@@ -27,6 +27,17 @@ ruling it out.
 - Disk is the single source of truth for files; all change notifications flow through the watcher bus.
 - UI: follow `DESIGN.md` tokens; zustand is the only state store; no new dependencies without justification.
 - Windows-first: paths via `pathlib`, PTYs via pywinpty, test on PowerShell.
+- Bug fixes start by reproducing the bug end-to-end, as close to how a user hits it as
+  possible — then the fix. A unit test that fails is not a reproduction; it is a guess
+  about where the bug lives. The E2E repro becomes the regression test.
+- Agent-facing tools are judged on token cost and latency, not just correctness: prefer
+  a thin call over a wrapped API, return token-efficient output (compact text beats
+  pretty-printed JSON), and keep descriptions short — every tool in the registry is
+  loaded into every session's context. Measure before adding, and say no to a tool that
+  costs more than the capability is worth.
+- Skills entering the bundle are vetted, not adopted on popularity: read every line
+  (a skill can run anything on the user's machine), and keep it only if it measurably
+  helps. Widely-starred skills have been shown to raise token use *and* worsen results.
 
 ## Workflow (enforced by branch ruleset — direct pushes to master are rejected)
 
