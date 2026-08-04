@@ -1,0 +1,50 @@
+/* Terminal panel: deepest surface, 8px inset (DESIGN.md §6.6). */
+
+.wb-terminal {
+  position: relative;
+  height: 100%;
+  background: var(--surface-terminal);
+  padding: var(--space-4);
+}
+
+.wb-terminal-host {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.wb-terminal .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+.wb-terminal .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+}
+
+.wb-terminal .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.wb-terminal-exited {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--backdrop);
+}
+
+.wb-terminal-exited-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-6) var(--space-8);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}

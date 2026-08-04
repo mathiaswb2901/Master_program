@@ -1,0 +1,56 @@
+/* File tree rows (DESIGN.md §6.2). */
+
+.wb-filetree {
+  height: 100%;
+  overflow: auto;
+  background: var(--surface-panel);
+  padding: var(--space-2) 0;
+}
+
+.wb-tree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  height: var(--row-height);
+  padding-right: var(--space-4);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.wb-tree-row:hover {
+  background: var(--surface-hover);
+}
+
+.wb-tree-row.is-selected {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+}
+
+.wb-tree-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.wb-tree-icon-slot {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.wb-chevron {
+  color: var(--text-tertiary);
+  transition: transform var(--duration-1) var(--ease-standard);
+}
+
+.wb-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.wb-file-icon {
+  color: var(--text-tertiary);
+}

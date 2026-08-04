@@ -1,0 +1,197 @@
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+
+import { useStore } from "../store";
+import type { TreeNode } from "../types";
+
+interface QuickAction {
+  id: string;
+  label: string;
+  run: () => void;
+}
+
+function activeFolder(): string {
+  const path = useStore.getState().activePath;
+  return path !== null && path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+}
+
+const ACTIONS: QuickAction[] = [
+  {
+    id: "new-session",
+    label: "New agent session here",
+    run: () => void useStore.getState().createSessionIn(activeFolder()),
+  },
+  { id: "new-terminal", label: "New terminal", run: () => useStore.getState().newTerminal() },
+  {
+    id: "toggle-theme",
+    label: "Toggle theme (dark/light)",
+    run: () => useStore.getState().toggleTheme(),
+  },
+];
+
+/** Subsequence match with bonuses for adjacency and segment starts; null = no match. */
+function fuzzyScore(query: string, target: string): number | null {
+  if (query === "") return 0;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  let qi = 0;
+  let score = 0;
+  let last = -2;
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] !== q[qi]) continue;
+    score += 1;
+    if (i === last + 1) score += 2;
+    const prev = i > 0 ? t[i - 1] : "";
+    if (i === 0 || prev === "/" || prev === "." || prev === "_" || prev === "-" || prev === " ") {
+      score += 3;
+    }
+    last = i;
+    qi += 1;
+  }
+  if (qi < q.length) return null;
+  return score - t.length * 0.01; // light tiebreak toward shorter targets
+}
+
+interface Row {
+  key: string;
+  title: string;
+  detail: string;
+  run: () => void;
+}
+
+export function QuickBar() {
+  const open = useStore((s) => s.quickBarOpen);
+  const tree = useStore((s) => s.tree);
+  const [query, setQuery] = useState("");
+  const [sel, setSel] = useState(0);
+  const selRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      setSel(0);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    selRef.current?.scrollIntoView({ block: "nearest" });
+  }, [sel, query]);
+
+  const files = useMemo(() => {
+    const out: string[] = [];
+    const walk = (node: TreeNode): void => {
+      if (node.kind === "file") out.push(node.path);
+      else (node.children ?? []).forEach(walk);
+    };
+    if (tree) walk(tree);
+    return out;
+  }, [tree]);
+
+  if (!open) return null;
+  const close = (): void => useStore.getState().setQuickBarOpen(false);
+
+  const actionsMode = query.startsWith(">");
+  let rows: Row[];
+  if (actionsMode) {
+    const q = query.slice(1).trim();
+    rows = ACTIONS.map((action) => ({ action, score: fuzzyScore(q, action.label) }))
+      .filter((x) => x.score !== null)
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .map(({ action }) => ({
+        key: action.id,
+        title: action.label,
+        detail: "",
+        run: action.run,
+      }));
+  } else {
+    const q = query.trim();
+    rows = files
+      .map((path) => ({ path, score: fuzzyScore(q, path) }))
+      .filter((x) => x.score !== null)
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, 50)
+      .map(({ path }) => ({
+        key: path,
+        title: path.split("/").pop() ?? path,
+        detail: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "",
+        run: () => void useStore.getState().openFile(path),
+      }));
+  }
+  const selIdx = Math.min(sel, Math.max(0, rows.length - 1));
+
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSel(Math.min(selIdx + 1, rows.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSel(Math.max(selIdx - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const row = rows[selIdx];
+      if (row) {
+        row.run();
+        close();
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  };
+
+  return (
+    <>
+      <div className="wb-qb-backdrop" onClick={close} />
+      <div className="wb-qb" role="dialog" aria-label="Quick open">
+        <input
+          autoFocus
+          className="wb-qb-input"
+          placeholder="Search files — type > for actions"
+          value={query}
+          spellCheck={false}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setSel(0);
+          }}
+          onKeyDown={onKeyDown}
+        />
+        <div className="wb-qb-results">
+          {rows.length === 0 && (
+            <div className="wb-qb-empty">
+              {actionsMode ? "No matching actions" : "No matching files"}
+            </div>
+          )}
+          {rows.map((row, i) => (
+            <button
+              type="button"
+              key={row.key}
+              ref={i === selIdx ? selRef : undefined}
+              className={"wb-qb-row" + (i === selIdx ? " is-selected" : "")}
+              onClick={() => {
+                row.run();
+                close();
+              }}
+              onMouseMove={() => setSel(i)}
+            >
+              <span className="wb-qb-row-title u-truncate">{row.title}</span>
+              {row.detail !== "" && <span className="wb-qb-row-detail u-truncate">{row.detail}</span>}
+            </button>
+          ))}
+        </div>
+        <div className="wb-qb-footer">
+          <span>
+            <span className="wb-keycap">↑↓</span> navigate
+          </span>
+          <span>
+            <span className="wb-keycap">Enter</span> open
+          </span>
+          <span>
+            <span className="wb-keycap">&gt;</span> actions
+          </span>
+          <span>
+            <span className="wb-keycap">Esc</span> close
+          </span>
+        </div>
+      </div>
+    </>
+  );
+}

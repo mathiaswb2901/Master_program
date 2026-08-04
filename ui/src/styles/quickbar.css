@@ -1,0 +1,109 @@
+/* QuickBar overlay (DESIGN.md §6.5). */
+
+.wb-qb-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  z-index: 100;
+}
+
+.wb-qb {
+  position: fixed;
+  left: 50%;
+  top: 15vh;
+  transform: translateX(-50%);
+  width: var(--quickbar-width);
+  max-width: calc(100vw - 32px);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  z-index: 101;
+  animation: wb-qb-in var(--duration-2) var(--ease-standard);
+}
+
+@keyframes wb-qb-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+.wb-qb-input {
+  height: 52px;
+  flex: none;
+  padding: 0 var(--space-6);
+  font-size: var(--type-xl-size);
+  line-height: var(--type-xl-line);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+/* Replacement focus treatment — the bar itself is the focus context. */
+.wb-qb-input:focus-visible {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
+
+.wb-qb-results {
+  overflow-y: auto;
+  padding: var(--space-3) 0;
+}
+
+.wb-qb-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  height: var(--row-height-lg);
+  padding: 0 var(--space-6);
+  border-left: 2px solid transparent;
+  font-size: var(--type-md-size);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.wb-qb-row.is-selected {
+  background: var(--surface-selected);
+  border-left-color: var(--accent);
+}
+
+.wb-qb-row-title {
+  flex: none;
+  max-width: 60%;
+}
+
+.wb-qb-row-detail {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+.wb-qb-empty {
+  padding: var(--space-6);
+  font-size: var(--type-md-size);
+  color: var(--text-tertiary);
+}
+
+.wb-qb-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  flex: none;
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
