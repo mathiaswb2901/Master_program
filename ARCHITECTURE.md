@@ -69,7 +69,18 @@ Session history is not ours: Claude Code and the SDK persist transcripts under
 (`session_index.py`), so CLI sessions and Workbench sessions share one history,
 grouped per folder.
 
-## Office editing (M2+)
+## Office editing
+
+**Direction (M4, decided 2026-08-04):** documents open in *real* installed
+Word/Excel/PowerPoint, docked into Workbench panels via native window hosting
+(launch → find HWND by class `OpusApp`/`XLMAIN`/`PPTFrameClass` → `SetParent` into a
+host window + child styling; spike-proven). A COM automation bridge (pywin32) lets
+agents read/write the live open document instead of fighting file locks. This requires
+the Tauri shell — a browser tab cannot host native windows. The OnlyOffice integration
+below remains as preview, document diffing for review, and fallback when Office isn't
+installed.
+
+### OnlyOffice (preview/diff/fallback)
 
 OnlyOffice Docs Community runs as a native local service (port 8880). The backend
 builds a PyJWT-signed editor config; the Document Server pulls the file from

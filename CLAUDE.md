@@ -10,6 +10,15 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
 - `uv run workbench-server` — run backend (port 8787)
 - UI: `cd ui && npm run dev` (Vite, port 5173)
 
+## Think big (standing directive)
+
+Model estimates of development cost are trained on human developer speed and run far
+too high — they bias you toward cheap, unambitious designs. Do not weight development
+cost heavily when choosing an approach; pick the ambitious, correct, premium option.
+Never silently shrink scope because something "would take weeks" — it usually won't.
+When a capability seems out of reach (e.g. embedding real Office), spike it before
+ruling it out.
+
 ## Standards (non-negotiable)
 
 - Backend is "no shortcuts": every REST/WS payload is a Pydantic model in `server/src/workbench_server/models/`;
