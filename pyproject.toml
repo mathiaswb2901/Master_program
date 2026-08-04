@@ -1,0 +1,78 @@
+[project]
+name = "workbench"
+version = "0.1.0"
+description = "One window for the analyst: code, terminals, real Office documents, and Claude agents."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "watchfiles>=0.24",
+    "pywinpty>=2.0.14; sys_platform == 'win32'",
+    "pyjwt>=2.9",
+    "httpx>=0.27",
+    "claude-agent-sdk>=0.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pre-commit>=4.0",
+]
+
+[project.scripts]
+workbench-server = "workbench_server.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server/src/workbench_server"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["server/src", "server/tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "UP",          # pyupgrade
+    "B",           # bugbear
+    "SIM",         # simplify
+    "ASYNC",       # async correctness
+    "S",           # security (bandit)
+    "RUF",         # ruff-native
+]
+
+[tool.ruff.lint.per-file-ignores]
+"server/tests/**" = ["S101"]  # assert is the point of tests
+
+[tool.mypy]
+strict = true
+files = ["server/src", "server/tests"]
+mypy_path = "server/src"
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["winpty.*", "claude_agent_sdk.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["server/tests"]
+asyncio_mode = "auto"
+addopts = "-q"

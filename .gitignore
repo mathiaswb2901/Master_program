@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Node / UI
+node_modules/
+ui/dist/
+
+# Tauri
+desktop/src-tauri/target/
+
+# Local config & secrets — never commit
+.env
+workbench.toml
+*.local.json
+
+# OS noise
+Thumbs.db
+.DS_Store
