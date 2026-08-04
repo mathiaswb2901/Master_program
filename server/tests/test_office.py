@@ -149,6 +149,12 @@ class TestHttpFlow:
         fs = client.post("/api/office/forcesave", json={"path": "report.docx"})
         assert fs.json() == {"error": 0}
 
+        # last-save exposes the DS-save hash so the UI can ignore own-save events
+        ls = client.get("/api/office/last-save", params={"path": "report.docx"})
+        assert ls.json() == {"hash": content_hash(b"PK\x03\x04 edited by onlyoffice")}
+        never = client.get("/api/office/last-save", params={"path": "other.docx"})
+        assert never.json() == {"hash": None}
+
     def test_callback_with_unsigned_body_rejected(
         self, office_settings: Settings, tmp_path: Path
     ) -> None:

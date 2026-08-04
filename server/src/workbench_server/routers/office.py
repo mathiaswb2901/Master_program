@@ -13,6 +13,7 @@ from workbench_server.models.office import (
     CallbackResponse,
     DocEditorConfig,
     ForcesaveRequest,
+    LastSaveResponse,
     OfficeStatus,
 )
 from workbench_server.services.office import (
@@ -86,6 +87,13 @@ async def callback(request: Request, token: str, body: dict[str, Any]) -> Callba
         log.exception("office.save_download_failed")
         return CallbackResponse(error=1)
     return CallbackResponse()
+
+
+@router.get("/last-save")
+def last_save(request: Request, path: str = Query(min_length=1)) -> LastSaveResponse:
+    """Hash of the last Document-Server save for a path; lets the UI ignore
+    watcher events caused by the editor's own autosaves."""
+    return LastSaveResponse(hash=_svc(request).last_save_hash(path))
 
 
 @router.post("/forcesave")
