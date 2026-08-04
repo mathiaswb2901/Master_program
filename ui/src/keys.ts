@@ -77,21 +77,35 @@ export function surfaceOf(target: EventTarget | null): Surface {
 }
 
 /**
+ * Plain-Ctrl chords the editor surface still yields to Workbench.
+ *
+ * Monaco standalone leaves Ctrl+P unbound and uses Ctrl+K only as the prefix of
+ * the fold chords (Ctrl+K Ctrl+0/J/L), so passing these through does not reach
+ * an editor command — it reaches the *browser*, where Ctrl+P opens the print
+ * dialog and Ctrl+K jumps to the address bar. Go-to-file is the better owner.
+ * The terminal keeps them: xterm really does use Ctrl+P (history) and Ctrl+K
+ * (kill-line) and preventDefaults them itself.
+ */
+const EDITOR_YIELDS_CTRL = new Set(["p", "k"]);
+
+/**
  * Whether Workbench takes this chord away from whatever has focus.
  *
  * xterm and Monaco are full keyboard applications: Ctrl+K kills a line, Ctrl+P
  * walks shell history, Ctrl+PageDown moves by page. Inside them we intercept
- * only what they do not use themselves — chords carrying Alt, or Ctrl+Shift.
- * Everywhere else any Ctrl/Alt chord is ours. Plain keys (no Ctrl, no Alt) are
- * never intercepted anywhere: typing always reaches the surface.
+ * only what they do not use themselves — chords carrying Alt, or Ctrl+Shift,
+ * plus the editor-specific exceptions above. Everywhere else any Ctrl/Alt chord
+ * is ours. Plain keys (no Ctrl, no Alt) are never intercepted anywhere: typing
+ * always reaches the surface.
  *
  * Consequence, by design: Ctrl+K/Ctrl+P do not open the QuickBar while a
- * terminal or editor has focus — Ctrl+Shift+P does, from anywhere.
+ * terminal has focus — Ctrl+Shift+P does, from anywhere.
  */
 export function isIntercepted(chord: Chord, surface: Surface): boolean {
   if (!chord.ctrl && !chord.alt) return false;
   if (surface === "other") return true;
-  return chord.alt || (chord.ctrl && chord.shift);
+  if (chord.alt || (chord.ctrl && chord.shift)) return true;
+  return surface === "editor" && chord.ctrl && EDITOR_YIELDS_CTRL.has(chord.key);
 }
 
 export interface Bindable {

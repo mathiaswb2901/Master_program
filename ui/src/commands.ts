@@ -10,8 +10,9 @@
  *  - Ctrl+Tab is reserved by the browser and never reaches the page, so editor
  *    tab cycling is Ctrl+PageUp/PageDown with Alt+PageUp/PageDown as the twin
  *    that also works inside Monaco and xterm (see `isIntercepted`).
- *  - Closing a tab is Ctrl+F4 with Alt+W as the fallback (Ctrl+W closes the
- *    browser window).
+ *  - Closing a tab is Alt+W. Ctrl+W closes the browser window and Ctrl+F4 is its
+ *    alias in Chromium, so Ctrl+F4 stays a Tauri-only secondary — never the
+ *    keycap the QuickBar advertises.
  *  - Ctrl+1..4 focus panels; in a browser tab Chrome/Firefox eat those to
  *    switch browser tabs, in the Tauri shell they arrive normally.
  *  - Alt+1..9 jump to the n-th most recent session — Alt is free in browsers
@@ -132,7 +133,7 @@ export const COMMANDS: readonly Command[] = [
   {
     id: "editor.close",
     title: "Close editor tab",
-    keys: ["Ctrl+F4", "Alt+W"],
+    keys: ["Alt+W", "Ctrl+F4"],
     when: () => useStore.getState().activePath !== null,
     run: () => {
       const path = useStore.getState().activePath;

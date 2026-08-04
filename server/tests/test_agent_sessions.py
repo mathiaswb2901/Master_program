@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from workbench_server import main
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.agents import (
@@ -796,16 +797,25 @@ def test_settled_plan_verdict_is_replayed_after_a_reconnect(
 
 
 @pytest.mark.timeout(60)
-def test_session_status_reaches_the_events_websocket(settings: Settings, tmp_path: Path) -> None:
+def test_session_status_reaches_the_events_websocket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Sessions without an open agent socket must still update: state changes go
-    onto the same in-process bus the watcher uses and out over /ws/events."""
-    app = create_app(settings)
-    app.state.session_manager = SessionManager(
-        tmp_path,
-        make_factory([delta("ok"), ResultMessage()]),
-        max_sessions=4,
-        event_publisher=app.state.event_bus,
-    )
+    onto the same in-process bus the watcher uses and out over /ws/events.
+
+    Runs against ``create_app``'s OWN SessionManager — only the SDK client
+    factory is swapped out — so the one production line the feature hangs on
+    (``event_publisher=event_bus`` in ``main.py``) is what carries the fan-out.
+    Rebuilding the manager here would let that kwarg be deleted with the suite
+    still green while chips and counts silently stopped updating.
+    """
+    factory = make_factory([delta("ok"), ResultMessage()])
+
+    def fake_sdk_client_factory(_ui_state_store: Any) -> Any:
+        return factory
+
+    monkeypatch.setattr(main, "sdk_client_factory", fake_sdk_client_factory)
+    app = create_app(Settings(workspace_root=tmp_path, claude_projects_dir=tmp_path / "projects"))
 
     with TestClient(app) as client, client.websocket_connect("/ws/events") as events:
         local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]

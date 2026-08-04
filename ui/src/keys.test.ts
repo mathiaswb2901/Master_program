@@ -71,11 +71,21 @@ describe("pass-through policy", () => {
     }
   });
 
-  it("leaves plain Ctrl chords to xterm and Monaco", () => {
-    // Ctrl+K kills a line, Ctrl+P walks shell history — theirs, not ours.
+  it("leaves plain Ctrl chords to xterm", () => {
+    // Ctrl+K kills a line, Ctrl+P walks shell history — the terminal's, not ours.
     expect(isIntercepted(parseChord("Ctrl+K"), "terminal")).toBe(false);
-    expect(isIntercepted(parseChord("Ctrl+P"), "editor")).toBe(false);
+    expect(isIntercepted(parseChord("Ctrl+P"), "terminal")).toBe(false);
+    expect(isIntercepted(parseChord("Ctrl+PageDown"), "terminal")).toBe(false);
+  });
+
+  it("takes Ctrl+P/Ctrl+K in the editor — Monaco does not use them, the browser does", () => {
+    // Passing them through opens the print dialog / focuses the address bar.
+    expect(isIntercepted(parseChord("Ctrl+P"), "editor")).toBe(true);
+    expect(isIntercepted(parseChord("Ctrl+K"), "editor")).toBe(true);
+    // …but only those two: everything else Monaco binds stays Monaco's.
     expect(isIntercepted(parseChord("Ctrl+PageDown"), "editor")).toBe(false);
+    expect(isIntercepted(parseChord("Ctrl+F"), "editor")).toBe(false);
+    expect(isIntercepted(parseChord("Ctrl+Z"), "editor")).toBe(false);
   });
 
   it("takes Ctrl chords everywhere else", () => {
@@ -97,7 +107,7 @@ describe("resolveCommand", () => {
     { id: "quickbar.files", keys: ["Ctrl+P", "Ctrl+K"] },
     { id: "quickbar.commands", keys: ["Ctrl+Shift+P"] },
     { id: "file.save", keys: ["Ctrl+S"], when: () => false },
-    { id: "editor.close", keys: ["Ctrl+F4", "Alt+W"] },
+    { id: "editor.close", keys: ["Alt+W", "Ctrl+F4"] },
   ];
 
   it("resolves any of a command's chords", () => {
@@ -120,6 +130,12 @@ describe("resolveCommand", () => {
     // …while the Alt twin still reaches the app from inside the terminal.
     expect(resolveCommand(press("w", { altKey: true }), "terminal", commands)?.id).toBe(
       "editor.close",
+    );
+  });
+
+  it("opens go-to-file from inside the editor", () => {
+    expect(resolveCommand(press("p", { ctrlKey: true }), "editor", commands)?.id).toBe(
+      "quickbar.files",
     );
   });
 

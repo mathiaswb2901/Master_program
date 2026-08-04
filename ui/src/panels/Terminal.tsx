@@ -105,6 +105,7 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const mountedRef = useRef(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -160,11 +161,18 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
   }, [id]);
 
   // Becoming visible: re-fit to the panel size it could not measure while hidden.
+  //
+  // Focus follows only a *switch* to this tab, never the first run: on launch the
+  // restored terminal must not grab the keyboard, or the first Ctrl+P of the
+  // session passes through to the shell (pass-through policy, keys.ts) and any
+  // typed text lands in a PTY the user never meant to touch.
   useEffect(() => {
+    const first = !mountedRef.current;
+    mountedRef.current = true;
     if (!visible) return;
     const fit = fitRef.current;
     if (fit !== null) fitTerminal(fit);
-    termRef.current?.focus();
+    if (!first) termRef.current?.focus();
   }, [visible]);
 
   useEffect(() => {

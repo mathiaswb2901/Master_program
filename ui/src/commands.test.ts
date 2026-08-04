@@ -53,6 +53,27 @@ describe("command registry", () => {
     }
   });
 
+  // Chords the browser owns outright: a page cannot preventDefault them, so the
+  // one the QuickBar advertises (keys[0]) must never be one of these — a user
+  // following the displayed hint in a dev browser tab would close the whole app.
+  const browserReserved = ["Ctrl+W", "Ctrl+F4", "Ctrl+T", "Ctrl+N", "Ctrl+Tab"].map(parseChord);
+
+  it("never advertises a browser-reserved chord as the primary binding", () => {
+    for (const command of COMMANDS) {
+      const primary = command.keys?.[0];
+      if (primary === undefined) continue;
+      const chord = parseChord(primary);
+      const reserved = browserReserved.some(
+        (r) =>
+          r.ctrl === chord.ctrl &&
+          r.alt === chord.alt &&
+          r.shift === chord.shift &&
+          r.key === chord.key,
+      );
+      expect(reserved, `${command.id} advertises ${primary}`).toBe(false);
+    }
+  });
+
   it("reaches the QuickBar command mode from any surface", () => {
     for (const surface of ["other", "editor", "terminal"] as const) {
       const resolved = resolveCommand(
