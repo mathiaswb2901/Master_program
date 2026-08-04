@@ -196,9 +196,17 @@ the moat.
   `ClaudeAgentOptions.plugins` → `--plugin-dir`, namespaced `workbench:*`, nothing
   written to `~/.claude`. `skills="all"` rejected — it appends a bare `Skill` to
   `allowed_tools`, shadowing the permission callback and auto-allowing every
-  discovered skill. Same change: sessions no longer inherit the user's global
-  `~/.claude` (`setting_sources=["project"]`; `WORKBENCH_SKILLS_INHERIT_USER=1`
-  restores the old behavior).
+  discovered skill. Instead the two skills something *tells* the agent to use
+  unprompted (`plan-visual`, `remember`) get narrow `Skill(workbench:<name>)` rules,
+  which the SDK's own rule parser treats as specifiers and so do not shadow the
+  callback; everything else still prompts. Same change: sessions load the
+  workspace's settings and nothing above them — `setting_sources=["project",
+  "local"]`, i.e. `.claude/settings.json` **and** the machine-local
+  `.claude/settings.local.json`, so a folder's own "always allow" rules and hooks
+  behave here as they do in plain Claude Code, while the global `~/.claude` scope
+  is dropped. `WORKBENCH_INHERIT_USER_SETTINGS=1` restores that global scope in
+  full (hooks and permission rules, not just skills), which is why it is not named
+  after skills.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

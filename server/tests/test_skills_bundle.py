@@ -136,12 +136,16 @@ class TestAgentOptions:
         assert expected is not None
         assert options.plugins == [{"type": "local", "path": str(expected)}]
 
-    def test_sessions_do_not_inherit_user_settings_by_default(self) -> None:
-        assert options_for(Settings()).setting_sources == ["project"]
+    def test_workspace_scoped_settings_load_but_the_global_scope_does_not(self) -> None:
+        """``local`` is ``.claude/settings.local.json`` — the machine-local file
+        Claude Code writes "always allow" rules and local hooks into. Dropping it
+        would make a folder behave differently here than in plain Claude Code;
+        only the user's global ~/.claude scope is meant to be excluded."""
+        assert options_for(Settings()).setting_sources == ["project", "local"]
 
     def test_inherit_flag_restores_the_sdk_default(self) -> None:
         """``None`` is "load every source", which is what sessions did before."""
-        options = options_for(Settings(skills_inherit_user=True))
+        options = options_for(Settings(inherit_user_settings=True))
         assert options.setting_sources is None
         assert options.plugins  # the bundle is orthogonal to inheritance
 
@@ -155,6 +159,40 @@ class TestAgentOptions:
         options = options_for(Settings())
         assert options.skills is None
         assert "Skill" not in options.allowed_tools
+
+    def test_the_skills_the_agent_is_told_to_use_are_allowed_narrowly(self) -> None:
+        """Instructing a skill the agent cannot invoke without a dialog is worse
+        than not instructing it: the user who declines gets the ungrounded output.
+        The rules stay per-skill so nothing else is auto-approved."""
+        allowed = options_for(Settings()).allowed_tools
+        assert "Skill(workbench:plan-visual)" in allowed
+        assert "Skill(workbench:remember)" in allowed
+        # workbench-dev is a reference the agent reaches for on its own judgment;
+        # no prompt pushes it, so it keeps the normal permission prompt.
+        assert "Skill(workbench:workbench-dev)" not in allowed
+        # A rule whose name no longer matches a shipped directory grants nothing
+        # and fails silently, so the two are pinned to each other here.
+        named = {
+            rule[len("Skill(workbench:") : -1] for rule in allowed if rule.startswith("Skill(")
+        }
+        assert named <= {path.parent.name for path in skill_files()}
+
+    def test_narrow_skill_rules_do_not_shadow_the_permission_callback(self) -> None:
+        """The SDK's own rule parser decides this: an entry with a real
+        specifier allows only matching invocations, so can_use_tool still runs
+        for every other skill. Asserted against the SDK, not our reading of it."""
+        from claude_agent_sdk.types import _get_can_use_tool_shadowed_warning
+
+        options = options_for(Settings())
+        message = _get_can_use_tool_shadowed_warning(
+            options.permission_mode, [rule for rule in options.allowed_tools if "Skill" in rule]
+        )
+        assert message is None
+
+    def test_skill_rules_are_dropped_with_the_bundle(self) -> None:
+        """A rule naming a skill no session can see is dead config."""
+        allowed = options_for(Settings(bundled_skills=False)).allowed_tools
+        assert not [rule for rule in allowed if rule.startswith("Skill")]
 
     def test_system_prompt_points_the_agent_at_the_plan_skill(self) -> None:
         append = options_for(Settings()).system_prompt["append"]
@@ -179,7 +217,7 @@ class TestResumedSessions:
 
             assert "--plugin-dir" in cmd
             assert cmd[cmd.index("--plugin-dir") + 1] == str(expected)
-            assert "--setting-sources=project" in cmd
+            assert "--setting-sources=project,local" in cmd
             assert ("--resume=0193f2a1b2c34d5e" in cmd) is (resume is not None)
 
     def test_inherit_flag_omits_the_setting_sources_flag(self) -> None:
@@ -188,31 +226,49 @@ class TestResumedSessions:
         )
 
         transport = SubprocessCLITransport(
-            prompt="hi", options=options_for(Settings(skills_inherit_user=True))
+            prompt="hi", options=options_for(Settings(inherit_user_settings=True))
         )
         transport._cli_path = "claude"
         assert not [arg for arg in transport._build_command() if "--setting-sources" in arg]
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.skipif(
+    not (os.environ.get("CI") or os.environ.get("WORKBENCH_PACKAGING_TEST") == "1"),
+    reason="builds a wheel; runs in CI, or set WORKBENCH_PACKAGING_TEST=1 to run locally",
+)
 def test_wheel_ships_the_skill_files(tmp_path: Path) -> None:
     """Package data is only data if the build backend picks it up.
 
     hatchling selects files through the VCS ignore rules, and the bundle hides
     behind a dot-directory (``.claude-plugin``) — exactly the shape that gets
     dropped silently, leaving an installed Workbench whose agents have no skills.
+
+    Gated on ``CI`` because it shells out to a real build: on a machine that is
+    offline or has a cold uv cache the build fails for reasons unrelated to any
+    code change, and it would tax every local ``uv run pytest`` with a packaging
+    step. The gate the release depends on still runs it on every push and PR.
     """
     uv = shutil.which("uv")
     if uv is None:  # pragma: no cover - CI and dev machines both have uv
         pytest.skip("uv is not on PATH")
     repo_root = Path(__file__).resolve().parents[2]
 
-    subprocess.run(  # noqa: S603 - fixed argv, path from shutil.which
-        [uv, "build", "--wheel", "--out-dir", str(tmp_path)],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(  # noqa: S603 - fixed argv, path from shutil.which
+            [uv, "build", "--wheel", "--out-dir", str(tmp_path)],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - build must succeed
+        # Without this the failure surfaces as a bare CalledProcessError and the
+        # build's own diagnostics stay inside the captured pipes.
+        pytest.fail(
+            f"uv build --wheel failed (exit {exc.returncode})\n"
+            f"stdout:\n{exc.stdout.decode(errors='replace')}\n"
+            f"stderr:\n{exc.stderr.decode(errors='replace')}"
+        )
     wheel = next(tmp_path.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())

@@ -41,6 +41,9 @@ ruling it out.
 - Bundled skills live in `server/src/workbench_server/skills_bundle/` (one local plugin,
   shipped as package data); each session gets them via `--plugin-dir` as
   `workbench:<name>` — session-scoped, nothing is ever written to `~/.claude`.
+  Sessions load workspace settings only (`project` + `local`);
+  `WORKBENCH_INHERIT_USER_SETTINGS=1` restores the *whole* global `~/.claude` scope —
+  hooks and permission rules included, not just skills — so treat it as a security knob.
 - Skills entering the bundle are vetted, not adopted on popularity: read every line
   (a skill can run anything on the user's machine), and keep it only if it measurably
   helps. Widely-starred skills have been shown to raise token use *and* worsen results.

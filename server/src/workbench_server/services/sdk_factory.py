@@ -16,12 +16,22 @@ from workbench_server.services.agent_sessions import (
     SdkClient,
     SessionBridge,
 )
-from workbench_server.services.skills_bundle import bundled_plugin_path
+from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
 
 # Tools the agent may use inside its folder without asking. Deliberately file-only:
 # anything else (Bash, web access, ...) falls through to can_use_tool and becomes
 # a permission prompt in the UI. Auto-allowing them would shadow the callback.
 _AUTO_ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep"]
+
+# The two bundled skills something already tells the agent to reach for on its
+# own: the system-prompt append names plan-visual, and remember's own description
+# has it read workspace memory at the start of unfamiliar work. Without these
+# rules that guidance opens every plan — and every session — with a permission
+# dialog, and a user who declines gets exactly the output the guidance existed to
+# prevent. These are narrow ``Skill(name)`` specifiers, never a bare ``Skill``:
+# only a whole-tool entry shadows can_use_tool, so every other skill — the user's
+# own included, and our own workbench-dev — still reaches the UI prompt.
+_AUTO_ALLOWED_SKILLS = [f"Skill({PLUGIN_NAME}:plan-visual)", f"Skill({PLUGIN_NAME}:remember)"]
 
 _PRESENT_PLAN_DESCRIPTION = (
     "Show the user an interactive plan card in Workbench and wait for their "
@@ -118,8 +128,9 @@ def build_agent_options(
     silently auto-allows every discovered skill, and a list would double as a
     context filter that hides the user's own project skills. The plugin is
     passed on its own instead, so bundled skills are simply *available* under
-    the ``workbench:`` prefix and any invocation still reaches the UI's
-    permission prompt like every other non-file tool.
+    the ``workbench:`` prefix; only the two named in ``_AUTO_ALLOWED_SKILLS``
+    carry a narrow allow rule, and every other invocation still reaches the UI's
+    permission prompt like any other non-file tool.
     """
     from claude_agent_sdk import (
         ClaudeAgentOptions,
@@ -141,12 +152,15 @@ def build_agent_options(
             plugins.append(SdkPluginConfig(type="local", path=str(plugin_path)))
 
     # ``None`` is the SDK's implicit default: load every filesystem settings
-    # source, including the user's global ~/.claude. ``["project"]`` keeps
-    # CLAUDE.md and .claude/settings.json — a workspace still configures its own
-    # agents — but stops a session from inheriting whatever is installed
-    # globally on this machine.
+    # source, including the user's global ~/.claude — its hooks and permission
+    # rules, not only its skills. ``["project", "local"]`` keeps everything the
+    # *workspace* configures: CLAUDE.md and .claude/settings.json, plus the
+    # machine-local .claude/settings.local.json where Claude Code records
+    # "always allow" rules, local hooks and local MCP servers — so a folder
+    # behaves the same in a Workbench session as it does in plain Claude Code.
+    # Only the global machine scope is dropped.
     setting_sources: list[SettingSource] | None = (
-        None if settings.skills_inherit_user else ["project"]
+        None if settings.inherit_user_settings else ["project", "local"]
     )
 
     return ClaudeAgentOptions(
@@ -154,6 +168,7 @@ def build_agent_options(
         resume=resume_session_id,
         allowed_tools=[
             *_AUTO_ALLOWED,
+            *(_AUTO_ALLOWED_SKILLS if plugins else []),
             "mcp__workbench__get_workspace_state",
             "mcp__workbench__present_plan",
         ],
