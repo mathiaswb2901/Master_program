@@ -60,7 +60,11 @@ the moat.
   (fix the identical PermissionRequest replay gap while there).~~ **done** — v1 renders
   live cards only (a plan is not re-rendered when resuming from a disk transcript) and
   lives in chat rather than its own dockview panel; the plan-visual authoring skill
-  ships separately.
+  ships separately. Per-node annotations and a plan-level comment already round-trip to
+  the agent (`PlanAnnotation`/`PlanResponse`), so the point-feedback channel is covered.
+  Still open: plan nodes render as structured cards, not as **design-system-faithful
+  visual mockups** — for UI proposals, a rendered preview in the app's own tokens beats
+  a description of one. → v2, alongside the M7 design work.
 - **Flow layer**: typed command registry replacing the 3-item QuickBar (panel focus
   Ctrl+1..4, tab cycle/close, Alt+1..9 session jump), `SessionStatusEvent` fan-out on
   `/ws/events`, status bar with live session chips + `document.title` attention badge,
@@ -75,10 +79,15 @@ the moat.
   live; entries drive QuickBar commands, terminal snippets, chat prompt templates, and
   custom keybindings; agents get a skill to add entries on request.
 - **Tool registry**: panels/commands/skills register in one place instead of hardwiring
-  in `App.tsx` (product principle 1).
+  in `App.tsx` (product principle 1). Registration carries an **agent-ergonomics
+  budget**: every agent-facing tool declares its output format and is measured for token
+  cost and latency before it lands — thin calls over wrapped APIs, compact text over
+  pretty JSON, short descriptions (they are loaded into every session's context).
 - Committed carryover: pptx E2E fidelity pass, bundled skills (Anthropic
   xlsx/docx/pptx; OfficeCLI after vetting; plan-visual, validate, remember,
-  loop-objective, workbench-dev), provenance badges.
+  loop-objective, workbench-dev), provenance badges. Every bundled skill passes a
+  **vetting bar** — read in full (a skill can execute anything on the user's machine)
+  and shown to help before it ships; popularity is not evidence.
 - UI quality tooling starts here: eslint, vitest, Playwright E2E (standing bar).
 
 ### M5 — Parallel (worktrees + Mission Control)
@@ -145,6 +154,14 @@ the moat.
 - 2026-08-04 — **Product reshape** after agentic-workflow bar review + competitive
   sweep (9-agent analysis): milestones restructured to M4 Instrument / M5 Parallel /
   M6 Proof / M7 Premium & Public; north star and product principles added above.
+- 2026-08-04 — **Agent ergonomics is a product constraint, not a nicety** (second pass
+  over the same agentic-workflow source). Reported measurements: an MCP wrapper around
+  GitHub cost ~3x the tokens and ~2x the latency of the plain CLI for identical tasks,
+  and token-efficient output formats saved ~40% over JSON. Consequence: tools carry a
+  measured budget at registry time (M4), not a review comment after the fact. Same pass:
+  skills get a vetting bar (a 177k-star skill benchmarked *worse* on results while using
+  ~5% more tokens), and bug fixes must open with an end-to-end reproduction. Both are
+  now `CLAUDE.md` standards.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 
@@ -187,3 +204,10 @@ Build for real external users, not just the author. Consequences, tracked as wor
   host pivot (M4); OnlyOffice demoted to preview/diff/fallback.
 - 2026-08-04 — **Think big** (user): standing directive encoded as product principle 3
   and in `CLAUDE.md`.
+- 2026-08-04 — **Agentic-workflow review, pt. 2** (user): four adoptions from a second
+  read of the same terminal-captain workflow source. (1) Tool ergonomics measured at
+  registry time → M4 tool registry. (2) Point-feedback on plan artifacts → already
+  shipped in #17; the open remainder is design-system-faithful visual mockups → v2/M7.
+  (3) End-to-end reproduction before a bug fix → `CLAUDE.md` standard. (4) Skill vetting
+  bar for the bundle → `CLAUDE.md` standard + M4 carryover. See Decisions log for the
+  measurements behind (1) and (4).
