@@ -94,6 +94,15 @@ class SessionIndex:
         role = "user" if record["type"] == "user" else "assistant"
         return TranscriptMessage(role=role, text=text)
 
+    def first_user_text(self, folder: Path, session_id: str) -> str | None:
+        """First user message of a stored transcript; None when absent/unreadable."""
+        if not re.fullmatch(r"[A-Za-z0-9-]+", session_id):
+            return None
+        transcript = self.project_dir(folder) / f"{session_id}.jsonl"
+        if not transcript.is_file():
+            return None
+        return self._first_user_text(transcript)
+
     def _first_user_text(self, transcript: Path) -> str | None:
         try:
             with transcript.open(encoding="utf-8", errors="replace") as fh:

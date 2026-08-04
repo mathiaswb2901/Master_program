@@ -32,6 +32,18 @@ log = structlog.get_logger()
 
 PERMISSION_TIMEOUT_S = 600.0
 _LISTENER_QUEUE_LIMIT = 2000
+_MAX_TITLE_CHARS = 60
+_FALLBACK_TITLE = "new session"
+
+
+def derive_title(text: str) -> str:
+    """Session title from the first user message: collapsed, truncated to ~60 chars."""
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return _FALLBACK_TITLE
+    if len(collapsed) <= _MAX_TITLE_CHARS:
+        return collapsed
+    return collapsed[: _MAX_TITLE_CHARS - 1].rstrip() + "…"
 
 
 class SdkClient(Protocol):
@@ -65,6 +77,7 @@ class AgentSession:
         self.sdk_session_id: str | None = resume_session_id
         self.state: SessionState = "idle"
         self.created_at: float = 0.0
+        self.title: str | None = None  # derived from the first user message
         self._factory = factory
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
@@ -132,6 +145,8 @@ class AgentSession:
         if self._turn_task is not None and not self._turn_task.done():
             self._emit(AgentError(message="agent is still working — interrupt it first"))
             return
+        if self.title is None:
+            self.title = derive_title(text)
         self._turn_task = asyncio.create_task(self._run_turn(text))
 
     async def _run_turn(self, text: str) -> None:
@@ -177,6 +192,16 @@ class AgentSession:
                     is_error=bool(getattr(message, "is_error", False)),
                 )
             )
+
+    def info(self) -> SessionInfo:
+        return SessionInfo(
+            session_id=self.local_id,
+            folder=self.folder_relative,
+            state=self.state,
+            live=True,
+            title=self.title or _FALLBACK_TITLE,
+            updated_at=self.created_at,
+        )
 
     async def interrupt(self) -> None:
         if self._client is not None:
@@ -238,17 +263,12 @@ class SessionManager:
         return self._sessions.get(local_id)
 
     def live_infos(self) -> list[SessionInfo]:
-        return [
-            SessionInfo(
-                session_id=s.local_id,
-                folder=s.folder_relative,
-                state=s.state,
-                live=True,
-                title=f"live session ({s.state})",
-                updated_at=s.created_at,
-            )
-            for s in self._sessions.values()
-        ]
+        return [s.info() for s in self._sessions.values()]
+
+    def live_sdk_ids(self) -> set[str]:
+        """SDK session ids of live sessions — their on-disk transcripts are the
+        same conversations and must not be listed twice."""
+        return {s.sdk_session_id for s in self._sessions.values() if s.sdk_session_id is not None}
 
     async def close_all(self) -> None:
         for session in list(self._sessions.values()):

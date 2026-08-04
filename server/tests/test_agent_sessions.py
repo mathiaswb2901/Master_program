@@ -24,6 +24,7 @@ from workbench_server.services.agent_sessions import (
     PermissionAsk,
     SessionManager,
     TooManySessionsError,
+    derive_title,
 )
 from workbench_server.services.session_index import SessionIndex, encode_project_dir
 
@@ -186,6 +187,43 @@ async def test_permission_round_trip(tmp_path: Path, allow: bool) -> None:
     assert client.permission_outcomes == [allow]
 
 
+# ---- session titles ---------------------------------------------------------
+
+
+class TestDeriveTitle:
+    def test_short_message_kept_verbatim(self) -> None:
+        assert derive_title("fix the DST bug") == "fix the DST bug"
+
+    def test_whitespace_collapsed(self) -> None:
+        assert derive_title("  fix\n\nthe   DST bug\t") == "fix the DST bug"
+
+    def test_long_message_truncated_to_60_with_ellipsis(self) -> None:
+        text = "improve the intraday bidding strategy for the SE3 battery portfolio please"
+        title = derive_title(text)
+        assert len(title) == 60
+        assert title.endswith("…")
+        assert title.startswith("improve the intraday")
+
+    def test_empty_message_falls_back(self) -> None:
+        assert derive_title("   \n ") == "new session"
+
+
+async def test_live_title_derived_from_first_user_message(tmp_path: Path) -> None:
+    script = [ResultMessage()]
+    manager = SessionManager(tmp_path, make_factory(script), max_sessions=4)
+    session = manager.create("")
+    assert manager.live_infos()[0].title == "new session"
+
+    queue = session.subscribe()
+    session.send_user_message("tighten the gate-closure check")
+    await drain(queue, TurnDone)
+    assert manager.live_infos()[0].title == "tighten the gate-closure check"
+
+    session.send_user_message("second message must not retitle")
+    await drain(queue, TurnDone)
+    assert manager.live_infos()[0].title == "tighten the gate-closure check"
+
+
 # ---- limits -----------------------------------------------------------------
 
 
@@ -282,3 +320,58 @@ def test_ws_pipeline_end_to_end(settings: Settings, tmp_path: Path) -> None:
         listing = client.get("/api/agents/sessions")
         assert listing.status_code == 200
         assert any(s["session_id"] == local_id for g in listing.json() for s in g["sessions"])
+
+
+@pytest.mark.timeout(60)
+def test_live_session_suppresses_its_own_transcript(tmp_path: Path) -> None:
+    """After the first turn the conversation exists twice on the backend — live
+    (local id) and on disk (SDK uuid). The listing must show it once: live."""
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    projects = tmp_path / "projects"
+    settings = Settings(workspace_root=workspace_root, claude_projects_dir=projects)
+    app = create_app(settings)
+    script = [delta("ok"), ResultMessage(session_id="sdk-e2e")]
+    app.state.session_manager = SessionManager(
+        settings.resolved_workspace(), make_factory(script), max_sessions=4
+    )
+
+    project_dir = projects / encode_project_dir(settings.resolved_workspace())
+    project_dir.mkdir(parents=True)
+
+    def transcript_line(text: str) -> str:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+
+    (project_dir / "sdk-e2e.jsonl").write_text(transcript_line("check the bids"), "utf-8")
+    (project_dir / "other-11.jsonl").write_text(transcript_line("unrelated session"), "utf-8")
+
+    with TestClient(app) as client:
+        created = client.post("/api/agents/sessions", json={"folder": ""})
+        local_id = created.json()["session_id"]
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "check the bids"}))
+            while json.loads(ws.receive_text())["type"] != "turn_done":
+                pass
+
+        rows = [s for g in client.get("/api/agents/sessions").json() for s in g["sessions"]]
+        ids = [s["session_id"] for s in rows]
+        assert local_id in ids  # the live entry represents the conversation
+        assert "sdk-e2e" not in ids  # its transcript row is suppressed
+        assert "other-11" in ids  # unrelated transcripts still listed
+        live_row = next(s for s in rows if s["session_id"] == local_id)
+        assert live_row["title"] == "check the bids"
+        assert live_row["live"] is True
+
+        # Resuming a transcript keeps its title and absorbs its disk row too.
+        resumed = client.post(
+            "/api/agents/sessions", json={"folder": "", "resume_session_id": "other-11"}
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["title"] == "unrelated session"
+        ids_after = [
+            s["session_id"]
+            for g in client.get("/api/agents/sessions").json()
+            for s in g["sessions"]
+        ]
+        assert "other-11" not in ids_after
