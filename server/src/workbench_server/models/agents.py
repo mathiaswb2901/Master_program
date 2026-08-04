@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
+from workbench_server.models.plans import PlanDecision, PlanPresented, PlanResolved
+
 SessionState = Literal["idle", "working", "needs_attention"]
 
 
@@ -63,10 +65,10 @@ class Interrupt(BaseModel):
 
 
 AgentClientMessage = Annotated[
-    UserMessage | PermissionDecision | Interrupt, Field(discriminator="type")
+    UserMessage | PermissionDecision | PlanDecision | Interrupt, Field(discriminator="type")
 ]
-agent_client_message: TypeAdapter[UserMessage | PermissionDecision | Interrupt] = TypeAdapter(
-    AgentClientMessage
+agent_client_message: TypeAdapter[UserMessage | PermissionDecision | PlanDecision | Interrupt] = (
+    TypeAdapter(AgentClientMessage)
 )
 
 
@@ -107,3 +109,17 @@ class TurnDone(BaseModel):
 class AgentError(BaseModel):
     type: Literal["agent_error"] = "agent_error"
     message: str
+
+
+_AgentServerMessage = (
+    TextDelta
+    | ToolUseNote
+    | PermissionRequest
+    | PlanPresented
+    | PlanResolved
+    | StatusChange
+    | TurnDone
+    | AgentError
+)
+AgentServerMessage = Annotated[_AgentServerMessage, Field(discriminator="type")]
+agent_server_message: TypeAdapter[_AgentServerMessage] = TypeAdapter(AgentServerMessage)

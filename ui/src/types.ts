@@ -1,5 +1,5 @@
 /**
- * Wire types. Mirrors server/src/workbench_server/models/{files,terminal,agents}.py —
+ * Wire types. Mirrors server/src/workbench_server/models/{files,terminal,agents,plans}.py —
  * keep in lockstep with the Pydantic models.
  */
 
@@ -135,6 +135,81 @@ export interface TerminalExit {
 
 export type TerminalServerMessage = TerminalOutput | TerminalExit;
 
+// ---- plans.py ---------------------------------------------------------------
+// The present_plan primitive: a closed schema our own components render — never
+// free-form markup from the model.
+
+export interface FileRef {
+  /** Workspace-relative, forward slashes. */
+  path: string;
+}
+
+export interface PlanOption {
+  option_id: string;
+  label: string;
+  pros: string[];
+  cons: string[];
+  /** At most one per group (validated server-side) — the only accented option. */
+  recommended: boolean;
+}
+
+export interface OptionGroupNode {
+  kind: "option_group";
+  node_id: string;
+  prompt: string;
+  options: PlanOption[];
+}
+
+export interface PlanStep {
+  text: string;
+  file_refs: FileRef[];
+}
+
+export interface StepListNode {
+  kind: "step_list";
+  node_id: string;
+  steps: PlanStep[];
+}
+
+export interface QuestionNode {
+  kind: "question";
+  node_id: string;
+  text: string;
+}
+
+export interface MarkdownNode {
+  kind: "markdown";
+  node_id: string;
+  text: string;
+}
+
+export type PlanNode = OptionGroupNode | StepListNode | QuestionNode | MarkdownNode;
+
+export interface PlanArtifact {
+  plan_id: string;
+  title: string;
+  summary: string;
+  /** At most 15 (server-capped). */
+  nodes: PlanNode[];
+}
+
+/** "no_decision" is timeout/interrupt — never an implied approval. */
+export type PlanVerdict = "approve" | "revise" | "reject" | "no_decision";
+
+export interface PlanAnnotation {
+  node_id: string;
+  text: string;
+}
+
+export interface PlanResponse {
+  plan_id: string;
+  verdict: PlanVerdict;
+  /** node_id -> option_id for every option group the user resolved. */
+  choices: Record<string, string>;
+  annotations: PlanAnnotation[];
+  comment: string;
+}
+
 // ---- agents.py --------------------------------------------------------------
 
 export type SessionState = "idle" | "working" | "needs_attention";
@@ -190,11 +265,16 @@ export interface PermissionDecision {
   allow: boolean;
 }
 
+export interface PlanDecision {
+  type: "plan_decision";
+  response: PlanResponse;
+}
+
 export interface Interrupt {
   type: "interrupt";
 }
 
-export type AgentClientMessage = UserMessage | PermissionDecision | Interrupt;
+export type AgentClientMessage = UserMessage | PermissionDecision | PlanDecision | Interrupt;
 
 // server -> client over /ws/agent/{id}
 
@@ -214,6 +294,20 @@ export interface PermissionRequest {
   request_id: string;
   tool: string;
   description: string;
+}
+
+export interface PlanPresented {
+  type: "plan_presented";
+  plan: PlanArtifact;
+}
+
+/** The pending plan settled server-side (decision, timeout, or interrupt). This
+ * frame — not the local click — is what makes a card read-only, so a stale card
+ * can never claim an approval the agent never received. */
+export interface PlanResolved {
+  type: "plan_resolved";
+  plan_id: string;
+  verdict: PlanVerdict;
 }
 
 export interface StatusChange {
@@ -238,6 +332,8 @@ export type AgentServerMessage =
   | TextDelta
   | ToolUseNote
   | PermissionRequest
+  | PlanPresented
+  | PlanResolved
   | StatusChange
   | TurnDone
   | AgentError;

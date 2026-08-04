@@ -19,6 +19,7 @@ from workbench_server.models.agents import (
     agent_client_message,
 )
 from workbench_server.models.files import OkResponse
+from workbench_server.models.plans import PlanDecision
 from workbench_server.services.agent_sessions import SessionManager, TooManySessionsError
 from workbench_server.services.sdk_factory import UiStateStore
 from workbench_server.services.session_index import SessionIndex
@@ -104,6 +105,12 @@ async def agent_ws(ws: WebSocket, local_id: str) -> None:
         return
     await ws.accept()
     queue = session.subscribe()
+    # Replay what this client missed. A session blocked on a permission prompt
+    # or a plan card emitted that frame once; without this, a client connecting
+    # afterwards (first open of a session started elsewhere, or a reconnect)
+    # sees needs_attention with nothing to answer and the agent waits forever.
+    for pending in session.pending_attention():
+        queue.put_nowait(pending)
 
     async def pump() -> None:
         with contextlib.suppress(RuntimeError):
@@ -124,6 +131,8 @@ async def agent_ws(ws: WebSocket, local_id: str) -> None:
                 session.send_user_message(msg.text)
             elif isinstance(msg, PermissionDecision):
                 session.resolve_permission(msg.request_id, msg.allow)
+            elif isinstance(msg, PlanDecision):
+                session.resolve_plan(msg.response)
             elif isinstance(msg, Interrupt):
                 await session.interrupt()
     except WebSocketDisconnect:

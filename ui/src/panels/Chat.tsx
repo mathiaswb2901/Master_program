@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { Markdown } from "../markdown";
 import { useStore, type ChatItem, type SessionFlags } from "../store";
 import type { SessionState, TreeNode } from "../types";
+import { PlanCard } from "./PlanCard";
 
 export interface StatusVisual {
   color: string;
@@ -146,6 +147,8 @@ function ChatItemView({ item }: { item: ChatItem }) {
       return <ToolRow item={item} />;
     case "permission":
       return <PermissionCard item={item} />;
+    case "plan":
+      return <PlanCard plan={item.plan} />;
     case "error":
       return <div className="wb-msg-error">Agent error: {item.message}</div>;
   }

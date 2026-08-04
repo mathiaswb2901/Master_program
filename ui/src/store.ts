@@ -11,6 +11,9 @@ import type {
   FileChangedEvent,
   FolderSessions,
   OfficeStatus,
+  PlanAnnotation,
+  PlanArtifact,
+  PlanVerdict,
   SessionInfo,
   SessionState,
   TranscriptMessage,
@@ -59,10 +62,43 @@ export type ChatItem =
       description: string;
       decision: "allow" | "deny" | null;
     }
+  | { kind: "plan"; plan: PlanArtifact }
   | { kind: "error"; message: string };
 
 export interface ChatState {
   items: ChatItem[];
+}
+
+/** What the user has assembled for one plan card. `verdict` is null until the
+ * card settles; once set the card renders read-only with their choices marked.
+ *
+ * Clicking sets it optimistically, but the server's `plan_resolved` frame is
+ * authoritative and overwrites it: a plan that timed out (or that another client
+ * already answered) settles as what actually happened, so no card ever claims an
+ * approval the agent never received. */
+export interface PlanDraft {
+  /** node_id -> option_id */
+  choices: Record<string, string>;
+  /** node_id -> free text (question answers and per-node notes alike) */
+  annotations: Record<string, string>;
+  comment: string;
+  verdict: PlanVerdict | null;
+}
+
+export const emptyPlanDraft = (): PlanDraft => ({
+  choices: {},
+  annotations: {},
+  comment: "",
+  verdict: null,
+});
+
+/** Option groups the draft has not answered. A group without a `recommended`
+ * option starts unselected (perfectly legal), so "approve" stays blocked until
+ * the user actually picks — an approval must never imply an unmade choice. */
+export function unchosenOptionGroups(plan: PlanArtifact, draft: PlanDraft): string[] {
+  return plan.nodes
+    .filter((node) => node.kind === "option_group" && draft.choices[node.node_id] === undefined)
+    .map((node) => node.node_id);
 }
 
 /** "Finished/failed since last viewed" markers layered over the server state. */
@@ -82,6 +118,8 @@ interface WorkbenchStore {
   activeSessionId: string | null;
   transcriptView: { session: SessionInfo; messages: TranscriptMessage[] } | null;
   chats: Record<string, ChatState>;
+  /** Draft + settled state per plan_id (plan ids are unique across sessions). */
+  plans: Record<string, PlanDraft>;
   quickBarOpen: boolean;
   terminalGeneration: number;
   toasts: Toast[];
@@ -129,6 +167,10 @@ interface WorkbenchStore {
   resumeSession: () => Promise<void>;
   sendChat: (text: string) => void;
   decidePermission: (requestId: string, allow: boolean) => void;
+  setPlanChoice: (planId: string, nodeId: string, optionId: string) => void;
+  setPlanAnnotation: (planId: string, nodeId: string, text: string) => void;
+  setPlanComment: (planId: string, text: string) => void;
+  decidePlan: (planId: string, verdict: Exclude<PlanVerdict, "no_decision">) => void;
   interrupt: () => void;
   handleAgentMessage: (sessionId: string, message: AgentServerMessage) => void;
 }
@@ -184,6 +226,12 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     });
   };
 
+  const patchPlan = (planId: string, patch: Partial<PlanDraft>): void => {
+    set((s) => ({
+      plans: { ...s.plans, [planId]: { ...(s.plans[planId] ?? emptyPlanDraft()), ...patch } },
+    }));
+  };
+
   return {
     theme: initialTheme,
     tree: null,
@@ -195,6 +243,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     activeSessionId: null,
     transcriptView: null,
     chats: {},
+    plans: {},
     quickBarOpen: false,
     terminalGeneration: 0,
     toasts: [],
@@ -713,6 +762,59 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       });
     },
 
+    setPlanChoice: (planId, nodeId, optionId) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return; // settled cards are read-only
+      patchPlan(planId, { choices: { ...draft.choices, [nodeId]: optionId } });
+    },
+
+    setPlanAnnotation: (planId, nodeId, text) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return;
+      patchPlan(planId, { annotations: { ...draft.annotations, [nodeId]: text } });
+    },
+
+    setPlanComment: (planId, text) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return;
+      patchPlan(planId, { comment: text });
+    },
+
+    decidePlan: (planId, verdict) => {
+      const id = get().activeSessionId;
+      if (!id) return;
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return; // one answer per plan
+      // "approve" means "proceed with the chosen options": every option group
+      // must have one, or the agent would guess at a decision it asked for.
+      // The Approve button is already disabled for this; belt and braces.
+      const plan = (get().chats[id]?.items ?? []).find(
+        (item): item is Extract<ChatItem, { kind: "plan" }> =>
+          item.kind === "plan" && item.plan.plan_id === planId,
+      );
+      if (
+        verdict === "approve" &&
+        plan !== undefined &&
+        unchosenOptionGroups(plan.plan, draft).length > 0
+      ) {
+        return;
+      }
+      const annotations: PlanAnnotation[] = Object.entries(draft.annotations)
+        .map(([nodeId, text]) => ({ node_id: nodeId, text: text.trim() }))
+        .filter((a) => a.text !== "");
+      ensureAgentSocket(id).send({
+        type: "plan_decision",
+        response: {
+          plan_id: planId,
+          verdict,
+          choices: draft.choices,
+          annotations,
+          comment: draft.comment.trim(),
+        },
+      });
+      patchPlan(planId, { verdict });
+    },
+
     interrupt: () => {
       const id = get().activeSessionId;
       if (!id) return;
@@ -750,12 +852,58 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           });
           break;
         case "permission_request":
-          appendChat(sessionId, {
-            kind: "permission",
-            requestId: message.request_id,
-            tool: message.tool,
-            description: message.description,
-            decision: null,
+          // The server replays still-pending prompts on (re)connect, so the
+          // same request_id can arrive twice — render it once.
+          set((s) => {
+            const chat = s.chats[sessionId] ?? { items: [] };
+            const seen = chat.items.some(
+              (item) => item.kind === "permission" && item.requestId === message.request_id,
+            );
+            if (seen) return {};
+            const item: ChatItem = {
+              kind: "permission",
+              requestId: message.request_id,
+              tool: message.tool,
+              description: message.description,
+              decision: null,
+            };
+            return { chats: { ...s.chats, [sessionId]: { items: [...chat.items, item] } } };
+          });
+          break;
+        case "plan_presented":
+          set((s) => {
+            const chat = s.chats[sessionId] ?? { items: [] };
+            const seen = chat.items.some(
+              (item) => item.kind === "plan" && item.plan.plan_id === message.plan.plan_id,
+            );
+            if (seen) return {}; // replay of a card already on screen
+            const draft = emptyPlanDraft();
+            // Start on the agent's recommendation: Approve then means "yes, as
+            // proposed". The user can still switch before deciding.
+            for (const node of message.plan.nodes) {
+              if (node.kind !== "option_group") continue;
+              const recommended = node.options.find((option) => option.recommended);
+              if (recommended) draft.choices[node.node_id] = recommended.option_id;
+            }
+            const item: ChatItem = { kind: "plan", plan: message.plan };
+            return {
+              chats: { ...s.chats, [sessionId]: { items: [...chat.items, item] } },
+              plans:
+                s.plans[message.plan.plan_id] !== undefined
+                  ? s.plans
+                  : { ...s.plans, [message.plan.plan_id]: draft },
+            };
+          });
+          break;
+        case "plan_resolved":
+          // Authoritative: overwrites an optimistic verdict (a click that raced
+          // the timeout) and settles cards on clients that never answered.
+          set((s) => {
+            const draft = s.plans[message.plan_id];
+            if (draft === undefined) return {}; // card belongs to another client
+            return {
+              plans: { ...s.plans, [message.plan_id]: { ...draft, verdict: message.verdict } },
+            };
           });
           break;
         case "status":

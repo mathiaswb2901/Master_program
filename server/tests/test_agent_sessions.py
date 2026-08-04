@@ -20,8 +20,22 @@ from workbench_server.models.agents import (
     ToolUseNote,
     TurnDone,
 )
+from workbench_server.models.plans import (
+    FileRef,
+    OptionGroupNode,
+    PlanAnnotation,
+    PlanArtifact,
+    PlanOption,
+    PlanPresented,
+    PlanResolved,
+    PlanResponse,
+    PlanStep,
+    StepListNode,
+)
+from workbench_server.services import agent_sessions
 from workbench_server.services.agent_sessions import (
-    PermissionAsk,
+    PlanAlreadyPendingError,
+    SessionBridge,
     SessionManager,
     TooManySessionsError,
 )
@@ -61,14 +75,23 @@ def delta(text: str) -> StreamEvent:
 
 
 class FakeClient:
-    """Yields a scripted message sequence; optionally asks permission first."""
+    """Yields a scripted message sequence; optionally asks permission or presents
+    a plan first — both through the same SessionBridge the real SDK factory gets."""
 
-    def __init__(self, script: list[Any], ask: PermissionAsk, ask_for: str | None = None) -> None:
+    def __init__(
+        self,
+        script: list[Any],
+        bridge: SessionBridge,
+        ask_for: str | None = None,
+        plan: PlanArtifact | None = None,
+    ) -> None:
         self._script = script
-        self._ask = ask
+        self._bridge = bridge
         self._ask_for = ask_for
+        self._plan = plan
         self.prompts: list[str] = []
         self.permission_outcomes: list[bool] = []
+        self.plan_responses: list[PlanResponse] = []
         self.disconnected = False
 
     async def connect(self) -> None:
@@ -79,8 +102,10 @@ class FakeClient:
 
     async def receive_response(self) -> AsyncIterator[Any]:
         if self._ask_for is not None:
-            outcome = await self._ask(self._ask_for, {"command": "pip install x"})
+            outcome = await self._bridge.ask_permission(self._ask_for, {"command": "pip install x"})
             self.permission_outcomes.append(outcome)
+        if self._plan is not None:
+            self.plan_responses.append(await self._bridge.present_plan(self._plan))
         for message in self._script:
             yield message
 
@@ -91,11 +116,13 @@ class FakeClient:
         self.disconnected = True
 
 
-def make_factory(script: list[Any], ask_for: str | None = None) -> Any:
+def make_factory(
+    script: list[Any], ask_for: str | None = None, plan: PlanArtifact | None = None
+) -> Any:
     created: list[FakeClient] = []
 
-    def factory(folder: Path, resume: str | None, ask: PermissionAsk) -> FakeClient:
-        client = FakeClient(script, ask, ask_for)
+    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> FakeClient:
+        client = FakeClient(script, bridge, ask_for, plan)
         created.append(client)
         return client
 
@@ -147,8 +174,8 @@ async def test_second_message_rejected_while_working(tmp_path: Path) -> None:
             await gate.wait()
             yield ResultMessage()
 
-    def factory(folder: Path, resume: str | None, ask: PermissionAsk) -> SlowClient:
-        return SlowClient([], ask)
+    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> SlowClient:
+        return SlowClient([], bridge)
 
     manager = SessionManager(tmp_path, factory, max_sessions=4)
     session = manager.create("")
@@ -185,6 +212,226 @@ async def test_permission_round_trip(tmp_path: Path, allow: bool) -> None:
     await drain(queue, TurnDone)
     client: FakeClient = factory.created[0]
     assert client.permission_outcomes == [allow]
+
+
+async def test_interrupt_settles_a_pending_permission(tmp_path: Path) -> None:
+    """Stop must unblock can_use_tool as well as a plan: the SDK interrupt cannot
+    reach a tool call parked on our future, so an unsettled prompt would leave
+    the session in needs_attention for the rest of the 10-minute timeout."""
+    factory = make_factory([ResultMessage()], ask_for="Bash")
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("install deps")
+    while not isinstance(await asyncio.wait_for(queue.get(), timeout=10), PermissionRequest):
+        pass
+
+    await session.interrupt()
+    await drain(queue, TurnDone)
+
+    assert factory.created[0].permission_outcomes == [False]  # denied, not hung
+    assert session.state == "idle"
+    assert session.pending_attention() == []
+
+
+async def test_orphaned_permission_timeout_never_resurrects_a_finished_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prompt still pending when the turn ends used to fire its timeout and
+    unconditionally set "working" — leaving an idle session marked busy forever
+    with nothing running."""
+    monkeypatch.setattr(agent_sessions, "PERMISSION_TIMEOUT_S", 0.05)
+
+    class OrphanClient(FakeClient):
+        orphan: "asyncio.Task[bool] | None" = None
+
+        async def receive_response(self) -> AsyncIterator[Any]:
+            # A prompt nobody answers, outliving the turn that raised it.
+            OrphanClient.orphan = asyncio.create_task(
+                self._bridge.ask_permission("Bash", {"command": "x"})
+            )
+            await asyncio.sleep(0)
+            yield ResultMessage()
+
+    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> OrphanClient:
+        return OrphanClient([], bridge)
+
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("go")
+    await drain(queue, TurnDone)
+    assert session.state == "idle"
+
+    orphan = OrphanClient.orphan
+    assert orphan is not None
+    assert await asyncio.wait_for(orphan, timeout=10) is False  # timed out -> deny
+    assert session.state == "idle"
+
+
+# ---- plans -------------------------------------------------------------------
+
+
+def sample_plan() -> PlanArtifact:
+    return PlanArtifact(
+        plan_id="plan-1",
+        title="Rework the DST handling",
+        summary="Pick a representation, then I do the steps.",
+        nodes=[
+            OptionGroupNode(
+                node_id="approach",
+                prompt="Which representation?",
+                options=[
+                    PlanOption(option_id="local", label="Local time + fold", recommended=True),
+                    PlanOption(option_id="utc", label="UTC everywhere"),
+                ],
+            ),
+            StepListNode(
+                node_id="steps",
+                steps=[PlanStep(text="Add a fold-aware index", file_refs=[FileRef(path="a.py")])],
+            ),
+        ],
+    )
+
+
+async def test_plan_round_trip_returns_the_typed_response(tmp_path: Path) -> None:
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("plan the DST fix")
+
+    presented: PlanPresented | None = None
+    while presented is None:
+        event = await asyncio.wait_for(queue.get(), timeout=10)
+        if isinstance(event, PlanPresented):
+            presented = event
+    assert presented.plan.title == "Rework the DST handling"
+    assert session.state == "needs_attention"
+
+    session.resolve_plan(
+        PlanResponse(
+            plan_id=presented.plan.plan_id,
+            verdict="approve",
+            choices={"approach": "local"},
+            annotations=[PlanAnnotation(node_id="steps", text="skip the backfill")],
+            comment="go",
+        )
+    )
+    await drain(queue, TurnDone)
+
+    client: FakeClient = factory.created[0]
+    assert len(client.plan_responses) == 1
+    answer = client.plan_responses[0]
+    assert answer.verdict == "approve"
+    assert answer.choices == {"approach": "local"}
+    assert answer.annotations[0].text == "skip the backfill"
+    assert session.pending_attention() == []  # nothing left to replay
+
+
+async def test_plan_timeout_resolves_to_no_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silence is never approval: the agent is told nobody answered."""
+    monkeypatch.setattr(agent_sessions, "PLAN_TIMEOUT_S", 0.05)
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("plan it")
+    events = await drain(queue, TurnDone)
+
+    answer = factory.created[0].plan_responses[0]
+    assert answer.verdict == "no_decision"
+    assert answer.plan_id == "plan-1"
+    assert session.state == "idle"
+    # The card must stop being answerable in every UI too — otherwise a user
+    # returning at minute 11 clicks Approve and is told the agent is proceeding.
+    resolved = [e for e in events if isinstance(e, PlanResolved)]
+    assert [e.verdict for e in resolved] == ["no_decision"]
+
+
+async def test_interrupt_settles_a_pending_plan(tmp_path: Path) -> None:
+    """An interrupt must unblock the waiting tool call and clear the attention
+    state — otherwise the session is wedged with a card nobody can answer."""
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("plan it")
+    while not isinstance(await asyncio.wait_for(queue.get(), timeout=10), PlanPresented):
+        pass
+
+    await session.interrupt()
+    await drain(queue, TurnDone)
+
+    assert factory.created[0].plan_responses[0].verdict == "no_decision"
+    assert session.state == "idle"
+    assert session.pending_attention() == []
+
+
+async def test_one_pending_plan_per_session(tmp_path: Path) -> None:
+    manager = SessionManager(tmp_path, make_factory([]), max_sessions=4)
+    session = manager.create("")
+    first = asyncio.create_task(session.present_plan(sample_plan()))
+    await asyncio.sleep(0.05)
+    with pytest.raises(PlanAlreadyPendingError):
+        await session.present_plan(sample_plan())
+    session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="reject"))
+    assert (await first).verdict == "reject"
+
+
+async def test_stale_plan_decision_is_ignored(tmp_path: Path) -> None:
+    manager = SessionManager(tmp_path, make_factory([]), max_sessions=4)
+    session = manager.create("")
+    task = asyncio.create_task(session.present_plan(sample_plan()))
+    await asyncio.sleep(0.05)
+    session.resolve_plan(
+        PlanResponse(plan_id="some-other-plan", verdict="approve", choices={"approach": "local"})
+    )
+    assert not task.done()
+    session.resolve_plan(
+        PlanResponse(plan_id="plan-1", verdict="approve", choices={"approach": "local"})
+    )
+    assert (await task).verdict == "approve"
+
+
+async def test_approve_without_every_option_chosen_is_ignored(tmp_path: Path) -> None:
+    """'approve' means "proceed with the chosen options". A group the user never
+    answered (one with no recommended option starts unselected) would reach the
+    agent as an implied approval of a decision it explicitly asked about, and it
+    would guess. Revise and reject legitimately need no choices."""
+    manager = SessionManager(tmp_path, make_factory([]), max_sessions=4)
+    session = manager.create("")
+    task = asyncio.create_task(session.present_plan(sample_plan()))
+    await asyncio.sleep(0.05)
+    session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="approve"))
+    await asyncio.sleep(0.05)
+    assert not task.done()  # dropped, and the card stays answerable
+
+    session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="revise", comment="split step 1"))
+    assert (await task).verdict == "revise"
+
+
+async def test_plan_resolution_is_broadcast_to_every_client(tmp_path: Path) -> None:
+    """Settlement is a frame, not a local guess: a second client (or the one that
+    never answered) must not keep a live card for a plan the agent stopped
+    waiting on — nor be able to flip it to "Approved" afterwards."""
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    first = session.subscribe()
+    second = session.subscribe()
+    session.send_user_message("plan it")
+    while not isinstance(await asyncio.wait_for(first.get(), timeout=10), PlanPresented):
+        pass
+
+    session.resolve_plan(
+        PlanResponse(plan_id="plan-1", verdict="approve", choices={"approach": "local"})
+    )
+    for queue in (first, second):
+        resolved = [e for e in await drain(queue, TurnDone) if isinstance(e, PlanResolved)]
+        assert [(e.plan_id, e.verdict) for e in resolved] == [("plan-1", "approve")]
 
 
 # ---- session titles ---------------------------------------------------------
@@ -338,6 +585,124 @@ def test_ws_pipeline_end_to_end(settings: Settings, tmp_path: Path) -> None:
         listing = client.get("/api/agents/sessions")
         assert listing.status_code == 200
         assert any(s["session_id"] == local_id for g in listing.json() for s in g["sessions"])
+
+
+@pytest.mark.timeout(60)
+def test_ws_plan_decision_round_trip(settings: Settings, tmp_path: Path) -> None:
+    """present_plan -> plan_presented frame -> plan_decision from the client ->
+    the agent's tool call returns the typed response."""
+    app = create_app(settings)
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    app.state.session_manager = SessionManager(tmp_path, factory, max_sessions=4)
+
+    with TestClient(app) as client:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "plan it"}))
+            frame = json.loads(ws.receive_text())
+            while frame["type"] != "plan_presented":
+                frame = json.loads(ws.receive_text())
+            plan = frame["plan"]
+            assert [node["kind"] for node in plan["nodes"]] == ["option_group", "step_list"]
+            assert plan["nodes"][1]["steps"][0]["file_refs"] == [{"path": "a.py"}]
+
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "plan_decision",
+                        "response": {
+                            "plan_id": plan["plan_id"],
+                            "verdict": "revise",
+                            "choices": {"approach": "utc"},
+                            "annotations": [{"node_id": "steps", "text": "add a rollback step"}],
+                            "comment": "close, but split step 1",
+                        },
+                    }
+                )
+            )
+            while json.loads(ws.receive_text())["type"] != "turn_done":
+                pass
+
+    answer = factory.created[0].plan_responses[0]
+    assert answer.verdict == "revise"
+    assert answer.choices == {"approach": "utc"}
+    assert answer.annotations[0].node_id == "steps"
+    assert answer.comment == "close, but split step 1"
+
+
+@pytest.mark.timeout(60)
+def test_pending_plan_is_replayed_to_a_reconnecting_client(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """A client that connects after the card was emitted still gets it."""
+    app = create_app(settings)
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    app.state.session_manager = SessionManager(tmp_path, factory, max_sessions=4)
+
+    with TestClient(app) as client:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "plan it"}))
+            while json.loads(ws.receive_text())["type"] != "plan_presented":
+                pass  # emitted once, to this connection only
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws2:
+            replayed = json.loads(ws2.receive_text())
+            assert replayed["type"] == "plan_presented"
+            assert replayed["plan"]["plan_id"] == "plan-1"
+            ws2.send_text(
+                json.dumps(
+                    {
+                        "type": "plan_decision",
+                        "response": {
+                            "plan_id": "plan-1",
+                            "verdict": "approve",
+                            "choices": {"approach": "local"},
+                        },
+                    }
+                )
+            )
+            seen: list[str] = []
+            while "turn_done" not in seen:
+                seen.append(json.loads(ws2.receive_text())["type"])
+            assert "plan_resolved" in seen  # the card settles on the wire, not by click
+
+    assert factory.created[0].plan_responses[0].verdict == "approve"
+
+
+@pytest.mark.timeout(60)
+def test_pending_permission_is_replayed_to_a_reconnecting_client(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """The same replay gap existed for permission prompts: a session blocked on
+    one used to look like a hung agent to any client that connected later."""
+    app = create_app(settings)
+    factory = make_factory([ResultMessage()], ask_for="Bash")
+    app.state.session_manager = SessionManager(tmp_path, factory, max_sessions=4)
+
+    with TestClient(app) as client:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "install deps"}))
+            while json.loads(ws.receive_text())["type"] != "permission_request":
+                pass
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws2:
+            replayed = json.loads(ws2.receive_text())
+            assert replayed["type"] == "permission_request"
+            ws2.send_text(
+                json.dumps(
+                    {
+                        "type": "permission_decision",
+                        "request_id": replayed["request_id"],
+                        "allow": True,
+                    }
+                )
+            )
+            while json.loads(ws2.receive_text())["type"] != "turn_done":
+                pass
+
+    assert factory.created[0].permission_outcomes == [True]
 
 
 @pytest.mark.timeout(60)

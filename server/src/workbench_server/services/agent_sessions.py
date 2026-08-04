@@ -1,16 +1,17 @@
 """Live agent sessions: the bridge between /ws/agent WebSockets and the Agent SDK.
 
-The SDK client is injected as a factory so the whole streaming/permission flow
-is testable with a fake. The real factory (``sdk_client_factory``) builds a
-``ClaudeSDKClient`` bound to a folder, with the context-bridge MCP server and a
-permission callback that round-trips to the UI.
+The SDK client is injected as a factory so the whole streaming/permission/plan
+flow is testable with a fake. The real factory (``sdk_client_factory``) builds a
+``ClaudeSDKClient`` bound to a folder, with the context-bridge MCP server and the
+callbacks that round-trip to the UI (permission prompts, plan cards).
 """
 
 import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,12 +28,20 @@ from workbench_server.models.agents import (
     ToolUseNote,
     TurnDone,
 )
+from workbench_server.models.plans import (
+    OptionGroupNode,
+    PlanArtifact,
+    PlanPresented,
+    PlanResolved,
+    PlanResponse,
+)
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.titles import FALLBACK_TITLE, derive_title
 
 log = structlog.get_logger()
 
 PERMISSION_TIMEOUT_S = 600.0
+PLAN_TIMEOUT_S = 600.0
 _LISTENER_QUEUE_LIMIT = 2000
 
 
@@ -46,8 +55,43 @@ class SdkClient(Protocol):
     async def disconnect(self) -> None: ...
 
 
-PermissionAsk = Callable[[str, dict[str, Any]], Awaitable[bool]]
-ClientFactory = Callable[[Path, str | None, PermissionAsk], SdkClient]
+class SessionBridge(Protocol):
+    """What a live session offers the client factory: every callback that has to
+    reach the human. Bundled into one object so adding the next one (plans were
+    the second) does not widen the factory signature again."""
+
+    async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool: ...
+    async def present_plan(self, artifact: PlanArtifact) -> PlanResponse: ...
+
+
+ClientFactory = Callable[[Path, str | None, SessionBridge], SdkClient]
+
+
+class PlanAlreadyPendingError(Exception):
+    """A second plan was presented while one is still awaiting a decision."""
+
+    def __init__(self) -> None:
+        super().__init__("a plan is already awaiting the user's decision")
+
+
+@dataclass
+class _PendingPlan:
+    artifact: PlanArtifact
+    future: "asyncio.Future[PlanResponse]"
+
+
+def _no_decision(plan_id: str, reason: str) -> PlanResponse:
+    """The only verdict silence may produce — never an implied approval."""
+    return PlanResponse(plan_id=plan_id, verdict="no_decision", comment=reason)
+
+
+def _unchosen_option_groups(artifact: PlanArtifact, response: PlanResponse) -> list[str]:
+    """Option groups the response left without a selection."""
+    return [
+        node.node_id
+        for node in artifact.nodes
+        if isinstance(node, OptionGroupNode) and node.node_id not in response.choices
+    ]
 
 
 class AgentSession:
@@ -77,6 +121,10 @@ class AgentSession:
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
+        # The emitted frames for those futures, kept so a client that connects
+        # after emission still gets the card (see pending_attention).
+        self._pending_permission_events: dict[str, PermissionRequest] = {}
+        self._pending_plan: _PendingPlan | None = None
         self._turn_task: asyncio.Task[None] | None = None
 
     # ---- listener plumbing -------------------------------------------------
@@ -89,6 +137,16 @@ class AgentSession:
     def unsubscribe(self, q: asyncio.Queue[BaseModel]) -> None:
         self._listeners.discard(q)
 
+    def pending_attention(self) -> list[BaseModel]:
+        """Frames a fresh subscriber missed: still-open permission requests and
+        the pending plan card. Emission is fire-and-forget, so a client that
+        connects (or reconnects) after the agent blocked would otherwise stare
+        at a `needs_attention` session with nothing to answer."""
+        events: list[BaseModel] = list(self._pending_permission_events.values())
+        if self._pending_plan is not None:
+            events.append(PlanPresented(plan=self._pending_plan.artifact))
+        return events
+
     def _emit(self, event: BaseModel) -> None:
         for q in self._listeners:
             if q.full():
@@ -100,38 +158,128 @@ class AgentSession:
             self.state = state
             self._emit(StatusChange(session_id=self.local_id, state=state))
 
-    # ---- permissions -------------------------------------------------------
+    # ---- permissions (SessionBridge) ---------------------------------------
 
-    async def _ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
+    async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
         request_id = uuid.uuid4().hex
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._pending_permissions[request_id] = fut
-        self._set_state("needs_attention")
-        self._emit(
-            PermissionRequest(
-                request_id=request_id,
-                tool=tool,
-                description=_describe_tool_call(tool, tool_input),
-            )
+        request = PermissionRequest(
+            request_id=request_id,
+            tool=tool,
+            description=_describe_tool_call(tool, tool_input),
         )
+        self._pending_permissions[request_id] = fut
+        self._pending_permission_events[request_id] = request
+        self._set_state("needs_attention")
+        self._emit(request)
         try:
             return await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
         except TimeoutError:
+            log.info("agent.permission_timed_out", session=self.local_id, request=request_id)
             return False
         finally:
             self._pending_permissions.pop(request_id, None)
-            self._set_state("working")
+            self._pending_permission_events.pop(request_id, None)
+            self._restore_state_after_prompt()
 
     def resolve_permission(self, request_id: str, allow: bool) -> None:
         fut = self._pending_permissions.get(request_id)
         if fut is not None and not fut.done():
             fut.set_result(allow)
 
+    def _abandon_pending_permissions(self, reason: str) -> None:
+        """Deny every prompt still awaiting the human so ``can_use_tool`` unwinds
+        now instead of blocking for the rest of ``PERMISSION_TIMEOUT_S``.
+
+        Same reasoning as ``_abandon_pending_plan``: the SDK interrupt cannot
+        unblock a tool call parked on a future of ours, so Stop (or a close) has
+        to settle it here or the session sits in ``needs_attention`` for ten more
+        minutes with a prompt the user already walked away from."""
+        for request_id, fut in list(self._pending_permissions.items()):
+            if not fut.done():
+                fut.set_result(False)
+                log.info(
+                    "agent.permission_abandoned",
+                    session=self.local_id,
+                    request=request_id,
+                    reason=reason,
+                )
+
+    def _restore_state_after_prompt(self) -> None:
+        """Leave ``needs_attention`` once a prompt settles — but only back into a
+        turn that is genuinely still running, and only when nothing else is still
+        waiting on the human. An orphaned prompt firing its timeout after the
+        turn ended used to flip an idle session to ``working`` permanently."""
+        if self._turn_task is None or self._turn_task.done():
+            return
+        if self._pending_permissions or self._pending_plan is not None:
+            return
+        self._set_state("working")
+
+    # ---- plans (SessionBridge) ---------------------------------------------
+
+    async def present_plan(self, artifact: PlanArtifact) -> PlanResponse:
+        """Show a plan card and block until the user decides.
+
+        Mirrors the permission flow: emit, flip to ``needs_attention``, await a
+        future under the same timeout discipline. Both silence (timeout) and an
+        interrupt resolve to verdict ``no_decision`` — the agent must then stop
+        and ask in chat. Nothing here ever produces an implied approval.
+
+        One plan at a time per session: a second call while one is pending is an
+        agent mistake and comes back as a tool error.
+        """
+        if self._pending_plan is not None:
+            raise PlanAlreadyPendingError
+        fut: asyncio.Future[PlanResponse] = asyncio.get_running_loop().create_future()
+        self._pending_plan = _PendingPlan(artifact=artifact, future=fut)
+        self._set_state("needs_attention")
+        self._emit(PlanPresented(plan=artifact))
+        try:
+            response = await asyncio.wait_for(fut, timeout=PLAN_TIMEOUT_S)
+        except TimeoutError:
+            log.info("agent.plan_timed_out", session=self.local_id, plan=artifact.plan_id)
+            response = _no_decision(artifact.plan_id, "no decision before the plan timed out")
+        finally:
+            self._pending_plan = None
+            self._restore_state_after_prompt()
+        # Tell every client the card is history — including the one that never
+        # answered, and any second client still showing it as live.
+        self._emit(PlanResolved(plan_id=artifact.plan_id, verdict=response.verdict))
+        return response
+
+    def resolve_plan(self, response: PlanResponse) -> None:
+        pending = self._pending_plan
+        if pending is None or pending.artifact.plan_id != response.plan_id:
+            log.warning("agent.plan_decision_ignored", session=self.local_id, reason="not_pending")
+            return
+        unchosen = _unchosen_option_groups(pending.artifact, response)
+        if response.verdict == "approve" and unchosen:
+            # "approve" means "proceed with the chosen options" — approving with
+            # a group unanswered would hand the agent an implied approval for a
+            # decision it explicitly asked the user to make, and it would guess.
+            log.warning(
+                "agent.plan_decision_ignored",
+                session=self.local_id,
+                reason="approve_without_choices",
+                unchosen=unchosen,
+            )
+            return
+        if not pending.future.done():
+            pending.future.set_result(response)
+
+    def _abandon_pending_plan(self, reason: str) -> None:
+        """Settle a pending plan as ``no_decision`` so the awaiting tool call
+        unwinds and the session cannot stay stuck in ``needs_attention``."""
+        pending = self._pending_plan
+        if pending is not None and not pending.future.done():
+            pending.future.set_result(_no_decision(pending.artifact.plan_id, reason))
+
     # ---- conversation ------------------------------------------------------
 
     async def _ensure_client(self) -> SdkClient:
         if self._client is None:
-            self._client = self._factory(self.folder, self.sdk_session_id, self._ask_permission)
+            self._client = self._factory(self.folder, self.sdk_session_id, self)
             await self._client.connect()
         return self._client
 
@@ -200,11 +348,18 @@ class AgentSession:
         )
 
     async def interrupt(self) -> None:
+        # Settle first: the SDK interrupt cannot unblock a tool call that is
+        # awaiting the human, so anything left pending — plan or permission —
+        # would wedge the session in needs_attention after the user pressed Stop.
+        self._abandon_pending_plan("the user interrupted the turn")
+        self._abandon_pending_permissions("the user interrupted the turn")
         if self._client is not None:
             with contextlib.suppress(Exception):
                 await self._client.interrupt()
 
     async def close(self) -> None:
+        self._abandon_pending_plan("the session closed")
+        self._abandon_pending_permissions("the session closed")
         if self._turn_task is not None:
             self._turn_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
