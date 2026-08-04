@@ -2,10 +2,12 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
@@ -71,6 +73,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(agents.router)
     app.include_router(agents.ws_router)
+
+    # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
+    ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
+    if ui_dist.is_dir():
+        app.mount("/", StaticFiles(directory=ui_dist, html=True), name="ui")
+
     return app
 
 
