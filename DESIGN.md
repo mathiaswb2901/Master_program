@@ -328,6 +328,11 @@ surface (`Ctrl+K` kills a line, `Ctrl+P` walks shell history). Plain keys are ne
 intercepted anywhere. Hence the Alt twins above: they are the ones that work from
 inside a terminal or editor.
 
+**User chords** (`shortcuts.md`, `docs/shortcuts.md`) must carry `Alt`. Everywhere but
+xterm and Monaco the app intercepts *any* `Ctrl` chord and preventDefaults it, so a
+file-supplied `Ctrl+V` would take paste away from the chat box, the rename field and the
+QuickBar's own input. Alt is both the safe set and the one that reaches every surface.
+
 One exception, in the editor only: `Ctrl+P` and `Ctrl+K` are intercepted. Monaco
 standalone leaves `Ctrl+P` unbound and uses `Ctrl+K` only as a fold-chord prefix, so
 passing them through reaches the *browser* (print dialog, address bar), not an editor

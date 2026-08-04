@@ -12,28 +12,54 @@ import type { ShortcutEntry } from "./types";
 
 export const SHORTCUTS_CATEGORY = "Shortcuts";
 
-const KIND_DETAIL: Record<ShortcutEntry["kind"], string> = {
-  shell: "shell snippet",
-  prompt: "prompt template",
-};
+const PROMPT_DETAIL = "prompt template";
+
+/** How much of a shell body a QuickBar row shows. Wider than the column: the
+ * CSS truncates what fits, this bounds what is rendered at all. */
+const PREVIEW_CHARS = 140;
 
 /**
- * What a `shell` shortcut types into the terminal.
+ * What a `shell` shortcut types into the terminal: printable text, cut at the
+ * first control byte.
  *
- * Never ends with a newline, and never *contains* one: in a live PTY a newline
- * is an Enter press, so a multi-line snippet would execute its earlier lines the
- * moment it landed. The user presses Enter — always. (The server already refuses
- * multi-line shell bodies; this is the second lock on the same door.)
+ * In a live PTY the C0 controls are key events, not characters. Line breaks are
+ * Enter; 0x0f is accept-line in readline and in PSReadLine's Emacs edit mode;
+ * 0x03 aborts the line; 0x1b opens an editing escape sequence that ConPTY's
+ * input parser turns back into virtual keys. Any of them would act the moment
+ * the text landed, so none of them ever reach the PTY — the user presses Enter,
+ * always. (The server refuses such a body outright; this is the second lock on
+ * the same door.)
  */
 export function shellInsertText(body: string): string {
-  const firstBreak = body.search(/[\r\n]/);
-  return (firstBreak === -1 ? body : body.slice(0, firstBreak)).trimEnd();
+  let stop = body.length;
+  for (let i = 0; i < body.length; i += 1) {
+    const code = body.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) {
+      stop = i;
+      break;
+    }
+  }
+  return body.slice(0, stop).trimEnd();
 }
 
 /** What a `prompt` shortcut leaves in the chat box: appended to what is there. */
 export function promptInsertText(draft: string, body: string): string {
   const kept = draft.replace(/\s+$/, "");
   return kept === "" ? body : `${kept}\n${body}`;
+}
+
+/**
+ * The QuickBar row's right-hand text.
+ *
+ * For a shell entry that is the snippet itself, not the file's `detail:` — name
+ * and detail are attacker-controlled free text from the same untrusted file as
+ * the body, so a row reading "branch + short status" could type anything. The
+ * row shows what will actually be typed; the label stops being load-bearing.
+ */
+export function entryDetail(entry: ShortcutEntry): string {
+  if (entry.kind !== "shell") return entry.detail ?? PROMPT_DETAIL;
+  const text = shellInsertText(entry.body);
+  return text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text;
 }
 
 /**
@@ -49,7 +75,7 @@ export function shortcutCommands(
     title: entry.name,
     category: SHORTCUTS_CATEGORY,
     keys: entry.keys !== null ? [entry.keys] : undefined,
-    detail: () => entry.detail ?? KIND_DETAIL[entry.kind],
+    detail: () => entryDetail(entry),
     run: () => run(entry),
   }));
 }

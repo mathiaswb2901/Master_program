@@ -7,8 +7,14 @@
  */
 
 export interface TerminalHandle {
-  /** Bytes to the PTY, exactly as typed — no newline is ever added. */
-  send: (data: string) => void;
+  /**
+   * Bytes to the PTY, exactly as typed — no newline is ever added. Returns
+   * false when the socket cannot take them: a handle outlives its socket (the
+   * tab stays open showing "Terminal exited", and is still the active terminal),
+   * and it also exists in the moment between Alt+T and the socket opening. A
+   * silent drop there would look to the caller exactly like a successful insert.
+   */
+  send: (data: string) => boolean;
   focus: () => void;
 }
 

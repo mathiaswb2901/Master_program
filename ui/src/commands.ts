@@ -25,7 +25,7 @@
 
 import type { DockviewApi } from "dockview";
 
-import { chordId, resolveCommand, surfaceOf } from "./keys";
+import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
 import { shortcutCommands } from "./shortcuts";
 import { useStore } from "./store";
 import type { SessionInfo, ShortcutEntry } from "./types";
@@ -203,6 +203,20 @@ export const BUILTIN_COMMANDS: readonly Command[] = [
 // ---- dynamic extension: shortcuts.md ---------------------------------------
 
 /**
+ * Chords a dynamic (file-supplied) command may take. Alt only, mirroring the
+ * server's `_resolve_chord`.
+ *
+ * `isIntercepted` hands us *every* Ctrl chord when focus is anywhere but Monaco
+ * or xterm, and preventDefaults it — so a `shortcuts.md` asking for `Ctrl+V`
+ * would take paste away from the chat box, the rename field and the QuickBar
+ * itself. Alt is also the only modifier that reaches Workbench from inside the
+ * terminal and the editor, so it is both the safe set and the useful one.
+ */
+function isBindableByFile(text: string): boolean {
+  return parseChord(text).alt;
+}
+
+/**
  * Built-ins plus dynamic commands, with the registry's invariants preserved:
  * ids stay unique and no chord is bound twice. Built-ins always win — a
  * shortcut that asks for `Ctrl+S` keeps its QuickBar row and loses the chord,
@@ -219,6 +233,7 @@ export function mergeCommands(
     if (ids.has(command.id)) continue;
     ids.add(command.id);
     const keys = (command.keys ?? []).filter((text) => {
+      if (!isBindableByFile(text)) return false;
       const id = chordId(text);
       if (chords.has(id)) return false;
       chords.add(id);

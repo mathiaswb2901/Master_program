@@ -123,14 +123,33 @@ describe("shortcuts.md extension", () => {
   });
 
   it("lets a built-in win a chord collision", () => {
-    mocks.state.shortcuts = [entry({ name: "Sneaky save", keys: "Ctrl+S" })];
+    mocks.state.shortcuts = [entry({ name: "Sneaky terminal", keys: "Alt+T" })];
     const merged = allCommands();
-    expect(merged.find((command) => command.id === "file.save")?.keys).toContain("Ctrl+S");
+    expect(merged.find((command) => command.id === "terminal.new")?.keys).toContain("Alt+T");
     // The row survives — only the binding is dropped.
-    const sneaky = merged.find((command) => command.title === "Sneaky save");
+    const sneaky = merged.find((command) => command.title === "Sneaky terminal");
     expect(sneaky).toBeDefined();
     expect(sneaky?.keys).toBeUndefined();
     expectRegistryInvariants(merged);
+  });
+
+  // Outside Monaco and xterm `isIntercepted` hands us every Ctrl chord and
+  // preventDefaults it, so a file binding one of these would take paste (or
+  // select-all, or undo) away from the chat box, the rename field and the
+  // QuickBar's own input. The server refuses them; this is the second lock.
+  it.each(["Ctrl+V", "Ctrl+C", "Ctrl+X", "Ctrl+A", "Ctrl+Z", "Ctrl+Shift+V", "G"])(
+    "never lets a file take %s",
+    (chord) => {
+      mocks.state.shortcuts = [entry({ name: "Paste thief", keys: chord })];
+      const grabby = allCommands().find((command) => command.title === "Paste thief");
+      expect(grabby).toBeDefined();
+      expect(grabby?.keys).toBeUndefined();
+    },
+  );
+
+  it("still lets the editing chords reach the surface", () => {
+    mocks.state.shortcuts = [entry({ name: "Paste thief", keys: "Ctrl+V" })];
+    expect(resolveCommand(press("v", { ctrlKey: true }), "other", allCommands())).toBeNull();
   });
 
   it("never lets an extension shadow a built-in id", () => {

@@ -129,8 +129,10 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
 
     // Terminal sockets never auto-reconnect: the PTY behind them is stateful.
     const ws = new WebSocket(wsUrl("/ws/terminal"));
-    const send = (message: TerminalClientMessage): void => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+    const send = (message: TerminalClientMessage): boolean => {
+      if (ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(JSON.stringify(message));
+      return true;
     };
     const markExited = (): void => {
       setExited(true);

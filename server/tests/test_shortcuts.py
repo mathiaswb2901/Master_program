@@ -1,5 +1,6 @@
 """shortcuts.md: parser + merge unit tests, and the live-reload pipeline end to end."""
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -9,7 +10,8 @@ from fastapi.testclient import TestClient
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.shortcuts import ShortcutEntry, ShortcutsState
-from workbench_server.services.shortcuts import merge_shortcuts, parse_shortcuts
+from workbench_server.services.event_bus import EventBus
+from workbench_server.services.shortcuts import ShortcutsService, merge_shortcuts, parse_shortcuts
 
 FENCE = "```"
 
@@ -100,6 +102,59 @@ def test_multi_line_shell_body_is_refused() -> None:
     assert "single line" in parsed.problems[0].message
 
 
+@pytest.mark.parametrize("control", ["\x0f", "\x1b", "\x03", "\x00", "\x7f", "\t"])
+def test_shell_body_with_a_control_byte_is_refused(control: str) -> None:
+    """Line breaks are not the only key events.
+
+    ``\\x0f`` is accept-line in bash readline and in PSReadLine's Emacs edit mode
+    — it submits the line on insertion; ``\\x1b`` opens an editing escape
+    sequence ConPTY turns back into virtual keys; ``\\x03`` aborts. Verbatim
+    insertion of any of them breaks "you read it, then you press Enter".
+    """
+    parsed = parse_shortcuts(
+        _file(_block("Sneaky", "", f"git status{control}-sb")), "workspace", "f.md"
+    )
+    assert parsed.entries == []
+    assert "printable" in parsed.problems[0].message
+
+
+def test_prompt_bodies_keep_their_line_breaks() -> None:
+    """The printable-text rule is about a PTY; a chat draft is a textarea."""
+    parsed = parse_shortcuts(
+        _file(_block("Review", "type: prompt", "One.\nTwo.")), "workspace", "f.md"
+    )
+    assert parsed.problems == []
+    assert parsed.entries[0].body == "One.\nTwo."
+
+
+def test_a_fenced_example_never_registers_a_command() -> None:
+    """Markdown inside a fence is example text, wherever the fence is.
+
+    ``docs/shortcuts.md`` ships its copy-paste starter as exactly this shape — a
+    ```` ```` ```` wrapper around example entries — so pasting the doc into a
+    shortcuts file as a reference must not arm every example, and a hostile file
+    must not be able to hide chord-bound entries inside an inert-looking block.
+    """
+    text = (
+        "Intro\n\n````markdown\n## Fake\n\n"
+        + FENCE
+        + "\nrm -rf ~\n"
+        + FENCE
+        + "\n````\n\n"
+        + _block("Real", "", "ls")
+    )
+    parsed = parse_shortcuts(text, "workspace", "f.md")
+    assert [e.name for e in parsed.entries] == ["Real"]
+    assert parsed.problems == []
+
+
+def test_a_fence_that_never_closes_outside_an_entry_is_reported() -> None:
+    """Swallowing the rest of the file is fine; doing it silently is not."""
+    parsed = parse_shortcuts("Intro\n\n````\n" + _block("Hidden", "", "ls"), "workspace", "f.md")
+    assert parsed.entries == []
+    assert "unterminated code fence" in parsed.problems[0].message
+
+
 def test_duplicate_name_in_one_file_keeps_the_first() -> None:
     text = _file(_block("Dup", "", "first"), _block("Dup", "", "second"))
     parsed = parse_shortcuts(text, "workspace", "f.md")
@@ -108,15 +163,23 @@ def test_duplicate_name_in_one_file_keeps_the_first() -> None:
 
 
 def test_chord_colliding_with_a_builtin_is_dropped_but_the_entry_survives() -> None:
-    parsed = parse_shortcuts(_file(_block("Save", "keys: Ctrl+S", "ls")), "workspace", "f.md")
-    assert [(e.name, e.keys) for e in parsed.entries] == [("Save", None)]
+    parsed = parse_shortcuts(_file(_block("Terminal", "keys: Alt+T", "ls")), "workspace", "f.md")
+    assert [(e.name, e.keys) for e in parsed.entries] == [("Terminal", None)]
     assert "built-in shortcut" in parsed.problems[0].message
 
 
-def test_chord_without_ctrl_or_alt_is_rejected() -> None:
-    parsed = parse_shortcuts(_file(_block("Plain", "keys: G", "ls")), "workspace", "f.md")
-    assert parsed.entries[0].keys is None
-    assert "Ctrl or Alt" in parsed.problems[0].message
+@pytest.mark.parametrize("keys", ["G", "Ctrl+V", "Ctrl+A", "Ctrl+Z", "Ctrl+Shift+V"])
+def test_a_chord_without_alt_is_rejected(keys: str) -> None:
+    """Alt is the only modifier a file may take.
+
+    Outside Monaco and xterm ``isIntercepted`` gives Workbench *every* Ctrl
+    chord and preventDefaults it, so a file binding Ctrl+V would take paste away
+    from the chat box and every other input in the app; a plain key is never
+    intercepted anywhere, so it would simply never fire.
+    """
+    parsed = parse_shortcuts(_file(_block("Grabby", f"keys: {keys}", "ls")), "workspace", "f.md")
+    assert parsed.entries[0].keys is None  # the row survives, only the binding goes
+    assert "must include Alt" in parsed.problems[0].message
 
 
 def test_second_entry_cannot_steal_a_chord() -> None:
@@ -183,6 +246,22 @@ def test_api_serves_both_files_merged(
         ("Local", "workspace"),
         ("Everywhere", "global"),
     ]
+
+
+@pytest.mark.timeout(30)
+async def test_stop_lets_the_global_watch_exit_its_own_loop(
+    tmp_path: Path, global_shortcuts_file: Path
+) -> None:
+    """Cancelling a task parked in ``async for … awatch`` leaves the generator
+    unfinalized and the watchfiles thread alive until GC. Like ``Watcher.stop``,
+    the stop event is what ends it — every test that builds an app starts one."""
+    service = ShortcutsService(tmp_path, EventBus(), global_path=global_shortcuts_file)
+    service.start()
+    watch = next(t for t in asyncio.all_tasks() if t.get_name() == "shortcuts-global")
+    await asyncio.sleep(0.1)  # let awatch reach its first await
+    await service.stop()
+    assert watch.done()
+    assert not watch.cancelled()
 
 
 @pytest.mark.timeout(60)

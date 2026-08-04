@@ -726,7 +726,12 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           return;
         }
         // No trailing newline, ever: the user presses Enter (see shellInsertText).
-        handle.send(shellInsertText(entry.body));
+        // A handle outlives its socket, so an undelivered insert must say so —
+        // silence here reads as "it typed" and invites an Enter into a dead tab.
+        if (!handle.send(shellInsertText(entry.body))) {
+          get().pushToast("warn", "Terminal is not connected — reconnect it, then try again.");
+          return;
+        }
         // After the QuickBar unmounts, so the keyboard lands where the text did.
         window.setTimeout(() => handle.focus(), 0);
         return;

@@ -141,10 +141,15 @@ the bus is the reload trigger — while the global one, living outside the works
 its own small `watchfiles` watch; a reload that changes the merged state publishes
 `ShortcutsChangedEvent` and the UI refetches. Entries extend the command registry
 (`ui/src/commands.ts`) dynamically, and built-ins win every id/chord collision. Parsing is
-total: a bad entry becomes a `problem` in the payload, never an exception. **Entries are
+total: a bad entry becomes a `problem` in the payload, never an exception; markdown
+inside any fence is example text, so a `##` line there registers nothing. **Entries are
 inserted, never executed** — a shell body is typed into the active terminal with no
-trailing newline (and must be single-line, since a newline in a PTY is Enter), a prompt
-lands in the chat draft. Format spec: `docs/shortcuts.md`.
+trailing newline, a prompt lands in the chat draft. Two invariants carry that, each
+enforced on both sides of the wire: a shell body is a single line of *printable* text
+(in a PTY the control bytes are key events — `\n` is Enter, `\x0f` is accept-line), and
+a file-supplied chord must carry `Alt` (outside Monaco/xterm the app intercepts every
+Ctrl chord, so `Ctrl+V` from a file would take paste away from every input).
+Format spec: `docs/shortcuts.md`.
 
 ## Testing layers
 

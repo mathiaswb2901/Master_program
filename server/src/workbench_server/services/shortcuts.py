@@ -1,4 +1,4 @@
-"""shortcuts.md: parser (pure) + the service that loads, merges and watches it.
+r"""shortcuts.md: parser (pure) + the service that loads, merges and watches it.
 
 The file is written by a human as a note and read by a forgiving parser: an H2
 heading names a shortcut, optional ``key: value`` lines configure it, and a
@@ -9,8 +9,10 @@ the file.
 Security (non-negotiable): nothing here executes anything. A ``shell`` entry is
 text the UI *types* into the active terminal without a trailing newline; a
 ``prompt`` entry is text it puts in the chat draft. The user presses Enter. A
-shell body is therefore required to be a single line: a body carrying a newline
-would run its earlier lines the moment it was inserted.
+shell body is therefore required to be printable text only: in a live PTY the
+control bytes are key events, not characters — ``\n`` is Enter, ``\x0f`` is
+accept-line in readline and PSReadLine, ``\x03`` aborts, ``\x1b`` opens an
+editing escape sequence — so any of them would act the moment the body landed.
 """
 
 import asyncio
@@ -92,6 +94,10 @@ def _reserved() -> frozenset[str]:
     colliding chord at merge time regardless. Listing them here is what turns a
     collision into a *message the user sees* instead of a binding that silently
     never fires.
+
+    Only the Alt-carrying ones can actually be *requested* by a file (see
+    ``_resolve_chord``); the Ctrl ones are listed so asking for one gets the
+    precise "built-in shortcut" message instead of the generic refusal.
     """
     chords = [
         "Ctrl+P",
@@ -123,6 +129,16 @@ _FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})\s*(?P<info>\S*)")
 _META_KEYS = frozenset({"type", "keys", "detail"})
 _KINDS: frozenset[str] = frozenset({"shell", "prompt"})
 
+# C0 controls + DEL. Printable text is what a shell body may be, and nothing else.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _control_reason(char: str) -> str:
+    """Message for a control byte, naming the common one so it reads as advice."""
+    if char == "\n":
+        return "shell body must be a single line"
+    return f"shell body must be printable text (found {char!r})"
+
 
 @dataclass
 class _Raw:
@@ -144,22 +160,44 @@ class ParsedFile:
     problems: list[ShortcutProblem] = field(default_factory=list)
 
 
-def _split_blocks(text: str) -> list[_Raw]:
-    """Cut the file into H2 blocks. Deliberately dumb: never raises."""
+def _split_blocks(text: str) -> tuple[list[_Raw], bool]:
+    """Cut the file into H2 blocks. Deliberately dumb: never raises.
+
+    Every fence is tracked, not just the one an entry is collecting: markdown
+    inside a fenced block is *example text*, so a ``##`` line in the preamble's
+    ```` ```markdown ```` sample (docs/shortcuts.md ships exactly that shape) is
+    prose, not a heading that registers a live command.
+
+    Returns the blocks and whether the file ended inside a fence no entry owned
+    — everything after such a fence was swallowed, and the caller says so.
+    """
     blocks: list[_Raw] = []
     current: _Raw | None = None
     fence_char = ""
     fence_len = 0
+    collecting = False  # the open fence is the current block's body
     for line in text.splitlines():
         if fence_len:
             stripped = line.strip()
             if stripped and set(stripped) == {fence_char} and len(stripped) >= fence_len:
                 fence_len = 0
-                if current is not None:
+                if collecting and current is not None:
                     current.closed = True
+                collecting = False
                 continue
-            if current is not None and current.body is not None:
+            if collecting and current is not None and current.body is not None:
                 current.body.append(line)
+            continue
+        fence = _FENCE_RE.match(line)
+        if fence is not None:
+            marker = fence.group("fence")
+            fence_char, fence_len = marker[0], len(marker)
+            # Only an entry that has no body yet claims the fence; any other one
+            # is tracked purely so its contents stay inert.
+            collecting = current is not None and current.body is None
+            if collecting and current is not None:
+                current.info = fence.group("info").lower()
+                current.body = []
             continue
         heading = _HEADING_RE.match(line)
         if heading is not None:
@@ -168,19 +206,12 @@ def _split_blocks(text: str) -> list[_Raw]:
             continue
         if current is None or current.body is not None:
             continue  # preamble, or prose after the body — both ignored
-        fence = _FENCE_RE.match(line)
-        if fence is not None:
-            marker = fence.group("fence")
-            fence_char, fence_len = marker[0], len(marker)
-            current.info = fence.group("info").lower()
-            current.body = []
-            continue
         meta = _META_RE.match(line.strip())
         if meta is not None:
             key = meta.group("key").lower()
             if key in _META_KEYS and key not in current.meta:
                 current.meta[key] = meta.group("value").strip()
-    return blocks
+    return blocks, bool(fence_len) and not collecting
 
 
 def _resolve_kind(raw: _Raw) -> str:
@@ -204,9 +235,15 @@ def _resolve_chord(
     if chord is None:
         reject(f"unusable chord {raw_keys!r} — binding ignored")
         return None
-    if not (chord.ctrl or chord.alt):
-        # keys.ts never intercepts a plain key: typing must always reach the surface.
-        reject(f"chord {raw_keys!r} needs Ctrl or Alt to reach Workbench — binding ignored")
+    if not chord.alt:
+        # Alt is the only modifier a file may ask for, for two reasons that point
+        # the same way. Reach: keys.ts never intercepts a plain key (typing must
+        # always arrive at the surface) and inside Monaco/xterm only Alt and
+        # Ctrl+Shift chords are taken, so Alt is the one that works everywhere.
+        # Safety: outside those two surfaces `isIntercepted` hands us *any*
+        # Ctrl chord, so a file asking for Ctrl+V or Ctrl+A would take paste or
+        # select-all away from the chat box and every other input in the app.
+        reject(f"chord {raw_keys!r} must include Alt to be bindable — binding ignored")
         return None
     canonical = chord.canonical()
     if canonical in RESERVED_CHORDS:
@@ -228,7 +265,14 @@ def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile
     def reject(name: str, reason: str) -> None:
         parsed.problems.append(ShortcutProblem(file=label, message=f"{name}: {reason}"))
 
-    for raw in _split_blocks(text):
+    blocks, dangling_fence = _split_blocks(text)
+    if dangling_fence:
+        parsed.problems.append(
+            ShortcutProblem(
+                file=label, message="unterminated code fence — everything below it was ignored"
+            )
+        )
+    for raw in blocks:
         name = raw.name.strip()
         if len(name) > MAX_NAME_CHARS:
             reject(name[:MAX_NAME_CHARS], f"name longer than {MAX_NAME_CHARS} characters — skipped")
@@ -257,10 +301,13 @@ def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile
             reject(name, f"unknown type {declared!r} (expected shell or prompt) — skipped")
             continue
         kind: ShortcutKind = "prompt" if declared == "prompt" else "shell"
-        if kind == "shell" and "\n" in body:
-            # Newlines are Enter presses in a live PTY: an inserted multi-line
-            # snippet would run its earlier lines. Never allowed.
-            reject(name, "shell body must be a single line — skipped")
+        if kind == "shell" and (control := _CONTROL_RE.search(body)) is not None:
+            # Control bytes are key events in a live PTY, not characters: \n and
+            # \r are Enter, \x0f is accept-line (readline, and PSReadLine in
+            # Emacs mode), \x03 aborts, \x1b starts an editing escape sequence
+            # that ConPTY turns back into virtual keys. Any of them would act on
+            # insertion — the one thing a shortcut may never do.
+            reject(name, f"{_control_reason(control.group())} — skipped")
             continue
 
         raw_keys = raw.meta.get("keys", "")
@@ -333,7 +380,8 @@ class ShortcutsService:
         self._bus = bus
         self._state = ShortcutsState(entries=[], problems=[])
         self._stop = asyncio.Event()
-        self._tasks: list[asyncio.Task[None]] = []
+        self._bus_task: asyncio.Task[None] | None = None
+        self._watch_task: asyncio.Task[None] | None = None
 
     def state(self) -> ShortcutsState:
         return self._state
@@ -355,18 +403,25 @@ class ShortcutsService:
             entries=len(self._state.entries),
             problems=len(self._state.problems),
         )
-        self._tasks = [
-            asyncio.create_task(self._watch_workspace(), name="shortcuts-workspace"),
-            asyncio.create_task(self._watch_global(), name="shortcuts-global"),
-        ]
+        self._bus_task = asyncio.create_task(self._watch_workspace(), name="shortcuts-workspace")
+        self._watch_task = asyncio.create_task(self._watch_global(), name="shortcuts-global")
 
     async def stop(self) -> None:
+        """Stop both watches, awaiting each — like ``Watcher.stop``.
+
+        The global watch exits its own ``async for`` on the stop event; cancelling
+        it instead would raise inside ``awatch``, leave the async generator
+        unfinalized and keep the watchfiles thread alive until GC. The bus
+        subscriber only ever waits on its queue, so cancel is its only way out.
+        """
         self._stop.set()
-        for task in self._tasks:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._tasks = []
+        if self._bus_task is not None:
+            self._bus_task.cancel()
+        for task in (self._bus_task, self._watch_task):
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._bus_task = self._watch_task = None
 
     def _read(self, path: Path, source: ShortcutSource, label: str) -> ParsedFile:
         try:
