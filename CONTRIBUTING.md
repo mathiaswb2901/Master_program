@@ -26,8 +26,11 @@ Optional: agent features need a Claude subscription login (`claude login` /
 - `uv run mypy` — strict, no `Any` smuggling
 - `uv run pytest` — new behavior ships with tests; cross-module behavior gets a
   full-pipeline test (see `server/tests/test_watcher.py` for the pattern)
-- UI: `npm run build` clean; follow `DESIGN.md` — colors/spacing only via
-  `tokens.css` variables
+- UI: `npm run lint`, `npm run test`, `npm run build` clean; follow `DESIGN.md` —
+  colors/spacing only via `tokens.css` variables
+- `cd ui && npm run e2e` — Playwright drives the built UI against a real server in a
+  throwaway workspace (agent journeys use `WORKBENCH_FAKE_AGENT=1`, so no Claude login
+  is needed). First run: `npx playwright install chromium`
 - Read `ARCHITECTURE.md` before moving module boundaries
 
 ## Conventions

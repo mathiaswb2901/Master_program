@@ -156,5 +156,20 @@ Format spec: `docs/shortcuts.md`.
 1. Unit: jail, hashing, protocol parsing, key derivation.
 2. Integration: real app in-process — API write -> watcher -> WS event; PTY round-trip;
    scripted-fake agent turns incl. permission flow.
+   - **Layer 2.5 — fake-agent mode** (`WORKBENCH_FAKE_AGENT=1`):
+     `services/fake_agent.py` is a `ClientFactory` that answers deterministically — a
+     streamed markdown reply, a `Read` of a real workspace file, a permission prompt, a
+     fixed `PlanArtifact` — through the *same* factory and `SessionBridge` seams the
+     real SDK plugs into. Nothing else changes: the session state machine, both
+     WebSocket fan-outs and every typed frame stay production code. This is what lets
+     layer 4 exercise chat, tool rows, permissions and plan cards with no Claude login
+     and no tokens. Off by default; `main.py` logs a structlog warning when it is on.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
-4. E2E (Playwright, per milestone): drive the built UI against the real backend.
+4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
+   **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
+   launched in a per-run temp workspace with fake-agent mode on. Seven journeys: file
+   CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
+   ConPTY, QuickBar/shortcuts (including the never-executed rule), chat streaming and
+   tool settling, plan cards, status chips and the attention badge, and office degraded
+   mode. Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
+   wait on the app's own signals.
