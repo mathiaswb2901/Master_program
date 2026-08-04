@@ -10,6 +10,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as api from "../api";
 import { loadDocsApi, type DocEditorInstance } from "../office";
 import { useStore, type OpenFile } from "../store";
+import type { Theme } from "../theme";
 
 let mountCounter = 0;
 
@@ -64,8 +65,13 @@ function DegradedCard({ file }: { file: OpenFile }) {
 
 export function OfficePanel({ file }: { file: OpenFile }) {
   const status = useStore((s) => s.officeStatus);
+  const appTheme = useStore((s) => s.theme);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  // Theme the running editor was created with. DocsAPI has no supported way
+  // to restyle a live instance, so a mismatch with the app theme shows the
+  // non-modal reopen bar instead of hot-swapping (reopen = fresh config).
+  const [editorTheme, setEditorTheme] = useState<Theme | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
 
   // Cached in the store after the first fetch; retried here if that failed.
@@ -88,12 +94,17 @@ export function OfficePanel({ file }: { file: OpenFile }) {
     host.replaceChildren(mount);
     setError(null);
     setReady(false);
+    setEditorTheme(null);
+    // Read the theme at creation time (not a dep — a theme change must not
+    // silently destroy the editor; the stale bar handles it instead).
+    const theme = useStore.getState().theme;
     void (async () => {
       const docsApi = await loadDocsApi(serverUrl);
-      const config = await api.getOfficeConfig(file.path);
+      const config = await api.getOfficeConfig(file.path, theme);
       if (cancelled) return;
       editor = new docsApi.DocEditor(mount.id, { ...config, height: "100%", width: "100%" });
       setReady(true);
+      setEditorTheme(theme);
     })().catch((err: unknown) => {
       if (cancelled) return;
       setError(
@@ -127,11 +138,15 @@ export function OfficePanel({ file }: { file: OpenFile }) {
     );
   }
 
+  const themeStale = editorTheme !== null && editorTheme !== appTheme;
+  const barMessage =
+    file.conflict ?? (themeStale ? "Theme changed — reopen the editor to apply it." : null);
+
   return (
     <div className="wb-office">
-      {file.conflict !== null && (
+      {barMessage !== null && (
         <div className="wb-office-bar" role="alert">
-          <span className="wb-office-bar-msg u-truncate">{file.conflict}</span>
+          <span className="wb-office-bar-msg u-truncate">{barMessage}</span>
           <button
             type="button"
             className="wb-btn wb-btn-sm wb-btn-outline"

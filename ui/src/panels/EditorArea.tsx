@@ -106,11 +106,22 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
       </div>
       {active?.kind === "text" && active.conflict !== null && <ConflictBar file={active} />}
       <div className="wb-editor-body">
-        {active === null ? null : active.kind === "office" ? (
-          // Keyed by path so switching office tabs tears down and recreates
-          // the editor instance instead of reusing another document's iframe.
-          <OfficePanel key={active.path} file={active} />
-        ) : active.loadError !== null ? (
+        {/* Every open office file keeps its editor mounted for the tab's whole
+            lifetime — creating an OnlyOffice instance is expensive, so tab
+            switches only toggle CSS visibility. display:none keeps hidden
+            iframes out of focus/tab order and unable to steal keystrokes.
+            Unmount (destroyEditor) happens only on close or generation bump. */}
+        {openFiles
+          .filter((f) => f.kind === "office")
+          .map((f) => (
+            <div
+              key={f.path}
+              className={"wb-office-host" + (f.path === activePath ? "" : " is-hidden")}
+            >
+              <OfficePanel file={f} />
+            </div>
+          ))}
+        {active === null || active.kind === "office" ? null : active.loadError !== null ? (
           <div className="wb-editor-message">Cannot open {active.name}: {active.loadError}</div>
         ) : (
           <Editor
