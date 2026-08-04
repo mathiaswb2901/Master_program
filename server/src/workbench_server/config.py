@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # Claude Code's per-project session storage; None = ~/.claude/projects
     claude_projects_dir: Path | None = None
 
+    # Replace the Agent SDK with the scripted stand-in in services/fake_agent.py:
+    # deterministic replies, plan cards and permission prompts, no Claude login
+    # and no tokens. This is how the Playwright suite drives the real backend.
+    # Off by default and loudly logged when on — a workbench that answers with
+    # canned text instead of an agent must never look like a working one.
+    fake_agent: bool = False
+
     # Load Workbench's own skills into every session, as a session-scoped local
     # plugin (see services/skills_bundle.py). Nothing is written to ~/.claude.
     bundled_skills: bool = True

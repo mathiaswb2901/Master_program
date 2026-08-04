@@ -13,8 +13,9 @@ from fastapi.staticfiles import StaticFiles
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
 from workbench_server.routers import agents, events, files, health, office, shortcuts, terminal
-from workbench_server.services.agent_sessions import SessionManager
+from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.event_bus import EventBus
+from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.office import OfficeService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
@@ -41,9 +42,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
+    # Fake mode replaces the SDK client and nothing else: same SessionManager,
+    # same bridge, same WebSockets — so what a test drives is the real backend.
+    client_factory: ClientFactory
+    if settings.fake_agent:
+        log.warning(
+            "agent.fake_mode_enabled",
+            detail="WORKBENCH_FAKE_AGENT is set: replies are scripted, no agent is running",
+        )
+        client_factory = fake_client_factory()
+    else:
+        client_factory = sdk_client_factory(ui_state_store, settings)
     session_manager = SessionManager(
         workspace.root,
-        sdk_client_factory(ui_state_store, settings),
+        client_factory,
         settings.max_concurrent_sessions,
         session_index=session_index,
         # Session state changes ride the same bus as watcher events, so the UI
