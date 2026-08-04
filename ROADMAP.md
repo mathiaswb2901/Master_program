@@ -80,9 +80,14 @@ the moat.
   custom keybindings; agents get a skill to add entries on request.
 - **Tool registry**: panels/commands/skills register in one place instead of hardwiring
   in `App.tsx` (product principle 1). Registration carries an **agent-ergonomics
-  budget**: every agent-facing tool declares its output format and is measured for token
-  cost and latency before it lands — thin calls over wrapped APIs, compact text over
-  pretty JSON, short descriptions (they are loaded into every session's context).
+  budget**, enforced through machinery that already exists rather than a new harness:
+  output format is a required typed field on registration (so `mypy --strict` fails an
+  omission), and each tool's own tests assert a ceiling on description length and on the
+  serialized size of a representative result (so the quality gate fails bloat). Thin
+  calls over wrapped APIs, compact text over pretty JSON, short descriptions — every
+  description is loaded into every session's context. Latency is deliberately *not*
+  budgeted: these are in-process local calls where the model and the user dominate.
+  Revisit with a real aggregate measurement if the tool surface passes ~20.
 - Committed carryover: pptx E2E fidelity pass, bundled skills (Anthropic
   xlsx/docx/pptx; OfficeCLI after vetting; plan-visual, validate, remember,
   loop-objective, workbench-dev), provenance badges. Every bundled skill passes a
@@ -162,6 +167,16 @@ the moat.
   skills get a vetting bar (a 177k-star skill benchmarked *worse* on results while using
   ~5% more tokens), and bug fixes must open with an end-to-end reproduction. Both are
   now `CLAUDE.md` standards.
+- 2026-08-04 — **Ergonomics budget narrowed to something that can fail** (revision of
+  the entry above, same day). The first wording — "measured for token cost and latency
+  before it lands" — named no mechanism, and a registry field merely *recording* a
+  measurement is decoration. Replaced with enforcement through existing machinery: a
+  required typed output-format field (caught by `mypy --strict`) and per-tool test
+  assertions on description length and serialized result size (caught by the quality
+  gate). No benchmark harness: the source's 3x finding came from a large third-party
+  tool surface, while Workbench owns ~10 agent-facing tools. Latency dropped — these are
+  in-process calls where the model and the user dominate, so budgeting it would promise
+  a measurement nobody takes.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 
