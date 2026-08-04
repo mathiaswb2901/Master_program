@@ -30,11 +30,13 @@ ruling it out.
 - Bug fixes start by reproducing the bug end-to-end, as close to how a user hits it as
   possible — then the fix. A unit test that fails is not a reproduction; it is a guess
   about where the bug lives. The E2E repro becomes the regression test.
-- Agent-facing tools are judged on token cost and latency, not just correctness: prefer
-  a thin call over a wrapped API, return token-efficient output (compact text beats
-  pretty-printed JSON), and keep descriptions short — every tool in the registry is
-  loaded into every session's context. Measure before adding, and say no to a tool that
-  costs more than the capability is worth.
+- Agent-facing tools are judged on token cost, not just correctness: prefer a thin call
+  over a wrapped API, return token-efficient output (compact text beats pretty-printed
+  JSON), and keep descriptions short — every tool description is loaded into every
+  session's context, so it is a cost you pay on every request. Enforce it where it can
+  fail: each tool's own tests assert a ceiling on its description length and on the
+  serialized size of a representative result. No separate benchmark harness — a budget
+  that lives outside the quality gate does not bind.
 - Skills entering the bundle are vetted, not adopted on popularity: read every line
   (a skill can run anything on the user's machine), and keep it only if it measurably
   helps. Widely-starred skills have been shown to raise token use *and* worsen results.
