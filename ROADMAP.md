@@ -48,4 +48,7 @@ Build for real external users, not just the author. Consequences, tracked as wor
 
 ## Change requests
 
-_(none open — add new user instructions here with date + priority)_
+- 2026-08-04 — **Frontend is too plain** (user): current UI reads as a generic VS Code
+  clone; the design pass must go beyond token compliance. Redo with the ui-ux-pro-max
+  skill used aggressively (style databases, component patterns, motion presets) to give
+  the app a distinctive visual identity. Priority: after M2/M3 office integration.

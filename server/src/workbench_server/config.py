@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # OnlyOffice Document Server (M2+). None = office editing disabled (degraded mode).
     onlyoffice_url: str | None = None
     onlyoffice_jwt_secret: str | None = None
+    # Base URL the Document Server uses to reach us; default derives from host/port.
+    public_base_url: str | None = None
+    # Keep a .bak of every office file before an editor save overwrites it.
+    office_backup: bool = True
+
+    def resolved_public_base_url(self) -> str:
+        return self.public_base_url or f"http://{self.host}:{self.port}"
 
     # Agent sessions
     max_concurrent_sessions: int = 4
