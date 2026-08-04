@@ -25,6 +25,8 @@ from workbench_server.models.office import (
     DocumentType,
     OfficeDocument,
     OfficeEditorConfig,
+    UiTheme,
+    default_customization,
 )
 from workbench_server.services.workspace import Workspace, content_hash
 
@@ -124,7 +126,7 @@ class OfficeService:
 
     # ---- editor config ------------------------------------------------------
 
-    def editor_config(self, path: str) -> DocEditorConfig:
+    def editor_config(self, path: str, theme: UiTheme = "dark") -> DocEditorConfig:
         if not self.enabled:
             raise OfficeDisabledError
         doc_type = self.document_type(path)
@@ -151,6 +153,7 @@ class OfficeService:
             editor_config=OfficeEditorConfig(
                 callback_url=f"{self._public_base}/api/office/callback/{callback_token}",
                 mode="edit" if editable else "view",
+                customization=default_customization(theme),
             ),
         )
         payload = config.model_dump(by_alias=True, exclude={"token"})

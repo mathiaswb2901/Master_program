@@ -15,6 +15,7 @@ from workbench_server.models.office import (
     ForcesaveRequest,
     LastSaveResponse,
     OfficeStatus,
+    UiTheme,
 )
 from workbench_server.services.office import (
     InvalidOfficeTokenError,
@@ -46,9 +47,11 @@ def status(request: Request) -> OfficeStatus:
 
 
 @router.get("/config")
-def config(request: Request, path: str = Query(min_length=1)) -> DocEditorConfig:
+def config(
+    request: Request, path: str = Query(min_length=1), theme: UiTheme = "dark"
+) -> DocEditorConfig:
     try:
-        return _svc(request).editor_config(path)
+        return _svc(request).editor_config(path, theme)
     except OfficeDisabledError as e:
         raise HTTPException(503, "office editing is not configured") from e
     except NotAnOfficeFileError as e:
