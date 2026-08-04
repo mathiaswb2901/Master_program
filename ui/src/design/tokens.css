@@ -1,0 +1,310 @@
+/* ==========================================================================
+   Workbench design tokens
+   Source of truth: /DESIGN.md — keep values in lockstep.
+   Dark is the default theme on :root; light overrides via [data-theme="light"].
+   Fonts are bundled via @fontsource in the app entry (no CDN imports here):
+     import "@fontsource/ibm-plex-sans/400.css";
+     import "@fontsource/ibm-plex-sans/500.css";
+     import "@fontsource/ibm-plex-sans/600.css";
+     import "@fontsource-variable/jetbrains-mono";
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Surfaces ------------------------------------------------------- */
+  --surface-app: #14161A;            /* window chrome, tab strips, status bar */
+  --surface-panel: #1A1D22;          /* panel bodies, editor background */
+  --surface-elevated: #21252C;       /* cards, inputs, user chat bubble */
+  --surface-overlay: #262B33;        /* QuickBar, menus, popovers, tooltips */
+  --surface-terminal: #111317;       /* xterm background, chat code blocks */
+  --surface-paper: #FFFFFF;          /* document canvas — same in both themes */
+  --surface-paper-surround: #262B33; /* around the page inside document panels */
+  --surface-hover: rgba(255, 255, 255, 0.05);
+  --surface-active: rgba(255, 255, 255, 0.08);
+  --surface-selected: rgba(92, 156, 230, 0.14);
+  --backdrop: rgba(0, 0, 0, 0.45);
+
+  /* ---- Text ------------------------------------------------------------ */
+  --text-primary: #E6E9EE;
+  --text-secondary: #A8B0BC;
+  --text-tertiary: #78808D;
+  --text-disabled: #545B66;
+  --text-on-accent: #FFFFFF;
+  --text-on-paper: #1B1F26;          /* chrome drawn over paper, both themes */
+
+  /* ---- Borders --------------------------------------------------------- */
+  --border-subtle: #262A31;          /* panel hairlines, row separators */
+  --border-default: #2E333C;         /* inputs, cards, buttons */
+  --border-strong: #3D4450;          /* hover/active borders, weighty dividers */
+  --border-paper-rim: #3D4450;       /* 1px rim framing document panels */
+  --focus-ring: #5C9CE6;
+
+  /* ---- Accent ---------------------------------------------------------- */
+  --accent: #5C9CE6;
+  --accent-hover: #75ADEC;
+  --accent-active: #4A8AD4;
+  --accent-muted: rgba(92, 156, 230, 0.15);
+
+  /* ---- Semantic -------------------------------------------------------- */
+  --success: #3FB950;
+  --success-bg: rgba(63, 185, 80, 0.14);
+  --warn: #D29922;
+  --warn-bg: rgba(210, 153, 34, 0.14);
+  --error: #F85149;
+  --error-bg: rgba(248, 81, 73, 0.14);
+  --info: #58A6FF;
+  --info-bg: rgba(88, 166, 255, 0.14);
+
+  /* ---- Agent status (distinct from semantic — meanings may diverge) ---- */
+  --agent-working: #5C9CE6;
+  --agent-working-bg: rgba(92, 156, 230, 0.14);
+  --agent-attention: #D29922;
+  --agent-attention-bg: rgba(210, 153, 34, 0.14);
+  --agent-idle: #78808D;
+  --agent-idle-bg: rgba(120, 128, 141, 0.14);
+  --agent-done: #3FB950;
+  --agent-done-bg: rgba(63, 185, 80, 0.14);
+  --agent-error: #F85149;
+  --agent-error-bg: rgba(248, 81, 73, 0.14);
+
+  /* ---- Terminal ANSI (feed to xterm.js theme + Monaco token colors) ---- */
+  --ansi-black: #2A2E37;
+  --ansi-red: #F47067;
+  --ansi-green: #57AB5A;
+  --ansi-yellow: #C69026;
+  --ansi-blue: #6CB6FF;
+  --ansi-magenta: #B083F0;
+  --ansi-cyan: #39C5CF;
+  --ansi-white: #A8B0BC;
+  --ansi-bright-black: #545B66;
+  --ansi-bright-red: #FF938A;
+  --ansi-bright-green: #6BC46D;
+  --ansi-bright-yellow: #DAAA3F;
+  --ansi-bright-blue: #96D0FF;
+  --ansi-bright-magenta: #DCBDFB;
+  --ansi-bright-cyan: #56D4DD;
+  --ansi-bright-white: #E6E9EE;
+
+  /* ---- Typography ------------------------------------------------------ */
+  --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "Cascadia Mono",
+    Consolas, monospace;
+
+  --type-xs-size: 11px;   --type-xs-line: 16px;   /* badges, section labels */
+  --type-sm-size: 12px;   --type-sm-line: 18px;   /* tree rows, tool calls, tabs */
+  --type-md-size: 13px;   --type-md-line: 20px;   /* base UI */
+  --type-chat-size: 14px; --type-chat-line: 22px; /* chat body */
+  --type-lg-size: 16px;   --type-lg-line: 24px;   /* panel headings */
+  --type-xl-size: 18px;   --type-xl-line: 26px;   /* QuickBar input */
+  --type-2xl-size: 20px;  --type-2xl-line: 28px;  /* zero-state titles */
+  --type-code-size: 13px; --type-code-line: 20px; /* Monaco, inline code */
+  --type-term-size: 13px; --type-term-line: 18px; /* xterm */
+
+  --weight-body: 400;
+  --weight-medium: 500;   /* emphasis, labels, tabs */
+  --weight-semibold: 600; /* headings, active states — never heavier */
+  --tracking-label: 0.04em; /* with uppercase 11px labels */
+
+  /* ---- Spacing (4px base, dense) --------------------------------------- */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+  --space-7: 20px;
+  --space-8: 24px;
+  --space-9: 32px;
+
+  /* ---- Component metrics ----------------------------------------------- */
+  --bar-height: 34px;        /* dockview tab strips, terminal tab bar */
+  --row-height: 26px;        /* file tree rows */
+  --row-height-lg: 40px;     /* QuickBar result rows */
+  --control-height: 28px;    /* buttons, inputs (compact) */
+  --quickbar-width: 640px;
+  --chat-max-width: 760px;
+  --tree-indent: 16px;
+
+  /* ---- Radii ------------------------------------------------------------ */
+  --radius-xs: 3px;   /* badges, keycaps */
+  --radius-sm: 4px;   /* buttons, inputs, tabs */
+  --radius-md: 6px;   /* cards, tool-call rows, code blocks */
+  --radius-lg: 10px;  /* chat bubbles, popovers */
+  --radius-xl: 12px;  /* QuickBar */
+  --radius-full: 999px;
+
+  /* ---- Elevation (floating elements only; always pair with 1px border) - */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);    /* tooltips, dragged tabs */
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);  /* menus, popovers */
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55); /* QuickBar, modals */
+
+  /* ---- Motion (opacity/transform only; see DESIGN.md §5) ---------------- */
+  --duration-1: 80ms;   /* hover washes, color changes */
+  --duration-2: 140ms;  /* tooltips, dropdowns, QuickBar in */
+  --duration-3: 200ms;  /* modals, toasts, panel-level fades */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* ==========================================================================
+   Light theme — [data-theme="light"] on <html>
+   ========================================================================== */
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* ---- Surfaces -------------------------------------------------------- */
+  --surface-app: #ECEEF1;
+  --surface-panel: #F7F8FA;
+  --surface-elevated: #FFFFFF;
+  --surface-overlay: #FFFFFF;
+  --surface-terminal: #FFFFFF;
+  --surface-paper: #FFFFFF;
+  --surface-paper-surround: #E4E7EB;
+  --surface-hover: rgba(17, 19, 23, 0.05);
+  --surface-active: rgba(17, 19, 23, 0.08);
+  --surface-selected: rgba(46, 111, 208, 0.10);
+  --backdrop: rgba(15, 18, 23, 0.30);
+
+  /* ---- Text ------------------------------------------------------------ */
+  --text-primary: #1B1F26;
+  --text-secondary: #4B5563;
+  --text-tertiary: #6E7781;
+  --text-disabled: #9AA1AB;
+  --text-on-accent: #FFFFFF;
+  --text-on-paper: #1B1F26;
+
+  /* ---- Borders --------------------------------------------------------- */
+  --border-subtle: #E4E7EB;
+  --border-default: #D7DBE1;
+  --border-strong: #B9C0C9;
+  --border-paper-rim: #D7DBE1;
+  --focus-ring: #2E6FD0;
+
+  /* ---- Accent ---------------------------------------------------------- */
+  --accent: #2E6FD0;
+  --accent-hover: #275FB5;
+  --accent-active: #21519B;
+  --accent-muted: rgba(46, 111, 208, 0.12);
+
+  /* ---- Semantic -------------------------------------------------------- */
+  --success: #1A7F37;
+  --success-bg: rgba(26, 127, 55, 0.10);
+  --warn: #9A6700;
+  --warn-bg: rgba(154, 103, 0, 0.10);
+  --error: #CF222E;
+  --error-bg: rgba(207, 34, 46, 0.10);
+  --info: #0969DA;
+  --info-bg: rgba(9, 105, 218, 0.10);
+
+  /* ---- Agent status ---------------------------------------------------- */
+  --agent-working: #2E6FD0;
+  --agent-working-bg: rgba(46, 111, 208, 0.12);
+  --agent-attention: #9A6700;
+  --agent-attention-bg: rgba(154, 103, 0, 0.10);
+  --agent-idle: #6E7781;
+  --agent-idle-bg: rgba(110, 119, 129, 0.10);
+  --agent-done: #1A7F37;
+  --agent-done-bg: rgba(26, 127, 55, 0.10);
+  --agent-error: #CF222E;
+  --agent-error-bg: rgba(207, 34, 46, 0.10);
+
+  /* ---- Terminal ANSI --------------------------------------------------- */
+  --ansi-black: #1B1F26;
+  --ansi-red: #CF222E;
+  --ansi-green: #1A7F37;
+  --ansi-yellow: #9A6700;
+  --ansi-blue: #0969DA;
+  --ansi-magenta: #8250DF;
+  --ansi-cyan: #1B7C83;
+  --ansi-white: #6E7781;
+  --ansi-bright-black: #4B5563;
+  --ansi-bright-red: #A40E26;
+  --ansi-bright-green: #116329;
+  --ansi-bright-yellow: #7D5400;
+  --ansi-bright-blue: #218BFF;
+  --ansi-bright-magenta: #A475F9;
+  --ansi-bright-cyan: #3192AA;
+  --ansi-bright-white: #8C959F;
+
+  /* ---- Elevation (softer in light) -------------------------------------- */
+  --shadow-1: 0 1px 2px rgba(27, 31, 38, 0.08);
+  --shadow-2: 0 4px 12px rgba(27, 31, 38, 0.12);
+  --shadow-3: 0 16px 40px rgba(27, 31, 38, 0.18);
+}
+
+/* ==========================================================================
+   Global defaults + minimal utilities
+   ========================================================================== */
+
+html {
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--type-md-size);
+  line-height: calc(var(--type-md-line) / var(--type-md-size));
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Visible focus everywhere; never remove without an in-rule replacement. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Tabular figures for any numeric UI text (prices, sizes, timestamps). */
+.u-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Single-line truncation for tabs, tree rows, list titles. */
+.u-truncate {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Screen-reader-only text (labels for icon-only buttons, status dots). */
+.u-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Section labels: 11px uppercase used in tab strips, chat headers, QuickBar. */
+.u-label {
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* The only looping animation in the app: agent "working" dot. */
+@keyframes wb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.u-agent-pulse {
+  animation: wb-pulse 2s ease-in-out infinite;
+}
+
+/* Reduced motion: collapse durations, stop the pulse (dot stays steady). */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-1: 1ms;
+    --duration-2: 1ms;
+    --duration-3: 1ms;
+  }
+  .u-agent-pulse {
+    animation: none;
+  }
+}
