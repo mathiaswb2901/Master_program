@@ -91,11 +91,13 @@ the moat.
   description is loaded into every session's context. Latency is deliberately *not*
   budgeted: these are in-process local calls where the model and the user dominate.
   Revisit with a real aggregate measurement if the tool surface passes ~20.
-- Committed carryover: pptx E2E fidelity pass, bundled skills (Anthropic
-  xlsx/docx/pptx; OfficeCLI after vetting; plan-visual, validate, remember,
-  loop-objective, workbench-dev), provenance badges. Every bundled skill passes a
-  **vetting bar** — read in full (a skill can execute anything on the user's machine)
-  and shown to help before it ships; popularity is not evidence.
+- Committed carryover: pptx E2E fidelity pass, provenance badges, and bundled skills —
+  `plan-visual`, `remember` and `workbench-dev` ship as the session-scoped `workbench`
+  plugin; `validate`, `loop-objective` and Workbench-authored Word/Excel/PowerPoint
+  skills remain, the office ones following the COM bridge rather than wrapping a
+  third-party CLI (see the decisions log). Every bundled skill passes a **vetting bar**
+  — read in full (a skill can execute anything on the user's machine) and shown to help
+  before it ships; popularity is not evidence.
 - UI quality tooling starts here: eslint + vitest **done** (`npm run lint` / `npm run
   test`, both in the CI ui job); Playwright E2E still pending (standing bar).
 
@@ -181,6 +183,30 @@ the moat.
   tool surface, while Workbench owns ~10 agent-facing tools. Latency dropped — these are
   in-process calls where the model and the user dominate, so budgeting it would promise
   a measurement nobody takes.
+
+- 2026-08-04 — **Bundled skills ship as one session-scoped local plugin**, and both
+  third-party sources are out (revises the prior-art entry above). *OfficeCLI:
+  rejected after vetting* — its `SKILL.md` has the agent fetch and run a remote
+  install script without consent, and overwrite global agent configuration in a way
+  we could not verify; owner sign-off same day. *Anthropic's xlsx/docx/pptx skills:
+  license-blocked* — those directories are published all-rights-reserved, so an OSS
+  package cannot redistribute them. Substituted with Workbench-authored skills; the
+  office ones follow the COM bridge (which reads and writes the *live* open document),
+  so wrapping a file-based CLI was the wrong shape regardless. Mechanism:
+  `ClaudeAgentOptions.plugins` → `--plugin-dir`, namespaced `workbench:*`, nothing
+  written to `~/.claude`. `skills="all"` rejected — it appends a bare `Skill` to
+  `allowed_tools`, shadowing the permission callback and auto-allowing every
+  discovered skill. Instead the two skills something *tells* the agent to use
+  unprompted (`plan-visual`, `remember`) get narrow `Skill(workbench:<name>)` rules,
+  which the SDK's own rule parser treats as specifiers and so do not shadow the
+  callback; everything else still prompts. Same change: sessions load the
+  workspace's settings and nothing above them — `setting_sources=["project",
+  "local"]`, i.e. `.claude/settings.json` **and** the machine-local
+  `.claude/settings.local.json`, so a folder's own "always allow" rules and hooks
+  behave here as they do in plain Claude Code, while the global `~/.claude` scope
+  is dropped. `WORKBENCH_INHERIT_USER_SETTINGS=1` restores that global scope in
+  full (hooks and permission rules, not just skills), which is why it is not named
+  after skills.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

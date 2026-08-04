@@ -40,7 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     session_index = SessionIndex(settings.resolved_projects_dir())
     session_manager = SessionManager(
         workspace.root,
-        sdk_client_factory(ui_state_store),
+        sdk_client_factory(ui_state_store, settings),
         settings.max_concurrent_sessions,
         session_index=session_index,
         # Session state changes ride the same bus as watcher events, so the UI

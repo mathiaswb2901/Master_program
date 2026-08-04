@@ -52,6 +52,7 @@ One Python process, one webview window, one optional local Office engine.
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
+| `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 
 ## Agent sessions
 
@@ -71,6 +72,20 @@ opened that session, while every state change is *also* published as a
 socket for a session still tracks its dot, chip and attention badge. Frames a client
 may have missed while disconnected (open permission prompts, the pending plan, the last
 settled plan verdict) are replayed on connect.
+
+**Bundled skills:** Workbench's own skills are one local Claude Code plugin shipped as
+package data (`skills_bundle/`) and passed per session as `--plugin-dir`, so they are
+namespaced `workbench:*` (a user skill cannot shadow them), live only as long as that
+CLI subprocess, and write nothing to `~/.claude`; a missing bundle degrades to no
+skills rather than a failed session. `plan-visual` and `remember` carry a narrow
+`Skill(workbench:<name>)` allow rule because the agent is told to reach for them
+unprompted; every other skill invocation still raises the permission prompt.
+Sessions load the workspace's own settings and nothing above it
+(`setting_sources=["project", "local"]` — `.claude/settings.json` plus the
+machine-local `.claude/settings.local.json`, so a folder behaves the same here as
+in plain Claude Code), which makes what an agent can do a property of the
+workspace. `WORKBENCH_INHERIT_USER_SETTINGS=1` adds the global `~/.claude` scope
+back — its hooks and permission rules, not only its skills.
 
 **Visual plan artifacts:** `present_plan` (the second context-bridge tool) takes a
 `PlanArtifact` — a closed, size-capped discriminated union of option groups, step
