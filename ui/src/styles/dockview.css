@@ -1,0 +1,45 @@
+/* Dockview theme mapped onto the workbench tokens (DESIGN.md §6.1). */
+
+.dockview-theme-workbench {
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+
+  --dv-group-view-background-color: var(--surface-panel);
+  --dv-tabs-and-actions-container-background-color: var(--surface-app);
+  --dv-tabs-and-actions-container-height: var(--bar-height);
+  --dv-tabs-and-actions-container-font-size: var(--type-sm-size);
+
+  --dv-activegroup-visiblepanel-tab-background-color: var(--surface-panel);
+  --dv-activegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--surface-panel);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-activegroup-visiblepanel-tab-color: var(--text-primary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--text-tertiary);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--text-secondary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--text-tertiary);
+
+  --dv-tab-divider-color: transparent;
+  --dv-tabs-container-scrollbar-color: var(--border-strong);
+  --dv-separator-border: var(--border-subtle);
+  --dv-paneview-active-outline-color: var(--focus-ring);
+  --dv-drag-over-background-color: var(--accent-muted);
+  --dv-drag-over-border-color: var(--accent);
+  --dv-active-sash-color: var(--accent);
+  --dv-background-color: var(--surface-app);
+  --dv-paneview-header-border-color: var(--border-subtle);
+  --dv-icon-hover-background-color: var(--surface-hover);
+  --dv-floating-box-shadow: var(--shadow-2);
+  --dv-overlay-z-index: 50;
+}
+
+/* Panel chrome tab (fixed layout panels): 12px/500, no close button. */
+.wb-panel-tab {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 var(--space-5);
+  min-width: 90px;
+  max-width: 200px;
+  font-size: var(--type-sm-size);
+  font-weight: var(--weight-medium);
+}

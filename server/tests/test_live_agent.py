@@ -26,9 +26,7 @@ async def test_real_sdk_round_trip(tmp_path: Path) -> None:
     manager = SessionManager(tmp_path, sdk_client_factory(UiStateStore()), max_sessions=1)
     session = manager.create("")
     queue = session.subscribe()
-    session.send_user_message(
-        "Reply with exactly the word: pong. No punctuation, nothing else."
-    )
+    session.send_user_message("Reply with exactly the word: pong. No punctuation, nothing else.")
     text = ""
     while True:
         event = await asyncio.wait_for(queue.get(), timeout=240)

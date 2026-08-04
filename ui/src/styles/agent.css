@@ -1,0 +1,265 @@
+/* Agent area: sessions list + chat (DESIGN.md §6.3, §6.4). */
+
+.wb-agent {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+}
+
+/* ---- Sessions list -------------------------------------------------------- */
+
+.wb-sessions {
+  flex: none;
+  max-height: 40%;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wb-sessions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  padding: var(--space-4) var(--space-5);
+}
+
+.wb-sessions-list {
+  overflow-y: auto;
+  padding-bottom: var(--space-3);
+}
+
+.wb-sessions-none {
+  padding: var(--space-2) var(--space-5) var(--space-4);
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+.wb-sessions-folder {
+  padding: var(--space-3) var(--space-5) var(--space-1);
+}
+
+.wb-session-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  height: var(--row-height);
+  padding: 0 var(--space-5);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.wb-session-row:hover {
+  background: var(--surface-hover);
+}
+
+.wb-session-row.is-selected {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+}
+
+.wb-session-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Hollow marker for non-live (on-disk) sessions. */
+.wb-dot-disk {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.wb-session-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.wb-session-time {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- Chat ----------------------------------------------------------------- */
+
+.wb-chat-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-chat {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-chat-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: none;
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wb-chat-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.wb-chat-readonly {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  flex: none;
+}
+
+.wb-chat-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+.wb-chat-col {
+  max-width: var(--chat-max-width);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* User: bubble, right-aligned. Assistant: full-width text, no bubble (§6.3). */
+.wb-msg-user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: var(--surface-elevated);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--type-chat-size);
+  line-height: var(--type-chat-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wb-msg-assistant {
+  font-size: var(--type-chat-size);
+  line-height: var(--type-chat-line);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wb-msg-block.is-error .wb-msg-assistant {
+  color: var(--error);
+}
+
+.wb-chat-cost {
+  margin-top: var(--space-1);
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-msg-error {
+  font-size: var(--type-sm-size);
+  color: var(--error);
+}
+
+/* Tool-call row: 28px, mono 12px, 2px status edge (§6.3). */
+.wb-tool-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 28px;
+  padding: 0 var(--space-4);
+  border-left: 2px solid var(--agent-working);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+}
+
+.wb-tool-row.is-settled {
+  border-left-color: var(--success);
+}
+
+.wb-tool-row.is-failed {
+  border-left-color: var(--error);
+}
+
+.wb-tool-name {
+  flex: none;
+  color: var(--text-primary);
+}
+
+.wb-tool-summary {
+  min-width: 0;
+}
+
+/* Permission prompt card (§6.3). */
+.wb-perm-card {
+  background: var(--surface-elevated);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.wb-perm-head {
+  padding: var(--space-4) var(--space-5);
+  background: var(--warn-bg);
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-medium);
+}
+
+.wb-perm-body {
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wb-perm-actions {
+  display: flex;
+  gap: var(--space-4);
+  padding: 0 var(--space-5) var(--space-4);
+}
+
+.wb-perm-decision {
+  padding: 0 var(--space-5) var(--space-4);
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+/* Input row. */
+.wb-chat-input {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-chat-input textarea {
+  width: 100%;
+  resize: none;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--type-chat-size);
+  line-height: var(--type-chat-line);
+  color: var(--text-primary);
+}
+
+.wb-chat-input-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-4);
+}

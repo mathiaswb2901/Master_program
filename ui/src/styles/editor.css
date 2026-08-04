@@ -1,0 +1,130 @@
+/* Editor area: internal file tab strip + conflict bar (DESIGN.md §6.1). */
+
+.wb-editor {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+}
+
+.wb-editor-tabs {
+  display: flex;
+  height: var(--bar-height);
+  flex: none;
+  background: var(--surface-app);
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.wb-editor-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.wb-editor-tab {
+  display: flex;
+  align-items: center;
+  min-width: 90px;
+  max-width: 200px;
+  padding: 0 var(--space-4) 0 var(--space-5);
+  font-size: var(--type-sm-size);
+  font-weight: var(--weight-medium);
+  color: var(--text-tertiary);
+}
+
+.wb-editor-tab:hover {
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+}
+
+/* Active tab fuses into the panel body — that fusion IS the indicator. */
+.wb-editor-tab.is-active {
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  box-shadow: 0 1px 0 0 var(--surface-panel);
+}
+
+.wb-editor-tab-label {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  text-align: left;
+  color: inherit;
+}
+
+.wb-editor-tab-label:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.wb-editor-tab-trailing {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+/* 6px dirty dot replaces the close button until hover (§6.1). */
+.wb-dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--text-secondary);
+}
+
+.wb-tab-close {
+  display: none;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.wb-editor-tab:hover .wb-tab-close,
+.wb-editor-tab.is-active:not(.is-dirty) .wb-tab-close {
+  display: inline-flex;
+}
+
+.wb-editor-tab:hover .wb-dirty-dot {
+  display: none;
+}
+
+.wb-tab-close:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* Non-modal conflict bar ("Changed on disk — Reload / Keep mine"). */
+.wb-conflict-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: none;
+  padding: var(--space-3) var(--space-5);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--type-sm-size);
+  color: var(--text-primary);
+}
+
+.wb-conflict-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+.wb-editor-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.wb-editor-message {
+  padding: var(--space-6);
+  font-size: var(--type-md-size);
+  color: var(--text-tertiary);
+}

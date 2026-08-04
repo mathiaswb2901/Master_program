@@ -1,0 +1,211 @@
+/* App-level layout, shared controls. Colors only via tokens — never raw hex. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--type-md-size);
+  line-height: calc(var(--type-md-line) / var(--type-md-size));
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+textarea,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+
+::selection {
+  background: var(--surface-selected);
+}
+
+.wb-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-dock {
+  flex: 1;
+  min-height: 0;
+}
+
+.wb-dock > * {
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- Buttons (28px compact controls, DESIGN.md §4/§6.3) ------------------- */
+
+.wb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  height: var(--control-height);
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-sm);
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  transition:
+    background-color var(--duration-1) var(--ease-standard),
+    border-color var(--duration-1) var(--ease-standard),
+    color var(--duration-1) var(--ease-standard);
+}
+
+.wb-btn:disabled {
+  cursor: default;
+  color: var(--text-disabled);
+}
+
+.wb-btn-primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+.wb-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.wb-btn-primary:active:not(:disabled) {
+  background: var(--accent-active);
+}
+.wb-btn-primary:disabled {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+}
+
+.wb-btn-outline {
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+}
+.wb-btn-outline:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.wb-btn-ghost {
+  color: var(--text-secondary);
+}
+.wb-btn-ghost:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* Deny is safe, not destructive: ghost that hints error on hover (§6.3). */
+.wb-btn-deny:hover {
+  color: var(--error);
+}
+
+.wb-btn-sm {
+  height: 22px;
+  padding: 0 var(--space-4);
+  font-size: var(--type-sm-size);
+}
+
+/* ---- Dots, badges, keycaps ------------------------------------------------ */
+
+.wb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  flex: none;
+}
+
+.wb-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 20px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-full);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex: none;
+}
+
+.wb-keycap {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+  color: var(--text-secondary);
+}
+
+/* ---- Empty states (§6.7) -------------------------------------------------- */
+
+.wb-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  text-align: center;
+  padding: var(--space-6);
+}
+
+.wb-empty-title {
+  font-size: var(--type-chat-size);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.wb-empty-hint {
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+  max-width: 260px;
+}
+
+/* ---- Scrollbars (overlay-style, §6.6) ------------------------------------- */
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
