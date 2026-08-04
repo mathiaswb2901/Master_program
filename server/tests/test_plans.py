@@ -19,6 +19,7 @@ from workbench_server.models.plans import (
     PlanArtifact,
     PlanDecision,
     PlanPresented,
+    PlanResolved,
     PlanResponse,
     StepListNode,
     plan_input_schema,
@@ -193,6 +194,13 @@ class TestWireFrames:
         assert isinstance(parsed, PlanPresented)
         assert parsed.plan.title.startswith("Fix the DST")
 
+    def test_plan_resolved_is_a_server_frame(self) -> None:
+        parsed = agent_server_message.validate_json(
+            PlanResolved(plan_id="p1", verdict="no_decision").model_dump_json()
+        )
+        assert isinstance(parsed, PlanResolved)
+        assert parsed.verdict == "no_decision"
+
     def test_plan_decision_is_a_client_frame(self) -> None:
         decision = PlanDecision(
             response=PlanResponse(
@@ -247,6 +255,23 @@ class TestPresentPlanTool:
         assert result.get("is_error") is not True
         assert PlanResponse.model_validate_json(result["content"][0]["text"]) == response
         assert bridge.presented[0].title.startswith("Fix the DST")
+
+    async def test_an_agent_supplied_plan_id_is_replaced(self) -> None:
+        """Stripping plan_id from the *schema* is advisory — the model can still
+        send one, and the default factory would keep it. It must not: the id is
+        in the tool result the agent reads, and echoing it back when re-presenting
+        after a 'revise' would produce a card the UI dedupes away (leaving the
+        user nothing to answer while the tool blocks for the full timeout)."""
+        bridge = FakeBridge(PlanResponse(plan_id="p1", verdict="approve"))
+        first = await handle_present_plan(bridge, plan_payload(plan_id="forged-or-echoed"))
+        second = await handle_present_plan(bridge, plan_payload(plan_id="forged-or-echoed"))
+
+        assert first.get("is_error") is not True
+        assert second.get("is_error") is not True
+        minted = [artifact.plan_id for artifact in bridge.presented]
+        assert "forged-or-echoed" not in minted
+        assert minted[0] != minted[1]  # every presentation is a fresh card
+        assert all(plan_id for plan_id in minted)
 
     async def test_validation_errors_come_back_as_tool_errors(self) -> None:
         """The agent must be able to self-correct, not crash the turn."""

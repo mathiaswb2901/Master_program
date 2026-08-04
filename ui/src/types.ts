@@ -301,6 +301,15 @@ export interface PlanPresented {
   plan: PlanArtifact;
 }
 
+/** The pending plan settled server-side (decision, timeout, or interrupt). This
+ * frame — not the local click — is what makes a card read-only, so a stale card
+ * can never claim an approval the agent never received. */
+export interface PlanResolved {
+  type: "plan_resolved";
+  plan_id: string;
+  verdict: PlanVerdict;
+}
+
 export interface StatusChange {
   type: "status";
   session_id: string;
@@ -324,6 +333,7 @@ export type AgentServerMessage =
   | ToolUseNote
   | PermissionRequest
   | PlanPresented
+  | PlanResolved
   | StatusChange
   | TurnDone
   | AgentError;

@@ -28,7 +28,13 @@ from workbench_server.models.agents import (
     ToolUseNote,
     TurnDone,
 )
-from workbench_server.models.plans import PlanArtifact, PlanPresented, PlanResponse
+from workbench_server.models.plans import (
+    OptionGroupNode,
+    PlanArtifact,
+    PlanPresented,
+    PlanResolved,
+    PlanResponse,
+)
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.titles import FALLBACK_TITLE, derive_title
 
@@ -77,6 +83,15 @@ class _PendingPlan:
 def _no_decision(plan_id: str, reason: str) -> PlanResponse:
     """The only verdict silence may produce — never an implied approval."""
     return PlanResponse(plan_id=plan_id, verdict="no_decision", comment=reason)
+
+
+def _unchosen_option_groups(artifact: PlanArtifact, response: PlanResponse) -> list[str]:
+    """Option groups the response left without a selection."""
+    return [
+        node.node_id
+        for node in artifact.nodes
+        if isinstance(node, OptionGroupNode) and node.node_id not in response.choices
+    ]
 
 
 class AgentSession:
@@ -160,16 +175,46 @@ class AgentSession:
         try:
             return await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
         except TimeoutError:
+            log.info("agent.permission_timed_out", session=self.local_id, request=request_id)
             return False
         finally:
             self._pending_permissions.pop(request_id, None)
             self._pending_permission_events.pop(request_id, None)
-            self._set_state("working")
+            self._restore_state_after_prompt()
 
     def resolve_permission(self, request_id: str, allow: bool) -> None:
         fut = self._pending_permissions.get(request_id)
         if fut is not None and not fut.done():
             fut.set_result(allow)
+
+    def _abandon_pending_permissions(self, reason: str) -> None:
+        """Deny every prompt still awaiting the human so ``can_use_tool`` unwinds
+        now instead of blocking for the rest of ``PERMISSION_TIMEOUT_S``.
+
+        Same reasoning as ``_abandon_pending_plan``: the SDK interrupt cannot
+        unblock a tool call parked on a future of ours, so Stop (or a close) has
+        to settle it here or the session sits in ``needs_attention`` for ten more
+        minutes with a prompt the user already walked away from."""
+        for request_id, fut in list(self._pending_permissions.items()):
+            if not fut.done():
+                fut.set_result(False)
+                log.info(
+                    "agent.permission_abandoned",
+                    session=self.local_id,
+                    request=request_id,
+                    reason=reason,
+                )
+
+    def _restore_state_after_prompt(self) -> None:
+        """Leave ``needs_attention`` once a prompt settles — but only back into a
+        turn that is genuinely still running, and only when nothing else is still
+        waiting on the human. An orphaned prompt firing its timeout after the
+        turn ended used to flip an idle session to ``working`` permanently."""
+        if self._turn_task is None or self._turn_task.done():
+            return
+        if self._pending_permissions or self._pending_plan is not None:
+            return
+        self._set_state("working")
 
     # ---- plans (SessionBridge) ---------------------------------------------
 
@@ -191,18 +236,34 @@ class AgentSession:
         self._set_state("needs_attention")
         self._emit(PlanPresented(plan=artifact))
         try:
-            return await asyncio.wait_for(fut, timeout=PLAN_TIMEOUT_S)
+            response = await asyncio.wait_for(fut, timeout=PLAN_TIMEOUT_S)
         except TimeoutError:
             log.info("agent.plan_timed_out", session=self.local_id, plan=artifact.plan_id)
-            return _no_decision(artifact.plan_id, "no decision before the plan timed out")
+            response = _no_decision(artifact.plan_id, "no decision before the plan timed out")
         finally:
             self._pending_plan = None
-            self._set_state("working")
+            self._restore_state_after_prompt()
+        # Tell every client the card is history — including the one that never
+        # answered, and any second client still showing it as live.
+        self._emit(PlanResolved(plan_id=artifact.plan_id, verdict=response.verdict))
+        return response
 
     def resolve_plan(self, response: PlanResponse) -> None:
         pending = self._pending_plan
         if pending is None or pending.artifact.plan_id != response.plan_id:
-            log.warning("agent.plan_decision_ignored", session=self.local_id)
+            log.warning("agent.plan_decision_ignored", session=self.local_id, reason="not_pending")
+            return
+        unchosen = _unchosen_option_groups(pending.artifact, response)
+        if response.verdict == "approve" and unchosen:
+            # "approve" means "proceed with the chosen options" — approving with
+            # a group unanswered would hand the agent an implied approval for a
+            # decision it explicitly asked the user to make, and it would guess.
+            log.warning(
+                "agent.plan_decision_ignored",
+                session=self.local_id,
+                reason="approve_without_choices",
+                unchosen=unchosen,
+            )
             return
         if not pending.future.done():
             pending.future.set_result(response)
@@ -288,14 +349,17 @@ class AgentSession:
 
     async def interrupt(self) -> None:
         # Settle first: the SDK interrupt cannot unblock a tool call that is
-        # awaiting the human, and a plan left pending would wedge the session.
+        # awaiting the human, so anything left pending — plan or permission —
+        # would wedge the session in needs_attention after the user pressed Stop.
         self._abandon_pending_plan("the user interrupted the turn")
+        self._abandon_pending_permissions("the user interrupted the turn")
         if self._client is not None:
             with contextlib.suppress(Exception):
                 await self._client.interrupt()
 
     async def close(self) -> None:
         self._abandon_pending_plan("the session closed")
+        self._abandon_pending_permissions("the session closed")
         if self._turn_task is not None:
             self._turn_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

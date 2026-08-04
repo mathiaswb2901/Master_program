@@ -101,7 +101,15 @@ PlanNode = Annotated[
 
 
 class PlanArtifact(BaseModel):
-    """A whole plan card. ``plan_id`` is minted server-side, not by the agent."""
+    """A whole plan card.
+
+    ``plan_id`` is minted here and never accepted from the agent: the tool body
+    strips the key before validating (``handle_present_plan``) because a default
+    factory alone would happily keep an agent-supplied value. That matters — the
+    tool result the agent reads contains ``plan_id``, and an agent that echoes it
+    back on the re-present after a ``revise`` verdict would produce a card the UI
+    dedupes away, leaving the user nothing to answer.
+    """
 
     plan_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12], max_length=64)
     title: str = Field(min_length=1, max_length=120)
@@ -148,6 +156,21 @@ class PlanPresented(BaseModel):
 
     type: Literal["plan_presented"] = "plan_presented"
     plan: PlanArtifact
+
+
+class PlanResolved(BaseModel):
+    """server -> client: the pending plan is settled and the card is now history.
+
+    Emitted for every settlement path — a decision, the timeout, an interrupt —
+    and broadcast to *all* subscribers, so no client can keep showing a live,
+    answerable card (or, worse, flip it to "Approved") for a plan the agent has
+    already stopped waiting on. This frame, not the optimistic click, is what
+    makes a card read-only.
+    """
+
+    type: Literal["plan_resolved"] = "plan_resolved"
+    plan_id: str = Field(min_length=1, max_length=64)
+    verdict: PlanVerdict
 
 
 class PlanDecision(BaseModel):

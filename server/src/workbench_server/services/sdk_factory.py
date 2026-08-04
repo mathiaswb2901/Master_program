@@ -45,11 +45,21 @@ class UiStateStore:
 async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> dict[str, Any]:
     """The present_plan tool body, free of SDK imports so it is directly testable.
 
+    ``plan_id`` is dropped before validation, not merely omitted from the tool's
+    input schema: the schema is advisory, and ``PlanArtifact``'s default factory
+    would keep any id the model sent. Since the tool result the agent reads
+    *contains* the id, an agent that echoes it back when re-presenting a revised
+    plan would collide with the settled card — the UI dedupes by ``plan_id`` and
+    the user would be left with nothing to answer while the tool blocked for the
+    full timeout. Minting here makes every presentation a fresh card.
+
     Validation errors come back as tool errors rather than exceptions: the agent
     reads them and fixes its own arguments on the next call.
     """
     try:
-        artifact = PlanArtifact.model_validate(args)
+        artifact = PlanArtifact.model_validate(
+            {key: value for key, value in args.items() if key != "plan_id"}
+        )
     except ValidationError as exc:
         problems = "; ".join(
             f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"

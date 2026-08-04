@@ -14,7 +14,7 @@
 import { useId, useState } from "react";
 
 import { Markdown } from "../markdown";
-import { emptyPlanDraft, useStore, type PlanDraft } from "../store";
+import { emptyPlanDraft, unchosenOptionGroups, useStore, type PlanDraft } from "../store";
 import type { OptionGroupNode, PlanArtifact, PlanNode, PlanVerdict, StepListNode } from "../types";
 
 /** Server caps (models/plans.py) — enforced here so a decision never bounces. */
@@ -269,6 +269,11 @@ export function PlanCard({ plan }: { plan: PlanArtifact }) {
   const settled = draft.verdict !== null;
   const decide = (verdict: Exclude<PlanVerdict, "no_decision">): void =>
     useStore.getState().decidePlan(plan.plan_id, verdict);
+  // Approving with a group unanswered would be an implied approval of a choice
+  // the user never made — the agent would just guess. Revise/Reject need no
+  // choices, so only Approve waits.
+  const unchosen = unchosenOptionGroups(plan, draft);
+  const hintId = `${titleId}-approve-hint`;
 
   return (
     <section className="wb-plan-card" aria-labelledby={titleId}>
@@ -315,7 +320,13 @@ export function PlanCard({ plan }: { plan: PlanArtifact }) {
             onChange={(e) => useStore.getState().setPlanComment(plan.plan_id, e.target.value)}
           />
           <div className="wb-plan-actions">
-            <button type="button" className="wb-btn wb-btn-primary" onClick={() => decide("approve")}>
+            <button
+              type="button"
+              className="wb-btn wb-btn-primary"
+              disabled={unchosen.length > 0}
+              aria-describedby={unchosen.length > 0 ? hintId : undefined}
+              onClick={() => decide("approve")}
+            >
               Approve
             </button>
             <button type="button" className="wb-btn wb-btn-outline" onClick={() => decide("revise")}>
@@ -328,6 +339,13 @@ export function PlanCard({ plan }: { plan: PlanArtifact }) {
             >
               Reject
             </button>
+            {unchosen.length > 0 && (
+              <span className="wb-plan-hint" id={hintId} role="note">
+                {unchosen.length === 1
+                  ? "Pick an option above to approve"
+                  : `Pick an option in ${unchosen.length} groups above to approve`}
+              </span>
+            )}
           </div>
         </div>
       )}

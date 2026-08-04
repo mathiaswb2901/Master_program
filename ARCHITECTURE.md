@@ -70,11 +70,17 @@ lists, questions and markdown (`models/plans.py`), never free-form markup — wh
 the UI renders as a native card; the user's choices, annotations and verdict come
 back to the agent as a typed `PlanResponse` through the same future-and-timeout
 discipline as permissions. A timeout or an interrupt resolves to verdict
-`no_decision`, never an implied approval. Both pending permissions and a pending
-plan are replayed to any client that subscribes after they were emitted, so a
-reconnect never leaves an unanswerable `needs_attention` session. The factory seam
-(`ClientFactory`) passes the session itself as a `SessionBridge` — the bundle of
-callbacks that must reach the human.
+`no_decision`, never an implied approval, and an `approve` that leaves an option
+group unchosen is dropped rather than passed on as one. `plan_id` is minted by the
+tool body (the key is stripped from the agent's arguments, not merely absent from
+the input schema) so a re-presented plan is always a fresh card. Every settlement
+broadcasts a `plan_resolved` frame — that frame, not the click, is what makes a
+card read-only, so a second client or a late returner can never assert a verdict
+the agent never received. Both pending permissions and a pending plan are replayed
+to any client that subscribes after they were emitted, and both are abandoned on
+interrupt/close, so neither a reconnect nor a Stop leaves an unanswerable
+`needs_attention` session. The factory seam (`ClientFactory`) passes the session
+itself as a `SessionBridge` — the bundle of callbacks that must reach the human.
 
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage

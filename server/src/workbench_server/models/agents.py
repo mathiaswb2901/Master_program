@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-from workbench_server.models.plans import PlanDecision, PlanPresented
+from workbench_server.models.plans import PlanDecision, PlanPresented, PlanResolved
 
 SessionState = Literal["idle", "working", "needs_attention"]
 
@@ -116,6 +116,7 @@ _AgentServerMessage = (
     | ToolUseNote
     | PermissionRequest
     | PlanPresented
+    | PlanResolved
     | StatusChange
     | TurnDone
     | AgentError

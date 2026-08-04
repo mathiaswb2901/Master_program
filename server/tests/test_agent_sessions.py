@@ -27,6 +27,7 @@ from workbench_server.models.plans import (
     PlanArtifact,
     PlanOption,
     PlanPresented,
+    PlanResolved,
     PlanResponse,
     PlanStep,
     StepListNode,
@@ -213,6 +214,61 @@ async def test_permission_round_trip(tmp_path: Path, allow: bool) -> None:
     assert client.permission_outcomes == [allow]
 
 
+async def test_interrupt_settles_a_pending_permission(tmp_path: Path) -> None:
+    """Stop must unblock can_use_tool as well as a plan: the SDK interrupt cannot
+    reach a tool call parked on our future, so an unsettled prompt would leave
+    the session in needs_attention for the rest of the 10-minute timeout."""
+    factory = make_factory([ResultMessage()], ask_for="Bash")
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("install deps")
+    while not isinstance(await asyncio.wait_for(queue.get(), timeout=10), PermissionRequest):
+        pass
+
+    await session.interrupt()
+    await drain(queue, TurnDone)
+
+    assert factory.created[0].permission_outcomes == [False]  # denied, not hung
+    assert session.state == "idle"
+    assert session.pending_attention() == []
+
+
+async def test_orphaned_permission_timeout_never_resurrects_a_finished_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prompt still pending when the turn ends used to fire its timeout and
+    unconditionally set "working" — leaving an idle session marked busy forever
+    with nothing running."""
+    monkeypatch.setattr(agent_sessions, "PERMISSION_TIMEOUT_S", 0.05)
+
+    class OrphanClient(FakeClient):
+        orphan: "asyncio.Task[bool] | None" = None
+
+        async def receive_response(self) -> AsyncIterator[Any]:
+            # A prompt nobody answers, outliving the turn that raised it.
+            OrphanClient.orphan = asyncio.create_task(
+                self._bridge.ask_permission("Bash", {"command": "x"})
+            )
+            await asyncio.sleep(0)
+            yield ResultMessage()
+
+    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> OrphanClient:
+        return OrphanClient([], bridge)
+
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("go")
+    await drain(queue, TurnDone)
+    assert session.state == "idle"
+
+    orphan = OrphanClient.orphan
+    assert orphan is not None
+    assert await asyncio.wait_for(orphan, timeout=10) is False  # timed out -> deny
+    assert session.state == "idle"
+
+
 # ---- plans -------------------------------------------------------------------
 
 
@@ -283,12 +339,16 @@ async def test_plan_timeout_resolves_to_no_decision(
     session = manager.create("")
     queue = session.subscribe()
     session.send_user_message("plan it")
-    await drain(queue, TurnDone)
+    events = await drain(queue, TurnDone)
 
     answer = factory.created[0].plan_responses[0]
     assert answer.verdict == "no_decision"
     assert answer.plan_id == "plan-1"
     assert session.state == "idle"
+    # The card must stop being answerable in every UI too — otherwise a user
+    # returning at minute 11 clicks Approve and is told the agent is proceeding.
+    resolved = [e for e in events if isinstance(e, PlanResolved)]
+    assert [e.verdict for e in resolved] == ["no_decision"]
 
 
 async def test_interrupt_settles_a_pending_plan(tmp_path: Path) -> None:
@@ -326,10 +386,52 @@ async def test_stale_plan_decision_is_ignored(tmp_path: Path) -> None:
     session = manager.create("")
     task = asyncio.create_task(session.present_plan(sample_plan()))
     await asyncio.sleep(0.05)
-    session.resolve_plan(PlanResponse(plan_id="some-other-plan", verdict="approve"))
+    session.resolve_plan(
+        PlanResponse(plan_id="some-other-plan", verdict="approve", choices={"approach": "local"})
+    )
     assert not task.done()
-    session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="approve"))
+    session.resolve_plan(
+        PlanResponse(plan_id="plan-1", verdict="approve", choices={"approach": "local"})
+    )
     assert (await task).verdict == "approve"
+
+
+async def test_approve_without_every_option_chosen_is_ignored(tmp_path: Path) -> None:
+    """'approve' means "proceed with the chosen options". A group the user never
+    answered (one with no recommended option starts unselected) would reach the
+    agent as an implied approval of a decision it explicitly asked about, and it
+    would guess. Revise and reject legitimately need no choices."""
+    manager = SessionManager(tmp_path, make_factory([]), max_sessions=4)
+    session = manager.create("")
+    task = asyncio.create_task(session.present_plan(sample_plan()))
+    await asyncio.sleep(0.05)
+    session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="approve"))
+    await asyncio.sleep(0.05)
+    assert not task.done()  # dropped, and the card stays answerable
+
+    session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="revise", comment="split step 1"))
+    assert (await task).verdict == "revise"
+
+
+async def test_plan_resolution_is_broadcast_to_every_client(tmp_path: Path) -> None:
+    """Settlement is a frame, not a local guess: a second client (or the one that
+    never answered) must not keep a live card for a plan the agent stopped
+    waiting on — nor be able to flip it to "Approved" afterwards."""
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    manager = SessionManager(tmp_path, factory, max_sessions=4)
+    session = manager.create("")
+    first = session.subscribe()
+    second = session.subscribe()
+    session.send_user_message("plan it")
+    while not isinstance(await asyncio.wait_for(first.get(), timeout=10), PlanPresented):
+        pass
+
+    session.resolve_plan(
+        PlanResponse(plan_id="plan-1", verdict="approve", choices={"approach": "local"})
+    )
+    for queue in (first, second):
+        resolved = [e for e in await drain(queue, TurnDone) if isinstance(e, PlanResolved)]
+        assert [(e.plan_id, e.verdict) for e in resolved] == [("plan-1", "approve")]
 
 
 # ---- session titles ---------------------------------------------------------
@@ -552,12 +654,18 @@ def test_pending_plan_is_replayed_to_a_reconnecting_client(
                 json.dumps(
                     {
                         "type": "plan_decision",
-                        "response": {"plan_id": "plan-1", "verdict": "approve"},
+                        "response": {
+                            "plan_id": "plan-1",
+                            "verdict": "approve",
+                            "choices": {"approach": "local"},
+                        },
                     }
                 )
             )
-            while json.loads(ws2.receive_text())["type"] != "turn_done":
-                pass
+            seen: list[str] = []
+            while "turn_done" not in seen:
+                seen.append(json.loads(ws2.receive_text())["type"])
+            assert "plan_resolved" in seen  # the card settles on the wire, not by click
 
     assert factory.created[0].plan_responses[0].verdict == "approve"
 

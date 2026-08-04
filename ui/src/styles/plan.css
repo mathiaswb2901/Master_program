@@ -282,5 +282,14 @@
 
 .wb-plan-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-4);
+}
+
+/* Why Approve is disabled — quiet, never an alarm (an unmade choice is normal). */
+.wb-plan-hint {
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-tertiary);
 }
