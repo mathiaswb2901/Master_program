@@ -76,8 +76,16 @@ class Workspace:
             current = content_hash(path.read_bytes())
             if current != expected_hash:
                 raise StaleWriteError(relative)
-        data = content.encode("utf-8")
+        return self.write_bytes(relative, content.encode("utf-8"))
+
+    def write_bytes(self, relative: str, data: bytes, backup: bool = False) -> str:
+        """Atomic write (tmp + replace). With ``backup``, the previous version is
+        kept as ``<name>.bak`` — the safety net for Office round-trips until
+        fidelity is trusted. Returns the new content hash."""
+        path = self.safe_path(relative)
         path.parent.mkdir(parents=True, exist_ok=True)
+        if backup and path.exists():
+            path.with_name(path.name + ".bak").write_bytes(path.read_bytes())
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as tmp:
