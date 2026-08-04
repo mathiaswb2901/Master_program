@@ -64,7 +64,10 @@ the moat.
   toast layer for currently-silent failures, chat markdown/code rendering with per-tool
   settle + expand, terminal tabs (kill the single-instance remount), file-tree CRUD
   wiring the endpoints that already exist, dirty-close confirmation + beforeunload guard,
-  real session titles + live/disk dedupe.
+  real session titles + live/disk dedupe. *Known gap*: the beforeunload guard and the
+  `document.title` attention badge are browser-only — WebView2 honors neither on native
+  window close/title, so the Tauri shell task above must re-wire both natively
+  (`onCloseRequested` → dirty-close modal; window `setTitle` for the badge).
 - **shortcuts.md**: workspace `.workbench/shortcuts.md` + global file, merged, watched
   live; entries drive QuickBar commands, terminal snippets, chat prompt templates, and
   custom keybindings; agents get a skill to add entries on request.

@@ -33,6 +33,20 @@ export interface WriteResponse {
   hash: string;
 }
 
+export interface CreateRequest {
+  path: string;
+  kind: "file" | "dir";
+}
+
+export interface RenameRequest {
+  path: string;
+  new_path: string;
+}
+
+export interface OkResponse {
+  ok: true;
+}
+
 export interface FileChangedEvent {
   type: "file_changed";
   path: string;

@@ -13,10 +13,9 @@ from pathlib import Path
 import structlog
 
 from workbench_server.models.agents import SessionInfo, TranscriptMessage
+from workbench_server.services.titles import derive_title
 
 log = structlog.get_logger()
-
-_MAX_TITLE = 80
 
 
 def encode_project_dir(folder: Path) -> str:
@@ -50,14 +49,17 @@ class SessionIndex:
             return []
         sessions: list[SessionInfo] = []
         for transcript in project.glob("*.jsonl"):
-            title = self._first_user_text(transcript) or "(no messages)"
+            first = self._first_user_text(transcript)
+            # derive_title, same as live sessions — a conversation must not
+            # visibly retitle when it transitions from live to on-disk.
+            title = derive_title(first) if first is not None else "(no messages)"
             sessions.append(
                 SessionInfo(
                     session_id=transcript.stem,
                     folder=workspace_relative,
                     state="idle",
                     live=False,
-                    title=title[:_MAX_TITLE],
+                    title=title,
                     updated_at=transcript.stat().st_mtime,
                 )
             )
@@ -93,6 +95,15 @@ class SessionIndex:
             return None
         role = "user" if record["type"] == "user" else "assistant"
         return TranscriptMessage(role=role, text=text)
+
+    def first_user_text(self, folder: Path, session_id: str) -> str | None:
+        """First user message of a stored transcript; None when absent/unreadable."""
+        if not re.fullmatch(r"[A-Za-z0-9-]+", session_id):
+            return None
+        transcript = self.project_dir(folder) / f"{session_id}.jsonl"
+        if not transcript.is_file():
+            return None
+        return self._first_user_text(transcript)
 
     def _first_user_text(self, transcript: Path) -> str | None:
         try:

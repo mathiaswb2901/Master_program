@@ -1,0 +1,192 @@
+/* Floating layers: confirm modal, context menu, toasts (DESIGN.md §4, §6). */
+
+/* ---- Confirm modal -------------------------------------------------------- */
+
+.wb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  z-index: 200;
+}
+
+.wb-modal {
+  position: fixed;
+  left: 50%;
+  top: 28vh;
+  transform: translateX(-50%);
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  z-index: 201;
+  animation: wb-modal-in var(--duration-3) var(--ease-standard);
+}
+
+@keyframes wb-modal-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+.wb-modal-title {
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-modal-message {
+  font-size: var(--type-md-size);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.wb-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-4);
+}
+
+/* ---- Context menu --------------------------------------------------------- */
+
+.wb-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+}
+
+.wb-menu {
+  position: fixed;
+  min-width: 160px;
+  padding: var(--space-2) 0;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  z-index: 151;
+  animation: wb-menu-in var(--duration-2) var(--ease-standard);
+}
+
+@keyframes wb-menu-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.wb-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--space-5);
+  font-size: var(--type-md-size);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.wb-menu-item:hover {
+  background: var(--surface-hover);
+}
+
+.wb-menu-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.wb-menu-item.is-danger:hover {
+  color: var(--error);
+}
+
+/* ---- Toasts --------------------------------------------------------------- */
+
+.wb-toasts {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  z-index: 180;
+}
+
+.wb-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-left-width: 2px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  font-size: var(--type-md-size);
+  color: var(--text-primary);
+  animation: wb-toast-in var(--duration-3) var(--ease-standard);
+}
+
+@keyframes wb-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.wb-toast.is-error {
+  border-left-color: var(--error);
+}
+
+.wb-toast.is-warn {
+  border-left-color: var(--warn);
+}
+
+.wb-toast.is-info {
+  border-left-color: var(--info);
+}
+
+.wb-toast.is-success {
+  border-left-color: var(--success);
+}
+
+.wb-toast-msg {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wb-toast-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.wb-toast-close:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}

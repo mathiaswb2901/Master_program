@@ -37,12 +37,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     event_bus = EventBus()
     watcher = Watcher(workspace.root, event_bus)
     ui_state_store = UiStateStore()
+    session_index = SessionIndex(settings.resolved_projects_dir())
     session_manager = SessionManager(
         workspace.root,
         sdk_client_factory(ui_state_store),
         settings.max_concurrent_sessions,
+        session_index=session_index,
     )
-    session_index = SessionIndex(settings.resolved_projects_dir())
     office_service = OfficeService(
         workspace,
         server_url=settings.onlyoffice_url,

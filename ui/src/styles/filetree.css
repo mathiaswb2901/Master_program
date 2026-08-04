@@ -1,7 +1,44 @@
 /* File tree rows (DESIGN.md §6.2). */
 
-.wb-filetree {
+.wb-filetree-panel {
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+}
+
+.wb-filetree-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wb-filetree-toolbar-actions {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.wb-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+}
+
+.wb-icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.wb-filetree {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   background: var(--surface-panel);
   padding: var(--space-2) 0;
@@ -53,4 +90,25 @@
 
 .wb-file-icon {
   color: var(--text-tertiary);
+}
+
+/* Inline rename / create input, sized to sit exactly in a row. */
+.wb-tree-rename {
+  padding-right: var(--space-4);
+}
+
+.wb-tree-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 var(--space-2);
+  background: var(--surface-elevated);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-xs);
+  font-size: var(--type-sm-size);
+  color: var(--text-primary);
+}
+
+.wb-tree-input:focus-visible {
+  outline: none; /* the accent border is the focus treatment here */
 }

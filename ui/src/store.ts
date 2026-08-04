@@ -40,6 +40,14 @@ export interface OpenFile {
   saveAck: boolean;
 }
 
+export type ToastKind = "error" | "warn" | "info" | "success";
+
+export interface Toast {
+  id: number;
+  kind: ToastKind;
+  message: string;
+}
+
 export type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; done: boolean; costUsd: number | null; isError: boolean }
@@ -76,6 +84,9 @@ interface WorkbenchStore {
   chats: Record<string, ChatState>;
   quickBarOpen: boolean;
   terminalGeneration: number;
+  toasts: Toast[];
+  /** Path awaiting the "close dirty file?" decision; renders the confirm modal. */
+  pendingClosePath: string | null;
   /** GET /api/office/status result, fetched once at startup (retried on
    * office open if that failed); when enabled, api.js is preloaded so the
    * first office tab doesn't pay the script-load latency. */
@@ -86,10 +97,18 @@ interface WorkbenchStore {
   toggleTheme: () => void;
   setQuickBarOpen: (open: boolean) => void;
   newTerminal: () => void;
+  pushToast: (kind: ToastKind, message: string) => void;
+  dismissToast: (id: number) => void;
 
   refreshTree: () => Promise<void>;
   openFile: (path: string) => Promise<void>;
+  /** Guarded close: dirty buffers get a confirm modal instead of silent discard. */
+  requestCloseFile: (path: string) => void;
+  resolvePendingClose: (action: "save" | "discard" | "cancel") => Promise<void>;
   closeFile: (path: string) => void;
+  createEntry: (path: string, kind: "file" | "dir") => Promise<void>;
+  renameEntry: (path: string, newPath: string) => Promise<void>;
+  deleteEntry: (path: string) => Promise<void>;
   setActiveFile: (path: string) => void;
   updateBuffer: (path: string, text: string) => void;
   saveFile: (path: string) => Promise<void>;
@@ -120,6 +139,15 @@ const initialTheme: Theme =
 let initialized = false;
 const loadingPaths = new Set<string>();
 let treeRefreshTimer: number | undefined;
+
+const TOAST_AUTO_DISMISS_MS = 6000;
+let toastSeq = 0;
+
+function errorDetail(err: unknown): string {
+  if (err instanceof api.ApiError) return err.detail;
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
 
 function emptyFile(
   path: string,
@@ -169,6 +197,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     chats: {},
     quickBarOpen: false,
     terminalGeneration: 0,
+    toasts: [],
+    pendingClosePath: null,
     officeStatus: null,
 
     init: () => {
@@ -208,11 +238,26 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
     newTerminal: () => set((s) => ({ terminalGeneration: s.terminalGeneration + 1 })),
 
+    pushToast: (kind, message) => {
+      const id = ++toastSeq;
+      set((s) => ({ toasts: [...s.toasts, { id, kind, message }] }));
+      window.setTimeout(() => get().dismissToast(id), TOAST_AUTO_DISMISS_MS);
+    },
+
+    dismissToast: (id) => {
+      set((s) =>
+        s.toasts.some((t) => t.id === id)
+          ? { toasts: s.toasts.filter((t) => t.id !== id) }
+          : s,
+      );
+    },
+
     refreshTree: async () => {
       try {
         set({ tree: await api.getTree() });
       } catch (err) {
         console.error("tree refresh failed", err);
+        get().pushToast("error", `File tree refresh failed: ${errorDetail(err)}`);
       }
     },
 
@@ -258,6 +303,25 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }
     },
 
+    requestCloseFile: (path) => {
+      const file = get().openFiles.find((f) => f.path === path);
+      if (file !== undefined && file.dirty) set({ pendingClosePath: path });
+      else get().closeFile(path);
+    },
+
+    resolvePendingClose: async (action) => {
+      const path = get().pendingClosePath;
+      set({ pendingClosePath: null });
+      if (path === null || action === "cancel") return;
+      if (action === "save") {
+        await get().saveFile(path);
+        const file = get().openFiles.find((f) => f.path === path);
+        // Save failed (conflict bar explains why) — keep the file open.
+        if (file !== undefined && file.dirty) return;
+      }
+      get().closeFile(path);
+    },
+
     closeFile: (path) => {
       disposeModel(path);
       set((s) => {
@@ -269,6 +333,57 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         }
         return { openFiles, activePath };
       });
+    },
+
+    createEntry: async (path, kind) => {
+      try {
+        await api.createEntry({ path, kind });
+      } catch (err) {
+        get().pushToast("error", `Create failed: ${errorDetail(err)}`);
+        return;
+      }
+      await get().refreshTree();
+      if (kind === "file") void get().openFile(path);
+    },
+
+    renameEntry: async (path, newPath) => {
+      // Open files under the old name: remap after the rename. Dirty buffers
+      // would silently lose edits through close/reopen — block those up front.
+      const prefix = path + "/";
+      const affected = get().openFiles.filter(
+        (f) => f.path === path || f.path.startsWith(prefix),
+      );
+      if (affected.some((f) => f.dirty)) {
+        get().pushToast("warn", "Save or close unsaved files under the old name first.");
+        return;
+      }
+      try {
+        await api.renameEntry({ path, new_path: newPath });
+      } catch (err) {
+        get().pushToast("error", `Rename failed: ${errorDetail(err)}`);
+        return;
+      }
+      const activeWas = get().activePath;
+      for (const f of affected) get().closeFile(f.path);
+      await get().refreshTree();
+      const remap = (p: string): string =>
+        p === path ? newPath : p.startsWith(prefix) ? newPath + p.slice(path.length) : p;
+      for (const f of affected) await get().openFile(remap(f.path));
+      if (activeWas !== null && get().openFiles.some((f) => f.path === remap(activeWas))) {
+        set({ activePath: remap(activeWas) });
+      }
+    },
+
+    deleteEntry: async (path) => {
+      try {
+        await api.deleteEntry(path);
+      } catch (err) {
+        get().pushToast("error", `Delete failed: ${errorDetail(err)}`);
+        return;
+      }
+      // The user confirmed the delete — dirty state no longer guards anything.
+      if (get().openFiles.some((f) => f.path === path)) get().closeFile(path);
+      void get().refreshTree();
     },
 
     setActiveFile: (path) => set({ activePath: path }),
@@ -332,6 +447,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           patchFile(path, {
             conflict: `Save failed: ${err instanceof Error ? err.message : String(err)}`,
           });
+          get().pushToast("error", `Save failed for ${path}: ${errorDetail(err)}`);
         }
       }
     },
@@ -482,17 +598,25 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         folders.sort(
           (a, b) => (b.sessions[0]?.updated_at ?? 0) - (a.sessions[0]?.updated_at ?? 0),
         );
+        // Rebuild states/flags from the listing: keep the client-side entry
+        // (WS events keep it fresher than the poll) but drop sessions that no
+        // longer exist — otherwise a needs_attention from a session evicted by
+        // a backend restart wedges the attention dot/title badge forever.
         set((s) => {
-          const states = { ...s.sessionStates };
+          const states: Record<string, SessionState> = {};
+          const flags: Record<string, SessionFlags> = {};
           for (const group of folders) {
             for (const ses of group.sessions) {
-              if (!(ses.session_id in states)) states[ses.session_id] = ses.state;
+              states[ses.session_id] = s.sessionStates[ses.session_id] ?? ses.state;
+              const kept = s.sessionFlags[ses.session_id];
+              if (kept !== undefined) flags[ses.session_id] = kept;
             }
           }
-          return { folders, sessionStates: states };
+          return { folders, sessionStates: states, sessionFlags: flags };
         });
       } catch (err) {
         console.error("sessions refresh failed", err);
+        get().pushToast("error", `Session list refresh failed: ${errorDetail(err)}`);
       }
     },
 
@@ -518,6 +642,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         set({ transcriptView: { session: info, messages: transcript.messages }, activeSessionId: null });
       } catch (err) {
         console.error("transcript load failed", err);
+        get().pushToast("error", `Transcript load failed: ${errorDetail(err)}`);
       }
     },
 
@@ -529,6 +654,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         void get().refreshSessions();
       } catch (err) {
         console.error("session create failed", err);
+        get().pushToast("error", `New session failed: ${errorDetail(err)}`);
       }
     },
 
@@ -553,6 +679,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         void get().refreshSessions();
       } catch (err) {
         console.error("session resume failed", err);
+        get().pushToast("error", `Session resume failed: ${errorDetail(err)}`);
       }
     },
 

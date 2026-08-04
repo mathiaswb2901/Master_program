@@ -19,10 +19,7 @@ from workbench_server.models.agents import (
     agent_client_message,
 )
 from workbench_server.models.files import OkResponse
-from workbench_server.services.agent_sessions import (
-    SessionManager,
-    TooManySessionsError,
-)
+from workbench_server.services.agent_sessions import SessionManager, TooManySessionsError
 from workbench_server.services.sdk_factory import UiStateStore
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
@@ -44,10 +41,17 @@ def list_sessions(request: Request) -> list[FolderSessions]:
     for info in manager.live_infos():
         grouped.setdefault(info.folder, []).append(info)
 
+    # A live session's transcript is already on disk under its SDK uuid — the
+    # live entry (keyed by local id) represents that conversation, so the
+    # matching transcript row is suppressed.
+    live_sdk_ids = manager.live_sdk_ids()
+
     # folders worth showing: root + first-level dirs (deeper folders appear once used)
     folders = [""] + [node.path for node in (workspace.tree().children or []) if node.kind == "dir"]
     for folder in folders:
         for info in index.list_sessions(workspace.safe_path(folder), folder):
+            if info.session_id in live_sdk_ids:
+                continue
             bucket = grouped.setdefault(folder, [])
             if not any(s.session_id == info.session_id for s in bucket):
                 bucket.append(info)
@@ -68,14 +72,7 @@ def create_session(request: Request, body: CreateSessionRequest) -> SessionInfo:
         raise HTTPException(429, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, "folder escapes workspace") from e
-    return SessionInfo(
-        session_id=session.local_id,
-        folder=session.folder_relative,
-        state=session.state,
-        live=True,
-        title="new session",
-        updated_at=session.created_at,
-    )
+    return session.info()
 
 
 @router.get("/transcript")

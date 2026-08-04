@@ -13,6 +13,7 @@ import "./styles/office.css";
 import "./styles/terminal.css";
 import "./styles/agent.css";
 import "./styles/quickbar.css";
+import "./styles/overlays.css";
 
 import { createRoot } from "react-dom/client";
 

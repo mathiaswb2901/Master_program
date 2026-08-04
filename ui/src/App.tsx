@@ -9,8 +9,10 @@ import { useEffect, type FunctionComponent } from "react";
 import { AgentPanel } from "./panels/AgentPanel";
 import { EditorAreaPanel } from "./panels/EditorArea";
 import { FileTreePanel } from "./panels/FileTree";
+import { DirtyCloseModal } from "./panels/Modal";
 import { QuickBar } from "./panels/QuickBar";
 import { TerminalPanel } from "./panels/Terminal";
+import { Toasts } from "./panels/Toasts";
 import { useStore } from "./store";
 
 const components: Record<string, FunctionComponent<IDockviewPanelProps>> = {
@@ -20,9 +22,30 @@ const components: Record<string, FunctionComponent<IDockviewPanelProps>> = {
   terminal: TerminalPanel,
 };
 
-/** Fixed panels: title only, no close button — closing them would strand the app. */
+const BASE_TITLE = "Workbench";
+
+const anyNeedsAttention = (states: Record<string, string>): boolean =>
+  Object.values(states).some((state) => state === "needs_attention");
+
+/** Fixed panels: title only, no close button — closing them would strand the app.
+ * The Agent tab carries an aggregate attention dot (DESIGN.md §6.4 dot-only). */
 function PanelTab(props: IDockviewPanelHeaderProps) {
-  return <div className="wb-panel-tab u-truncate">{props.api.title ?? props.api.id}</div>;
+  const attention = useStore(
+    (s) => props.api.id === "agent" && anyNeedsAttention(s.sessionStates),
+  );
+  return (
+    <div className="wb-panel-tab u-truncate">
+      {props.api.title ?? props.api.id}
+      {attention && (
+        <span
+          className="wb-tab-attention-dot"
+          role="img"
+          aria-label="A session needs attention"
+          title="A session needs attention"
+        />
+      )}
+    </div>
+  );
 }
 
 const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbench" };
@@ -55,8 +78,27 @@ function onReady(event: DockviewReadyEvent): void {
 }
 
 export default function App() {
+  const attention = useStore((s) => anyNeedsAttention(s.sessionStates));
+
   useEffect(() => {
     useStore.getState().init();
+  }, []);
+
+  // Attention badge in the window/taskbar title; cleared once attended.
+  useEffect(() => {
+    document.title = attention ? `● ${BASE_TITLE}` : BASE_TITLE;
+  }, [attention]);
+
+  // Never lose unsaved buffers to a silent window close/refresh.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent): void => {
+      if (useStore.getState().openFiles.some((f) => f.dirty)) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
   useEffect(() => {
@@ -90,6 +132,8 @@ export default function App() {
         />
       </div>
       <QuickBar />
+      <DirtyCloseModal />
+      <Toasts />
     </div>
   );
 }
