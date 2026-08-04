@@ -71,3 +71,26 @@ export function loadDocsApi(serverUrl: string): Promise<DocsApiGlobal> {
   });
   return docsApiPromise;
 }
+
+let preconnectDone = false;
+
+/** Warm up the Document Server before the first office tab opens: a
+ * `<link rel="preconnect">` to its origin plus a background api.js load.
+ * Failures are silent — `loadDocsApi` clears its cache on error, so the
+ * first real open retries and surfaces the problem to the user. */
+export function preloadDocsApi(serverUrl: string): void {
+  if (!preconnectDone) {
+    try {
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = new URL(serverUrl).origin;
+      document.head.appendChild(link);
+      preconnectDone = true;
+    } catch {
+      // malformed server_url — the script load below reports it on first open
+    }
+  }
+  void loadDocsApi(serverUrl).catch(() => {
+    // Document Server unreachable right now — retried on first office open.
+  });
+}

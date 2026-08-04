@@ -1,5 +1,6 @@
 /** Typed REST client for the workbench server (proxied through Vite at /api). */
 
+import type { Theme } from "./theme";
 import type {
   CallbackResponse,
   CreateSessionRequest,
@@ -70,8 +71,8 @@ export const putUiState = (body: UiState): Promise<unknown> =>
 
 export const getOfficeStatus = (): Promise<OfficeStatus> => request("/api/office/status");
 
-export const getOfficeConfig = (path: string): Promise<DocEditorConfig> =>
-  request(`/api/office/config?path=${encodeURIComponent(path)}`);
+export const getOfficeConfig = (path: string, theme: Theme): Promise<DocEditorConfig> =>
+  request(`/api/office/config?path=${encodeURIComponent(path)}&theme=${theme}`);
 
 export const postOfficeForcesave = (path: string): Promise<CallbackResponse> =>
   request("/api/office/forcesave", jsonInit("POST", { path }));

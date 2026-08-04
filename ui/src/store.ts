@@ -4,7 +4,7 @@ import { create } from "zustand";
 
 import * as api from "./api";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
-import { isOfficePath } from "./office";
+import { isOfficePath, preloadDocsApi } from "./office";
 import { THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
@@ -76,7 +76,9 @@ interface WorkbenchStore {
   chats: Record<string, ChatState>;
   quickBarOpen: boolean;
   terminalGeneration: number;
-  /** GET /api/office/status result, fetched once on first office open. */
+  /** GET /api/office/status result, fetched once at startup (retried on
+   * office open if that failed); when enabled, api.js is preloaded so the
+   * first office tab doesn't pay the script-load latency. */
   officeStatus: OfficeStatus | null;
 
   init: () => void;
@@ -183,6 +185,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           void get().refreshSessions();
         },
       });
+      void get().ensureOfficeStatus();
     },
 
     setTheme: (theme) => {
@@ -431,7 +434,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       if (get().officeStatus !== null || officeStatusPending) return;
       officeStatusPending = true;
       try {
-        set({ officeStatus: await api.getOfficeStatus() });
+        const status = await api.getOfficeStatus();
+        set({ officeStatus: status });
+        // Warm the connection + script cache before the first office tab.
+        if (status.enabled && status.server_url !== null) preloadDocsApi(status.server_url);
       } catch (err) {
         console.error("office status failed", err);
       } finally {

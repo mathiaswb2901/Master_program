@@ -3,6 +3,17 @@
    our chrome around it is the surround + rim, and every state card renders on
    paper colors so nothing dark-mode flashes against the white canvas. */
 
+/* Hosts one open office file's editor for the whole tab lifetime; switching
+   tabs toggles this class instead of unmounting (display:none also keeps the
+   hidden iframe unfocusable, so background editors can't steal keystrokes). */
+.wb-office-host {
+  height: 100%;
+}
+
+.wb-office-host.is-hidden {
+  display: none;
+}
+
 .wb-office {
   height: 100%;
   display: flex;
