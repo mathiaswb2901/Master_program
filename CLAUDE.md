@@ -38,6 +38,9 @@ ruling it out.
   fail: each tool's own tests assert a ceiling on its description length and on the
   serialized size of a representative result. No separate benchmark harness — a budget
   that lives outside the quality gate does not bind.
+- Bundled skills live in `server/src/workbench_server/skills_bundle/` (one local plugin,
+  shipped as package data); each session gets them via `--plugin-dir` as
+  `workbench:<name>` — session-scoped, nothing is ever written to `~/.claude`.
 - Skills entering the bundle are vetted, not adopted on popularity: read every line
   (a skill can run anything on the user's machine), and keep it only if it measurably
   helps. Widely-starred skills have been shown to raise token use *and* worsen results.

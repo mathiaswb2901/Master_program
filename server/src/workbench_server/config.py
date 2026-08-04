@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # Claude Code's per-project session storage; None = ~/.claude/projects
     claude_projects_dir: Path | None = None
 
+    # Load Workbench's own skills into every session, as a session-scoped local
+    # plugin (see services/skills_bundle.py). Nothing is written to ~/.claude.
+    bundled_skills: bool = True
+    # Also load the user's global ~/.claude settings and skills into sessions.
+    # Off by default: a Workbench session sees project settings plus our bundle,
+    # so what an agent can do is a property of the workspace, not of whatever
+    # happens to be installed globally on this machine.
+    skills_inherit_user: bool = False
+
     def resolved_projects_dir(self) -> Path:
         return self.claude_projects_dir or (Path.home() / ".claude" / "projects")
 

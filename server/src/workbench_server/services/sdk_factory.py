@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
 from workbench_server.models.plans import PlanArtifact, plan_input_schema
 from workbench_server.services.agent_sessions import (
@@ -15,6 +16,7 @@ from workbench_server.services.agent_sessions import (
     SdkClient,
     SessionBridge,
 )
+from workbench_server.services.skills_bundle import bundled_plugin_path
 
 # Tools the agent may use inside its folder without asking. Deliberately file-only:
 # anything else (Bash, web access, ...) falls through to can_use_tool and becomes
@@ -98,46 +100,92 @@ def build_context_bridge(store: UiStateStore, bridge: SessionBridge) -> Any:
     )
 
 
-def sdk_client_factory(store: UiStateStore) -> Any:
+def build_agent_options(
+    store: UiStateStore,
+    settings: Settings,
+    folder: Path,
+    resume_session_id: str | None,
+    bridge: SessionBridge,
+) -> Any:
+    """The single construction point for ``ClaudeAgentOptions``.
+
+    Split out of the factory closure so the whole configuration — permissions,
+    the context bridge, the bundled plugin, which filesystem settings a session
+    inherits — is assertable in tests without connecting a client.
+
+    Skills are *not* enabled through ``options.skills``: ``"all"`` appends a bare
+    ``Skill`` entry to ``allowed_tools``, which shadows ``can_use_tool`` and
+    silently auto-allows every discovered skill, and a list would double as a
+    context filter that hides the user's own project skills. The plugin is
+    passed on its own instead, so bundled skills are simply *available* under
+    the ``workbench:`` prefix and any invocation still reaches the UI's
+    permission prompt like every other non-file tool.
+    """
+    from claude_agent_sdk import (
+        ClaudeAgentOptions,
+        PermissionResultAllow,
+        PermissionResultDeny,
+        SdkPluginConfig,
+        SettingSource,
+    )
+
+    async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+        if await bridge.ask_permission(tool_name, tool_input):
+            return PermissionResultAllow()
+        return PermissionResultDeny(message="User declined in the workbench UI")
+
+    plugins: list[SdkPluginConfig] = []
+    if settings.bundled_skills:
+        plugin_path = bundled_plugin_path()
+        if plugin_path is not None:
+            plugins.append(SdkPluginConfig(type="local", path=str(plugin_path)))
+
+    # ``None`` is the SDK's implicit default: load every filesystem settings
+    # source, including the user's global ~/.claude. ``["project"]`` keeps
+    # CLAUDE.md and .claude/settings.json — a workspace still configures its own
+    # agents — but stops a session from inheriting whatever is installed
+    # globally on this machine.
+    setting_sources: list[SettingSource] | None = (
+        None if settings.skills_inherit_user else ["project"]
+    )
+
+    return ClaudeAgentOptions(
+        cwd=str(folder),
+        resume=resume_session_id,
+        allowed_tools=[
+            *_AUTO_ALLOWED,
+            "mcp__workbench__get_workspace_state",
+            "mcp__workbench__present_plan",
+        ],
+        permission_mode="acceptEdits",
+        include_partial_messages=True,
+        can_use_tool=can_use_tool,
+        mcp_servers={"workbench": build_context_bridge(store, bridge)},
+        plugins=plugins,
+        setting_sources=setting_sources,
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": (
+                "You are running inside Workbench. Before editing files, call "
+                "get_workspace_state and avoid editing files listed as dirty "
+                "(unsaved user changes). When you propose multi-step work or "
+                "alternatives, call present_plan instead of writing the plan "
+                "as prose — the user answers it as an interactive card. Use the "
+                "bundled workbench:plan-visual skill when authoring that card."
+            ),
+        },
+    )
+
+
+def sdk_client_factory(store: UiStateStore, settings: Settings | None = None) -> Any:
     """Returns a ClientFactory closure for SessionManager."""
+    resolved = settings or Settings()
 
     def factory(folder: Path, resume_session_id: str | None, bridge: SessionBridge) -> SdkClient:
-        from claude_agent_sdk import (
-            ClaudeAgentOptions,
-            ClaudeSDKClient,
-            PermissionResultAllow,
-            PermissionResultDeny,
-        )
+        from claude_agent_sdk import ClaudeSDKClient
 
-        async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
-            if await bridge.ask_permission(tool_name, tool_input):
-                return PermissionResultAllow()
-            return PermissionResultDeny(message="User declined in the workbench UI")
-
-        options = ClaudeAgentOptions(
-            cwd=str(folder),
-            resume=resume_session_id,
-            allowed_tools=[
-                *_AUTO_ALLOWED,
-                "mcp__workbench__get_workspace_state",
-                "mcp__workbench__present_plan",
-            ],
-            permission_mode="acceptEdits",
-            include_partial_messages=True,
-            can_use_tool=can_use_tool,
-            mcp_servers={"workbench": build_context_bridge(store, bridge)},
-            system_prompt={
-                "type": "preset",
-                "preset": "claude_code",
-                "append": (
-                    "You are running inside Workbench. Before editing files, call "
-                    "get_workspace_state and avoid editing files listed as dirty "
-                    "(unsaved user changes). When you propose multi-step work or "
-                    "alternatives, call present_plan instead of writing the plan "
-                    "as prose — the user answers it as an interactive card."
-                ),
-            },
-        )
+        options = build_agent_options(store, resolved, folder, resume_session_id, bridge)
         client: SdkClient = ClaudeSDKClient(options=options)
         return client
 
