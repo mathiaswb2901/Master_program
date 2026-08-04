@@ -598,14 +598,21 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         folders.sort(
           (a, b) => (b.sessions[0]?.updated_at ?? 0) - (a.sessions[0]?.updated_at ?? 0),
         );
+        // Rebuild states/flags from the listing: keep the client-side entry
+        // (WS events keep it fresher than the poll) but drop sessions that no
+        // longer exist — otherwise a needs_attention from a session evicted by
+        // a backend restart wedges the attention dot/title badge forever.
         set((s) => {
-          const states = { ...s.sessionStates };
+          const states: Record<string, SessionState> = {};
+          const flags: Record<string, SessionFlags> = {};
           for (const group of folders) {
             for (const ses of group.sessions) {
-              if (!(ses.session_id in states)) states[ses.session_id] = ses.state;
+              states[ses.session_id] = s.sessionStates[ses.session_id] ?? ses.state;
+              const kept = s.sessionFlags[ses.session_id];
+              if (kept !== undefined) flags[ses.session_id] = kept;
             }
           }
-          return { folders, sessionStates: states };
+          return { folders, sessionStates: states, sessionFlags: flags };
         });
       } catch (err) {
         console.error("sessions refresh failed", err);

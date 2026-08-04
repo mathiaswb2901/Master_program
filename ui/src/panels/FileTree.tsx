@@ -120,13 +120,36 @@ interface MenuItem {
 function ContextMenu({ items, x, y, onClose }: { items: MenuItem[]; x: number; y: number; onClose: () => void }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
+  // DESIGN.md §7: menus fully keyboard-operable. Roving focus with wrap on
+  // Arrow keys, Home/End jumps, and Tab contained inside the menu — it must
+  // never escape into the page behind the open menu.
   useEffect(() => {
-    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const buttons = (): HTMLButtonElement[] =>
+      Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+    buttons()[0]?.focus();
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         onClose();
+        return;
+      }
+      const list = buttons();
+      if (list.length === 0) return;
+      const index = list.indexOf(document.activeElement as HTMLButtonElement);
+      const focusAt = (target: number): void => {
+        e.preventDefault();
+        e.stopPropagation();
+        list[(target + list.length) % list.length]?.focus();
+      };
+      if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
+        focusAt(index + 1); // index -1 (focus elsewhere) lands on the first item
+      } else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
+        focusAt(index === -1 ? list.length - 1 : index - 1);
+      } else if (e.key === "Home") {
+        focusAt(0);
+      } else if (e.key === "End") {
+        focusAt(list.length - 1);
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -147,7 +170,7 @@ function ContextMenu({ items, x, y, onClose }: { items: MenuItem[]; x: number; y
           onClose();
         }}
       />
-      <div ref={menuRef} className="wb-menu" role="menu" style={{ left, top }}>
+      <div ref={menuRef} className="wb-menu" role="menu" aria-orientation="vertical" style={{ left, top }}>
         {items.map((item) => (
           <button
             key={item.label}
@@ -209,10 +232,17 @@ function TreeRow({ node, depth, expanded, cb }: RowProps) {
     );
   }
 
-  const onContextMenu = (e: ReactMouseEvent): void => {
+  const onContextMenu = (e: ReactMouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    cb.onMenu(node, e.clientX, e.clientY);
+    if (e.clientX === 0 && e.clientY === 0) {
+      // Keyboard-invoked (Shift+F10 / Menu key on the focused row) — anchor
+      // the menu to the row instead of the top-left viewport corner.
+      const rect = e.currentTarget.getBoundingClientRect();
+      cb.onMenu(node, rect.left + 16, rect.bottom);
+    } else {
+      cb.onMenu(node, e.clientX, e.clientY);
+    }
   };
 
   return (

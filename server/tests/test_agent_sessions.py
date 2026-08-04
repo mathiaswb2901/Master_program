@@ -24,9 +24,9 @@ from workbench_server.services.agent_sessions import (
     PermissionAsk,
     SessionManager,
     TooManySessionsError,
-    derive_title,
 )
 from workbench_server.services.session_index import SessionIndex, encode_project_dir
+from workbench_server.services.titles import derive_title
 
 # ---- fake SDK message types (duck-typed on class name) ----------------------
 
@@ -253,6 +253,24 @@ class TestSessionIndex:
             == "C--Users-mathi-GnistEnergy-repo"
         )
 
+    def test_stored_titles_match_live_derivation(self, tmp_path: Path) -> None:
+        """Stored transcripts use derive_title too — a conversation must not
+        retitle (length/whitespace/ellipsis) when it goes from live to on-disk."""
+        folder = tmp_path / "ws"
+        folder.mkdir()
+        project = tmp_path / "projects" / encode_project_dir(folder)
+        project.mkdir(parents=True)
+        first = "improve\n\nthe   intraday bidding strategy for the SE3 battery portfolio please"
+        (project / "bbb-222.jsonl").write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": first}}),
+            encoding="utf-8",
+        )
+
+        sessions = SessionIndex(tmp_path / "projects").list_sessions(folder, "")
+        assert sessions[0].title == derive_title(first)
+        assert len(sessions[0].title) == 60
+        assert sessions[0].title.endswith("…")
+
     def test_lists_and_reads_transcripts(self, tmp_path: Path) -> None:
         folder = tmp_path / "ws" / "se3"
         folder.mkdir(parents=True)
@@ -333,7 +351,10 @@ def test_live_session_suppresses_its_own_transcript(tmp_path: Path) -> None:
     app = create_app(settings)
     script = [delta("ok"), ResultMessage(session_id="sdk-e2e")]
     app.state.session_manager = SessionManager(
-        settings.resolved_workspace(), make_factory(script), max_sessions=4
+        settings.resolved_workspace(),
+        make_factory(script),
+        max_sessions=4,
+        session_index=app.state.session_index,
     )
 
     project_dir = projects / encode_project_dir(settings.resolved_workspace())
@@ -375,3 +396,55 @@ def test_live_session_suppresses_its_own_transcript(tmp_path: Path) -> None:
             for s in g["sessions"]
         ]
         assert "other-11" not in ids_after
+
+
+@pytest.mark.timeout(60)
+def test_resumed_transcript_stays_suppressed_after_a_turn(tmp_path: Path) -> None:
+    """Claude Code mints a NEW sdk id when a conversation is resumed. After the
+    first turn the session must suppress BOTH transcripts — the one it resumed
+    from and the one written under the fresh id — or the stale row reappears
+    next to the live entry and clicking it re-resumes an outdated fork."""
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    projects = tmp_path / "projects"
+    settings = Settings(workspace_root=workspace_root, claude_projects_dir=projects)
+    app = create_app(settings)
+    # The resumed conversation comes back under a fresh sdk id.
+    script = [delta("continuing"), ResultMessage(session_id="sdk-fresh")]
+    app.state.session_manager = SessionManager(
+        settings.resolved_workspace(),
+        make_factory(script),
+        max_sessions=4,
+        session_index=app.state.session_index,
+    )
+
+    project_dir = projects / encode_project_dir(settings.resolved_workspace())
+    project_dir.mkdir(parents=True)
+
+    def transcript_line(text: str) -> str:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+
+    (project_dir / "old-transcript.jsonl").write_text(transcript_line("original ask"), "utf-8")
+
+    with TestClient(app) as client:
+        resumed = client.post(
+            "/api/agents/sessions",
+            json={"folder": "", "resume_session_id": "old-transcript"},
+        )
+        assert resumed.status_code == 200
+        local_id = resumed.json()["session_id"]
+        assert resumed.json()["title"] == "original ask"  # via SessionManager.create
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "keep going"}))
+            while json.loads(ws.receive_text())["type"] != "turn_done":
+                pass
+
+        # The SDK persisted the resumed conversation under its fresh id too.
+        (project_dir / "sdk-fresh.jsonl").write_text(transcript_line("original ask"), "utf-8")
+
+        rows = [s for g in client.get("/api/agents/sessions").json() for s in g["sessions"]]
+        ids = [s["session_id"] for s in rows]
+        assert local_id in ids  # the live entry represents the conversation
+        assert "old-transcript" not in ids  # resumed-from transcript still suppressed
+        assert "sdk-fresh" not in ids  # fresh-id transcript suppressed as well

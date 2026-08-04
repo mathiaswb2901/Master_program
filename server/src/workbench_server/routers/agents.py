@@ -19,11 +19,7 @@ from workbench_server.models.agents import (
     agent_client_message,
 )
 from workbench_server.models.files import OkResponse
-from workbench_server.services.agent_sessions import (
-    SessionManager,
-    TooManySessionsError,
-    derive_title,
-)
+from workbench_server.services.agent_sessions import SessionManager, TooManySessionsError
 from workbench_server.services.sdk_factory import UiStateStore
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
@@ -69,8 +65,6 @@ def list_sessions(request: Request) -> list[FolderSessions]:
 
 @router.post("/sessions")
 def create_session(request: Request, body: CreateSessionRequest) -> SessionInfo:
-    workspace: Workspace = request.app.state.workspace
-    index: SessionIndex = request.app.state.session_index
     manager: SessionManager = request.app.state.session_manager
     try:
         session = manager.create(body.folder, body.resume_session_id)
@@ -78,11 +72,6 @@ def create_session(request: Request, body: CreateSessionRequest) -> SessionInfo:
         raise HTTPException(429, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, "folder escapes workspace") from e
-    if body.resume_session_id is not None:
-        # A resumed conversation keeps the title of the transcript it continues.
-        first = index.first_user_text(workspace.safe_path(body.folder), body.resume_session_id)
-        if first is not None:
-            session.title = derive_title(first)
     return session.info()
 
 

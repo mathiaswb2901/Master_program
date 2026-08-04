@@ -13,10 +13,9 @@ from pathlib import Path
 import structlog
 
 from workbench_server.models.agents import SessionInfo, TranscriptMessage
+from workbench_server.services.titles import derive_title
 
 log = structlog.get_logger()
-
-_MAX_TITLE = 80
 
 
 def encode_project_dir(folder: Path) -> str:
@@ -50,14 +49,17 @@ class SessionIndex:
             return []
         sessions: list[SessionInfo] = []
         for transcript in project.glob("*.jsonl"):
-            title = self._first_user_text(transcript) or "(no messages)"
+            first = self._first_user_text(transcript)
+            # derive_title, same as live sessions — a conversation must not
+            # visibly retitle when it transitions from live to on-disk.
+            title = derive_title(first) if first is not None else "(no messages)"
             sessions.append(
                 SessionInfo(
                     session_id=transcript.stem,
                     folder=workspace_relative,
                     state="idle",
                     live=False,
-                    title=title[:_MAX_TITLE],
+                    title=title,
                     updated_at=transcript.stat().st_mtime,
                 )
             )
