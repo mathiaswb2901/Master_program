@@ -7,8 +7,8 @@ logged under **Change requests** and pulled into milestones.
 
 | # | Scope | Status |
 |---|-------|--------|
-| M0 | Foundations: typed FastAPI core, uv, ruff/mypy-strict/pytest, pre-commit, CI, design system (`DESIGN.md`, tokens) | **in progress** |
-| M1 | IDE-lite shell: pywinpty terminals, jail-safe files API, Monaco tabs, watcher/sync engine, multi-session agent core (per-folder chat grouping, context bridge), QuickBar, Tauri dev window | pending |
+| M0 | Foundations: typed FastAPI core, uv, ruff/mypy-strict/pytest, pre-commit, CI, design system (`DESIGN.md`, tokens) | **done** |
+| M1 | IDE-lite shell: pywinpty terminals, jail-safe files API, Monaco tabs, watcher/sync engine, multi-session agent core (per-folder chat grouping, context bridge), QuickBar, Tauri dev window | **in progress** |
 | M2 | Word: OnlyOffice native install, signed editor config + save callback, Doc panel, reopen-on-agent-edit, mammoth.js degraded mode | pending |
 | M3 | Excel: Sheet panel (same OnlyOffice pattern), `.bak` safety, agent-side openpyxl analysis | pending |
 | M4 | PowerPoint; bundled skills (plan-visual, validate, remember, loop-objective, workbench-dev, Anthropic xlsx/docx/pptx, OfficeCLI after vetting); provenance badges; Tauri sidecar packaging + release CI | pending |

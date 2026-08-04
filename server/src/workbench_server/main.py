@@ -9,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
-from workbench_server.routers import health
+from workbench_server.routers import health, terminal
+from workbench_server.services.pty_manager import PtyManager
 
 log = structlog.get_logger()
 
@@ -21,6 +22,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(settings)
 
+    pty_manager = PtyManager()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info(
@@ -29,10 +32,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             port=settings.port,
         )
         yield
+        pty_manager.shutdown()
         log.info("workbench.stopped")
 
     app = FastAPI(title="Workbench", lifespan=lifespan)
     app.state.settings = settings
+    app.state.pty_manager = pty_manager
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -41,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(health.router)
+    app.include_router(terminal.router)
     return app
 
 
