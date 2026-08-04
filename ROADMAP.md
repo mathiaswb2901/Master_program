@@ -78,9 +78,12 @@ the moat.
   browser-only — WebView2 honors neither on native window close/title, so the Tauri
   shell task above must re-wire both natively (`onCloseRequested` → dirty-close modal;
   window `setTitle` for the badge).
-- **shortcuts.md**: workspace `.workbench/shortcuts.md` + global file, merged, watched
+- ~~**shortcuts.md**: workspace `.workbench/shortcuts.md` + global file, merged, watched
   live; entries drive QuickBar commands, terminal snippets, chat prompt templates, and
-  custom keybindings; agents get a skill to add entries on request.
+  custom keybindings~~ **done** — format spec in `docs/shortcuts.md`. Entries *insert*
+  and never execute (no `run:` option, shell bodies single-line, no trailing newline),
+  so a hostile workspace file can add QuickBar rows but not actions. Still open: agents
+  get a skill to add entries on request (ships with the skills bundle).
 - **Tool registry**: panels/commands/skills register in one place instead of hardwiring
   in `App.tsx` (product principle 1). Registration carries an **agent-ergonomics
   budget**, enforced through machinery that already exists rather than a new harness:

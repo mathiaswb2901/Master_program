@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { MONO_FONT } from "../monaco";
 import { useStore } from "../store";
+import { registerTerminal } from "../terminalInput";
 import { xtermTheme } from "../theme";
 import type { TerminalClientMessage, TerminalServerMessage } from "../types";
 import { wsUrl } from "../ws";
@@ -128,8 +129,10 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
 
     // Terminal sockets never auto-reconnect: the PTY behind them is stateful.
     const ws = new WebSocket(wsUrl("/ws/terminal"));
-    const send = (message: TerminalClientMessage): void => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+    const send = (message: TerminalClientMessage): boolean => {
+      if (ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(JSON.stringify(message));
+      return true;
     };
     const markExited = (): void => {
       setExited(true);
@@ -147,8 +150,14 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
     const resizeSub = term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
     const observer = new ResizeObserver(() => fitTerminal(fit));
     observer.observe(host);
+    // Shell shortcuts type through this handle — same path as a keystroke.
+    const unregister = registerTerminal(id, {
+      send: (data) => send({ type: "input", data }),
+      focus: () => term.focus(),
+    });
 
     return () => {
+      unregister();
       observer.disconnect();
       dataSub.dispose();
       resizeSub.dispose();

@@ -44,6 +44,12 @@ export function parseChord(text: string): Chord {
   return chord;
 }
 
+/** Identity of a chord, for "is this already bound?" checks. */
+export function chordId(text: string): string {
+  const chord = parseChord(text);
+  return `${chord.ctrl ? "c" : ""}${chord.alt ? "a" : ""}${chord.shift ? "s" : ""}:${chord.key}`;
+}
+
 function matchesKey(event: KeyLike, key: string): boolean {
   if (key === "") return false;
   if (event.key.toLowerCase() === key) return true;

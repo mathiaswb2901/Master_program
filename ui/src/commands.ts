@@ -5,6 +5,10 @@
  * Every command is reachable from the keyboard even without a chord, because
  * Ctrl+Shift+P lists all of them; `keys` exists for the ones worth a reflex.
  *
+ * The list has two halves: the static built-ins below, and the dynamic commands
+ * the user's `shortcuts.md` contributes (see `mergeCommands`). Built-ins win
+ * every collision, so nothing a workspace file says can shadow `Ctrl+S`.
+ *
  * Chord choices (browser-safe where it matters — the app runs in a dev browser
  * tab as well as in the Tauri shell):
  *  - Ctrl+Tab is reserved by the browser and never reaches the page, so editor
@@ -21,9 +25,10 @@
 
 import type { DockviewApi } from "dockview";
 
-import { resolveCommand, surfaceOf } from "./keys";
+import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
+import { shortcutCommands } from "./shortcuts";
 import { useStore } from "./store";
-import type { SessionInfo } from "./types";
+import type { SessionInfo, ShortcutEntry } from "./types";
 
 export interface Command {
   id: string;
@@ -34,6 +39,8 @@ export interface Command {
   when?: () => boolean;
   /** Extra context for the QuickBar row (right-aligned, tertiary). */
   detail?: () => string;
+  /** QuickBar grouping. Built-ins are uncategorized and listed first. */
+  category?: string;
   run: () => void;
 }
 
@@ -88,7 +95,7 @@ const sessionJumps: Command[] = Array.from({ length: 9 }, (_, i) => ({
   },
 }));
 
-export const COMMANDS: readonly Command[] = [
+export const BUILTIN_COMMANDS: readonly Command[] = [
   {
     id: "quickbar.files",
     title: "Go to file…",
@@ -193,9 +200,74 @@ export const COMMANDS: readonly Command[] = [
   },
 ];
 
+// ---- dynamic extension: shortcuts.md ---------------------------------------
+
+/**
+ * Chords a dynamic (file-supplied) command may take. Alt only, mirroring the
+ * server's `_resolve_chord`.
+ *
+ * `isIntercepted` hands us *every* Ctrl chord when focus is anywhere but Monaco
+ * or xterm, and preventDefaults it — so a `shortcuts.md` asking for `Ctrl+V`
+ * would take paste away from the chat box, the rename field and the QuickBar
+ * itself. Alt is also the only modifier that reaches Workbench from inside the
+ * terminal and the editor, so it is both the safe set and the useful one.
+ */
+function isBindableByFile(text: string): boolean {
+  return parseChord(text).alt;
+}
+
+/**
+ * Built-ins plus dynamic commands, with the registry's invariants preserved:
+ * ids stay unique and no chord is bound twice. Built-ins always win — a
+ * shortcut that asks for `Ctrl+S` keeps its QuickBar row and loses the chord,
+ * never the other way round.
+ */
+export function mergeCommands(
+  builtins: readonly Command[],
+  extra: readonly Command[],
+): Command[] {
+  const ids = new Set(builtins.map((command) => command.id));
+  const chords = new Set(builtins.flatMap((command) => (command.keys ?? []).map(chordId)));
+  const merged: Command[] = [...builtins];
+  for (const command of extra) {
+    if (ids.has(command.id)) continue;
+    ids.add(command.id);
+    const keys = (command.keys ?? []).filter((text) => {
+      if (!isBindableByFile(text)) return false;
+      const id = chordId(text);
+      if (chords.has(id)) return false;
+      chords.add(id);
+      return true;
+    });
+    merged.push({ ...command, keys: keys.length > 0 ? keys : undefined });
+  }
+  return merged;
+}
+
+/** Inserting is the only thing a shortcut may do — the surface it lands in
+ * gets focus so the user's next keystroke (Enter, or more typing) goes there. */
+function runShortcut(entry: ShortcutEntry): void {
+  focusPanel(entry.kind === "shell" ? "terminal" : "agent");
+  useStore.getState().runShortcut(entry);
+}
+
+/** The live registry: built-ins + one command per shortcuts.md entry.
+ * Memoized on the entries array (replaced only by a reload) — this runs on
+ * every keystroke in the app. */
+let merged: { entries: readonly ShortcutEntry[]; commands: Command[] } | null = null;
+
+export function allCommands(): Command[] {
+  const entries = useStore.getState().shortcuts;
+  if (merged === null || merged.entries !== entries) {
+    const extra = shortcutCommands(entries, runShortcut);
+    merged = { entries, commands: mergeCommands(BUILTIN_COMMANDS, extra) };
+  }
+  return merged.commands;
+}
+
 /** Commands applicable right now — what the QuickBar lists. */
 export function visibleCommands(): Command[] {
-  return COMMANDS.filter((command) => command.when?.() !== false);
+  return allCommands().filter((command) => command.when?.() !== false);
 }
 
 /**
@@ -205,7 +277,7 @@ export function visibleCommands(): Command[] {
  */
 export function installCommandKeys(): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
-    const command = resolveCommand(event, surfaceOf(event.target), COMMANDS);
+    const command = resolveCommand(event, surfaceOf(event.target), allCommands());
     if (command === null) return;
     event.preventDefault();
     event.stopPropagation();

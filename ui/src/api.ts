@@ -13,6 +13,7 @@ import type {
   OkResponse,
   RenameRequest,
   SessionInfo,
+  ShortcutsState,
   TranscriptResponse,
   TreeNode,
   UiState,
@@ -67,6 +68,8 @@ export const renameEntry = (body: RenameRequest): Promise<OkResponse> =>
 
 export const deleteEntry = (path: string): Promise<OkResponse> =>
   request(`/api/files/content?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+
+export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcuts");
 
 export const getSessions = (): Promise<FolderSessions[]> => request("/api/agents/sessions");
 

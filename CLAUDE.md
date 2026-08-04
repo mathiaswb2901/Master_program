@@ -64,5 +64,6 @@ ruling it out.
 
 ## Danger zones
 
-- Never write secrets or personal paths into tracked files (OSS repo).
+- Never write secrets or personal paths into tracked files (OSS repo). `.workbench/` is
+  the user's own data — `shortcuts.md` (format: `docs/shortcuts.md`) is never committed.
 - Office file operations must preserve fidelity — when in doubt, keep a `.bak` and verify round-trip.

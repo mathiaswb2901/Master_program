@@ -154,7 +154,9 @@ export function Chat({ sessionId }: { sessionId: string }) {
     return sessionId;
   });
 
-  const [draft, setDraft] = useState("");
+  // The draft lives in the store: prompt shortcuts write it from outside.
+  const draft = useStore((s) => s.chatDrafts[sessionId] ?? "");
+  const setDraft = (text: string): void => useStore.getState().setChatDraft(sessionId, text);
   const listRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -166,8 +168,7 @@ export function Chat({ sessionId }: { sessionId: string }) {
   const send = (): void => {
     const text = draft.trim();
     if (!text) return;
-    useStore.getState().sendChat(text);
-    setDraft("");
+    useStore.getState().sendChat(text); // clears the draft
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>): void => {

@@ -99,6 +99,17 @@
   flex: none;
 }
 
+/* Section header above a group of rows (§6.5). */
+.wb-qb-cat {
+  padding: var(--space-4) var(--space-6) var(--space-2);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
 .wb-qb-empty {
   padding: var(--space-6);
   font-size: var(--type-md-size);
