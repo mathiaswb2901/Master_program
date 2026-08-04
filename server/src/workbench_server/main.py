@@ -9,9 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
-from workbench_server.routers import events, files, health, terminal
+from workbench_server.routers import agents, events, files, health, terminal
+from workbench_server.services.agent_sessions import SessionManager
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.pty_manager import PtyManager
+from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
+from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
 
@@ -29,12 +32,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     workspace = Workspace(settings.resolved_workspace())
     event_bus = EventBus()
     watcher = Watcher(workspace.root, event_bus)
+    ui_state_store = UiStateStore()
+    session_manager = SessionManager(
+        workspace.root,
+        sdk_client_factory(ui_state_store),
+        settings.max_concurrent_sessions,
+    )
+    session_index = SessionIndex(settings.resolved_projects_dir())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("workbench.starting", workspace=str(workspace.root), port=settings.port)
         watcher.start()
         yield
+        await session_manager.close_all()
         await watcher.stop()
         pty_manager.shutdown()
         log.info("workbench.stopped")
@@ -44,6 +55,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.pty_manager = pty_manager
     app.state.workspace = workspace
     app.state.event_bus = event_bus
+    app.state.ui_state_store = ui_state_store
+    app.state.session_manager = session_manager
+    app.state.session_index = session_index
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -55,6 +69,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(terminal.router)
     app.include_router(files.router)
     app.include_router(events.router)
+    app.include_router(agents.router)
+    app.include_router(agents.ws_router)
     return app
 
 

@@ -27,6 +27,11 @@ class Settings(BaseSettings):
 
     # Agent sessions
     max_concurrent_sessions: int = 4
+    # Claude Code's per-project session storage; None = ~/.claude/projects
+    claude_projects_dir: Path | None = None
+
+    def resolved_projects_dir(self) -> Path:
+        return self.claude_projects_dir or (Path.home() / ".claude" / "projects")
 
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""
