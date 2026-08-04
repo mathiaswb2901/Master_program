@@ -40,11 +40,12 @@ One Python process, one webview window, one optional local Office engine.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
+| `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `services/workspace.py` | path jail, atomic writes, hashing, tree |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/event_bus.py` | in-process pub/sub |
@@ -53,6 +54,7 @@ One Python process, one webview window, one optional local Office engine.
 | `services/session_index.py` | per-folder history from Claude Code's storage |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
+| `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 
 ## Agent sessions
 
@@ -130,6 +132,19 @@ writes to disk and re-enters the normal watcher flow. `document.key` derives fro
 content hash so external changes (e.g. agent edits) force a reopen instead of serving
 a stale cached copy. Absent OnlyOffice, documents degrade to read-only preview +
 "Open in Word".
+
+## Shortcuts
+
+`<workspace>/.workbench/shortcuts.md` merged over `~/.workbench/shortcuts.md` (workspace
+wins per name). The workspace file rides the existing watcher — its `FileChangedEvent` on
+the bus is the reload trigger — while the global one, living outside the workspace, gets
+its own small `watchfiles` watch; a reload that changes the merged state publishes
+`ShortcutsChangedEvent` and the UI refetches. Entries extend the command registry
+(`ui/src/commands.ts`) dynamically, and built-ins win every id/chord collision. Parsing is
+total: a bad entry becomes a `problem` in the payload, never an exception. **Entries are
+inserted, never executed** — a shell body is typed into the active terminal with no
+trailing newline (and must be single-line, since a newline in a PTY is Enter), a prompt
+lands in the chat draft. Format spec: `docs/shortcuts.md`.
 
 ## Testing layers
 

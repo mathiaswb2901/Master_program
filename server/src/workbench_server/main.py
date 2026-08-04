@@ -12,13 +12,14 @@ from fastapi.staticfiles import StaticFiles
 
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
-from workbench_server.routers import agents, events, files, health, office, terminal
+from workbench_server.routers import agents, events, files, health, office, shortcuts, terminal
 from workbench_server.services.agent_sessions import SessionManager
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.office import OfficeService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.session_index import SessionIndex
+from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
 
@@ -36,6 +37,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     workspace = Workspace(settings.resolved_workspace())
     event_bus = EventBus()
     watcher = Watcher(workspace.root, event_bus)
+    # Rides the watcher's bus for the workspace file; watches the global one itself.
+    shortcuts_service = ShortcutsService(workspace.root, event_bus)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
     session_manager = SessionManager(
@@ -60,8 +63,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.info("workbench.starting", workspace=str(workspace.root), port=settings.port)
         app.state.http = httpx.AsyncClient(timeout=30)
         watcher.start()
+        shortcuts_service.start()
         yield
         await session_manager.close_all()
+        await shortcuts_service.stop()
         await watcher.stop()
         pty_manager.shutdown()
         await app.state.http.aclose()
@@ -76,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_manager = session_manager
     app.state.session_index = session_index
     app.state.office = office_service
+    app.state.shortcuts = shortcuts_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -90,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(agents.ws_router)
     app.include_router(office.router)
+    app.include_router(shortcuts.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

@@ -5,6 +5,8 @@ import { create } from "zustand";
 import * as api from "./api";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { isOfficePath, preloadDocsApi } from "./office";
+import { promptInsertText, shellInsertText } from "./shortcuts";
+import { terminalHandle } from "./terminalInput";
 import { THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
@@ -17,6 +19,8 @@ import type {
   SessionInfo,
   SessionState,
   SessionStatusEvent,
+  ShortcutEntry,
+  ShortcutProblem,
   TranscriptMessage,
   TreeNode,
   UiState,
@@ -140,6 +144,9 @@ interface WorkbenchStore {
   activeSessionId: string | null;
   transcriptView: { session: SessionInfo; messages: TranscriptMessage[] } | null;
   chats: Record<string, ChatState>;
+  /** Unsent message text per session — in the store because prompt shortcuts
+   * write it from outside the chat component. */
+  chatDrafts: Record<string, string>;
   /** Draft + settled state per plan_id (plan ids are unique across sessions). */
   plans: Record<string, PlanDraft>;
   /** Cost of the most recent finished turn, for the status bar. */
@@ -156,6 +163,9 @@ interface WorkbenchStore {
    * office open if that failed); when enabled, api.js is preloaded so the
    * first office tab doesn't pay the script-load latency. */
   officeStatus: OfficeStatus | null;
+  /** shortcuts.md entries (workspace merged over global) + what failed to parse. */
+  shortcuts: ShortcutEntry[];
+  shortcutProblems: ShortcutProblem[];
 
   init: () => void;
   setTheme: (theme: Theme) => void;
@@ -185,6 +195,12 @@ interface WorkbenchStore {
   syncFromDisk: (path: string) => Promise<void>;
   reloadFromDisk: (path: string) => Promise<void>;
   keepMine: (path: string) => Promise<void>;
+
+  refreshShortcuts: () => Promise<void>;
+  /** Insert a shortcut into its surface. Never executes: shell snippets are
+   * typed into the terminal without a newline, prompts land in the chat draft. */
+  runShortcut: (entry: ShortcutEntry) => void;
+  setChatDraft: (sessionId: string, text: string) => void;
 
   ensureOfficeStatus: () => Promise<void>;
   checkOfficeChange: (path: string, eventHash: string | null) => Promise<void>;
@@ -216,6 +232,20 @@ let treeRefreshTimer: number | undefined;
 
 const TOAST_AUTO_DISMISS_MS = 6000;
 let toastSeq = 0;
+
+/** Serialized problem list already toasted — see `refreshShortcuts`. */
+let lastShortcutProblems = "[]";
+
+/** Put the caret back in the chat box after a prompt shortcut fills it. One
+ * chat is mounted at a time (the active session), so the selector is exact. */
+function focusChatInput(): void {
+  window.setTimeout(() => {
+    const input = document.querySelector<HTMLTextAreaElement>(".wb-chat-input textarea");
+    if (input === null) return;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, 0);
+}
 
 function errorDetail(err: unknown): string {
   if (err instanceof api.ApiError) return err.detail;
@@ -275,6 +305,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     activeSessionId: null,
     transcriptView: null,
     chats: {},
+    chatDrafts: {},
     plans: {},
     lastCostUsd: null,
     quickBarOpen: false,
@@ -284,6 +315,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     toasts: [],
     pendingClosePath: null,
     officeStatus: null,
+    shortcuts: [],
+    shortcutProblems: [],
 
     init: () => {
       if (initialized) return;
@@ -293,11 +326,13 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           const event = data as WorkspaceEvent;
           if (event.type === "file_changed") get().handleFileChanged(event);
           else if (event.type === "session_status") get().handleSessionStatus(event);
+          else if (event.type === "shortcuts_changed") void get().refreshShortcuts();
         },
         // Re-sync on every (re)connect — covers events missed while offline.
         onOpen: () => {
           void get().refreshTree();
           void get().refreshSessions();
+          void get().refreshShortcuts();
         },
       });
       void get().ensureOfficeStatus();
@@ -664,6 +699,55 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }
     },
 
+    refreshShortcuts: async () => {
+      try {
+        const state = await api.getShortcuts();
+        set({ shortcuts: state.entries, shortcutProblems: state.problems });
+        // Toast once per distinct problem set: a reload that changes nothing
+        // (or fixes everything) must not re-nag on every watcher event.
+        const signature = JSON.stringify(state.problems);
+        if (signature === lastShortcutProblems) return;
+        lastShortcutProblems = signature;
+        const first = state.problems[0];
+        if (first === undefined) return;
+        const more = state.problems.length > 1 ? ` (+${state.problems.length - 1} more)` : "";
+        get().pushToast("warn", `${first.file}: ${first.message}${more}`);
+      } catch (err) {
+        console.error("shortcuts refresh failed", err);
+      }
+    },
+
+    runShortcut: (entry) => {
+      if (entry.kind === "shell") {
+        const id = get().activeTerminalId;
+        const handle = id === null ? null : terminalHandle(id);
+        if (handle === null) {
+          get().pushToast("warn", "No terminal open — Alt+T opens one, then try again.");
+          return;
+        }
+        // No trailing newline, ever: the user presses Enter (see shellInsertText).
+        handle.send(shellInsertText(entry.body));
+        // After the QuickBar unmounts, so the keyboard lands where the text did.
+        window.setTimeout(() => handle.focus(), 0);
+        return;
+      }
+      const sessionId = get().activeSessionId;
+      if (sessionId === null) {
+        get().pushToast("warn", "No agent session open — start one, then try again.");
+        return;
+      }
+      set((s) => ({
+        chatDrafts: {
+          ...s.chatDrafts,
+          [sessionId]: promptInsertText(s.chatDrafts[sessionId] ?? "", entry.body),
+        },
+      }));
+      focusChatInput();
+    },
+
+    setChatDraft: (sessionId, text) =>
+      set((s) => ({ chatDrafts: { ...s.chatDrafts, [sessionId]: text } })),
+
     ensureOfficeStatus: async () => {
       if (get().officeStatus !== null || officeStatusPending) return;
       officeStatusPending = true;
@@ -806,7 +890,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       if (!id) return;
       ensureAgentSocket(id).send({ type: "user_message", text });
       appendChat(id, { kind: "user", text });
-      set((s) => ({ sessionStates: { ...s.sessionStates, [id]: "working" } }));
+      set((s) => ({
+        sessionStates: { ...s.sessionStates, [id]: "working" },
+        chatDrafts: { ...s.chatDrafts, [id]: "" },
+      }));
     },
 
     decidePermission: (requestId, allow) => {

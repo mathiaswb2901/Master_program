@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import { visibleCommands } from "../commands";
 import { chordKeycaps } from "../keys";
@@ -34,6 +41,8 @@ interface Row {
   detail: string;
   /** Primary chord, rendered as keycaps on the right (DESIGN.md §6.5). */
   chord?: string;
+  /** Section this row belongs to; a header is drawn where it changes. */
+  category?: string;
   run: () => void;
 }
 
@@ -78,12 +87,19 @@ export function QuickBar() {
     rows = visibleCommands()
       .map((command) => ({ command, score: fuzzyScore(q, command.title) }))
       .filter((x) => x.score !== null)
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      // Categorized commands (shortcuts.md) sort after the built-ins, so their
+      // section header stays a header rather than appearing mid-list.
+      .sort(
+        (a, b) =>
+          (a.command.category === undefined ? 0 : 1) -
+            (b.command.category === undefined ? 0 : 1) || (b.score ?? 0) - (a.score ?? 0),
+      )
       .map(({ command }) => ({
         key: command.id,
         title: command.title,
         detail: command.detail?.() ?? "",
         chord: command.keys?.[0],
+        category: command.category,
         run: command.run,
       }));
   } else {
@@ -145,29 +161,33 @@ export function QuickBar() {
             </div>
           )}
           {rows.map((row, i) => (
-            <button
-              type="button"
-              key={row.key}
-              ref={i === selIdx ? selRef : undefined}
-              className={"wb-qb-row" + (i === selIdx ? " is-selected" : "")}
-              onClick={() => {
-                row.run();
-                close();
-              }}
-              onMouseMove={() => setSel(i)}
-            >
-              <span className="wb-qb-row-title u-truncate">{row.title}</span>
-              <span className="wb-qb-row-detail u-truncate">{row.detail}</span>
-              {row.chord !== undefined && (
-                <span className="wb-qb-row-keys">
-                  {chordKeycaps(row.chord).map((cap) => (
-                    <span key={cap} className="wb-keycap">
-                      {cap}
-                    </span>
-                  ))}
-                </span>
+            <Fragment key={row.key}>
+              {row.category !== undefined && row.category !== rows[i - 1]?.category && (
+                <div className="wb-qb-cat">{row.category}</div>
               )}
-            </button>
+              <button
+                type="button"
+                ref={i === selIdx ? selRef : undefined}
+                className={"wb-qb-row" + (i === selIdx ? " is-selected" : "")}
+                onClick={() => {
+                  row.run();
+                  close();
+                }}
+                onMouseMove={() => setSel(i)}
+              >
+                <span className="wb-qb-row-title u-truncate">{row.title}</span>
+                <span className="wb-qb-row-detail u-truncate">{row.detail}</span>
+                {row.chord !== undefined && (
+                  <span className="wb-qb-row-keys">
+                    {chordKeycaps(row.chord).map((cap) => (
+                      <span key={cap} className="wb-keycap">
+                        {cap}
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </button>
+            </Fragment>
           ))}
         </div>
         <div className="wb-qb-footer">

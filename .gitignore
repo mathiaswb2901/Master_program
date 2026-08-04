@@ -19,6 +19,8 @@ desktop/src-tauri/target/
 .env
 workbench.toml
 *.local.json
+# Per-user workspace data (shortcuts.md and anything else Workbench keeps here)
+.workbench/
 
 # OS noise
 Thumbs.db

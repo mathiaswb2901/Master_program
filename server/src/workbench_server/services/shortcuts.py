@@ -1,0 +1,432 @@
+"""shortcuts.md: parser (pure) + the service that loads, merges and watches it.
+
+The file is written by a human as a note and read by a forgiving parser: an H2
+heading names a shortcut, optional ``key: value`` lines configure it, and a
+fenced code block is its body. A malformed entry is skipped and reported in
+``ShortcutsState.problems`` — parsing never raises and never loses the rest of
+the file.
+
+Security (non-negotiable): nothing here executes anything. A ``shell`` entry is
+text the UI *types* into the active terminal without a trailing newline; a
+``prompt`` entry is text it puts in the chat draft. The user presses Enter. A
+shell body is therefore required to be a single line: a body carrying a newline
+would run its earlier lines the moment it was inserted.
+"""
+
+import asyncio
+import contextlib
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import structlog
+from watchfiles import awatch
+
+from workbench_server.models.files import FileChangedEvent
+from workbench_server.models.shortcuts import (
+    MAX_BODY_CHARS,
+    MAX_DETAIL_CHARS,
+    MAX_FILE_BYTES,
+    MAX_NAME_CHARS,
+    ShortcutEntry,
+    ShortcutKind,
+    ShortcutProblem,
+    ShortcutsChangedEvent,
+    ShortcutSource,
+    ShortcutsState,
+)
+from workbench_server.services.event_bus import EventBus
+
+log = structlog.get_logger()
+
+WORKSPACE_SHORTCUTS_PATH = ".workbench/shortcuts.md"
+WORKSPACE_LABEL = ".workbench/shortcuts.md"
+GLOBAL_LABEL = "~/.workbench/shortcuts.md"
+
+
+def global_shortcuts_path() -> Path:
+    """The user-global file. Not a setting: one well-known path, like the file itself."""
+    return Path.home() / ".workbench" / "shortcuts.md"
+
+
+# ---- chords ----------------------------------------------------------------
+
+_MODIFIERS = {"ctrl": "ctrl", "cmd": "ctrl", "meta": "ctrl", "alt": "alt", "shift": "shift"}
+
+
+@dataclass(frozen=True)
+class _Chord:
+    ctrl: bool
+    alt: bool
+    shift: bool
+    key: str
+
+    def canonical(self) -> str:
+        return f"{int(self.ctrl)}{int(self.alt)}{int(self.shift)}:{self.key}"
+
+
+def parse_chord(text: str) -> _Chord | None:
+    """Mirror of ``ui/src/keys.ts`` ``parseChord``. None = no real key in it."""
+    ctrl = alt = shift = False
+    key = ""
+    for raw in text.split("+"):
+        part = raw.strip().lower()
+        if part == "":
+            continue
+        modifier = _MODIFIERS.get(part)
+        if modifier == "ctrl":
+            ctrl = True
+        elif modifier == "alt":
+            alt = True
+        elif modifier == "shift":
+            shift = True
+        else:
+            key = part
+    return _Chord(ctrl, alt, shift, key) if key else None
+
+
+def _reserved() -> frozenset[str]:
+    """Chords the built-in registry owns (DESIGN.md §6.8).
+
+    Advisory duplication: ``ui/src/commands.ts`` is authoritative and drops a
+    colliding chord at merge time regardless. Listing them here is what turns a
+    collision into a *message the user sees* instead of a binding that silently
+    never fires.
+    """
+    chords = [
+        "Ctrl+P",
+        "Ctrl+K",
+        "Ctrl+Shift+P",
+        "Ctrl+S",
+        "Ctrl+PageDown",
+        "Alt+PageDown",
+        "Ctrl+PageUp",
+        "Alt+PageUp",
+        "Alt+W",
+        "Ctrl+F4",
+        "Alt+T",
+        *[f"Ctrl+{n}" for n in range(1, 5)],
+        *[f"Alt+{n}" for n in range(1, 10)],
+    ]
+    return frozenset(chord.canonical() for text in chords if (chord := parse_chord(text)))
+
+
+RESERVED_CHORDS = _reserved()
+
+
+# ---- parser ----------------------------------------------------------------
+
+_HEADING_RE = re.compile(r"^##\s+(?P<name>\S.*?)\s*$")
+_META_RE = re.compile(r"^(?:[-*]\s+)?(?P<key>[A-Za-z][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*)$")
+_FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})\s*(?P<info>\S*)")
+
+_META_KEYS = frozenset({"type", "keys", "detail"})
+_KINDS: frozenset[str] = frozenset({"shell", "prompt"})
+
+
+@dataclass
+class _Raw:
+    """One H2 block, before validation."""
+
+    name: str
+    meta: dict[str, str] = field(default_factory=dict)
+    body: list[str] | None = None  # None = the block had no fenced block at all
+    info: str = ""
+    closed: bool = False
+
+
+@dataclass
+class ParsedFile:
+    """What one shortcuts file contributed."""
+
+    label: str
+    entries: list[ShortcutEntry] = field(default_factory=list)
+    problems: list[ShortcutProblem] = field(default_factory=list)
+
+
+def _split_blocks(text: str) -> list[_Raw]:
+    """Cut the file into H2 blocks. Deliberately dumb: never raises."""
+    blocks: list[_Raw] = []
+    current: _Raw | None = None
+    fence_char = ""
+    fence_len = 0
+    for line in text.splitlines():
+        if fence_len:
+            stripped = line.strip()
+            if stripped and set(stripped) == {fence_char} and len(stripped) >= fence_len:
+                fence_len = 0
+                if current is not None:
+                    current.closed = True
+                continue
+            if current is not None and current.body is not None:
+                current.body.append(line)
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading is not None:
+            current = _Raw(name=heading.group("name"))
+            blocks.append(current)
+            continue
+        if current is None or current.body is not None:
+            continue  # preamble, or prose after the body — both ignored
+        fence = _FENCE_RE.match(line)
+        if fence is not None:
+            marker = fence.group("fence")
+            fence_char, fence_len = marker[0], len(marker)
+            current.info = fence.group("info").lower()
+            current.body = []
+            continue
+        meta = _META_RE.match(line.strip())
+        if meta is not None:
+            key = meta.group("key").lower()
+            if key in _META_KEYS and key not in current.meta:
+                current.meta[key] = meta.group("value").strip()
+    return blocks
+
+
+def _resolve_kind(raw: _Raw) -> str:
+    """Explicit ``type:`` wins; a ```prompt fence selects it; otherwise shell."""
+    declared = raw.meta.get("type")
+    if declared is not None:
+        return declared.lower()
+    return "prompt" if raw.info == "prompt" else "shell"
+
+
+def _resolve_chord(
+    raw_keys: str, name: str, label: str, taken: set[str], problems: list[ShortcutProblem]
+) -> str | None:
+    """Validated chord text, or None with a problem appended. The entry survives
+    a bad chord — it is still reachable from the QuickBar."""
+
+    def reject(reason: str) -> None:
+        problems.append(ShortcutProblem(file=label, message=f"{name}: {reason}"))
+
+    chord = parse_chord(raw_keys)
+    if chord is None:
+        reject(f"unusable chord {raw_keys!r} — binding ignored")
+        return None
+    if not (chord.ctrl or chord.alt):
+        # keys.ts never intercepts a plain key: typing must always reach the surface.
+        reject(f"chord {raw_keys!r} needs Ctrl or Alt to reach Workbench — binding ignored")
+        return None
+    canonical = chord.canonical()
+    if canonical in RESERVED_CHORDS:
+        reject(f"chord {raw_keys!r} is a built-in shortcut — binding ignored")
+        return None
+    if canonical in taken:
+        reject(f"chord {raw_keys!r} is already bound — binding ignored")
+        return None
+    taken.add(canonical)
+    return raw_keys
+
+
+def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile:
+    """Parse one shortcuts file. Pure, total: bad entries become problems."""
+    parsed = ParsedFile(label=label)
+    seen: set[str] = set()
+    taken_chords: set[str] = set()
+
+    def reject(name: str, reason: str) -> None:
+        parsed.problems.append(ShortcutProblem(file=label, message=f"{name}: {reason}"))
+
+    for raw in _split_blocks(text):
+        name = raw.name.strip()
+        if len(name) > MAX_NAME_CHARS:
+            reject(name[:MAX_NAME_CHARS], f"name longer than {MAX_NAME_CHARS} characters — skipped")
+            continue
+        if name.casefold() in seen:
+            reject(name, "duplicate name in this file — later entry skipped")
+            continue
+        seen.add(name.casefold())
+
+        if raw.body is None:
+            reject(name, "no fenced code block — the block is the shortcut body")
+            continue
+        if not raw.closed:
+            reject(name, "unterminated code fence — skipped")
+            continue
+        body = "\n".join(raw.body).strip("\n").rstrip()
+        if body == "":
+            reject(name, "empty body — skipped")
+            continue
+        if len(body) > MAX_BODY_CHARS:
+            reject(name, f"body longer than {MAX_BODY_CHARS} characters — skipped")
+            continue
+
+        declared = _resolve_kind(raw)
+        if declared not in _KINDS:
+            reject(name, f"unknown type {declared!r} (expected shell or prompt) — skipped")
+            continue
+        kind: ShortcutKind = "prompt" if declared == "prompt" else "shell"
+        if kind == "shell" and "\n" in body:
+            # Newlines are Enter presses in a live PTY: an inserted multi-line
+            # snippet would run its earlier lines. Never allowed.
+            reject(name, "shell body must be a single line — skipped")
+            continue
+
+        raw_keys = raw.meta.get("keys", "")
+        keys = (
+            _resolve_chord(raw_keys, name, label, taken_chords, parsed.problems)
+            if raw_keys
+            else None
+        )
+        detail = raw.meta.get("detail") or None
+        parsed.entries.append(
+            ShortcutEntry(
+                name=name,
+                kind=kind,
+                body=body,
+                keys=keys,
+                detail=detail[:MAX_DETAIL_CHARS] if detail is not None else None,
+                source=source,
+            )
+        )
+    return parsed
+
+
+def merge_shortcuts(primary: ParsedFile, secondary: ParsedFile) -> ShortcutsState:
+    """Merge two parsed files. ``primary`` (the workspace) wins: a name it
+    already defines shadows the other file's entry silently — that is the
+    documented rule, not an error — and a chord it already took is dropped from
+    the secondary entry with a problem."""
+    entries: list[ShortcutEntry] = []
+    problems: list[ShortcutProblem] = [*primary.problems, *secondary.problems]
+    names: set[str] = set()
+    chords: set[str] = set()
+    for parsed in (primary, secondary):
+        for entry in parsed.entries:
+            if entry.name.casefold() in names:
+                continue
+            names.add(entry.name.casefold())
+            chord = parse_chord(entry.keys) if entry.keys is not None else None
+            if chord is not None:
+                if chord.canonical() in chords:
+                    problems.append(
+                        ShortcutProblem(
+                            file=parsed.label,
+                            message=f"{entry.name}: chord {entry.keys!r} is already bound "
+                            "— binding ignored",
+                        )
+                    )
+                    entry = entry.model_copy(update={"keys": None})
+                else:
+                    chords.add(chord.canonical())
+            entries.append(entry)
+    return ShortcutsState(entries=entries, problems=problems)
+
+
+# ---- service ---------------------------------------------------------------
+
+
+class ShortcutsService:
+    """Loads both files, keeps the merged state, and reloads it live.
+
+    The workspace file rides the existing watcher (its `FileChangedEvent` on the
+    bus is the trigger). The global file lives outside the workspace, so it gets
+    its own small watch on the same `watchfiles` mechanism.
+    """
+
+    def __init__(
+        self, workspace_root: Path, bus: EventBus, global_path: Path | None = None
+    ) -> None:
+        self._workspace_file = workspace_root.resolve() / Path(WORKSPACE_SHORTCUTS_PATH)
+        self._global_file = global_path or global_shortcuts_path()
+        self._bus = bus
+        self._state = ShortcutsState(entries=[], problems=[])
+        self._stop = asyncio.Event()
+        self._tasks: list[asyncio.Task[None]] = []
+
+    def state(self) -> ShortcutsState:
+        return self._state
+
+    def reload(self) -> bool:
+        """Re-read both files. Returns True when the merged state changed."""
+        state = merge_shortcuts(
+            self._read(self._workspace_file, "workspace", WORKSPACE_LABEL),
+            self._read(self._global_file, "global", GLOBAL_LABEL),
+        )
+        changed = state != self._state
+        self._state = state
+        return changed
+
+    def start(self) -> None:
+        self.reload()
+        log.info(
+            "shortcuts.loaded",
+            entries=len(self._state.entries),
+            problems=len(self._state.problems),
+        )
+        self._tasks = [
+            asyncio.create_task(self._watch_workspace(), name="shortcuts-workspace"),
+            asyncio.create_task(self._watch_global(), name="shortcuts-global"),
+        ]
+
+    async def stop(self) -> None:
+        self._stop.set()
+        for task in self._tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._tasks = []
+
+    def _read(self, path: Path, source: ShortcutSource, label: str) -> ParsedFile:
+        try:
+            if path.stat().st_size > MAX_FILE_BYTES:
+                return ParsedFile(
+                    label=label,
+                    problems=[
+                        ShortcutProblem(
+                            file=label, message=f"larger than {MAX_FILE_BYTES // 1024} KB — ignored"
+                        )
+                    ],
+                )
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return ParsedFile(label=label)  # both files are optional
+        except OSError as err:
+            return ParsedFile(
+                label=label,
+                problems=[
+                    ShortcutProblem(file=label, message=f"unreadable: {err.strerror or err}")
+                ],
+            )
+        return parse_shortcuts(text, source, label)
+
+    def _reload_and_publish(self) -> None:
+        if not self.reload():
+            return
+        self._bus.publish(
+            ShortcutsChangedEvent(
+                entry_count=len(self._state.entries),
+                problem_count=len(self._state.problems),
+            )
+        )
+        log.info(
+            "shortcuts.reloaded",
+            entries=len(self._state.entries),
+            problems=len(self._state.problems),
+        )
+
+    async def _watch_workspace(self) -> None:
+        """The workspace watcher already reports this file — subscribe, don't re-watch."""
+        queue = self._bus.subscribe()
+        try:
+            while True:
+                event = await queue.get()
+                if isinstance(event, FileChangedEvent) and event.path == WORKSPACE_SHORTCUTS_PATH:
+                    self._reload_and_publish()
+        finally:
+            self._bus.unsubscribe(queue)
+
+    async def _watch_global(self) -> None:
+        directory = self._global_file.parent
+        if not directory.is_dir():
+            # Nothing to watch yet; a global file created later is picked up on
+            # the next server start. Keeping a poll alive for it is not worth it.
+            log.debug("shortcuts.global_absent", path=str(self._global_file))
+            return
+        name = self._global_file.name
+        async for changes in awatch(
+            directory, stop_event=self._stop, debounce=200, step=50, recursive=False
+        ):
+            if any(Path(raw).name == name for _, raw in changes):
+                self._reload_and_publish()

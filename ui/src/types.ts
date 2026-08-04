@@ -57,7 +57,42 @@ export interface FileChangedEvent {
 }
 
 /** Everything that arrives on /ws/events (see also SessionStatusEvent below). */
-export type WorkspaceEvent = FileChangedEvent | SessionStatusEvent;
+export type WorkspaceEvent = FileChangedEvent | SessionStatusEvent | ShortcutsChangedEvent;
+
+// ---- shortcuts.py -----------------------------------------------------------
+// One markdown file per scope (workspace + user-global), merged. An entry is
+// INSERTED into a surface, never executed — there is no "run" field by design.
+
+export type ShortcutKind = "shell" | "prompt";
+export type ShortcutSource = "workspace" | "global";
+
+export interface ShortcutEntry {
+  name: string;
+  kind: ShortcutKind;
+  body: string;
+  /** Single chord ("Alt+G"); null = reachable from the QuickBar only. */
+  keys: string | null;
+  detail: string | null;
+  source: ShortcutSource;
+}
+
+export interface ShortcutProblem {
+  /** Display label of the file it came from. */
+  file: string;
+  message: string;
+}
+
+export interface ShortcutsState {
+  entries: ShortcutEntry[];
+  problems: ShortcutProblem[];
+}
+
+/** Broadcast on /ws/events when a shortcuts file loads differently than before. */
+export interface ShortcutsChangedEvent {
+  type: "shortcuts_changed";
+  entry_count: number;
+  problem_count: number;
+}
 
 // ---- office.py --------------------------------------------------------------
 // Serialized with Pydantic aliases — camelCase on the wire where aliased.
