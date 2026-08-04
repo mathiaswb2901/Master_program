@@ -24,6 +24,28 @@ logged under **Change requests** and pulled into milestones.
 - 2026-08-04 — Auth: machine's existing Claude Code subscription login; `ANTHROPIC_API_KEY` as
   documented alternative.
 
+## Open-source product bar (standing directive, 2026-08-04)
+
+Build for real external users, not just the author. Consequences, tracked as work:
+
+1. **Local-API security hardening** (before first public release): the backend listens on
+   127.0.0.1, but any local process or malicious web page can reach localhost — add a
+   per-launch auth token required on every REST/WS call (injected into the served UI),
+   plus strict Origin checks on WebSockets (DNS-rebinding defense).
+2. **Cross-platform**: PTY layer is behind `PtyManager` — add a ptyprocess-based POSIX
+   implementation and a CI matrix (windows/ubuntu/macos) when M1 stabilizes. No
+   Windows-only assumptions outside `pty_manager.py`.
+3. **First-run experience**: workspace picker on first launch, graceful "Claude login not
+   found" guidance (`claude setup-token` / API key), OnlyOffice detected-or-degraded.
+4. **Contributor experience**: CONTRIBUTING.md, ARCHITECTURE.md, issue/PR templates,
+   good-first-issue labels; keep module boundaries documented.
+5. **Release engineering**: versioned GitHub releases with Tauri installers, changelog,
+   signed artifacts if feasible.
+6. **Privacy stance**: zero telemetry, stated in README. Files never leave the machine
+   except through the user's own Anthropic account.
+7. **Naming**: "workbench" is a placeholder — pick a unique, searchable name (check
+   GitHub/PyPI/npm availability) before publishing.
+
 ## Change requests
 
 _(none open — add new user instructions here with date + priority)_
