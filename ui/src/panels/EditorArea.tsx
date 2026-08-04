@@ -11,6 +11,8 @@ import {
 } from "../monaco";
 import { useStore, type OpenFile } from "../store";
 
+import { OfficePanel } from "./OfficePanel";
+
 function EditorTab({ file, active }: { file: OpenFile; active: boolean }) {
   return (
     <div
@@ -102,9 +104,13 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
           <EditorTab key={f.path} file={f} active={f.path === activePath} />
         ))}
       </div>
-      {active?.conflict != null && <ConflictBar file={active} />}
+      {active?.kind === "text" && active.conflict !== null && <ConflictBar file={active} />}
       <div className="wb-editor-body">
-        {active === null ? null : active.loadError !== null ? (
+        {active === null ? null : active.kind === "office" ? (
+          // Keyed by path so switching office tabs tears down and recreates
+          // the editor instance instead of reusing another document's iframe.
+          <OfficePanel key={active.path} file={active} />
+        ) : active.loadError !== null ? (
           <div className="wb-editor-message">Cannot open {active.name}: {active.loadError}</div>
         ) : (
           <Editor

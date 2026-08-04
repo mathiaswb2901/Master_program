@@ -1,0 +1,163 @@
+/* Office document panel (DESIGN.md §2.8 paper doctrine, §6.1 document panels).
+   Tokens only — never raw hex. The OnlyOffice iframe stays light ("paper");
+   our chrome around it is the surround + rim, and every state card renders on
+   paper colors so nothing dark-mode flashes against the white canvas. */
+
+.wb-office {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-paper-surround);
+}
+
+.wb-office-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Host for the imperative DocsAPI mount node (replaced by the editor iframe). */
+.wb-office-frame {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border-paper-rim);
+}
+
+.wb-office-frame iframe {
+  display: block;
+}
+
+/* ---- State cards: degraded mode, loading, errors — on paper --------------- */
+
+.wb-office-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+  background: var(--surface-paper-surround);
+}
+
+/* Degraded mode renders without an editor body — same card, static flow. */
+.wb-office > .wb-office-state {
+  position: static;
+  flex: 1;
+}
+
+.wb-office-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: 340px;
+  min-width: 0;
+  padding: var(--space-8);
+  text-align: center;
+  background: var(--surface-paper);
+  color: var(--text-on-paper);
+  border: 1px solid var(--border-paper-rim);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+}
+
+.wb-office-card-title {
+  font-size: var(--type-chat-size);
+  line-height: var(--type-chat-line);
+  font-weight: var(--weight-semibold);
+}
+
+.wb-office-card-file {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+}
+
+.wb-office-card-hint {
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  opacity: 0.7; /* tertiary-on-paper; no dedicated token, keep contrast ≥ 4.5:1 */
+}
+
+/* Buttons on paper: --text-primary/--surface-hover invert badly in dark mode,
+   so these use the paper-safe pair (text-on-paper + paper rim). */
+.wb-office-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--border-paper-rim);
+  border-radius: var(--radius-sm);
+  background: var(--surface-paper);
+  color: var(--text-on-paper);
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  transition: border-color var(--duration-1) var(--ease-standard);
+}
+
+.wb-office-btn:hover {
+  border-color: var(--text-on-paper);
+}
+
+/* ---- Non-modal reopen bar (same pattern as the editor conflict bar) ------- */
+
+.wb-office-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: none;
+  padding: var(--space-3) var(--space-5);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--type-sm-size);
+  color: var(--text-primary);
+}
+
+.wb-office-bar-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Subtle forcesave acknowledgment (badge anatomy per §6.4) ------------- */
+
+.wb-office-saved {
+  position: absolute;
+  right: var(--space-5);
+  bottom: var(--space-5);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 20px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--surface-overlay);
+  color: var(--text-secondary);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  box-shadow: var(--shadow-1);
+  animation: wb-office-saved-in var(--duration-2) var(--ease-standard);
+}
+
+.wb-office-saved-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--success);
+  flex: none;
+}
+
+@keyframes wb-office-saved-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

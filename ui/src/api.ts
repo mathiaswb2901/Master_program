@@ -1,9 +1,13 @@
 /** Typed REST client for the workbench server (proxied through Vite at /api). */
 
 import type {
+  CallbackResponse,
   CreateSessionRequest,
+  DocEditorConfig,
   FileContent,
   FolderSessions,
+  OfficeLastSave,
+  OfficeStatus,
   SessionInfo,
   TranscriptResponse,
   TreeNode,
@@ -63,3 +67,21 @@ export const getTranscript = (folder: string, sessionId: string): Promise<Transc
 
 export const putUiState = (body: UiState): Promise<unknown> =>
   request("/api/agents/ui-state", jsonInit("PUT", body));
+
+export const getOfficeStatus = (): Promise<OfficeStatus> => request("/api/office/status");
+
+export const getOfficeConfig = (path: string): Promise<DocEditorConfig> =>
+  request(`/api/office/config?path=${encodeURIComponent(path)}`);
+
+export const postOfficeForcesave = (path: string): Promise<CallbackResponse> =>
+  request("/api/office/forcesave", jsonInit("POST", { path }));
+
+/** Defensive: the endpoint may not exist yet — 404 means "never saved" (null). */
+export const getOfficeLastSave = async (path: string): Promise<OfficeLastSave> => {
+  try {
+    return await request(`/api/office/last-save?path=${encodeURIComponent(path)}`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return { hash: null };
+    throw err;
+  }
+};
