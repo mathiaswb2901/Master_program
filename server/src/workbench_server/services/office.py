@@ -66,6 +66,9 @@ class OfficeService:
         self._backup = backup_originals
         # document.key -> workspace path, for the forcesave command service call
         self._keys: dict[str, str] = {}
+        # path -> hash of the last bytes a Document Server save wrote; lets the
+        # UI distinguish the editor's own saves from external (agent/git) edits
+        self._last_saves: dict[str, str] = {}
 
     @property
     def enabled(self) -> bool:
@@ -172,7 +175,11 @@ class OfficeService:
         response = await http.get(url)
         response.raise_for_status()
         self._workspace.write_bytes(path, response.content, backup=self._backup)
+        self._last_saves[path] = content_hash(response.content)
         log.info("office.saved", path=path, status=status, size=len(response.content))
+
+    def last_save_hash(self, path: str) -> str | None:
+        return self._last_saves.get(path)
 
     # ---- forcesave ----------------------------------------------------------
 

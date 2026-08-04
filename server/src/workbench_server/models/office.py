@@ -75,5 +75,9 @@ class ForcesaveRequest(BaseModel):
     path: str
 
 
+class LastSaveResponse(BaseModel):
+    hash: str | None
+
+
 class CallbackResponse(BaseModel):
     error: int = 0
