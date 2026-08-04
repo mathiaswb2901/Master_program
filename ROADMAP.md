@@ -54,10 +54,13 @@ the moat.
   window hosting; COM bridge so agents read/write the *live* open document; OnlyOffice
   demoted to preview/diff/fallback. Requires the **Tauri shell** (a browser tab cannot
   host native windows) — pulled forward from packaging into M4 core.
-- **Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
+- ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
   Pydantic `PlanArtifact` → native clickable plan cards in chat (options, steps, file
   refs); decisions return to the agent as typed JSON; pending-plan replay on reconnect
-  (fix the identical PermissionRequest replay gap while there).
+  (fix the identical PermissionRequest replay gap while there).~~ **done** — v1 renders
+  live cards only (a plan is not re-rendered when resuming from a disk transcript) and
+  lives in chat rather than its own dockview panel; the plan-visual authoring skill
+  ships separately.
 - **Flow layer**: typed command registry replacing the 3-item QuickBar (panel focus
   Ctrl+1..4, tab cycle/close, Alt+1..9 session jump), `SessionStatusEvent` fan-out on
   `/ws/events`, status bar with live session chips + `document.title` attention badge,

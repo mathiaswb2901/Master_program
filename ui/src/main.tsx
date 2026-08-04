@@ -12,6 +12,7 @@ import "./styles/editor.css";
 import "./styles/office.css";
 import "./styles/terminal.css";
 import "./styles/agent.css";
+import "./styles/plan.css";
 import "./styles/quickbar.css";
 import "./styles/overlays.css";
 

@@ -11,6 +11,9 @@ import type {
   FileChangedEvent,
   FolderSessions,
   OfficeStatus,
+  PlanAnnotation,
+  PlanArtifact,
+  PlanVerdict,
   SessionInfo,
   SessionState,
   TranscriptMessage,
@@ -59,11 +62,30 @@ export type ChatItem =
       description: string;
       decision: "allow" | "deny" | null;
     }
+  | { kind: "plan"; plan: PlanArtifact }
   | { kind: "error"; message: string };
 
 export interface ChatState {
   items: ChatItem[];
 }
+
+/** What the user has assembled for one plan card. `verdict` is null until they
+ * answer; once set the card renders read-only with their choices marked. */
+export interface PlanDraft {
+  /** node_id -> option_id */
+  choices: Record<string, string>;
+  /** node_id -> free text (question answers and per-node notes alike) */
+  annotations: Record<string, string>;
+  comment: string;
+  verdict: PlanVerdict | null;
+}
+
+export const emptyPlanDraft = (): PlanDraft => ({
+  choices: {},
+  annotations: {},
+  comment: "",
+  verdict: null,
+});
 
 /** "Finished/failed since last viewed" markers layered over the server state. */
 export interface SessionFlags {
@@ -82,6 +104,8 @@ interface WorkbenchStore {
   activeSessionId: string | null;
   transcriptView: { session: SessionInfo; messages: TranscriptMessage[] } | null;
   chats: Record<string, ChatState>;
+  /** Draft + settled state per plan_id (plan ids are unique across sessions). */
+  plans: Record<string, PlanDraft>;
   quickBarOpen: boolean;
   terminalGeneration: number;
   toasts: Toast[];
@@ -129,6 +153,10 @@ interface WorkbenchStore {
   resumeSession: () => Promise<void>;
   sendChat: (text: string) => void;
   decidePermission: (requestId: string, allow: boolean) => void;
+  setPlanChoice: (planId: string, nodeId: string, optionId: string) => void;
+  setPlanAnnotation: (planId: string, nodeId: string, text: string) => void;
+  setPlanComment: (planId: string, text: string) => void;
+  decidePlan: (planId: string, verdict: Exclude<PlanVerdict, "no_decision">) => void;
   interrupt: () => void;
   handleAgentMessage: (sessionId: string, message: AgentServerMessage) => void;
 }
@@ -184,6 +212,12 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     });
   };
 
+  const patchPlan = (planId: string, patch: Partial<PlanDraft>): void => {
+    set((s) => ({
+      plans: { ...s.plans, [planId]: { ...(s.plans[planId] ?? emptyPlanDraft()), ...patch } },
+    }));
+  };
+
   return {
     theme: initialTheme,
     tree: null,
@@ -195,6 +229,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     activeSessionId: null,
     transcriptView: null,
     chats: {},
+    plans: {},
     quickBarOpen: false,
     terminalGeneration: 0,
     toasts: [],
@@ -713,6 +748,45 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       });
     },
 
+    setPlanChoice: (planId, nodeId, optionId) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return; // settled cards are read-only
+      patchPlan(planId, { choices: { ...draft.choices, [nodeId]: optionId } });
+    },
+
+    setPlanAnnotation: (planId, nodeId, text) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return;
+      patchPlan(planId, { annotations: { ...draft.annotations, [nodeId]: text } });
+    },
+
+    setPlanComment: (planId, text) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return;
+      patchPlan(planId, { comment: text });
+    },
+
+    decidePlan: (planId, verdict) => {
+      const id = get().activeSessionId;
+      if (!id) return;
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return; // one answer per plan
+      const annotations: PlanAnnotation[] = Object.entries(draft.annotations)
+        .map(([nodeId, text]) => ({ node_id: nodeId, text: text.trim() }))
+        .filter((a) => a.text !== "");
+      ensureAgentSocket(id).send({
+        type: "plan_decision",
+        response: {
+          plan_id: planId,
+          verdict,
+          choices: draft.choices,
+          annotations,
+          comment: draft.comment.trim(),
+        },
+      });
+      patchPlan(planId, { verdict });
+    },
+
     interrupt: () => {
       const id = get().activeSessionId;
       if (!id) return;
@@ -750,12 +824,47 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           });
           break;
         case "permission_request":
-          appendChat(sessionId, {
-            kind: "permission",
-            requestId: message.request_id,
-            tool: message.tool,
-            description: message.description,
-            decision: null,
+          // The server replays still-pending prompts on (re)connect, so the
+          // same request_id can arrive twice — render it once.
+          set((s) => {
+            const chat = s.chats[sessionId] ?? { items: [] };
+            const seen = chat.items.some(
+              (item) => item.kind === "permission" && item.requestId === message.request_id,
+            );
+            if (seen) return {};
+            const item: ChatItem = {
+              kind: "permission",
+              requestId: message.request_id,
+              tool: message.tool,
+              description: message.description,
+              decision: null,
+            };
+            return { chats: { ...s.chats, [sessionId]: { items: [...chat.items, item] } } };
+          });
+          break;
+        case "plan_presented":
+          set((s) => {
+            const chat = s.chats[sessionId] ?? { items: [] };
+            const seen = chat.items.some(
+              (item) => item.kind === "plan" && item.plan.plan_id === message.plan.plan_id,
+            );
+            if (seen) return {}; // replay of a card already on screen
+            const draft = emptyPlanDraft();
+            // Start on the agent's recommendation: Approve then means "yes, as
+            // proposed". The user can still switch before deciding.
+            for (const node of message.plan.nodes) {
+              if (node.kind !== "option_group") continue;
+              const recommended = node.options.find((option) => option.recommended);
+              if (recommended) draft.choices[node.node_id] = recommended.option_id;
+            }
+            const item: ChatItem = { kind: "plan", plan: message.plan };
+            return {
+              chats: { ...s.chats, [sessionId]: { items: [...chat.items, item] } },
+              plans:
+                s.plans[message.plan.plan_id] !== undefined
+                  ? s.plans
+                  : { ...s.plans, [message.plan.plan_id]: draft },
+            };
           });
           break;
         case "status":

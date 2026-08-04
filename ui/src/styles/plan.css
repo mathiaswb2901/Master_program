@@ -1,0 +1,286 @@
+/* Plan cards in chat (M4 visual plan artifacts).
+   Structure comes from hairlines and surface steps, never shadows (DESIGN.md §4);
+   --accent appears on exactly two things: the recommended option and Approve. */
+
+.wb-plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+
+.wb-plan-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
+.wb-plan-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-plan-verdict {
+  flex: none;
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.wb-plan-summary {
+  margin: 0;
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-secondary);
+}
+
+.wb-plan-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.wb-plan-node {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ---- Option groups -------------------------------------------------------- */
+
+.wb-plan-group {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0; /* fieldsets otherwise refuse to shrink inside flex columns */
+}
+
+.wb-plan-prompt {
+  padding: 0 0 var(--space-3);
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-plan-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wb-plan-option {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-1) var(--ease-standard),
+    border-color var(--duration-1) var(--ease-standard);
+}
+
+.wb-plan-option:hover {
+  border-color: var(--border-strong);
+}
+
+.wb-plan-option.is-selected {
+  background: var(--surface-selected);
+  border-color: var(--accent);
+}
+
+/* The radio itself is screen-reader-only; the card carries the focus ring. */
+.wb-plan-option:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.wb-plan-option:has(input:disabled) {
+  cursor: default;
+}
+
+.wb-plan-option-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.wb-plan-option-label {
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+/* The one accented mark in the card body (DESIGN.md principle 3). */
+.wb-plan-rec {
+  flex: none;
+  padding: 0 var(--space-4);
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-full);
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.wb-plan-chosen {
+  flex: none;
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.wb-plan-tradeoffs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-plan-tradeoffs li {
+  display: flex;
+  gap: var(--space-4);
+}
+
+/* +/− carries the meaning, so pros and cons are legible without color (§7). */
+.wb-plan-sign {
+  flex: none;
+  width: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+/* ---- Steps ---------------------------------------------------------------- */
+
+.wb-plan-steps {
+  margin: 0;
+  padding-left: var(--space-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-secondary);
+}
+
+.wb-plan-steps li::marker {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.wb-plan-step-text {
+  color: var(--text-primary);
+}
+
+.wb-plan-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.wb-plan-file {
+  height: 22px;
+  padding: 0 var(--space-4);
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition:
+    color var(--duration-1) var(--ease-standard),
+    border-color var(--duration-1) var(--ease-standard);
+}
+
+.wb-plan-file:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+/* ---- Questions, notes, footer --------------------------------------------- */
+
+.wb-plan-question {
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-plan-note,
+.wb-plan-footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-plan-note textarea,
+.wb-plan-footer textarea {
+  width: 100%;
+  resize: vertical;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-primary);
+}
+
+.wb-plan-note-read {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wb-plan-footer {
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-plan-actions {
+  display: flex;
+  gap: var(--space-4);
+}

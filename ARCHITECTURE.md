@@ -40,7 +40,7 @@ One Python process, one webview window, one optional local Office engine.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents |
+| `models/` | REST/WS schemas: files, terminal, agents, plans |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out |
@@ -49,7 +49,7 @@ One Python process, one webview window, one optional local Office engine.
 | `services/watcher.py` | watchfiles -> bus |
 | `services/event_bus.py` | in-process pub/sub |
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
-| `services/agent_sessions.py` | session state machines, streaming, permissions |
+| `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 
@@ -63,6 +63,18 @@ everything else (Bash, web) raises a `PermissionRequest` event and blocks on an
 asyncio future until the UI answers (10-minute timeout -> deny). The context-bridge
 MCP tool `get_workspace_state` lets agents see the active/open/dirty files so they
 avoid editing buffers with unsaved user changes.
+
+**Visual plan artifacts:** `present_plan` (the second context-bridge tool) takes a
+`PlanArtifact` — a closed, size-capped discriminated union of option groups, step
+lists, questions and markdown (`models/plans.py`), never free-form markup — which
+the UI renders as a native card; the user's choices, annotations and verdict come
+back to the agent as a typed `PlanResponse` through the same future-and-timeout
+discipline as permissions. A timeout or an interrupt resolves to verdict
+`no_decision`, never an implied approval. Both pending permissions and a pending
+plan are replayed to any client that subscribes after they were emitted, so a
+reconnect never leaves an unanswerable `needs_attention` session. The factory seam
+(`ClientFactory`) passes the session itself as a `SessionBridge` — the bundle of
+callbacks that must reach the human.
 
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage
