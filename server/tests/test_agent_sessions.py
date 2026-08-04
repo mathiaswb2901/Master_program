@@ -17,6 +17,7 @@ from workbench_server.main import create_app
 from workbench_server.models.agents import (
     PermissionRequest,
     TextDelta,
+    ToolSettled,
     ToolUseNote,
     TurnDone,
 )
@@ -51,12 +52,28 @@ class StreamEvent:
 
 
 class ToolUseBlock:
-    def __init__(self, name: str, tool_input: dict[str, Any]) -> None:
+    def __init__(self, name: str, tool_input: dict[str, Any], block_id: str = "") -> None:
         self.name = name
         self.input = tool_input
+        if block_id:
+            self.id = block_id
+
+
+class ToolResultBlock:
+    def __init__(self, tool_use_id: str, content: Any, is_error: bool = False) -> None:
+        self.tool_use_id = tool_use_id
+        self.content = content
+        self.is_error = is_error
 
 
 class AssistantMessage:
+    def __init__(self, content: list[Any]) -> None:
+        self.content = content
+
+
+class UserMessage:
+    """The SDK's carrier for tool results — not something the human typed."""
+
     def __init__(self, content: list[Any]) -> None:
         self.content = content
 
@@ -164,6 +181,69 @@ async def test_turn_streams_deltas_tools_and_done(tmp_path: Path) -> None:
     assert isinstance(done, TurnDone)
     assert done.cost_usd == 0.05
     assert session.sdk_session_id == "sdk-123"  # captured for future resume
+
+
+async def test_each_tool_row_settles_on_its_own_result(tmp_path: Path) -> None:
+    """Rows used to flip in bulk at turn_done, so a Read that failed 30 seconds
+    ago looked fine until the turn ended. Each result settles exactly one row."""
+    script = [
+        AssistantMessage([ToolUseBlock("Read", {"file_path": "a.py"}, block_id="tu-1")]),
+        AssistantMessage([ToolUseBlock("Bash", {"command": "pytest"}, block_id="tu-2")]),
+        UserMessage([ToolResultBlock("tu-1", [{"type": "text", "text": "VERSION = 2"}])]),
+        UserMessage([ToolResultBlock("tu-2", "boom", is_error=True)]),
+        ResultMessage(),
+    ]
+    manager = SessionManager(tmp_path, make_factory(script), max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("go")
+    events = await drain(queue, TurnDone)
+
+    notes = [e for e in events if isinstance(e, ToolUseNote)]
+    assert [note.id for note in notes] == ["tu-1", "tu-2"]
+    settled = [e for e in events if isinstance(e, ToolSettled)]
+    assert [(s.id, s.ok) for s in settled] == [("tu-1", True), ("tu-2", False)]
+    assert settled[0].output_excerpt == "VERSION = 2"
+    assert settled[1].output_excerpt == "boom"
+
+
+async def test_tool_ids_are_minted_when_the_sdk_gives_none(tmp_path: Path) -> None:
+    """A block without an id still produces a valid frame (the row then settles
+    at turn_done like before) — and two such rows never share an id."""
+    script = [
+        AssistantMessage(
+            [ToolUseBlock("Read", {"file_path": "a.py"}), ToolUseBlock("Read", {"path": "b.py"})]
+        ),
+        ResultMessage(),
+    ]
+    manager = SessionManager(tmp_path, make_factory(script), max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("go")
+    events = await drain(queue, TurnDone)
+
+    ids = [e.id for e in events if isinstance(e, ToolUseNote)]
+    assert len(ids) == 2
+    assert all(i for i in ids)
+    assert len(set(ids)) == 2
+
+
+async def test_tool_output_excerpt_is_capped(tmp_path: Path) -> None:
+    """A Grep over a monorepo is not a chat frame."""
+    script = [
+        AssistantMessage([ToolUseBlock("Grep", {"pattern": "x"}, block_id="tu-1")]),
+        UserMessage([ToolResultBlock("tu-1", "y" * 10_000)]),
+        ResultMessage(),
+    ]
+    manager = SessionManager(tmp_path, make_factory(script), max_sessions=4)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("go")
+    events = await drain(queue, TurnDone)
+
+    settled = next(e for e in events if isinstance(e, ToolSettled))
+    assert len(settled.output_excerpt) == agent_sessions.TOOL_EXCERPT_LIMIT + 1
+    assert settled.output_excerpt.endswith("…")
 
 
 async def test_second_message_rejected_while_working(tmp_path: Path) -> None:
@@ -326,7 +406,10 @@ async def test_plan_round_trip_returns_the_typed_response(tmp_path: Path) -> Non
     assert answer.verdict == "approve"
     assert answer.choices == {"approach": "local"}
     assert answer.annotations[0].text == "skip the backfill"
-    assert session.pending_attention() == []  # nothing left to replay
+    # Nothing answerable is left — only the verdict, replayed so a client that
+    # dropped after deciding learns how the card ended.
+    replay = session.pending_attention()
+    assert [type(e).__name__ for e in replay] == ["PlanResolved"]
 
 
 async def test_plan_timeout_resolves_to_no_decision(
@@ -367,7 +450,8 @@ async def test_interrupt_settles_a_pending_plan(tmp_path: Path) -> None:
 
     assert factory.created[0].plan_responses[0].verdict == "no_decision"
     assert session.state == "idle"
-    assert session.pending_attention() == []
+    replay = session.pending_attention()
+    assert [type(e).__name__ for e in replay] == ["PlanResolved"]  # verdict only, no live card
 
 
 async def test_one_pending_plan_per_session(tmp_path: Path) -> None:
@@ -668,6 +752,77 @@ def test_pending_plan_is_replayed_to_a_reconnecting_client(
             assert "plan_resolved" in seen  # the card settles on the wire, not by click
 
     assert factory.created[0].plan_responses[0].verdict == "approve"
+
+
+@pytest.mark.timeout(60)
+def test_settled_plan_verdict_is_replayed_after_a_reconnect(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """A client that decides and then loses the socket before ``plan_resolved``
+    arrives used to never learn the verdict: its card stayed live and answerable
+    for a plan the agent had already acted on. The replay closes that window."""
+    app = create_app(settings)
+    factory = make_factory([ResultMessage()], plan=sample_plan())
+    app.state.session_manager = SessionManager(tmp_path, factory, max_sessions=4)
+
+    with TestClient(app) as client:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "plan it"}))
+            while json.loads(ws.receive_text())["type"] != "plan_presented":
+                pass
+            # Decide, then drop the connection immediately — the frame settling
+            # the card is emitted while nobody is listening.
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "plan_decision",
+                        "response": {
+                            "plan_id": "plan-1",
+                            "verdict": "approve",
+                            "choices": {"approach": "local"},
+                        },
+                    }
+                )
+            )
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws2:
+            replayed = json.loads(ws2.receive_text())
+            assert replayed["type"] == "plan_resolved"
+            assert replayed["plan_id"] == "plan-1"
+            assert replayed["verdict"] == "approve"
+
+    assert factory.created[0].plan_responses[0].verdict == "approve"
+
+
+@pytest.mark.timeout(60)
+def test_session_status_reaches_the_events_websocket(settings: Settings, tmp_path: Path) -> None:
+    """Sessions without an open agent socket must still update: state changes go
+    onto the same in-process bus the watcher uses and out over /ws/events."""
+    app = create_app(settings)
+    app.state.session_manager = SessionManager(
+        tmp_path,
+        make_factory([delta("ok"), ResultMessage()]),
+        max_sessions=4,
+        event_publisher=app.state.event_bus,
+    )
+
+    with TestClient(app) as client, client.websocket_connect("/ws/events") as events:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "go"}))
+            while json.loads(ws.receive_text())["type"] != "turn_done":
+                pass
+
+        statuses: list[dict[str, Any]] = []
+        while len(statuses) < 2:  # working, then idle
+            frame = json.loads(events.receive_text())
+            if frame["type"] == "session_status":
+                statuses.append(frame)
+
+    assert [f["state"] for f in statuses] == ["working", "idle"]
+    assert {f["session_id"] for f in statuses} == {local_id}
+    assert statuses[0]["folder"] == ""
 
 
 @pytest.mark.timeout(60)

@@ -16,9 +16,11 @@ import type {
   PlanVerdict,
   SessionInfo,
   SessionState,
+  SessionStatusEvent,
   TranscriptMessage,
   TreeNode,
   UiState,
+  WorkspaceEvent,
 } from "./types";
 import { ReconnectingSocket } from "./ws";
 
@@ -51,10 +53,30 @@ export interface Toast {
   message: string;
 }
 
+/** One terminal tab: its own PTY socket, kept mounted while the tab exists. */
+export interface TerminalTab {
+  id: number;
+  title: string;
+  /** Bumped by Reconnect — remounts the instance against a fresh PTY. */
+  generation: number;
+  /** PTY session alive: drives the running-process dot (DESIGN.md §6.6). */
+  alive: boolean;
+}
+
 export type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; done: boolean; costUsd: number | null; isError: boolean }
-  | { kind: "tool"; tool: string; summary: string; settled: boolean; settledError: boolean }
+  | {
+      kind: "tool";
+      /** Server-side call id; `tool_settled` settles exactly this row. */
+      id: string;
+      tool: string;
+      summary: string;
+      settled: boolean;
+      settledError: boolean;
+      /** Result excerpt, once it arrives; the chevron expands it. */
+      output: string;
+    }
   | {
       kind: "permission";
       requestId: string;
@@ -120,8 +142,13 @@ interface WorkbenchStore {
   chats: Record<string, ChatState>;
   /** Draft + settled state per plan_id (plan ids are unique across sessions). */
   plans: Record<string, PlanDraft>;
+  /** Cost of the most recent finished turn, for the status bar. */
+  lastCostUsd: number | null;
   quickBarOpen: boolean;
-  terminalGeneration: number;
+  /** Text the QuickBar opens with — ">" puts it straight into command mode. */
+  quickBarPrefill: string;
+  terminals: TerminalTab[];
+  activeTerminalId: number | null;
   toasts: Toast[];
   /** Path awaiting the "close dirty file?" decision; renders the confirm modal. */
   pendingClosePath: string | null;
@@ -133,8 +160,12 @@ interface WorkbenchStore {
   init: () => void;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
-  setQuickBarOpen: (open: boolean) => void;
+  setQuickBarOpen: (open: boolean, prefill?: string) => void;
   newTerminal: () => void;
+  closeTerminal: (id: number) => void;
+  setActiveTerminal: (id: number) => void;
+  restartTerminal: (id: number) => void;
+  setTerminalAlive: (id: number, alive: boolean) => void;
   pushToast: (kind: ToastKind, message: string) => void;
   dismissToast: (id: number) => void;
 
@@ -173,6 +204,7 @@ interface WorkbenchStore {
   decidePlan: (planId: string, verdict: Exclude<PlanVerdict, "no_decision">) => void;
   interrupt: () => void;
   handleAgentMessage: (sessionId: string, message: AgentServerMessage) => void;
+  handleSessionStatus: (event: SessionStatusEvent) => void;
 }
 
 const initialTheme: Theme =
@@ -244,8 +276,11 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     transcriptView: null,
     chats: {},
     plans: {},
+    lastCostUsd: null,
     quickBarOpen: false,
-    terminalGeneration: 0,
+    quickBarPrefill: "",
+    terminals: [{ id: 1, title: "Terminal 1", generation: 0, alive: true }],
+    activeTerminalId: 1,
     toasts: [],
     pendingClosePath: null,
     officeStatus: null,
@@ -255,8 +290,9 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       initialized = true;
       new ReconnectingSocket("/ws/events", {
         onMessage: (data) => {
-          const event = data as FileChangedEvent;
+          const event = data as WorkspaceEvent;
           if (event.type === "file_changed") get().handleFileChanged(event);
+          else if (event.type === "session_status") get().handleSessionStatus(event);
         },
         // Re-sync on every (re)connect — covers events missed while offline.
         onOpen: () => {
@@ -283,9 +319,42 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       get().setTheme(get().theme === "dark" ? "light" : "dark");
     },
 
-    setQuickBarOpen: (open) => set({ quickBarOpen: open }),
+    setQuickBarOpen: (open, prefill = "") => set({ quickBarOpen: open, quickBarPrefill: prefill }),
 
-    newTerminal: () => set((s) => ({ terminalGeneration: s.terminalGeneration + 1 })),
+    newTerminal: () =>
+      set((s) => {
+        const id = ++terminalSeq;
+        return {
+          terminals: [...s.terminals, { id, title: `Terminal ${id}`, generation: 0, alive: true }],
+          activeTerminalId: id,
+        };
+      }),
+
+    closeTerminal: (id) =>
+      set((s) => {
+        // Unmounting the instance closes its socket, which releases the PTY.
+        const index = s.terminals.findIndex((t) => t.id === id);
+        const terminals = s.terminals.filter((t) => t.id !== id);
+        let activeTerminalId = s.activeTerminalId;
+        if (activeTerminalId === id) {
+          activeTerminalId = terminals[Math.min(index, terminals.length - 1)]?.id ?? null;
+        }
+        return { terminals, activeTerminalId };
+      }),
+
+    setActiveTerminal: (id) => set({ activeTerminalId: id }),
+
+    restartTerminal: (id) =>
+      set((s) => ({
+        terminals: s.terminals.map((t) =>
+          t.id === id ? { ...t, generation: t.generation + 1, alive: true } : t,
+        ),
+      })),
+
+    setTerminalAlive: (id, alive) =>
+      set((s) => ({
+        terminals: s.terminals.map((t) => (t.id === id ? { ...t, alive } : t)),
+      })),
 
     pushToast: (kind, message) => {
       const id = ++toastSeq;
@@ -845,10 +914,36 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         case "tool_use":
           appendChat(sessionId, {
             kind: "tool",
+            id: message.id,
             tool: message.tool,
             summary: message.summary,
             settled: false,
             settledError: false,
+            output: "",
+          });
+          break;
+        case "tool_settled":
+          // One row settles on its own result — no waiting for the turn to end.
+          set((s) => {
+            const chat = s.chats[sessionId];
+            if (chat === undefined) return {};
+            return {
+              chats: {
+                ...s.chats,
+                [sessionId]: {
+                  items: chat.items.map((item) =>
+                    item.kind === "tool" && item.id === message.id
+                      ? {
+                          ...item,
+                          settled: true,
+                          settledError: !message.ok,
+                          output: message.output_excerpt,
+                        }
+                      : item,
+                  ),
+                },
+              },
+            };
           });
           break;
         case "permission_request":
@@ -918,6 +1013,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
               if (item.kind === "assistant" && !item.done) {
                 return { ...item, done: true, costUsd: message.cost_usd, isError: message.is_error };
               }
+              // Rows the SDK never delivered a result for (interrupted turns,
+              // tools without a call id) still have to stop looking busy.
               if (item.kind === "tool" && !item.settled) {
                 return { ...item, settled: true, settledError: message.is_error };
               }
@@ -927,6 +1024,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
             const current = s.sessionFlags[sessionId] ?? { done: false, error: false };
             return {
               chats: chat ? { ...s.chats, [sessionId]: { items } } : s.chats,
+              lastCostUsd: message.cost_usd ?? s.lastCostUsd,
               sessionStates: { ...s.sessionStates, [sessionId]: "idle" },
               sessionFlags: {
                 ...s.sessionFlags,
@@ -953,8 +1051,38 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           break;
       }
     },
+
+    handleSessionStatus: (event) => {
+      // Arrives on /ws/events for EVERY session, including ones this client has
+      // no agent socket for — that is the whole point of the frame.
+      const known = get().sessionStates[event.session_id] !== undefined;
+      set((s) => ({
+        sessionStates: { ...s.sessionStates, [event.session_id]: event.state },
+      }));
+      // A session we have never listed (started by another window, or created
+      // since our last poll): pull the listing so it gets a title and a row.
+      if (!known) scheduleSessionsRefresh();
+    },
   };
 });
+
+// ---- terminals ---------------------------------------------------------------
+
+/** Tab ids/titles are monotonic for the app's lifetime — "Terminal 3" stays
+ * "Terminal 3" after 1 and 2 are closed, so the tab strip never renumbers. */
+let terminalSeq = 1;
+
+// ---- session listing refresh (debounced) -------------------------------------
+
+let sessionsRefreshTimer: number | undefined;
+
+/** Coalesce the bursts a starting session produces (idle -> working -> …). */
+function scheduleSessionsRefresh(): void {
+  window.clearTimeout(sessionsRefreshTimer);
+  sessionsRefreshTimer = window.setTimeout(() => {
+    void useStore.getState().refreshSessions();
+  }, 400);
+}
 
 // ---- per-file sync coalescing ----------------------------------------------
 

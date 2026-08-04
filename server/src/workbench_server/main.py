@@ -43,6 +43,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sdk_client_factory(ui_state_store),
         settings.max_concurrent_sessions,
         session_index=session_index,
+        # Session state changes ride the same bus as watcher events, so the UI
+        # tracks sessions it has no agent socket open for.
+        event_publisher=event_bus,
     )
     office_service = OfficeService(
         workspace,

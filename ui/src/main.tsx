@@ -14,6 +14,7 @@ import "./styles/terminal.css";
 import "./styles/agent.css";
 import "./styles/plan.css";
 import "./styles/quickbar.css";
+import "./styles/statusbar.css";
 import "./styles/overlays.css";
 
 import { createRoot } from "react-dom/client";

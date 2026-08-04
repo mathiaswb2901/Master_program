@@ -1,0 +1,114 @@
+/* Status bar: 24px, chrome surface, top hairline (DESIGN.md §2.1, §6.4). */
+
+.wb-statusbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  height: 24px;
+  padding: 0 var(--space-4);
+  background: var(--surface-app);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-tertiary);
+  overflow: hidden;
+}
+
+.wb-status-left,
+.wb-status-center,
+.wb-status-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.wb-status-left {
+  flex: 1;
+}
+
+.wb-status-center {
+  flex: 2;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.wb-status-right {
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.wb-status-workspace {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+  flex: none;
+  max-width: 40%;
+}
+
+.wb-status-sep {
+  flex: none;
+}
+
+.wb-status-file {
+  min-width: 0;
+}
+
+/* Dirty marker: 6px dot, same language as the editor tabs (§6.1). */
+.wb-status-dirty {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--text-secondary);
+}
+
+/* ---- Session chips -------------------------------------------------------- */
+
+.wb-status-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 18px;
+  max-width: 160px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: var(--type-xs-size);
+  color: var(--text-secondary);
+  flex: none;
+  transition: background-color var(--duration-1) var(--ease-standard);
+}
+
+.wb-status-chip:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.wb-status-chip.is-active {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+}
+
+.wb-status-chip-title {
+  min-width: 0;
+}
+
+.wb-status-more {
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+/* ---- Counters + cost ------------------------------------------------------ */
+
+.wb-status-count {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.wb-status-cost {
+  font-family: var(--font-mono);
+  flex: none;
+}

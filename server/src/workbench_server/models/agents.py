@@ -23,6 +23,21 @@ class FolderSessions(BaseModel):
     sessions: list[SessionInfo]
 
 
+class SessionStatusEvent(BaseModel):
+    """Bus event: a live session changed state.
+
+    Published on the in-process EventBus (fanned out on ``/ws/events``) rather
+    than only on ``/ws/agent/{id}``: the agent socket exists solely for sessions
+    the user has opened, so without this a session started elsewhere — or simply
+    not on screen — never updates its dot, chip or attention badge.
+    """
+
+    type: Literal["session_status"] = "session_status"
+    session_id: str
+    folder: str  # workspace-relative folder the session is bound to ("" = root)
+    state: SessionState
+
+
 class CreateSessionRequest(BaseModel):
     folder: str = ""  # workspace-relative
     resume_session_id: str | None = None
@@ -81,9 +96,32 @@ class TextDelta(BaseModel):
 
 
 class ToolUseNote(BaseModel):
+    """server -> client: the agent started a tool call.
+
+    ``id`` is the SDK's ``tool_use`` id when there is one (minted locally
+    otherwise) and is what :class:`ToolSettled` refers back to, so each row in
+    the chat settles on its own result instead of the whole batch flipping at
+    ``turn_done``.
+    """
+
     type: Literal["tool_use"] = "tool_use"
+    id: str = Field(min_length=1, max_length=200)
     tool: str
     summary: str
+
+
+class ToolSettled(BaseModel):
+    """server -> client: the result for one tool call arrived.
+
+    ``output_excerpt`` is truncated to ``TOOL_EXCERPT_LIMIT`` characters by the
+    session before it is ever put on the wire — a Grep over a monorepo is not a
+    chat frame, and the expander is a glance, not a log viewer.
+    """
+
+    type: Literal["tool_settled"] = "tool_settled"
+    id: str = Field(min_length=1, max_length=200)
+    ok: bool
+    output_excerpt: str = ""
 
 
 class PermissionRequest(BaseModel):
@@ -114,6 +152,7 @@ class AgentError(BaseModel):
 _AgentServerMessage = (
     TextDelta
     | ToolUseNote
+    | ToolSettled
     | PermissionRequest
     | PlanPresented
     | PlanResolved
