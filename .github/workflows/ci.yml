@@ -44,6 +44,12 @@ jobs:
       - name: Install
         run: npm ci
         if: ${{ hashFiles('ui/package-lock.json') != '' }}
+      - name: Lint
+        run: npm run lint
+        if: ${{ hashFiles('ui/package-lock.json') != '' }}
+      - name: Tests
+        run: npm run test
+        if: ${{ hashFiles('ui/package-lock.json') != '' }}
       - name: Build
         run: npm run build
         if: ${{ hashFiles('ui/package-lock.json') != '' }}

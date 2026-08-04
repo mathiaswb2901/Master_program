@@ -255,6 +255,14 @@
   color: var(--error);
 }
 
+/* Tool call: row + (expanded) output block. */
+.wb-tool {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
 /* Tool-call row: 28px, mono 12px, 2px status edge (§6.3). */
 .wb-tool-row {
   display: flex;
@@ -276,9 +284,46 @@
   border-left-color: var(--error);
 }
 
+/* Chevron: expands the output block instantly (no animation, §6.3). */
+.wb-tool-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 24px;
+  flex: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-ui);
+}
+
+.wb-tool-chevron:hover {
+  color: var(--text-primary);
+}
+
+.wb-tool-chevron.is-empty {
+  cursor: default;
+}
+
 .wb-tool-name {
   flex: none;
   color: var(--text-primary);
+}
+
+/* Output excerpt: the terminal "well" surface, like chat code blocks (§6.3). */
+.wb-tool-output {
+  margin: 0 0 0 var(--space-6);
+  padding: var(--space-4) var(--space-5);
+  max-height: 260px;
+  overflow: auto;
+  background: var(--surface-terminal);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .wb-tool-summary {

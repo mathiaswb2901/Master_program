@@ -1,4 +1,9 @@
-"""/ws/events: pushes watcher events (and later: agent/session events) to the UI."""
+"""/ws/events: the workspace-wide push channel.
+
+Carries watcher file events and agent ``session_status`` events — anything a
+client must know about without having opened the panel or socket that produced
+it. The router stays a dumb fan-out: producers publish typed models on the bus.
+"""
 
 import contextlib
 

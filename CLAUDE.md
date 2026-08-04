@@ -8,7 +8,8 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
 - `uv sync --dev` — install/refresh env (uv manages `.venv`)
 - `uv run pytest` — tests; `uv run mypy` — types; `uv run ruff check . && uv run ruff format .` — lint/format
 - `uv run workbench-server` — run backend (port 8787)
-- UI: `cd ui && npm run dev` (Vite, port 5173)
+- UI: `cd ui && npm run dev` (Vite, port 5173); `npm run lint` — eslint;
+  `npm run test` — vitest; `npm run build` — type-check + bundle
 
 ## Think big (standing directive)
 

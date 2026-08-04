@@ -6,11 +6,13 @@ import {
 } from "dockview";
 import { useEffect, type FunctionComponent } from "react";
 
+import { installCommandKeys, setDockApi } from "./commands";
 import { AgentPanel } from "./panels/AgentPanel";
 import { EditorAreaPanel } from "./panels/EditorArea";
 import { FileTreePanel } from "./panels/FileTree";
 import { DirtyCloseModal } from "./panels/Modal";
 import { QuickBar } from "./panels/QuickBar";
+import { StatusBar } from "./panels/StatusBar";
 import { TerminalPanel } from "./panels/Terminal";
 import { Toasts } from "./panels/Toasts";
 import { useStore } from "./store";
@@ -52,6 +54,8 @@ const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbenc
 
 function onReady(event: DockviewReadyEvent): void {
   const { api } = event;
+  // The registry needs the dock handle for the panel-focus commands (Ctrl+1..4).
+  setDockApi(api);
   api.addPanel({ id: "editors", component: "editors", title: "Editor" });
   api.addPanel({
     id: "files",
@@ -101,25 +105,10 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
-  useEffect(() => {
-    // Capture phase so Ctrl+K / Ctrl+P / Ctrl+S win over Monaco and xterm.
-    const onKey = (e: KeyboardEvent): void => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-      const key = e.key.toLowerCase();
-      const s = useStore.getState();
-      if (key === "k" || key === "p") {
-        e.preventDefault();
-        e.stopPropagation();
-        s.setQuickBarOpen(!s.quickBarOpen);
-      } else if (key === "s") {
-        e.preventDefault();
-        e.stopPropagation();
-        if (s.activePath !== null) void s.saveFile(s.activePath);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
+  // Every keybinding in the app comes from the command registry (commands.ts).
+  useEffect(() => installCommandKeys(), []);
+
+  useEffect(() => () => setDockApi(null), []);
 
   return (
     <div className="wb-root">
@@ -131,6 +120,7 @@ export default function App() {
           onReady={onReady}
         />
       </div>
+      <StatusBar />
       <QuickBar />
       <DirtyCloseModal />
       <Toasts />

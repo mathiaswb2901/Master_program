@@ -43,7 +43,7 @@ One Python process, one webview window, one optional local Office engine.
 | `models/` | REST/WS schemas: files, terminal, agents, plans |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
-| `routers/events.py` | `/ws/events` fan-out |
+| `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
 | `services/workspace.py` | path jail, atomic writes, hashing, tree |
 | `services/watcher.py` | watchfiles -> bus |
@@ -63,6 +63,14 @@ everything else (Bash, web) raises a `PermissionRequest` event and blocks on an
 asyncio future until the UI answers (10-minute timeout -> deny). The context-bridge
 MCP tool `get_workspace_state` lets agents see the active/open/dirty files so they
 avoid editing buffers with unsaved user changes.
+
+Two fan-outs, deliberately: `/ws/agent/{id}` carries the conversation (deltas, tool
+calls and their `tool_settled` results, permission and plan cards) to clients that
+opened that session, while every state change is *also* published as a
+`SessionStatusEvent` on the shared bus and out over `/ws/events` — so a window with no
+socket for a session still tracks its dot, chip and attention badge. Frames a client
+may have missed while disconnected (open permission prompts, the pending plan, the last
+settled plan verdict) are replayed on connect.
 
 **Visual plan artifacts:** `present_plan` (the second context-bridge tool) takes a
 `PlanArtifact` — a closed, size-capped discriminated union of option groups, step

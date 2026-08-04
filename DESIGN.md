@@ -295,7 +295,54 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Terminal tabs reuse §6.1 at the same 34px; a running-process dot uses
   `--agent-working` steady (no pulse — pulse is reserved for agents).
 
-### 6.7 Empty states
+### 6.7 Status bar
+- Height **24px**, bg `--surface-app`, 1px `--border-subtle` top hairline, 11px text.
+- Left: workspace name (`--text-secondary`, 500) + active file path + 6px dirty dot
+  (`--text-secondary`, same language as tab dirty dots).
+- Centre: one chip per live session — 18px pill, 6px status dot (§2.6) + short title,
+  click opens the session; the active one on `--surface-selected`. Beyond four chips the
+  rest collapse to a `+N` count.
+- Right: needs-attention count, working count (pulsing dot), last turn cost in mono
+  tabular figures. Counts hide at zero — a quiet bar means nothing needs you.
+- Every dot-only element carries an `aria-label` (§6.4).
+
+### 6.8 Keymap and pass-through policy
+Every binding lives in the command registry (`ui/src/commands.ts`); the QuickBar lists
+the same registry, so nothing is reachable only by chord and nothing only by mouse.
+
+| Chord | Command |
+|---|---|
+| `Ctrl+P` / `Ctrl+K` | Go to file |
+| `Ctrl+Shift+P` | Show all commands (QuickBar, command mode) |
+| `Ctrl+S` | Save file |
+| `Ctrl+PageDown` / `Alt+PageDown` | Next editor tab |
+| `Ctrl+PageUp` / `Alt+PageUp` | Previous editor tab |
+| `Alt+W` / `Ctrl+F4` | Close editor tab |
+| `Ctrl+1..4` | Focus Files / Editor / Agent / Terminal |
+| `Alt+1..9` | Jump to the n-th most recent session |
+| `Alt+T` | New terminal |
+
+**Pass-through:** inside xterm and Monaco — both full keyboard applications — only
+chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the
+surface (`Ctrl+K` kills a line, `Ctrl+P` walks shell history). Plain keys are never
+intercepted anywhere. Hence the Alt twins above: they are the ones that work from
+inside a terminal or editor.
+
+One exception, in the editor only: `Ctrl+P` and `Ctrl+K` are intercepted. Monaco
+standalone leaves `Ctrl+P` unbound and uses `Ctrl+K` only as a fold-chord prefix, so
+passing them through reaches the *browser* (print dialog, address bar), not an editor
+command — go-to-file is the better owner. The terminal keeps both: xterm genuinely
+uses them.
+
+**Browser-reserved:** `Ctrl+Tab`, `Ctrl+W`, `Ctrl+T` never reach the page in a browser
+tab, which is why cycling is PageUp/PageDown. `Ctrl+F4` is Chromium's alias for
+`Ctrl+W` and is equally unstoppable, so closing is `Alt+W` — the chord the QuickBar
+advertises and the only one that also works with focus inside Monaco or xterm.
+`Ctrl+F4`, `Ctrl+1..4` and `Ctrl+PageUp/PageDown` are consumed by the browser in a dev
+browser tab but arrive normally in the Tauri shell; they are listed as secondaries, not
+as the advertised binding.
+
+### 6.9 Empty states
 - Centered, max-width 260px. Icon 32px, 1.5px stroke, `--text-tertiary`. Title 14px/600
   `--text-secondary`; hint 12px `--text-tertiary`; optional single action as `--accent`
   link or one outline button — never a filled button in an empty state.

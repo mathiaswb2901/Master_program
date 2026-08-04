@@ -91,6 +91,14 @@
   color: var(--text-tertiary);
 }
 
+/* Keycap hints, right-aligned after the detail (§6.5). */
+.wb-qb-row-keys {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
 .wb-qb-empty {
   padding: var(--space-6);
   font-size: var(--type-md-size);

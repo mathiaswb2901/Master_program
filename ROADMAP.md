@@ -65,16 +65,19 @@ the moat.
   Still open: plan nodes render as structured cards, not as **design-system-faithful
   visual mockups** — for UI proposals, a rendered preview in the app's own tokens beats
   a description of one. → v2, alongside the M7 design work.
-- **Flow layer**: typed command registry replacing the 3-item QuickBar (panel focus
-  Ctrl+1..4, tab cycle/close, Alt+1..9 session jump), `SessionStatusEvent` fan-out on
+- **Flow layer** — **done**: typed command registry (`ui/src/commands.ts`) replacing the
+  3-item QuickBar and the ad-hoc keydown handler (panel focus Ctrl+1..4, tab
+  cycle/close, Alt+1..9 session jump, Ctrl+Shift+P command mode, explicit
+  xterm/Monaco pass-through policy — `DESIGN.md` §6.8), `SessionStatusEvent` fan-out on
   `/ws/events`, status bar with live session chips + `document.title` attention badge,
   toast layer for currently-silent failures, chat markdown/code rendering with per-tool
-  settle + expand, terminal tabs (kill the single-instance remount), file-tree CRUD
-  wiring the endpoints that already exist, dirty-close confirmation + beforeunload guard,
-  real session titles + live/disk dedupe. *Known gap*: the beforeunload guard and the
-  `document.title` attention badge are browser-only — WebView2 honors neither on native
-  window close/title, so the Tauri shell task above must re-wire both natively
-  (`onCloseRequested` → dirty-close modal; window `setTitle` for the badge).
+  settle + expand (`ToolSettled` frames), terminal tabs (N PTYs, kill the
+  single-instance remount), file-tree CRUD wiring the endpoints that already exist,
+  dirty-close confirmation + beforeunload guard, real session titles + live/disk dedupe.
+  *Known gap*: the beforeunload guard and the `document.title` attention badge are
+  browser-only — WebView2 honors neither on native window close/title, so the Tauri
+  shell task above must re-wire both natively (`onCloseRequested` → dirty-close modal;
+  window `setTitle` for the badge).
 - **shortcuts.md**: workspace `.workbench/shortcuts.md` + global file, merged, watched
   live; entries drive QuickBar commands, terminal snippets, chat prompt templates, and
   custom keybindings; agents get a skill to add entries on request.
@@ -93,7 +96,8 @@ the moat.
   loop-objective, workbench-dev), provenance badges. Every bundled skill passes a
   **vetting bar** — read in full (a skill can execute anything on the user's machine)
   and shown to help before it ships; popularity is not evidence.
-- UI quality tooling starts here: eslint, vitest, Playwright E2E (standing bar).
+- UI quality tooling starts here: eslint + vitest **done** (`npm run lint` / `npm run
+  test`, both in the CI ui job); Playwright E2E still pending (standing bar).
 
 ### M5 — Parallel (worktrees + Mission Control)
 

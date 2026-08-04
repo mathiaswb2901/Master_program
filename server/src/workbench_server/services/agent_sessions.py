@@ -23,8 +23,10 @@ from workbench_server.models.agents import (
     PermissionRequest,
     SessionInfo,
     SessionState,
+    SessionStatusEvent,
     StatusChange,
     TextDelta,
+    ToolSettled,
     ToolUseNote,
     TurnDone,
 )
@@ -42,6 +44,12 @@ log = structlog.get_logger()
 
 PERMISSION_TIMEOUT_S = 600.0
 PLAN_TIMEOUT_S = 600.0
+#: How long a settled plan's verdict stays replayable to a reconnecting client.
+#: Long enough to cover a refresh or a dropped socket, short enough that a card
+#: from an hour ago is not re-announced as news.
+PLAN_RESOLUTION_REPLAY_S = 300.0
+#: Hard cap on a tool result excerpt, applied before the frame is built.
+TOOL_EXCERPT_LIMIT = 2000
 _LISTENER_QUEUE_LIMIT = 2000
 
 
@@ -53,6 +61,12 @@ class SdkClient(Protocol):
     def receive_response(self) -> AsyncIterator[Any]: ...
     async def interrupt(self) -> None: ...
     async def disconnect(self) -> None: ...
+
+
+class EventPublisher(Protocol):
+    """The slice of EventBus a session uses to fan status out to /ws/events."""
+
+    def publish(self, event: BaseModel) -> None: ...
 
 
 class SessionBridge(Protocol):
@@ -104,6 +118,7 @@ class AgentSession:
         folder_relative: str,
         factory: ClientFactory,
         resume_session_id: str | None = None,
+        event_publisher: EventPublisher | None = None,
     ) -> None:
         self.local_id = local_id
         self.folder = folder
@@ -118,6 +133,7 @@ class AgentSession:
         self.created_at: float = 0.0
         self.title: str | None = None  # derived from the first user message
         self._factory = factory
+        self._publisher = event_publisher
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
@@ -125,6 +141,10 @@ class AgentSession:
         # after emission still gets the card (see pending_attention).
         self._pending_permission_events: dict[str, PermissionRequest] = {}
         self._pending_plan: _PendingPlan | None = None
+        # Last plan verdict and when it settled — replayed to a client that was
+        # away while the card resolved (see pending_attention).
+        self._last_plan_resolution: PlanResolved | None = None
+        self._last_plan_resolved_at = 0.0
         self._turn_task: asyncio.Task[None] | None = None
 
     # ---- listener plumbing -------------------------------------------------
@@ -138,13 +158,26 @@ class AgentSession:
         self._listeners.discard(q)
 
     def pending_attention(self) -> list[BaseModel]:
-        """Frames a fresh subscriber missed: still-open permission requests and
-        the pending plan card. Emission is fire-and-forget, so a client that
-        connects (or reconnects) after the agent blocked would otherwise stare
-        at a `needs_attention` session with nothing to answer."""
+        """Frames a fresh subscriber missed: still-open permission requests, the
+        pending plan card, and the verdict of a recently settled one. Emission is
+        fire-and-forget, so a client that connects (or reconnects) after the agent
+        blocked would otherwise stare at a `needs_attention` session with nothing
+        to answer.
+
+        The settled verdict matters for the same reason as the open card: a
+        client that sent a decision and lost the socket before ``plan_resolved``
+        arrived would keep an answerable card for a plan the agent already acted
+        on — and could "approve" it a second time.
+        """
         events: list[BaseModel] = list(self._pending_permission_events.values())
         if self._pending_plan is not None:
             events.append(PlanPresented(plan=self._pending_plan.artifact))
+        resolution = self._last_plan_resolution
+        if (
+            resolution is not None
+            and time.monotonic() - self._last_plan_resolved_at <= PLAN_RESOLUTION_REPLAY_S
+        ):
+            events.append(resolution)
         return events
 
     def _emit(self, event: BaseModel) -> None:
@@ -154,9 +187,18 @@ class AgentSession:
             q.put_nowait(event)
 
     def _set_state(self, state: SessionState) -> None:
-        if state != self.state:
-            self.state = state
-            self._emit(StatusChange(session_id=self.local_id, state=state))
+        if state == self.state:
+            return
+        self.state = state
+        self._emit(StatusChange(session_id=self.local_id, state=state))
+        # Also to the global bus: every client tracks every session's state,
+        # including the ones it has no agent socket for.
+        if self._publisher is not None:
+            self._publisher.publish(
+                SessionStatusEvent(
+                    session_id=self.local_id, folder=self.folder_relative, state=state
+                )
+            )
 
     # ---- permissions (SessionBridge) ---------------------------------------
 
@@ -244,8 +286,13 @@ class AgentSession:
             self._pending_plan = None
             self._restore_state_after_prompt()
         # Tell every client the card is history — including the one that never
-        # answered, and any second client still showing it as live.
-        self._emit(PlanResolved(plan_id=artifact.plan_id, verdict=response.verdict))
+        # answered, and any second client still showing it as live. Kept for
+        # replay too: the client that decided may have dropped before this
+        # reached it (see pending_attention).
+        resolution = PlanResolved(plan_id=artifact.plan_id, verdict=response.verdict)
+        self._last_plan_resolution = resolution
+        self._last_plan_resolved_at = time.monotonic()
+        self._emit(resolution)
         return response
 
     def resolve_plan(self, response: PlanResponse) -> None:
@@ -320,9 +367,32 @@ class AgentSession:
                     tool = str(getattr(block, "name", "tool"))
                     raw_input = getattr(block, "input", None)
                     tool_input = raw_input if isinstance(raw_input, dict) else {}
+                    # The SDK's tool_use id is what the result comes back under;
+                    # a local id keeps the frame valid when there is none, and
+                    # that row simply falls back to settling at turn_done.
+                    raw_id = getattr(block, "id", None)
+                    call_id = raw_id if isinstance(raw_id, str) and raw_id else uuid.uuid4().hex
                     self._emit(
-                        ToolUseNote(tool=tool, summary=_describe_tool_call(tool, tool_input))
+                        ToolUseNote(
+                            id=call_id, tool=tool, summary=_describe_tool_call(tool, tool_input)
+                        )
                     )
+        elif kind == "UserMessage":
+            # Tool results arrive as a synthetic user turn (SDK naming — not a
+            # message the human typed); each block settles exactly one row.
+            for block in getattr(message, "content", []) or []:
+                if type(block).__name__ != "ToolResultBlock":
+                    continue
+                raw_id = getattr(block, "tool_use_id", None)
+                if not isinstance(raw_id, str) or not raw_id:
+                    continue
+                self._emit(
+                    ToolSettled(
+                        id=raw_id,
+                        ok=not bool(getattr(block, "is_error", False)),
+                        output_excerpt=_result_excerpt(getattr(block, "content", None)),
+                    )
+                )
         elif kind == "ResultMessage":
             sdk_id = getattr(message, "session_id", None)
             if isinstance(sdk_id, str):
@@ -378,6 +448,28 @@ def _describe_tool_call(tool: str, tool_input: dict[str, Any]) -> str:
     return tool
 
 
+def _result_excerpt(content: Any) -> str:
+    """Flatten an SDK tool result into capped plain text.
+
+    The SDK hands back either a string or a list of content blocks (dicts or
+    objects); anything else is not something we can show, so it comes through as
+    an empty excerpt and the row simply has nothing to expand.
+    """
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            value = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+            if isinstance(value, str):
+                parts.append(value)
+        text = "\n".join(parts)
+    else:
+        text = ""
+    text = text.strip()
+    return text[:TOOL_EXCERPT_LIMIT] + "…" if len(text) > TOOL_EXCERPT_LIMIT else text
+
+
 class SessionManager:
     def __init__(
         self,
@@ -385,11 +477,13 @@ class SessionManager:
         factory: ClientFactory,
         max_sessions: int,
         session_index: SessionIndex | None = None,
+        event_publisher: EventPublisher | None = None,
     ) -> None:
         self._root = workspace_root
         self._factory = factory
         self._max = max_sessions
         self._index = session_index
+        self._publisher = event_publisher
         self._sessions: dict[str, AgentSession] = {}
 
     @property
@@ -410,6 +504,7 @@ class SessionManager:
             folder_relative=folder_relative,
             factory=self._factory,
             resume_session_id=resume_session_id,
+            event_publisher=self._publisher,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.

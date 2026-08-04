@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 
 import { Markdown } from "../markdown";
 import { useStore, type ChatItem, type SessionFlags } from "../store";
-import type { SessionState, TreeNode } from "../types";
+import { toolTargetPath } from "../toolTarget";
+import type { SessionState } from "../types";
 import { PlanCard } from "./PlanCard";
 
 export interface StatusVisual {
@@ -69,63 +70,47 @@ function PermissionCard({ item }: { item: Extract<ChatItem, { kind: "permission"
   );
 }
 
-// ---- tool rows: resolve "Edit: <path>" summaries to workspace files ---------
-
-const treePathsCache = new WeakMap<TreeNode, string[]>();
-
-function treeFilePaths(tree: TreeNode): string[] {
-  const cached = treePathsCache.get(tree);
-  if (cached !== undefined) return cached;
-  const out: string[] = [];
-  const walk = (node: TreeNode): void => {
-    if (node.kind === "file") out.push(node.path);
-    else (node.children ?? []).forEach(walk);
-  };
-  walk(tree);
-  treePathsCache.set(tree, out);
-  return out;
-}
-
-/** Workspace file a tool summary refers to, or null. Summaries look like
- * "Edit: <value>" where the value may be workspace-relative or absolute. */
-export function toolTargetPath(summary: string, tree: TreeNode | null): string | null {
-  if (tree === null) return null;
-  const colon = summary.indexOf(": ");
-  if (colon < 0) return null;
-  const value = summary
-    .slice(colon + 2)
-    .trim()
-    .replace(/^["']|["']$/g, "")
-    .replace(/\\/g, "/");
-  if (value === "") return null;
-  const paths = treeFilePaths(tree);
-  if (paths.includes(value)) return value;
-  const suffixMatches = paths.filter((p) => value.endsWith("/" + p));
-  return suffixMatches.length === 1 ? suffixMatches[0] : null;
-}
-
+/** One tool call: status edge flips on ITS result, chevron expands the output. */
 function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
   const tree = useStore((s) => s.tree);
   const target = useMemo(() => toolTargetPath(item.summary, tree), [item.summary, tree]);
+  const [expanded, setExpanded] = useState(false);
+  const hasOutput = item.output !== "";
   return (
-    <div
-      className={
-        "wb-tool-row" + (item.settled ? (item.settledError ? " is-failed" : " is-settled") : "")
-      }
-    >
-      <span className="wb-tool-name">{item.tool}</span>
-      {target !== null ? (
-        <button
-          type="button"
-          className="wb-tool-summary wb-tool-link u-truncate"
-          title={`Open ${target}`}
-          onClick={() => void useStore.getState().openFile(target)}
-        >
-          {item.summary}
-        </button>
-      ) : (
-        <span className="wb-tool-summary u-truncate">{item.summary}</span>
-      )}
+    <div className="wb-tool">
+      <div
+        className={
+          "wb-tool-row" + (item.settled ? (item.settledError ? " is-failed" : " is-settled") : "")
+        }
+      >
+        {hasOutput ? (
+          <button
+            type="button"
+            className="wb-tool-chevron"
+            aria-expanded={expanded}
+            aria-label={expanded ? "Hide output" : "Show output"}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "⌄" : "›"}
+          </button>
+        ) : (
+          <span className="wb-tool-chevron is-empty" aria-hidden="true" />
+        )}
+        <span className="wb-tool-name">{item.tool}</span>
+        {target !== null ? (
+          <button
+            type="button"
+            className="wb-tool-summary wb-tool-link u-truncate"
+            title={`Open ${target}`}
+            onClick={() => void useStore.getState().openFile(target)}
+          >
+            {item.summary}
+          </button>
+        ) : (
+          <span className="wb-tool-summary u-truncate">{item.summary}</span>
+        )}
+      </div>
+      {expanded && hasOutput && <pre className="wb-tool-output">{item.output}</pre>}
     </div>
   );
 }

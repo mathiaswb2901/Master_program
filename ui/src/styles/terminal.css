@@ -1,10 +1,96 @@
 /* Terminal panel: deepest surface, 8px inset (DESIGN.md §6.6). */
 
-.wb-terminal {
-  position: relative;
+.wb-terminals {
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-terminal);
+}
+
+/* Tab strip reuses the dock tab language at the same 34px (§6.1/§6.6). */
+.wb-term-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: var(--bar-height);
+  background: var(--surface-app);
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.wb-term-tab {
+  display: flex;
+  align-items: center;
+  flex: none;
+  min-width: 90px;
+  max-width: 200px;
+  padding-right: var(--space-2);
+  color: var(--text-tertiary);
+}
+
+.wb-term-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+/* Active tab merges into the terminal body — the fusion IS the indicator. */
+.wb-term-tab.is-active {
+  background: var(--surface-terminal);
+  color: var(--text-primary);
+}
+
+.wb-term-tab-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--space-5);
+  font-size: var(--type-sm-size);
+  font-weight: var(--weight-medium);
+  color: inherit;
+}
+
+/* Running process: steady dot — the pulse belongs to agents alone (§6.6). */
+.wb-term-running {
+  background: var(--agent-working);
+}
+
+/* Close button: hover/active only, same as the editor tabs (§6.1). */
+.wb-term-tab:hover .wb-tab-close,
+.wb-term-tab.is-active .wb-tab-close {
+  display: inline-flex;
+}
+
+.wb-term-add {
+  flex: none;
+  width: var(--bar-height);
+  color: var(--text-tertiary);
+  font-size: var(--type-lg-size);
+}
+
+.wb-term-add:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.wb-terminals-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.wb-terminal {
+  position: absolute;
+  inset: 0;
   background: var(--surface-terminal);
   padding: var(--space-4);
+}
+
+/* display:none keeps hidden terminals out of focus and tab order. */
+.wb-terminal.is-hidden {
+  display: none;
 }
 
 .wb-terminal-host {

@@ -56,6 +56,9 @@ export interface FileChangedEvent {
   origin: "watcher";
 }
 
+/** Everything that arrives on /ws/events (see also SessionStatusEvent below). */
+export type WorkspaceEvent = FileChangedEvent | SessionStatusEvent;
+
 // ---- office.py --------------------------------------------------------------
 // Serialized with Pydantic aliases — camelCase on the wire where aliased.
 
@@ -231,6 +234,15 @@ export interface FolderSessions {
   sessions: SessionInfo[];
 }
 
+/** Broadcast on /ws/events whenever a live session changes state — so sessions
+ * without an open agent socket update too. */
+export interface SessionStatusEvent {
+  type: "session_status";
+  session_id: string;
+  folder: string;
+  state: SessionState;
+}
+
 export interface CreateSessionRequest {
   folder: string;
   resume_session_id?: string | null;
@@ -285,8 +297,19 @@ export interface TextDelta {
 
 export interface ToolUseNote {
   type: "tool_use";
+  /** Stable call id; `tool_settled` refers back to it. */
+  id: string;
   tool: string;
   summary: string;
+}
+
+/** The result for one tool call: settles exactly that row, not the whole turn. */
+export interface ToolSettled {
+  type: "tool_settled";
+  id: string;
+  ok: boolean;
+  /** Truncated server-side (see TOOL_EXCERPT_LIMIT). */
+  output_excerpt: string;
 }
 
 export interface PermissionRequest {
@@ -331,6 +354,7 @@ export interface AgentError {
 export type AgentServerMessage =
   | TextDelta
   | ToolUseNote
+  | ToolSettled
   | PermissionRequest
   | PlanPresented
   | PlanResolved

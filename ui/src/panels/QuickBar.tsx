@@ -1,32 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
+import { visibleCommands } from "../commands";
+import { chordKeycaps } from "../keys";
 import { useStore } from "../store";
 import type { TreeNode } from "../types";
-
-interface QuickAction {
-  id: string;
-  label: string;
-  run: () => void;
-}
-
-function activeFolder(): string {
-  const path = useStore.getState().activePath;
-  return path !== null && path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-}
-
-const ACTIONS: QuickAction[] = [
-  {
-    id: "new-session",
-    label: "New agent session here",
-    run: () => void useStore.getState().createSessionIn(activeFolder()),
-  },
-  { id: "new-terminal", label: "New terminal", run: () => useStore.getState().newTerminal() },
-  {
-    id: "toggle-theme",
-    label: "Toggle theme (dark/light)",
-    run: () => useStore.getState().toggleTheme(),
-  },
-];
 
 /** Subsequence match with bonuses for adjacency and segment starts; null = no match. */
 function fuzzyScore(query: string, target: string): number | null {
@@ -55,11 +32,14 @@ interface Row {
   key: string;
   title: string;
   detail: string;
+  /** Primary chord, rendered as keycaps on the right (DESIGN.md §6.5). */
+  chord?: string;
   run: () => void;
 }
 
 export function QuickBar() {
   const open = useStore((s) => s.quickBarOpen);
+  const prefill = useStore((s) => s.quickBarPrefill);
   const tree = useStore((s) => s.tree);
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
@@ -67,10 +47,10 @@ export function QuickBar() {
 
   useEffect(() => {
     if (open) {
-      setQuery("");
+      setQuery(prefill);
       setSel(0);
     }
-  }, [open]);
+  }, [open, prefill]);
 
   useEffect(() => {
     selRef.current?.scrollIntoView({ block: "nearest" });
@@ -93,14 +73,18 @@ export function QuickBar() {
   let rows: Row[];
   if (actionsMode) {
     const q = query.slice(1).trim();
-    rows = ACTIONS.map((action) => ({ action, score: fuzzyScore(q, action.label) }))
+    // Every command in the registry, so the QuickBar is the complete keyboard
+    // path to the app — nothing is reachable only by mouse or only by chord.
+    rows = visibleCommands()
+      .map((command) => ({ command, score: fuzzyScore(q, command.title) }))
       .filter((x) => x.score !== null)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .map(({ action }) => ({
-        key: action.id,
-        title: action.label,
-        detail: "",
-        run: action.run,
+      .map(({ command }) => ({
+        key: command.id,
+        title: command.title,
+        detail: command.detail?.() ?? "",
+        chord: command.keys?.[0],
+        run: command.run,
       }));
   } else {
     const q = query.trim();
@@ -173,7 +157,16 @@ export function QuickBar() {
               onMouseMove={() => setSel(i)}
             >
               <span className="wb-qb-row-title u-truncate">{row.title}</span>
-              {row.detail !== "" && <span className="wb-qb-row-detail u-truncate">{row.detail}</span>}
+              <span className="wb-qb-row-detail u-truncate">{row.detail}</span>
+              {row.chord !== undefined && (
+                <span className="wb-qb-row-keys">
+                  {chordKeycaps(row.chord).map((cap) => (
+                    <span key={cap} className="wb-keycap">
+                      {cap}
+                    </span>
+                  ))}
+                </span>
+              )}
             </button>
           ))}
         </div>
