@@ -1,0 +1,12 @@
+# Normalize to LF in the repo; checkout as-is where it matters
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaries
+*.png binary
+*.ico binary
+*.woff2 binary
+*.xlsx binary
+*.docx binary
+*.pptx binary
