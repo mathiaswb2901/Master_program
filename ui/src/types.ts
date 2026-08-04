@@ -42,6 +42,59 @@ export interface FileChangedEvent {
   origin: "watcher";
 }
 
+// ---- office.py --------------------------------------------------------------
+// Serialized with Pydantic aliases — camelCase on the wire where aliased.
+
+export type OfficeDocumentType = "word" | "cell" | "slide";
+
+export interface OfficeStatus {
+  enabled: boolean;
+  /** Base URL of the OnlyOffice Document Server (for loading api.js). */
+  server_url: string | null;
+}
+
+export interface OfficeDocument {
+  fileType: string;
+  key: string;
+  title: string;
+  url: string;
+}
+
+export interface OfficeUser {
+  id: string;
+  name: string;
+}
+
+export interface OfficeEditorConfig {
+  callbackUrl: string;
+  mode: "edit" | "view";
+  lang: string;
+  user: OfficeUser;
+  customization: Record<string, unknown>;
+}
+
+/** The object handed whole to `new DocsAPI.DocEditor(elementId, config)`. */
+export interface DocEditorConfig {
+  document: OfficeDocument;
+  documentType: OfficeDocumentType;
+  editorConfig: OfficeEditorConfig;
+  /** JWT of this config (minus the token field itself). */
+  token: string;
+}
+
+export interface ForcesaveRequest {
+  path: string;
+}
+
+export interface CallbackResponse {
+  error: number;
+}
+
+export interface OfficeLastSave {
+  /** Hash of the editor's last saved bytes; null when it has never saved. */
+  hash: string | null;
+}
+
 // ---- terminal.py ------------------------------------------------------------
 
 export interface TerminalInput {

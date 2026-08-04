@@ -4,11 +4,13 @@ import { create } from "zustand";
 
 import * as api from "./api";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
+import { isOfficePath } from "./office";
 import { THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
   FileChangedEvent,
   FolderSessions,
+  OfficeStatus,
   SessionInfo,
   SessionState,
   TranscriptMessage,
@@ -20,6 +22,8 @@ import { ReconnectingSocket } from "./ws";
 export interface OpenFile {
   path: string;
   name: string;
+  /** "text" renders in Monaco; "office" in the OnlyOffice document panel. */
+  kind: "text" | "office";
   buffer: string;
   /** Content last synced with disk — dirty when buffer differs. */
   savedContent: string;
@@ -30,6 +34,10 @@ export interface OpenFile {
   conflict: string | null;
   /** Non-null when the file could not be loaded (e.g. binary, 415). */
   loadError: string | null;
+  /** Bumped to destroy + recreate the office editor (fresh config/key). */
+  officeGeneration: number;
+  /** Transient "saved" acknowledgment after an office forcesave. */
+  saveAck: boolean;
 }
 
 export type ChatItem =
@@ -68,6 +76,8 @@ interface WorkbenchStore {
   chats: Record<string, ChatState>;
   quickBarOpen: boolean;
   terminalGeneration: number;
+  /** GET /api/office/status result, fetched once on first office open. */
+  officeStatus: OfficeStatus | null;
 
   init: () => void;
   setTheme: (theme: Theme) => void;
@@ -85,6 +95,10 @@ interface WorkbenchStore {
   syncFromDisk: (path: string) => Promise<void>;
   reloadFromDisk: (path: string) => Promise<void>;
   keepMine: (path: string) => Promise<void>;
+
+  ensureOfficeStatus: () => Promise<void>;
+  checkOfficeChange: (path: string, eventHash: string | null) => Promise<void>;
+  reopenOffice: (path: string) => void;
 
   refreshSessions: () => Promise<void>;
   openSession: (info: SessionInfo) => void;
@@ -104,6 +118,27 @@ const initialTheme: Theme =
 let initialized = false;
 const loadingPaths = new Set<string>();
 let treeRefreshTimer: number | undefined;
+
+function emptyFile(
+  path: string,
+  name: string,
+  kind: OpenFile["kind"],
+  loadError: string | null,
+): OpenFile {
+  return {
+    path,
+    name,
+    kind,
+    buffer: "",
+    savedContent: "",
+    hash: null,
+    dirty: false,
+    conflict: null,
+    loadError,
+    officeGeneration: 0,
+    saveAck: false,
+  };
+}
 
 export const useStore = create<WorkbenchStore>()((set, get) => {
   const patchFile = (path: string, patch: Partial<OpenFile>): void => {
@@ -132,6 +167,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     chats: {},
     quickBarOpen: false,
     terminalGeneration: 0,
+    officeStatus: null,
 
     init: () => {
       if (initialized) return;
@@ -183,22 +219,27 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         return;
       }
       if (loadingPaths.has(path)) return;
-      loadingPaths.add(path);
       const name = path.split("/").pop() ?? path;
+      if (isOfficePath(path)) {
+        // No content fetch — the OnlyOffice panel pulls its own editor config.
+        set((s) => ({
+          openFiles: [...s.openFiles, emptyFile(path, name, "office", null)],
+          activePath: path,
+        }));
+        void get().ensureOfficeStatus();
+        return;
+      }
+      loadingPaths.add(path);
       try {
         const fc = await api.getFileContent(path);
         set((s) => ({
           openFiles: [
             ...s.openFiles,
             {
-              path,
-              name,
+              ...emptyFile(path, name, "text", null),
               buffer: fc.content,
               savedContent: fc.content,
               hash: fc.hash,
-              dirty: false,
-              conflict: null,
-              loadError: null,
             },
           ],
           activePath: path,
@@ -206,19 +247,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       } catch (err) {
         const detail = err instanceof api.ApiError ? err.detail : String(err);
         set((s) => ({
-          openFiles: [
-            ...s.openFiles,
-            {
-              path,
-              name,
-              buffer: "",
-              savedContent: "",
-              hash: null,
-              dirty: false,
-              conflict: null,
-              loadError: detail,
-            },
-          ],
+          openFiles: [...s.openFiles, emptyFile(path, name, "text", detail)],
           activePath: path,
         }));
       } finally {
@@ -252,6 +281,25 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     saveFile: async (path) => {
       const file = get().openFiles.find((f) => f.path === path);
       if (!file || file.loadError !== null) return;
+      if (file.kind === "office") {
+        // Fire-and-forget flush of pending edits to disk; a subtle "Saved"
+        // acknowledgment shows on success (the editor autosaves regardless).
+        try {
+          await api.postOfficeForcesave(path);
+          patchFile(path, { saveAck: true });
+          window.clearTimeout(officeAckTimers.get(path));
+          officeAckTimers.set(
+            path,
+            window.setTimeout(() => {
+              officeAckTimers.delete(path);
+              patchFile(path, { saveAck: false });
+            }, 1600),
+          );
+        } catch {
+          // office disabled or Document Server unreachable — nothing to flush
+        }
+        return;
+      }
       const content = file.buffer;
       try {
         const res = await api.putFileContent({
@@ -293,6 +341,11 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
       const file = get().openFiles.find((f) => f.path === event.path);
       if (!file || file.loadError !== null) return;
+      if (file.kind === "office") {
+        // Coalesce, then ask the server whose save this was (see checkOfficeChange).
+        scheduleOfficeCheck(event.path, event.hash);
+        return;
+      }
       if (event.hash !== null && event.hash === file.hash) return; // echo of our own save
       // Coalesce bursts (a single save often surfaces as delete+modify on
       // Windows) and verify against a fresh GET rather than the event payload.
@@ -372,6 +425,46 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       } catch {
         patchFile(path, { hash: null, dirty: true, conflict: null });
       }
+    },
+
+    ensureOfficeStatus: async () => {
+      if (get().officeStatus !== null || officeStatusPending) return;
+      officeStatusPending = true;
+      try {
+        set({ officeStatus: await api.getOfficeStatus() });
+      } catch (err) {
+        console.error("office status failed", err);
+      } finally {
+        officeStatusPending = false; // on failure: retried on the next office open
+      }
+    },
+
+    checkOfficeChange: async (path, eventHash) => {
+      // The editor's own saves also land on disk and fire watcher events; the
+      // server remembers the hash of its last Document Server save so we can
+      // tell those apart from external (agent/git) edits.
+      let lastSave: string | null = null;
+      try {
+        lastSave = (await api.getOfficeLastSave(path)).hash;
+      } catch {
+        // endpoint unavailable — treat as unknown and offer the reopen
+      }
+      const file = get().openFiles.find((f) => f.path === path);
+      if (!file || file.kind !== "office") return;
+      if (eventHash !== null && eventHash === lastSave) return; // editor's own save
+      patchFile(path, { conflict: "Document changed outside the editor." });
+    },
+
+    reopenOffice: (path) => {
+      // New generation -> the panel destroys the editor, refetches the config
+      // (new document.key for the changed bytes) and recreates it.
+      set((s) => ({
+        openFiles: s.openFiles.map((f) =>
+          f.path === path
+            ? { ...f, conflict: null, officeGeneration: f.officeGeneration + 1 }
+            : f,
+        ),
+      }));
     },
 
     refreshSessions: async () => {
@@ -596,6 +689,29 @@ function scheduleFileSync(path: string): void {
       void useStore.getState().syncFromDisk(path);
     }, 150),
   );
+}
+
+// ---- office: status guard, forcesave ack timers, change-check coalescing ---
+
+let officeStatusPending = false;
+
+const officeAckTimers = new Map<string, number>();
+
+const officeCheckTimers = new Map<string, { timer: number; hash: string | null }>();
+
+/** Coalesce watcher bursts (a save often surfaces as delete+modify on Windows),
+ * keeping the last non-null hash seen in the burst. */
+function scheduleOfficeCheck(path: string, hash: string | null): void {
+  const pending = officeCheckTimers.get(path);
+  if (pending !== undefined) window.clearTimeout(pending.timer);
+  const kept = hash ?? pending?.hash ?? null;
+  officeCheckTimers.set(path, {
+    hash: kept,
+    timer: window.setTimeout(() => {
+      officeCheckTimers.delete(path);
+      void useStore.getState().checkOfficeChange(path, kept);
+    }, 150),
+  });
 }
 
 // ---- agent sockets (module-level; one per live session, kept for app lifetime)

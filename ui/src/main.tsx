@@ -9,6 +9,7 @@ import "./styles/app.css";
 import "./styles/dockview.css";
 import "./styles/filetree.css";
 import "./styles/editor.css";
+import "./styles/office.css";
 import "./styles/terminal.css";
 import "./styles/agent.css";
 import "./styles/quickbar.css";
