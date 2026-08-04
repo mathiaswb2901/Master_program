@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
+import { Markdown } from "../markdown";
 import { useStore, type ChatItem, type SessionFlags } from "../store";
-import type { SessionState } from "../types";
+import type { SessionState, TreeNode } from "../types";
 
 export interface StatusVisual {
   color: string;
@@ -67,6 +68,67 @@ function PermissionCard({ item }: { item: Extract<ChatItem, { kind: "permission"
   );
 }
 
+// ---- tool rows: resolve "Edit: <path>" summaries to workspace files ---------
+
+const treePathsCache = new WeakMap<TreeNode, string[]>();
+
+function treeFilePaths(tree: TreeNode): string[] {
+  const cached = treePathsCache.get(tree);
+  if (cached !== undefined) return cached;
+  const out: string[] = [];
+  const walk = (node: TreeNode): void => {
+    if (node.kind === "file") out.push(node.path);
+    else (node.children ?? []).forEach(walk);
+  };
+  walk(tree);
+  treePathsCache.set(tree, out);
+  return out;
+}
+
+/** Workspace file a tool summary refers to, or null. Summaries look like
+ * "Edit: <value>" where the value may be workspace-relative or absolute. */
+export function toolTargetPath(summary: string, tree: TreeNode | null): string | null {
+  if (tree === null) return null;
+  const colon = summary.indexOf(": ");
+  if (colon < 0) return null;
+  const value = summary
+    .slice(colon + 2)
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/\\/g, "/");
+  if (value === "") return null;
+  const paths = treeFilePaths(tree);
+  if (paths.includes(value)) return value;
+  const suffixMatches = paths.filter((p) => value.endsWith("/" + p));
+  return suffixMatches.length === 1 ? suffixMatches[0] : null;
+}
+
+function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
+  const tree = useStore((s) => s.tree);
+  const target = useMemo(() => toolTargetPath(item.summary, tree), [item.summary, tree]);
+  return (
+    <div
+      className={
+        "wb-tool-row" + (item.settled ? (item.settledError ? " is-failed" : " is-settled") : "")
+      }
+    >
+      <span className="wb-tool-name">{item.tool}</span>
+      {target !== null ? (
+        <button
+          type="button"
+          className="wb-tool-summary wb-tool-link u-truncate"
+          title={`Open ${target}`}
+          onClick={() => void useStore.getState().openFile(target)}
+        >
+          {item.summary}
+        </button>
+      ) : (
+        <span className="wb-tool-summary u-truncate">{item.summary}</span>
+      )}
+    </div>
+  );
+}
+
 function ChatItemView({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
@@ -74,24 +136,14 @@ function ChatItemView({ item }: { item: ChatItem }) {
     case "assistant":
       return (
         <div className={item.isError ? "wb-msg-block is-error" : "wb-msg-block"}>
-          <div className="wb-msg-assistant">{item.text}</div>
+          <Markdown text={item.text} />
           {item.done && item.costUsd !== null && (
             <div className="wb-chat-cost u-tabular">{"$" + item.costUsd.toFixed(4)}</div>
           )}
         </div>
       );
     case "tool":
-      return (
-        <div
-          className={
-            "wb-tool-row" +
-            (item.settled ? (item.settledError ? " is-failed" : " is-settled") : "")
-          }
-        >
-          <span className="wb-tool-name">{item.tool}</span>
-          <span className="wb-tool-summary u-truncate">{item.summary}</span>
-        </div>
-      );
+      return <ToolRow item={item} />;
     case "permission":
       return <PermissionCard item={item} />;
     case "error":
@@ -222,9 +274,7 @@ export function TranscriptView() {
                 {m.text}
               </div>
             ) : (
-              <div key={i} className="wb-msg-assistant">
-                {m.text}
-              </div>
+              <Markdown key={i} text={m.text} />
             ),
           )}
         </div>

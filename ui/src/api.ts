@@ -3,12 +3,15 @@
 import type { Theme } from "./theme";
 import type {
   CallbackResponse,
+  CreateRequest,
   CreateSessionRequest,
   DocEditorConfig,
   FileContent,
   FolderSessions,
   OfficeLastSave,
   OfficeStatus,
+  OkResponse,
+  RenameRequest,
   SessionInfo,
   TranscriptResponse,
   TreeNode,
@@ -55,6 +58,15 @@ export const getFileContent = (path: string): Promise<FileContent> =>
 
 export const putFileContent = (body: WriteRequest): Promise<WriteResponse> =>
   request("/api/files/content", jsonInit("PUT", body));
+
+export const createEntry = (body: CreateRequest): Promise<OkResponse> =>
+  request("/api/files/create", jsonInit("POST", body));
+
+export const renameEntry = (body: RenameRequest): Promise<OkResponse> =>
+  request("/api/files/rename", jsonInit("POST", body));
+
+export const deleteEntry = (path: string): Promise<OkResponse> =>
+  request(`/api/files/content?path=${encodeURIComponent(path)}`, { method: "DELETE" });
 
 export const getSessions = (): Promise<FolderSessions[]> => request("/api/agents/sessions");
 

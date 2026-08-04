@@ -36,7 +36,7 @@ function EditorTab({ file, active }: { file: OpenFile; active: boolean }) {
           type="button"
           className="wb-tab-close"
           aria-label={`Close ${file.name}`}
-          onClick={() => useStore.getState().closeFile(file.path)}
+          onClick={() => useStore.getState().requestCloseFile(file.path)}
         >
           ×
         </button>

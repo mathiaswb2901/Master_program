@@ -32,14 +32,30 @@
   --dv-overlay-z-index: 50;
 }
 
+/* Focused panel group: 1px accent top edge on its tab strip only (§6.1) —
+ * the one place chrome uses accent structurally. */
+.dockview-theme-workbench .dv-active-group > .dv-tabs-and-actions-container {
+  box-shadow: inset 0 1px 0 0 var(--accent);
+}
+
 /* Panel chrome tab (fixed layout panels): 12px/500, no close button. */
 .wb-panel-tab {
   display: flex;
   align-items: center;
+  gap: var(--space-3);
   height: 100%;
   padding: 0 var(--space-5);
   min-width: 90px;
   max-width: 200px;
   font-size: var(--type-sm-size);
   font-weight: var(--weight-medium);
+}
+
+/* Aggregate "a session needs attention" dot on the Agent tab (§6.4 dot-only). */
+.wb-tab-attention-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--agent-attention);
+  flex: none;
 }
