@@ -85,6 +85,14 @@ class TestService:
         with pytest.raises(NotAnOfficeFileError):
             svc.editor_config("x.py")
 
+    def test_theme_flows_into_customization(self, svc: OfficeService, tmp_path: Path) -> None:
+        (tmp_path / "t.docx").write_bytes(DOCX)
+        dark = svc.editor_config("t.docx", "dark")
+        light = svc.editor_config("t.docx", "light")
+        assert dark.editor_config.customization["uiTheme"] == "theme-dark"
+        assert light.editor_config.customization["uiTheme"] == "theme-light"
+        assert dark.editor_config.customization["hideRulers"] is True
+
     def test_forged_token_rejected(self, svc: OfficeService) -> None:
         forged = pyjwt.encode({"path": "a.docx"}, "wrong-secret", algorithm="HS256")
         with pytest.raises(InvalidOfficeTokenError):

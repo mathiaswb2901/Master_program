@@ -19,6 +19,20 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
 - UI: follow `DESIGN.md` tokens; zustand is the only state store; no new dependencies without justification.
 - Windows-first: paths via `pathlib`, PTYs via pywinpty, test on PowerShell.
 
+## Workflow (enforced by branch ruleset — direct pushes to master are rejected)
+
+- Feature branch -> PR (`gh pr create`) -> quality-gate green -> `gh pr merge --squash --auto`.
+  The gate requires the branch to be up to date with master; rebase when it moves.
+- Subagents that write to this repo run in an ISOLATED git worktree — never in the
+  checkout the main session uses. One writer per checkout, always.
+- `--amend`/`reset`/`rebase` only after verifying `git log -1` shows the expected HEAD;
+  never put `git commit` at the tail of a long `&&` chain.
+- Run the app: `uv run workbench-server` (workspace = CWD it starts from). Office
+  editing needs env: `WORKBENCH_ONLYOFFICE_URL=http://localhost:8880` and
+  `WORKBENCH_ONLYOFFICE_JWT_SECRET` = `services.CoAuthoring.secret.session.string` from
+  `C:\Program Files\ONLYOFFICE\DocumentServer\config\local.json` (native local install,
+  services `Ds*Svc`, port 8880).
+
 ## Danger zones
 
 - Never write secrets or personal paths into tracked files (OSS repo).

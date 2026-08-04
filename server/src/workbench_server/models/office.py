@@ -48,6 +48,26 @@ class OfficeUser(BaseModel):
     name: str = "Workbench"
 
 
+UiTheme = Literal["dark", "light"]
+
+
+def default_customization(theme: UiTheme = "dark") -> dict[str, Any]:
+    """A calm, de-cluttered editor: dark chrome to match the app, compact header,
+    no side panels or feedback nags. Unknown keys are ignored by older DS builds."""
+    return {
+        "autosave": True,
+        "compactHeader": True,
+        "compactToolbar": False,  # keep full editing power; header stays compact
+        "hideRightMenu": True,
+        "hideRulers": True,
+        "toolbarHideFileName": True,
+        "feedback": False,
+        "help": False,
+        "uiTheme": "theme-dark" if theme == "dark" else "theme-light",
+        "features": {"spellcheck": {"change": True}},
+    }
+
+
 class OfficeEditorConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -55,9 +75,7 @@ class OfficeEditorConfig(BaseModel):
     mode: Literal["edit", "view"]
     lang: str = "en"
     user: OfficeUser = Field(default_factory=OfficeUser)
-    customization: dict[str, Any] = Field(
-        default_factory=lambda: {"autosave": True, "compactHeader": True, "hideRightMenu": True}
-    )
+    customization: dict[str, Any] = Field(default_factory=default_customization)
 
 
 class DocEditorConfig(BaseModel):
