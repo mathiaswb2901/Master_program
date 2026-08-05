@@ -79,3 +79,31 @@ class TestTree:
             "kind": "file",
             "children": None,
         }
+
+    async def test_tree_skips_build_caches_but_keeps_folders_of_the_same_name(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Two directories called ``target``; only the one cargo made goes away."""
+        build = tmp_path / "desktop" / "src-tauri" / "target"
+        (build / "debug").mkdir(parents=True)
+        (build / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+        (build / "debug" / "popup.toml").write_text("[permissions]")
+
+        own = tmp_path / "analysis" / "target"
+        own.mkdir(parents=True)
+        (own / "se3-2026.csv").write_text("hour,mw\n")
+
+        root = (await client.get("/api/files/tree")).json()
+        by_name = {child["name"]: child for child in root["children"]}
+        tauri = by_name["desktop"]["children"][0]
+        assert [c["name"] for c in tauri["children"]] == []
+        kept = by_name["analysis"]["children"][0]
+        assert kept["name"] == "target"
+        assert kept["children"] == [
+            {
+                "name": "se3-2026.csv",
+                "path": "analysis/target/se3-2026.csv",
+                "kind": "file",
+                "children": None,
+            }
+        ]

@@ -14,7 +14,8 @@ from watchfiles import Change, awatch
 
 from workbench_server.models.files import MAX_TEXT_FILE_BYTES, FileChangedEvent
 from workbench_server.services.event_bus import EventBus
-from workbench_server.services.workspace import IGNORED_DIRS, content_hash
+from workbench_server.services.ignore import CACHEDIR_TAG, IgnoreIndex
+from workbench_server.services.workspace import content_hash
 
 log = structlog.get_logger()
 
@@ -23,19 +24,6 @@ _CHANGE_NAMES: dict[Change, Literal["added", "modified", "deleted"]] = {
     Change.modified: "modified",
     Change.deleted: "deleted",
 }
-
-
-def _ignored(root: Path, path: Path) -> bool:
-    try:
-        parts = path.relative_to(root).parts
-    except ValueError:
-        return True
-    if any(part in IGNORED_DIRS for part in parts):
-        return True
-    # our own atomic-write temp files (".name.random.tmp") must never surface as events
-    if path.name.startswith(".") and path.name.endswith(".tmp"):
-        return True
-    return path.is_dir()
 
 
 def _hash_of(path: Path) -> str | None:
@@ -51,8 +39,17 @@ class Watcher:
     def __init__(self, root: Path, bus: EventBus) -> None:
         self._root = root.resolve()
         self._bus = bus
+        self._ignore = IgnoreIndex(self._root)
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+
+    def _skip(self, path: Path) -> bool:
+        if self._ignore.ignored(path):
+            return True
+        # our own atomic-write temp files (".name.random.tmp") must never surface as events
+        if path.name.startswith(".") and path.name.endswith(".tmp"):
+            return True
+        return path.is_dir()
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name="workspace-watcher")
@@ -68,9 +65,15 @@ class Watcher:
         async for changes in awatch(
             self._root, stop_event=self._stop, debounce=200, step=50, recursive=True
         ):
+            # Before the batch, not during it: `changes` is a set, so a build
+            # that creates its directory and writes the tag inside one debounce
+            # window could otherwise have its artifacts judged — and remembered
+            # as visible — before the tag in the same batch was ever noticed.
+            if any(Path(raw_path).name == CACHEDIR_TAG for _, raw_path in changes):
+                self._ignore.invalidate()
             for change, raw_path in changes:
                 path = Path(raw_path)
-                if _ignored(self._root, path):
+                if self._skip(path):
                     continue
                 kind = _CHANGE_NAMES.get(change)
                 if kind is None:

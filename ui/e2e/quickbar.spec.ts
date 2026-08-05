@@ -6,6 +6,8 @@
  *    surfaces as a problems toast rather than dying silently, and is carried by
  *    the shortcuts payload itself (the half of the assertion that outlives the
  *    toast's auto-dismiss);
+ *  - Ctrl+P searches files, and a cargo build tree is not among them — while a
+ *    folder that merely shares its name is;
  *  - Ctrl+Shift+P opens the QuickBar in command mode, with keycaps on the rows
  *    that carry a chord;
  *  - file-supplied shortcuts appear under their own "Shortcuts" category;
@@ -15,11 +17,18 @@
  *    its argument a second time).
  */
 
+import path from "node:path/posix";
+
 import { expect, test } from "@playwright/test";
 
 import type { ShortcutsState } from "../src/types";
-import { gotoApp, runInTerminal, terminal, terminalText, workspaceReady } from "./app";
-import { BROKEN_SHORTCUT_NAME, SHORTCUT_BODY, SHORTCUT_NAME } from "./workspace";
+import { gotoApp, runInTerminal, terminal, terminalText, treeItem, workspaceReady } from "./app";
+import {
+  BROKEN_SHORTCUT_NAME,
+  OWN_TARGET_FILE,
+  SHORTCUT_BODY,
+  SHORTCUT_NAME,
+} from "./workspace";
 
 const MARKER = "e2e-shortcut-marker";
 /** Sync command for the never-run step. Its output differs from its input, and
@@ -53,6 +62,36 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
   });
 
   await workspaceReady(page);
+
+  await test.step("build artifacts are not files you can open; same-named folders are", async () => {
+    // The bug this replaces: a Tauri build put ~3.5k files under
+    // `desktop/src-tauri/target/`, and every one of them was offered here.
+    await page.keyboard.press("Control+P");
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    await expect(quickbar.locator(".wb-qb-input")).toHaveValue("");
+
+    await page.keyboard.type("popup");
+    await expect(quickbar.locator(".wb-qb-empty")).toHaveText("No matching files");
+
+    // The other half, and the reason the name `target` was not simply banned:
+    // the analyst's own folder of target data is untouched.
+    await quickbar.locator(".wb-qb-input").fill("se3-targets");
+    const row = quickbar.locator(".wb-qb-row").first();
+    await expect(row).toContainText("se3-targets-2026.csv");
+    await expect(row).toContainText(path.dirname(OWN_TARGET_FILE));
+
+    await page.keyboard.press("Escape");
+    await expect(quickbar).toBeHidden();
+  });
+
+  await test.step("the file tree does not walk the build cache either", async () => {
+    await expect(treeItem(page, "desktop")).toBeVisible();
+    await treeItem(page, "desktop").click();
+    await expect(treeItem(page, "src-tauri")).toBeVisible();
+    await treeItem(page, "src-tauri").click();
+    // `target` is the only thing in it, and it is gone.
+    await expect(page.getByRole("treeitem", { name: "target" })).toHaveCount(0);
+  });
 
   await test.step("Ctrl+Shift+P opens command mode with keycaps", async () => {
     await page.keyboard.press("Control+Shift+P");
