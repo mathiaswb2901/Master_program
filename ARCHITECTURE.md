@@ -1049,14 +1049,55 @@ rather than assume it — `safe_path` refuses a slot, the tree does not list one
 and a real `git worktree add` through the API produces no file event on
 `/ws/events`.
 
-**When the reset happens.** A clean slot is returned *as it is*; the
-`reset --hard` that repurposes it runs at **acquire** time. Acquire is the only
-moment the pool knows which commit to reset *to*, and it is the moment nothing
-is running in the slot — whereas a release fires exactly as the holder's own
-processes are letting go of their handles, which is when a Windows reset is most
-likely to fail. Commits a holder made and did not push survive that reset:
-nothing here runs `gc`, `worktree remove` or `clean -x`, so they stay in the
-object database, reachable through the slot's own `HEAD` reflog.
+**When the reset happens.** A clean slot is returned *as it is*; the reset that
+repurposes it runs at **acquire** time. Acquire is the only moment the pool
+knows which commit to reset *to*, and it is the moment nothing is running in the
+slot — whereas a release fires exactly as the holder's own processes are letting
+go of their handles, which is when a Windows reset is most likely to fail.
+Commits a holder made and did not push survive that reset: nothing here runs
+`gc`, `worktree remove` or `clean -x`, so they stay in the object database,
+reachable through the slot's own `HEAD` reflog.
+
+**And why that reset is `--keep`.** The dirty check and the reset behind it are
+two git processes, so there is a gap between them, and a slot that was clean
+when it was asked can be written to before the reset lands — by a build daemon
+the previous holder left running, a language server, an indexer: the same class
+of background writer the lock table above is about. Under `reset --hard` that
+write was overwritten with no `dirty`, no `needs_review`, no event and no log
+line, which is the one failure this service is not allowed to have. `--keep`
+refuses to overwrite a locally-modified file, so the decision and the
+destruction happen inside *one* git process rather than across a gap:
+
+| a write that lands in the gap | what happens now |
+|---|---|
+| to a file that **differs** between `HEAD` and the base | `--keep` aborts; status is re-read, the slot is parked `dirty`, the work is intact |
+| to a file the two commits **agree** on | `--keep` keeps it; the post-reset status check sees it and parks the slot `dirty` |
+| nothing raced | status is empty after the reset, and *only* then is the slot leased |
+
+The failed-reset path re-reads `git status` rather than matching a substring of
+git's stderr, because the two causes need different answers: a racing writer
+leaves the slot dirty and heals itself when the writer stops, a held handle
+leaves it clean and unresettable and wants a human. `--hard` survives only on
+the two paths where destruction is what the caller asked for by name —
+`release(discard_changes=True)` and `prune(force=True)` — and those now verify
+that the slot really is empty before reporting it `free`, since the `clean -fd`
+behind the reset is a second process with a gap of its own.
+
+**One writer per pool, enforced by the OS.** The service's `asyncio.Lock` is
+exactly as wide as one interpreter: it serialises concurrent requests to *one*
+server and nothing else. Two `workbench-server` processes pointed at the same
+workspace (a crashed server not yet reaped, two dev instances on one folder)
+share a pool root and a `pool.json`, and both could read one slot as free, both
+prepare it, both lease it, with the last save winning the state file — one
+checkout, two writers, the invariant the whole feature exists to provide. So
+`PoolLock` takes an exclusive byte-range lock on `<pool root>/pool.lock` for the
+life of the process (`msvcrt.locking` on Windows, `flock` elsewhere). A server
+that cannot take it serves no pool: `GET /api/worktrees` carries the reason,
+acquire is a 503, and everything else in that server starts normally. The lock
+is held by a **handle**, not by the existence of a file, so a killed server
+cannot leave a pool permanently unopenable — the OS drops it when the process
+dies, and a clean shutdown releases it explicitly so the next server does not
+have to wait to be lucky.
 
 **Not built yet** (ROADMAP M5 item 6 carries them): multi-root file and terminal
 access through a root registry, so a slot can be *opened* in the UI with the path

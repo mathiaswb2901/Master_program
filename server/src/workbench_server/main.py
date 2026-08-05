@@ -163,6 +163,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await host_backend.aclose()
         await provenance_service.stop()
         await shortcuts_service.stop()
+        # Releases the pool's cross-process lock, so the next server on this
+        # workspace can serve slots immediately instead of waiting for this
+        # process to be reaped.
+        await worktree_service.stop()
         await watcher.stop()
         pty_manager.shutdown()
         await app.state.http.aclose()

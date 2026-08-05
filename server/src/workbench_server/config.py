@@ -8,7 +8,10 @@ the only setting most users ever touch.
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from workbench_server.models.worktrees import MAX_LEASE_SECONDS, MIN_LEASE_SECONDS
 
 
 class Settings(BaseSettings):
@@ -85,7 +88,16 @@ class Settings(BaseSettings):
     # Default lease, in seconds. One of the two idle signals: a slot is
     # reclaimable only when the lease has expired *and* its owner process is
     # gone. Long enough that an agent working unattended keeps its slot.
-    worktree_lease_seconds: float = 3600.0
+    #
+    # Bounded by the *same* constants as AcquireWorktreeRequest.ttl_seconds and
+    # RenewWorktreeRequest.ttl_seconds, and for the same reason: a floor keeps
+    # the next sweep from reclaiming a slot out from under its holder, and a
+    # ceiling keeps a typo from parking one for a year. Bounding only the
+    # explicit override would have protected the rare path and left the common
+    # one open — most callers never send a ttl_seconds and land here.
+    worktree_lease_seconds: float = Field(
+        default=3600.0, ge=MIN_LEASE_SECONDS, le=MAX_LEASE_SECONDS
+    )
 
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""

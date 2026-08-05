@@ -26,21 +26,25 @@ arithmetic, which a real lock cannot do deterministically.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
-from workbench_server.config import Settings
+from workbench_server.config import Settings, load_settings
 from workbench_server.main import create_app
 from workbench_server.models.worktrees import (
+    MAX_LEASE_SECONDS,
+    MIN_LEASE_SECONDS,
     AcquireWorktreeRequest,
     WorktreeInfo,
     WorktreePool,
@@ -48,6 +52,8 @@ from workbench_server.models.worktrees import (
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
 from workbench_server.services.worktrees import (
+    DISCARD_FAILED_DETAIL,
+    POOL_LOCK_FILE,
     POOL_STATE_FILE,
     RESET_ATTEMPTS,
     AliveProbe,
@@ -131,6 +137,20 @@ def pool_root(tmp_path: Path) -> Path:
     return tmp_path / "pool"
 
 
+#: Every service :func:`_started` builds, so the autouse fixture below can hand
+#: back the pool lock each one holds. Without it a test's lock would outlive it
+#: and the *next* test on the same root would be told a server is already there
+#: — and on Windows an open handle in ``tmp_path`` also blocks pytest's cleanup.
+_LIVE: list[WorktreeService] = []
+
+
+@pytest.fixture(autouse=True)
+async def _release_pool_locks() -> AsyncIterator[None]:
+    yield
+    while _LIVE:
+        await _LIVE.pop().stop()
+
+
 async def _started(
     repo: Path,
     pool_root: Path,
@@ -151,6 +171,7 @@ async def _started(
         clock=clock,
         alive=alive,
     )
+    _LIVE.append(service)
     await service.start()
     return service
 
@@ -518,6 +539,7 @@ async def test_unusable_state_comes_back_with_every_slot_held(
     assert first.snapshot().slots[0].state == "free"
 
     (pool_root / POOL_STATE_FILE).write_text(corruption, encoding="utf-8")
+    await first.stop()  # the restart this is simulating means that process is gone
     rebuilt = await _started(repo, pool_root)
     pool = rebuilt.snapshot()
 
@@ -535,6 +557,7 @@ async def test_a_recovered_slot_is_not_handed_out(repo: Path, pool_root: Path) -
     assert info.lease is not None
     await first.release(info.slot, info.lease.lease_id)
     (pool_root / POOL_STATE_FILE).unlink()
+    await first.stop()
 
     rebuilt = await _started(repo, pool_root, capacity=1)
 
@@ -552,6 +575,7 @@ async def test_a_recovered_slot_is_released_by_the_reaper_once_it_verifies(
     assert info.lease is not None
     await first.release(info.slot, info.lease.lease_id)
     (pool_root / POOL_STATE_FILE).unlink()
+    await first.stop()
 
     rebuilt = await _started(
         repo, pool_root, clock=clock, alive=lambda _pid: False, lease_seconds=600.0
@@ -570,6 +594,7 @@ async def test_a_good_state_file_is_believed(repo: Path, pool_root: Path) -> Non
     first = await _started(repo, pool_root)
     info = await first.acquire(_acquire("lane-a", owner_pid=4242))
     assert info.lease is not None
+    await first.stop()
 
     second = await _started(repo, pool_root)
     pool = second.snapshot()
@@ -588,10 +613,11 @@ async def test_a_directory_git_does_not_know_is_flagged_never_deleted(
     repo: Path, pool_root: Path
 ) -> None:
     """A half-created slot is not a slot — and it is still somebody's bytes."""
-    await _started(repo, pool_root)
+    first = await _started(repo, pool_root)
     stray = pool_root / "slot-99"
     stray.mkdir()
     (stray / "something.txt").write_bytes(b"who put this here\n")
+    await first.stop()
 
     rebuilt = await _started(repo, pool_root)
     states = {slot.slot: slot for slot in rebuilt.snapshot().slots}
@@ -719,7 +745,7 @@ async def test_a_transient_lock_is_retried_rather_than_failed(repo: Path, pool_r
 
     async def flaky(cwd: Path, args: Sequence[str], timeout_s: float) -> GitResult:
         nonlocal attempts
-        if tuple(args[:2]) == ("reset", "--hard"):
+        if args[0] == "reset":  # either mode: the retry budget is one budget
             attempts += 1
             if attempts <= failures:
                 return GitResult(1, "", "error: unable to unlink old 'model.py': Permission denied")
@@ -743,7 +769,7 @@ async def test_a_lock_that_outlasts_the_budget_is_reported_honestly(
     """No ``--force``, no pretending. The slot says what happened to it."""
 
     async def stuck(cwd: Path, args: Sequence[str], timeout_s: float) -> GitResult:
-        if tuple(args[:2]) == ("reset", "--hard"):
+        if args[0] == "reset":  # either mode: the retry budget is one budget
             return GitResult(1, "", "error: unable to unlink old 'model.py': Permission denied")
         return await run_git(cwd, args, timeout_s)
 
@@ -779,6 +805,217 @@ async def test_a_status_that_cannot_be_read_is_never_read_as_clean(
     assert released.state == "needs_review"
     with pytest.raises(PoolExhaustedError):
         await service.acquire(_acquire("lane-b"))
+
+
+# ---- the gap between the check and the reset --------------------------------
+#
+# The dirty check and the reset behind it are two separate git processes, so
+# there is a window between them, and a slot that was clean when it was asked
+# can be written to before the reset lands. Under `reset --hard` that write was
+# overwritten with no `dirty`, no `needs_review`, no event and no log line —
+# silent destruction of somebody's work, which is the one failure this service
+# is not allowed to have.
+#
+# Both halves get a test, because `--keep` answers them differently: it refuses
+# outright for a file that differs between HEAD and the target, and silently
+# *preserves* a change to a file the two commits agree on. Neither may end with
+# the slot leased out.
+#
+# The racing write is injected through the runner seam at exactly the instant
+# the race describes. That is deliberate: the window is a timing accident, and a
+# sleep-based version of these tests would be flaky in both directions — passing
+# against the bug on a slow machine and failing against the fix on a fast one.
+
+
+RACED = b"VERSION = 99  # written while the pool was looking away\n"
+
+
+async def test_a_write_between_the_check_and_the_reset_is_not_destroyed(
+    repo: Path, pool_root: Path
+) -> None:
+    """The reproduction. A tracked file that differs between HEAD and the base.
+
+    Something still attached to the slot — a build daemon the previous holder
+    left running, a language server, an indexer — writes ``model.py`` after the
+    pool has decided the slot is clean and before the reset runs. ``--keep``
+    refuses to overwrite it, and the pool parks the slot instead of leasing it.
+
+    Capacity is 1 so the caller is *told*: at capacity, a slot that cannot be
+    prepared is the whole pool, and an honest refusal beats a checkout with
+    somebody else's uncommitted work in it.
+    """
+    (repo / "model.py").write_bytes(b"VERSION = 2\n")
+    second = _commit(repo, "second")
+    first_commit = _git(repo, "rev-parse", "HEAD~1")
+
+    tracked: Path | None = None
+    raced = False
+
+    async def writes_into_the_gap(cwd: Path, args: Sequence[str], timeout_s: float) -> GitResult:
+        nonlocal raced
+        # `tracked` is only known once a slot exists, which is also what arms
+        # this: nothing races the acquire that creates the slot.
+        if tracked is not None and args[0] == "reset" and not raced:
+            raced = True  # once: the retries must not keep re-opening the window
+            tracked.write_bytes(RACED)
+        return await run_git(cwd, args, timeout_s)
+
+    service = await _started(repo, pool_root, capacity=1, runner=writes_into_the_gap)
+    info = await service.acquire(_acquire(base=first_commit))
+    assert info.lease is not None
+    await service.release(info.slot, info.lease.lease_id)
+    assert service.snapshot().slots[0].state == "free"
+    assert (Path(info.path) / "model.py").read_bytes() == b"VERSION = 1\n"
+
+    tracked = Path(info.path) / "model.py"
+    # Suppressed rather than `pytest.raises`, so the *first* thing this test
+    # fails on is the data loss and not a side effect of it. The bug being
+    # reproduced is silent: under a plain `reset --hard` these bytes were gone
+    # and every other signal still said the acquire had gone perfectly.
+    with contextlib.suppress(PoolExhaustedError):
+        await service.acquire(_acquire("lane-b", base=second))
+
+    assert raced, "the window never opened — this test proves nothing"
+    assert tracked.read_bytes() == RACED, "the racing write was silently destroyed"
+    held = service.snapshot().slots[0]
+    assert held.state == "dirty"
+    assert held.lease is None, "a slot with somebody's work in it was handed to lane-b"
+    assert held.detail == dirty_detail(1)
+
+
+async def test_a_write_the_reset_would_not_have_touched_is_caught_after_it(
+    repo: Path, pool_root: Path
+) -> None:
+    """The other half, and the reason a post-reset check earns its git call.
+
+    Here the slot is being re-prepared at the commit it already sits on, so no
+    file differs between HEAD and the target and ``--keep`` has nothing to
+    refuse: it succeeds and *keeps* the racing write. That is not destruction,
+    but it is somebody's uncommitted work sitting in a slot about to be handed
+    to a different holder — so the reset is verified rather than believed.
+    """
+    tracked: Path | None = None
+    raced = False
+
+    async def writes_into_the_gap(cwd: Path, args: Sequence[str], timeout_s: float) -> GitResult:
+        nonlocal raced
+        if tracked is not None and args[0] == "reset" and not raced:
+            raced = True
+            tracked.write_bytes(RACED)
+        return await run_git(cwd, args, timeout_s)
+
+    service = await _started(repo, pool_root, capacity=1, runner=writes_into_the_gap)
+    info = await service.acquire(_acquire())
+    assert info.lease is not None
+    await service.release(info.slot, info.lease.lease_id)
+
+    tracked = Path(info.path) / "model.py"
+    with contextlib.suppress(PoolExhaustedError):
+        await service.acquire(_acquire("lane-b"))
+
+    assert raced
+    assert tracked.read_bytes() == RACED, "the racing write was silently destroyed"
+    held = service.snapshot().slots[0]
+    assert held.state == "dirty"
+    assert held.lease is None, "a slot with somebody's work in it was handed to lane-b"
+
+
+async def test_a_reused_slot_really_is_moved_to_the_new_base(repo: Path, pool_root: Path) -> None:
+    """The control for both of the above: with nobody racing, the reset resets.
+
+    ``--keep`` is a weaker flag than ``--hard`` and this is the test that stops
+    it being *too* weak — a reused slot must genuinely arrive at the commit it
+    was acquired for, not merely fail to lose anything.
+    """
+    (repo / "model.py").write_bytes(b"VERSION = 2\n")
+    second = _commit(repo, "second")
+    first_commit = _git(repo, "rev-parse", "HEAD~1")
+
+    service = await _started(repo, pool_root, capacity=1)
+    first = await service.acquire(_acquire(base=first_commit))
+    assert first.lease is not None
+    assert (Path(first.path) / "model.py").read_bytes() == b"VERSION = 1\n"
+    await service.release(first.slot, first.lease.lease_id)
+
+    moved = await service.acquire(_acquire("lane-b", base=second))
+
+    assert moved.slot == first.slot  # reused, not recreated
+    assert moved.head == second
+    assert (Path(moved.path) / "model.py").read_bytes() == b"VERSION = 2\n"
+
+
+async def test_a_discard_that_could_not_empty_the_slot_is_never_reported_free(
+    repo: Path, pool_root: Path
+) -> None:
+    """The same gap on the destructive path, which has its own second process.
+
+    ``release(discard_changes=True)`` resets and *then* cleans, so a writer
+    active across that gap leaves work behind. The caller asked for an empty
+    slot; a slot handed back as ``free`` with somebody's file still in it is the
+    same silent lie in the other direction, so the promise is re-read from git
+    before it is made.
+    """
+    late: Path | None = None
+
+    async def writes_after_the_clean(cwd: Path, args: Sequence[str], timeout_s: float) -> GitResult:
+        result = await run_git(cwd, args, timeout_s)
+        if late is not None and args[0] == "clean" and not late.exists():
+            late.write_bytes(b"landed after the clean\n")
+        return result
+
+    service = await _started(repo, pool_root, capacity=1, runner=writes_after_the_clean)
+    info = await service.acquire(_acquire())
+    assert info.lease is not None
+    (Path(info.path) / "model.py").write_bytes(b"VERSION = 99\n")
+
+    late = Path(info.path) / "late.txt"
+    released = await service.release(info.slot, info.lease.lease_id, discard_changes=True)
+
+    assert released.state == "needs_review"
+    assert released.detail == DISCARD_FAILED_DETAIL
+    assert late.is_file(), "the work that arrived late is still the user's"
+
+
+# ---- one writer per pool, across processes ----------------------------------
+
+
+async def test_a_second_server_on_one_workspace_does_not_serve_the_pool(
+    repo: Path, pool_root: Path
+) -> None:
+    """``asyncio.Lock`` is one interpreter wide; the invariant is not.
+
+    Two ``workbench-server`` processes on one workspace share a pool root and a
+    ``pool.json``. Without an OS-level guard both read the same slot as free,
+    both prepare it, both lease it, and the last to save wins the state file —
+    one checkout, two writers, which is the single thing this feature exists to
+    prevent. Two services here are two independent lock *handles*, which is
+    exactly what two processes are.
+
+    The refusal is a ``problem`` and a 503, never a crash: everything else in
+    the second server starts normally.
+    """
+    first = await _started(repo, pool_root)
+    held = await first.acquire(_acquire("lane-a"))
+
+    second = await _started(repo, pool_root)
+    pool = second.snapshot()
+
+    assert pool.problem is not None and "one server per workspace" in pool.problem
+    assert pool.repo is None, "a server without the lock must not look ready"
+    assert pool.slots == []
+    with pytest.raises(PoolUnavailableError):
+        await second.acquire(_acquire("lane-b"))
+    # The first server is untouched and still owns what it leased.
+    assert first.snapshot().slots[0].lease is not None
+    assert (pool_root / POOL_LOCK_FILE).is_file()
+
+    # And the lock is a handle, not a flag file: the moment the holder lets go,
+    # the next server serves the same pool — including the slot still leased.
+    await first.stop()
+    third = await _started(repo, pool_root)
+
+    assert third.snapshot().problem is None
+    assert [slot.slot for slot in third.snapshot().slots] == [held.slot]
 
 
 # ---- the pool root is not the workspace -------------------------------------
@@ -1000,6 +1237,40 @@ async def test_the_liveness_probe_never_touches_the_process_it_asks_about() -> N
         await child.wait()
     assert process_alive(child.pid) is False
     assert process_alive(0) is False
+
+
+# ---- the configured default is bounded like the request that overrides it ----
+
+
+def test_the_server_wide_lease_default_is_bounded_like_the_request_field() -> None:
+    """The bounds on ``ttl_seconds`` protected the path almost nobody takes.
+
+    ``AcquireWorktreeRequest.ttl_seconds`` and ``RenewWorktreeRequest.ttl_seconds``
+    are bounded so a typo cannot park a slot for a year — but both fall back to
+    ``Settings.worktree_lease_seconds`` when a caller omits them, and most
+    callers do. A bare float there left the *common* path unbounded, which is
+    the wrong way round.
+    """
+    assert Settings(worktree_lease_seconds=MIN_LEASE_SECONDS).worktree_lease_seconds
+    assert Settings(worktree_lease_seconds=MAX_LEASE_SECONDS).worktree_lease_seconds
+
+    with pytest.raises(ValidationError):
+        Settings(worktree_lease_seconds=MIN_LEASE_SECONDS - 1)
+    with pytest.raises(ValidationError):
+        Settings(worktree_lease_seconds=MAX_LEASE_SECONDS + 1)
+
+
+def test_a_misplaced_decimal_in_the_environment_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The way an operator actually hits this: units, or one zero too many."""
+    monkeypatch.setenv("WORKBENCH_WORKTREE_LEASE_SECONDS", str(MAX_LEASE_SECONDS * 10))
+    with pytest.raises(ValidationError):
+        load_settings()
+
+    monkeypatch.setenv("WORKBENCH_WORKTREE_LEASE_SECONDS", "0.5")  # meant minutes
+    with pytest.raises(ValidationError):
+        load_settings()
 
 
 async def test_two_acquires_at_once_get_two_different_slots(repo: Path, pool_root: Path) -> None:

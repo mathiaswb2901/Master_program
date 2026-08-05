@@ -49,15 +49,37 @@ indexed as N more copies of the project — every file in the repo would appear
 watcher storm. Outside the root, ``safe_path`` refuses it and the watcher never
 sees it, which is the property ``test_worktrees.py`` asserts rather than assumes.
 
-**When the reset happens.** A clean slot is returned *as it is*; the
-``reset --hard`` that repurposes it runs at **acquire** time. Two reasons, and
-the second is the load-bearing one: acquire is the only moment the pool knows
-which commit to reset *to*, and it is the moment nothing is running in the slot
-— whereas a release fires exactly as the holder's own processes are letting go
-of their file handles, which is when a Windows reset is most likely to fail.
-Commits a holder made and did not push are not destroyed by that reset: nothing
-here runs ``gc``, ``worktree remove`` or ``clean -x``, so they stay in the
-object database, reachable through the slot's own ``HEAD`` reflog.
+**When the reset happens.** A clean slot is returned *as it is*; the reset that
+repurposes it runs at **acquire** time. Two reasons, and the second is the
+load-bearing one: acquire is the only moment the pool knows which commit to
+reset *to*, and it is the moment nothing is running in the slot — whereas a
+release fires exactly as the holder's own processes are letting go of their file
+handles, which is when a Windows reset is most likely to fail. Commits a holder
+made and did not push are not destroyed by that reset: nothing here runs ``gc``,
+``worktree remove`` or ``clean -x``, so they stay in the object database,
+reachable through the slot's own ``HEAD`` reflog.
+
+**And why that reset is ``--keep``.** A dirty check and the reset behind it are
+two separate git processes, so there is a gap between them, and a slot that was
+clean when it was asked can be written to before the reset lands — by a build
+daemon the previous holder left running, a language server, an indexer: exactly
+the class of background writer the Windows lock note above is about. Under
+``reset --hard`` that write was overwritten with no state change, no event and
+no log line, which is the one failure this service is not allowed to have.
+:data:`ResetMode` is the fix: ``--keep`` refuses to overwrite a locally-modified
+file, so the decision and the destruction happen inside *one* git process
+instead of across a gap, and :meth:`WorktreeService._verify_reset` re-reads
+status afterwards to catch the writes ``--keep`` preserves rather than refuses.
+``--hard`` survives only where destruction is what the caller asked for by name.
+
+**One writer per pool, enforced by the OS.** The ``asyncio.Lock`` below is
+exactly as wide as one interpreter. Two ``workbench-server`` processes on the
+same workspace share a pool root and a ``pool.json``, and nothing in Python
+stops both from reading one slot as free and leasing it to different holders —
+one checkout, two writers, the invariant this feature exists to provide. So
+:class:`PoolLock` takes an exclusive byte-range lock on a file in the pool root
+for the life of the process; a server that cannot take it serves no pool and
+says so, and everything else in the app starts normally.
 """
 
 import asyncio
@@ -72,7 +94,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import structlog
 from pydantic import ValidationError
@@ -98,6 +120,14 @@ log = structlog.get_logger()
 #: The state document, next to the slots it describes.
 POOL_STATE_FILE = "pool.json"
 
+#: The cross-process guard, next to the state it protects. See :class:`PoolLock`.
+POOL_LOCK_FILE = "pool.lock"
+
+#: One sentence for a slot git would not talk about, from one place — the same
+#: reason :func:`dirty_detail` exists: ``_transition`` publishes only when
+#: something changed, so two wordings for one situation *look* like a change.
+STATUS_UNREADABLE = "git could not report this slot's status"
+
 #: Ceilings on one git call. ``worktree add`` copies a whole checkout out, so it
 #: gets its own; everything else is metadata work that either lands promptly or
 #: is not going to. Nothing here waits forever — a git that hangs would hang the
@@ -117,6 +147,30 @@ GIT_CHECKOUT_TIMEOUT_S = 600.0
 #: put back honestly becomes ``needs_review`` instead of a lie.
 RESET_ATTEMPTS = 5
 RESET_BACKOFF_S = 0.2
+
+#: The two resets this service runs, and the difference between them is the
+#: whole safety story of :meth:`WorktreeService._prepare`.
+#:
+#: ``--keep`` repurposes a slot the pool believes is *free*. It updates the files
+#: that differ between ``HEAD`` and the target and **aborts** rather than
+#: overwrite one that has local changes — which is what folds the dirty check
+#: into the destructive call itself. A separate ``git status`` followed by
+#: ``reset --hard`` cannot do that: they are two processes, and a writer that
+#: lands between them loses its work silently.
+#:
+#: ``--hard`` is kept for exactly the two paths where destroying uncommitted
+#: work is what the caller asked for out loud — ``release(discard_changes=True)``
+#: and ``prune(force=True)`` — and nowhere else. Neither is ``--force``: git's
+#: reset is already forceful and the flag this service refuses to reach for is
+#: still refused.
+ResetMode = Literal["--keep", "--hard"]
+
+#: A discard that could not leave the slot empty. One sentence, because both
+#: causes (a handle held open, a process still writing) have the same answer.
+DISCARD_FAILED_DETAIL = (
+    f"could not empty this slot after {RESET_ATTEMPTS} attempts — something is "
+    "holding a file open in it, or still writing to it"
+)
 
 #: ``os.replace`` onto the state file, same story as ``services/layouts.py``.
 REPLACE_ATTEMPTS = 10
@@ -338,6 +392,94 @@ def _alive_posix(pid: int) -> bool:
     return True
 
 
+def _lock_exclusively(fd: int) -> None:
+    """Take a non-blocking exclusive lock on one byte, or raise ``OSError``.
+
+    One byte is enough: nothing reads the file's contents, and a byte-range lock
+    is the cheapest thing both platforms agree on. The platform test is written
+    as a literal ``sys.platform`` comparison rather than through the
+    :data:`WINDOWS` constant used elsewhere in this module, because here it has
+    to narrow the *import* — ``fcntl`` does not exist on Windows and the
+    Windows-only type-check this project runs must skip that branch rather than
+    fail to resolve it.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(fd: int) -> None:
+    """Drop the lock. Best effort: the close behind it releases it regardless."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        with contextlib.suppress(OSError):
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+class PoolLock:
+    """One writer per *pool*, enforced by the operating system.
+
+    :class:`WorktreeService` serialises its own callers with an
+    ``asyncio.Lock``, which is exactly as wide as one interpreter — it prevents
+    two concurrent requests to one server from racing, and nothing else. Two
+    ``workbench-server`` processes pointed at the same workspace (a crashed
+    server whose old process has not fully exited, two dev instances started
+    against the same folder by mistake) share a pool root and a ``pool.json``.
+    Both can read the same slot as ``free``, both can prepare it, both can lease
+    it to a different holder, and the last one to save wins the state file: one
+    checkout handed to two writers, which is precisely the invariant this whole
+    feature exists to provide.
+
+    So the guard is the OS's rather than the language's, and it is held by a
+    **handle** on purpose. Windows and POSIX both drop a file lock when the
+    holding process dies, so a server that is killed cannot leave a pool
+    permanently unopenable — a lock file whose mere *existence* meant "held"
+    would need a liveness story of its own, and this module already knows how
+    unreliable those are (see :func:`process_alive`).
+    """
+
+    def __init__(self) -> None:
+        self._fd: int | None = None
+
+    def acquire(self, root: Path) -> str | None:
+        """Take it. ``None`` on success, else the sentence to report."""
+        path = root / POOL_LOCK_FILE
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as err:
+            return f"the pool lock {path} could not be opened: {err.strerror or err}"
+        try:
+            _lock_exclusively(fd)
+        except OSError:
+            os.close(fd)
+            return (
+                f"another process is already serving the worktree pool at {root} — "
+                "one server per workspace, so this one will not hand out slots"
+            )
+        self._fd = fd
+        return None
+
+    def release(self) -> None:
+        """Give it back. Safe to call when it was never taken."""
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        _unlock(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 class WorktreeService:
     """The pool: slots by name, the git behind them, and the events."""
 
@@ -364,7 +506,10 @@ class WorktreeService:
         self._repo: Path | None = None
         self._slots: dict[str, WorktreeInfo] = {}
         self._problem: str | None = "the worktree pool has not been started"
+        #: Serialises this process's own callers.
         self._lock = asyncio.Lock()
+        #: Serialises this process against every *other* one. See :class:`PoolLock`.
+        self._pool_lock = PoolLock()
 
     # ---- properties ---------------------------------------------------------
 
@@ -388,7 +533,7 @@ class WorktreeService:
         """
         async with self._lock:
             try:
-                self._repo = await self._discover_repo()
+                repo = await self._discover_repo()
             except GitError as err:
                 self._problem = str(err)
                 log.info("worktrees.unavailable", detail=self._problem)
@@ -399,6 +544,15 @@ class WorktreeService:
                 self._problem = f"pool root {self._root} is unusable: {err.strerror or err}"
                 log.warning("worktrees.root_unusable", root=str(self._root), detail=self._problem)
                 return
+            # Before anything reads pool.json, and before `self._repo` is set:
+            # a process that does not hold the pool lock must not be able to
+            # reach `acquire`, and `_require_repo` is the gate that stops it.
+            held = self._pool_lock.acquire(self._root)
+            if held is not None:
+                self._problem = held
+                log.warning("worktrees.pool_locked_elsewhere", root=str(self._root), detail=held)
+                return
+            self._repo = repo
             known, self._problem = self._load_state()
             self._slots = await self._reconcile(known)
             self._save_state()
@@ -410,6 +564,17 @@ class WorktreeService:
                 capacity=self._capacity,
                 problem=self._problem,
             )
+
+    async def stop(self) -> None:
+        """Hand the pool back to the next process. Never raises.
+
+        The OS would release the lock when this process exits anyway; releasing
+        it here is what lets a *clean* shutdown be followed immediately by
+        another server on the same workspace, instead of one that depends on how
+        fast the old process is reaped.
+        """
+        async with self._lock:
+            self._pool_lock.release()
 
     # ---- reading ------------------------------------------------------------
 
@@ -453,12 +618,19 @@ class WorktreeService:
         Returns ``None`` when the slot cannot be handed out — and it has already
         been moved to ``dirty`` or ``needs_review`` and published by then, so
         the caller only has to try the next one.
+
+        Three questions, not one, because the first two are separate git
+        processes and a slot can change between them. The check below says the
+        slot was clean *when it was asked*; ``--keep`` is what makes the reset
+        itself refuse to overwrite a write that landed since; and
+        :meth:`_verify_reset` catches the writes ``--keep`` silently *preserves*
+        rather than refuses. Only a slot that answers all three is leased out,
+        so "reset succeeded, slot leased" is a fact rather than a hope.
         """
-        info = self._slots[name]
-        path = Path(info.path)
+        path = Path(self._slots[name].path)
         dirty = await self._dirty_count(path)
         if dirty is None:
-            self._transition(name, "needs_review", detail="git could not report this slot's status")
+            self._transition(name, "needs_review", detail=STATUS_UNREADABLE)
             return None
         if dirty > 0:
             # The state file said free and the disk says otherwise. The disk
@@ -466,7 +638,30 @@ class WorktreeService:
             log.warning("worktrees.free_slot_was_dirty", slot=name, files=dirty)
             self._transition(name, "dirty", detail=dirty_detail(dirty), dirty_files=dirty)
             return None
-        if not await self._reset_to(path, base):
+        if not await self._reset_to(path, base, mode="--keep"):
+            await self._reset_refused(name, path, base)
+            return None
+        return await self._verify_reset(name, path)
+
+    async def _reset_refused(self, name: str, path: Path, base: str) -> None:
+        """A reset that would not run, and *why* — asked of git, not of stderr.
+
+        Two causes with the same exit code and very different meanings: a file
+        somebody wrote between the check and the reset (``--keep`` aborts rather
+        than destroy it — the slot is dirty and the work is intact), or a handle
+        held open so the reset cannot touch the tree at all (the slot is clean
+        and unusable). Re-reading status tells them apart without matching a
+        substring of git's error text, and the two land in different states
+        because they need different answers: one heals when the writer stops,
+        the other wants a human.
+        """
+        raced = await self._dirty_count(path)
+        if raced is None:
+            self._transition(name, "needs_review", detail=STATUS_UNREADABLE)
+        elif raced > 0:
+            log.warning("worktrees.acquire_raced_a_writer", slot=name, files=raced, refused=True)
+            self._transition(name, "dirty", detail=dirty_detail(raced), dirty_files=raced)
+        else:
             self._transition(
                 name,
                 "needs_review",
@@ -475,8 +670,26 @@ class WorktreeService:
                     "something is holding a file open in this slot"
                 ),
             )
+
+    async def _verify_reset(self, name: str, path: Path) -> WorktreeInfo | None:
+        """The reset said yes. Make it say so definitively.
+
+        ``--keep`` only aborts for a file that *differs* between ``HEAD`` and
+        the target; a write to a file the two commits agree on is kept, which is
+        not destruction but is still somebody's work sitting in a slot about to
+        be leased to somebody else. This is where it surfaces — and where a
+        silent race becomes a ``dirty`` slot with a reason on it.
+        """
+        after = await self._dirty_count(path)
+        if after is None:
+            self._transition(name, "needs_review", detail=STATUS_UNREADABLE)
             return None
-        return info
+        if after > 0:
+            log.warning("worktrees.acquire_raced_a_writer", slot=name, files=after, refused=False)
+            self._transition(name, "dirty", detail=dirty_detail(after), dirty_files=after)
+            return None
+        log.debug("worktrees.slot_verified_clean", slot=name)
+        return self._slots[name]
 
     async def _create_slot(self, repo: Path, base: str) -> str:
         """``git worktree add --detach``. The ``--detach`` is decision 1."""
@@ -551,9 +764,7 @@ class WorktreeService:
             path = Path(info.path)
             dirty = await self._dirty_count(path)
             if dirty is None:
-                return self._transition(
-                    slot, "needs_review", detail="git could not report this slot's status"
-                )
+                return self._transition(slot, "needs_review", detail=STATUS_UNREADABLE)
             if dirty > 0 and not discard_changes:
                 log.info("worktrees.released_dirty", slot=slot, files=dirty)
                 return self._transition(
@@ -563,7 +774,7 @@ class WorktreeService:
                 return self._transition(
                     slot,
                     "needs_review",
-                    detail=f"could not discard changes after {RESET_ATTEMPTS} attempts",
+                    detail=DISCARD_FAILED_DETAIL,
                     dirty_files=dirty,
                 )
             head = await self._head(path)
@@ -661,7 +872,7 @@ class WorktreeService:
         path = Path(info.path)
         dirty = await self._dirty_count(path)
         if dirty is None:
-            self._transition(name, "needs_review", detail="git could not report this slot's status")
+            self._transition(name, "needs_review", detail=STATUS_UNREADABLE)
             return KeptSlot(slot=name, reason="needs_review", detail="git could not read the slot")
         if dirty > 0:
             if not force:
@@ -676,7 +887,7 @@ class WorktreeService:
                 self._transition(
                     name,
                     "needs_review",
-                    detail=f"could not discard changes after {RESET_ATTEMPTS} attempts",
+                    detail=DISCARD_FAILED_DETAIL,
                     dirty_files=dirty,
                 )
                 return KeptSlot(
@@ -739,8 +950,8 @@ class WorktreeService:
                 return result.out.splitlines()[0].strip()
         return None
 
-    async def _reset_to(self, path: Path, commit: str) -> bool:
-        """``git reset --hard`` past a transient Windows lock.
+    async def _reset_to(self, path: Path, commit: str, *, mode: ResetMode) -> bool:
+        """``git reset`` past a transient Windows lock. See :data:`ResetMode`.
 
         See :data:`RESET_ATTEMPTS`. A lock that outlasts the budget is a real
         one, and the answer to a real one is ``needs_review`` — never a harder
@@ -748,7 +959,7 @@ class WorktreeService:
         """
         for attempt in range(RESET_ATTEMPTS):
             try:
-                result = await self._git(path, ("reset", "--hard", commit), GIT_TIMEOUT_S)
+                result = await self._git(path, ("reset", mode, commit), GIT_TIMEOUT_S)
             except GitError as err:
                 log.warning("worktrees.reset_error", path=str(path), detail=str(err))
                 return False
@@ -770,15 +981,32 @@ class WorktreeService:
         The missing ``-x`` is decision 2: ignored files are the dependency and
         build caches that make a warm slot worth pooling, and a "clean" that
         deletes ``node_modules`` turns every reuse back into a cold install.
+
+        ``--hard`` here rather than the ``--keep`` :meth:`_prepare` uses, because
+        this path is only ever reached through ``discard_changes`` or ``force``
+        — the caller naming destruction out loud is what makes it allowed.
+
+        Verified rather than assumed, all the same. This is the one call that
+        *promises* an empty slot, and the clean behind the reset is a second
+        process: a writer active across that gap leaves work behind, and a slot
+        handed back as ``free`` with somebody's files in it is the same silent
+        lie the acquire path guards against. So the promise is re-read from git
+        before it is made.
         """
-        if not await self._reset_to(path, "HEAD"):
+        if not await self._reset_to(path, "HEAD", mode="--hard"):
             return False
         try:
             result = await self._git(path, ("clean", "-fd"), GIT_TIMEOUT_S)
         except GitError as err:
             log.warning("worktrees.clean_error", path=str(path), detail=str(err))
             return False
-        return result.ok
+        if not result.ok:
+            return False
+        left = await self._dirty_count(path)
+        if left != 0:  # None (git would not say) and >0 (work arrived) both fail
+            log.warning("worktrees.discard_left_work_behind", path=str(path), files=left)
+            return False
+        return True
 
     async def _registered_worktrees(self) -> dict[str, str]:
         """Slot name -> path, for the worktrees git knows about under our root."""
