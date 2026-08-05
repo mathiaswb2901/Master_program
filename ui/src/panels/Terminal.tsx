@@ -7,6 +7,7 @@ import { MONO_FONT } from "../monaco";
 import type { WorkbenchTool } from "../registry";
 import { useStore } from "../store";
 import { registerTerminal } from "../terminalInput";
+import { attachRenderer } from "../terminalRenderer";
 import { xtermTheme } from "../theme";
 import type { TerminalClientMessage, TerminalServerMessage } from "../types";
 import { wsUrl } from "../ws";
@@ -101,10 +102,36 @@ function fitTerminal(fit: FitAddon): void {
   if (dims !== undefined && dims.cols >= 2 && dims.rows >= 2) fit.fit();
 }
 
+/**
+ * The host element, carrying a reader for what the terminal holds.
+ *
+ * On the GPU renderer xterm draws to a canvas and there is no `.xterm-rows` to
+ * scrape — that element exists only under the DOM renderer. The reader hangs on
+ * the host node rather than on `window` so that "the visible terminal" stays
+ * expressed by the same CSS the E2E suite already selects with, and reads the
+ * *buffer*: wrapped lines are rejoined, which the old `textContent` scrape could
+ * not do (it split a shell line the shell considers unbroken, hiding markers
+ * from a substring search).
+ */
+type TerminalHost = HTMLDivElement & { readTerminalText?: () => string };
+
+function bufferText(term: XTerm): string {
+  const buffer = term.buffer.active;
+  const lines: string[] = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    if (line === undefined) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  return lines.join("\n");
+}
+
 function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
   const theme = useStore((s) => s.theme);
   const [exited, setExited] = useState(false);
-  const hostRef = useRef<HTMLDivElement>(null);
+  const hostRef = useRef<TerminalHost>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const mountedRef = useRef(false);
@@ -126,6 +153,9 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
     fitRef.current = fit;
     term.loadAddon(fit);
     term.open(host);
+    // After `open`, never before: the GPU renderer needs the element to exist.
+    const renderer = attachRenderer(term);
+    host.readTerminalText = () => bufferText(term);
     fitTerminal(fit);
 
     // Terminal sockets never auto-reconnect: the PTY behind them is stateful.
@@ -164,6 +194,8 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
       resizeSub.dispose();
       ws.onclose = null;
       ws.close();
+      delete host.readTerminalText;
+      renderer.dispose(); // before the terminal: the addon holds a GL context
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

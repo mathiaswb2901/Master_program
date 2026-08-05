@@ -199,6 +199,7 @@ in-process calls where the model and the user dominate.
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
+| `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage |
 | `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |
@@ -207,6 +208,38 @@ in-process calls where the model and the user dominate.
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
+
+## Terminal throughput
+
+ConPTY is the floor and it is not ours: PowerShell writes line-at-a-time, so a
+1.48 MB flood arrives as ~20,000 reads of ~73 chars at ~620/s, and a raw
+pywinpty loop with no Workbench code in it measures the same shape and the same
+~30 s. What *was* ours is that the pump sent one Pydantic model, one
+`model_dump_json()` and one `send_text()` per read — 18,827 frames, mean 79
+chars. `services/terminal_stream.py` batches them: **the first chunk after a
+quiet stream goes out immediately** (a keystroke echoed at an idle prompt never
+waits on a timer — that is the whole interactive feel), a busy stream emits at
+most one frame per window, unbroken output widens that window, and a size cap
+keeps a fast producer streaming rather than buffering. Measured over the real
+socket: 1,347 frames at mean 1,100 chars, with echo latency unchanged
+(median 0.5 ms). The policy is a clock-free object so the measured ConPTY
+arrival trace can be replayed in virtual time and the frame budget asserted
+deterministically (`test_terminal.py`).
+
+The in-flight read is a task that is never cancelled by the window timer; a
+plain `wait_for` would drop the chunk ConPTY had already handed over. And the
+policy runs on `time.perf_counter`, not `loop.time()`: on CPython 3.11 the
+latter is Windows' tick counter (15.6 ms granularity), which made the idle test
+fire at random — and asyncio arms its own timers off it, so a wake-up is only a
+hint and `perf_counter` decides whether the frame is really due.
+
+On the client, `ui/src/terminalRenderer.ts` puts xterm on the GPU
+(`@xterm/addon-webgl`) with a fallback to the default DOM renderer on both
+failure paths — the context refusing to be created, and the context being lost
+mid-session. A dead canvas is worse than a slow one. Consequence for tests:
+under the GPU renderer there is no `.xterm-rows` to scrape, so the E2E suite
+reads xterm's buffer through a reader `panels/Terminal.tsx` hangs on the host
+element (wrapped lines rejoined — strictly better than the old `textContent`).
 
 ## Agent sessions
 
