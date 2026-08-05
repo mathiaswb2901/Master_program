@@ -103,6 +103,10 @@ export default defineConfig({
       env: {
         [WORKSPACE_ENV]: E2E_WORKSPACE,
         WORKBENCH_FAKE_AGENT: "1",
+        // The host backend's counterpart to fake-agent mode: the whole Office
+        // host lifecycle, its refusals and its fallbacks, with no Office, no
+        // Rust and no native window anywhere near CI. Journey 7 drives it.
+        WORKBENCH_OFFICE_FAKE: "1",
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: E2E_WORKSPACE,
         WORKBENCH_CLAUDE_PROJECTS_DIR: path.join(E2E_WORKSPACE, ".claude-projects"),

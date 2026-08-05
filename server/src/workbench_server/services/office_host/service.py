@@ -16,12 +16,16 @@ be substituted (:class:`~...state.ForeignProcessError`). A document already open
 elsewhere is a first-class refusal with a reason the UI can show, never a silent
 takeover.
 
-**Policy.** ``office_native`` gates hosting entirely, and ``auto`` currently
-resolves to *not* hosting natively: the Win32 backend does not ship yet, and it
-becomes the default only once hang isolation is proven (owner decision,
-2026-08-05). PowerPoint is refused whatever the mode — it is single-instance and
-offers no window handle to prove ownership with, so preview is the honest answer
-in v1. Nothing here touches the OnlyOffice path, which stays exactly as it was.
+**Policy.** ``office_native`` gates hosting entirely. ``auto`` now resolves to
+hosting natively *where it is possible*: the containment the owner made it
+conditional on is built and measured (``host::mover`` in the shell — a hung
+guest costs a resize frame ~1.5 ms instead of ~1 s), so the remaining conditions
+are ones the machine answers, not ones a reviewer has to. Windows, an Office to
+launch, and a desktop shell attached to the host channel: any of them missing is
+reported by ``capabilities`` and the UI falls back to OnlyOffice. PowerPoint is
+refused whatever the mode — it is single-instance and offers no window handle to
+prove ownership with, so preview is the honest answer in v1. Nothing here
+touches the OnlyOffice path, which stays exactly as it was.
 """
 
 import asyncio
@@ -55,6 +59,8 @@ from workbench_server.services.office_host.backend import (
     HostHandle,
 )
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
+from workbench_server.services.office_host.shell_backend import ShellHostBackend
+from workbench_server.services.office_host.shell_channel import ShellChannel
 from workbench_server.services.office_host.state import ForeignProcessError, HostLifecycle
 from workbench_server.services.workspace import Workspace
 
@@ -146,18 +152,24 @@ def detect_office(roots: Sequence[Path] | None = None) -> bool:
     return False
 
 
-def build_backend(mode: OfficeNativeMode, fake: bool) -> HostBackend | None:
+def build_backend(
+    mode: OfficeNativeMode, fake: bool, channel: ShellChannel | None = None
+) -> HostBackend | None:
     """The one place a backend is chosen. ``None`` means "cannot host here".
 
-    The Win32/COM implementation lands behind this call in a later PR; until
-    then ``on`` without the fake backend is honestly reported as unavailable
-    rather than pretending.
+    ``auto`` is where the owner decision lives: it now resolves to the real
+    backend, because hang isolation is proven (``host::mover`` on the Rust side,
+    measured in ``hosting_tests::hang_isolation_measurement``). ``off`` still
+    wins over everything. Off Windows there is nothing to host with, whatever
+    the mode says — and that is reported, not raised.
     """
     if mode == "off":
         return None
     if fake:
         return FakeHostBackend()
-    return None
+    if channel is None or sys.platform != "win32":
+        return None
+    return ShellHostBackend(channel)
 
 
 @dataclass
@@ -176,6 +188,12 @@ class _Host:
     #: coroutine finding the host already terminal when its await returns. Given
     #: back when a close *fails*, because a refused close reaped nothing.
     released: bool = False
+    #: Whether the panel showing it is on screen. A hosted window is a real
+    #: window and does not hide itself when its editor tab goes behind another
+    #: one; like ``rect``, this is written whatever the state and read by the
+    #: embed, so a tab switched away from during the launch does not come back
+    #: as a Word over somebody else's document.
+    visible: bool = True
     #: Reserved for the panel PR: the dockview panel currently showing it.
     panel_id: str | None = field(default=None)
 
@@ -191,6 +209,7 @@ class OfficeHostService:
         *,
         mode: OfficeNativeMode = "auto",
         fake: bool = False,
+        channel: ShellChannel | None = None,
         detector: Callable[[], bool] = detect_office,
         clock: Callable[[], float] = time.time,
         poll_interval_s: float = POLL_INTERVAL_S,
@@ -201,6 +220,10 @@ class OfficeHostService:
         self._bus = bus
         self._mode: OfficeNativeMode = mode
         self._fake = fake
+        #: Only for reporting whether a shell is attached. The backend is what
+        #: actually uses it; the service holds it so ``capabilities`` can say
+        #: *why* hosting is unavailable instead of only that it is.
+        self._channel = channel
         # "off" wins over everything, including a backend somebody wired in.
         self._backend = None if mode == "off" else backend
         self._office_detected = detector()
@@ -215,7 +238,10 @@ class OfficeHostService:
 
     @property
     def hosting_available(self) -> bool:
-        return self._backend is not None
+        """A backend exists *and* it can host right now. The second half is not
+        a formality: the real backend needs the desktop shell attached, and the
+        same server serves a browser tab that can never host anything."""
+        return self._backend is not None and self._backend.ready()
 
     def capabilities(self, onlyoffice_enabled: bool) -> OfficeCapabilities:
         """What this machine can actually do, said plainly.
@@ -230,24 +256,31 @@ class OfficeHostService:
             native_hosting=native,
             office_detected=self._office_detected,
             fake_backend=self._fake and native,
+            shell_attached=self._shell_attached,
             hostable_kinds=list(HOSTABLE_KINDS) if native else [],
             onlyoffice=onlyoffice_enabled,
             fallback="native" if native else ("onlyoffice" if onlyoffice_enabled else "preview"),
             detail=self._detail(onlyoffice_enabled),
         )
 
+    @property
+    def _shell_attached(self) -> bool:
+        return self._channel is not None and self._channel.attached
+
     def _detail(self, onlyoffice_enabled: bool) -> str:
         if self._mode == "off":
             return "native hosting is off (WORKBENCH_OFFICE_NATIVE=off)"
         if self.hosting_available and self._fake:
             return "the fake host backend is active: no real document is hosted"
-        if self._mode == "auto":
-            return (
-                "auto: native hosting stays off until the window host ships and "
-                "hang isolation is proven"
-            )
+        if self._backend is None:
+            if not self._office_detected:
+                return "no Microsoft Office was found on this machine"
+            return "native hosting is not available here (it needs the Workbench desktop shell)"
         if not self.hosting_available:
-            return "native hosting requested, but no host backend is available on this machine"
+            return (
+                "native hosting is ready, but this window is a browser tab — "
+                "only the Workbench desktop shell can dock a real document"
+            )
         if onlyoffice_enabled:
             return "native hosting available; OnlyOffice remains for preview and diff"
         return "native hosting available"
@@ -292,7 +325,8 @@ class OfficeHostService:
     async def _drive(self, host: _Host, backend: HostBackend, file_path: Path) -> OfficeHostInfo:
         try:
             handle = await asyncio.wait_for(
-                backend.launch(file_path, host.lifecycle.kind), self._launch_timeout_s
+                backend.launch(file_path, host.lifecycle.kind, host.lifecycle.host_id),
+                self._launch_timeout_s,
             )
         except TimeoutError:
             # The backend's own timeout should have fired long before ours. It
@@ -379,13 +413,20 @@ class OfficeHostService:
             path=host.lifecycle.path,
             pid=host.lifecycle.pid,
         )
+        info = host.lifecycle.info()
         if host.rect != embedded_at:
             # Bounds that arrived *during* the embed. They were stored rather
             # than sent (there was no embedded window to move yet), so send them
             # now — otherwise a panel resized while Word was starting would sit
             # at the rectangle it had a second ago.
-            return await self.set_bounds(host.lifecycle.host_id, host.rect)
-        return host.lifecycle.info()
+            info = await self.set_bounds(host.lifecycle.host_id, host.rect)
+        if not host.visible and not host.lifecycle.terminal:
+            # Same story for the tab the user switched away from while Word was
+            # starting: the window has just been shown, and nobody asked for it.
+            info = await self._guarded(
+                host, "set_visible", lambda backend, handle: backend.set_visible(handle, False)
+            )
+        return info
 
     async def _reuse(
         self, host: _Host, backend: HostBackend, rect: PanelRect | None
@@ -414,6 +455,26 @@ class OfficeHostService:
             return host.lifecycle.info()
         return await self._guarded(
             host, "set_bounds", lambda backend, handle: backend.set_bounds(handle, rect)
+        )
+
+    async def set_visible(self, host_id: str, visible: bool) -> OfficeHostInfo:
+        """The panel went behind another tab, or came back.
+
+        Remembered whatever the state, and applied only when there is a window:
+        a tab switched away from *during* the launch must still be hidden when
+        the embed lands, or a real Word appears over whatever the user is
+        looking at now. The embed reads this the same way it reads ``rect``.
+        """
+        host = self._require(host_id)
+        if host.lifecycle.terminal:
+            raise HostStateError(host_id, host.lifecycle.state, "show or hide")
+        if host.visible == visible:
+            return host.lifecycle.info()
+        host.visible = visible
+        if host.lifecycle.state != "embedded":
+            return host.lifecycle.info()
+        return await self._guarded(
+            host, "set_visible", lambda backend, handle: backend.set_visible(handle, visible)
         )
 
     async def detach(self, host_id: str) -> OfficeHostInfo:
@@ -627,7 +688,10 @@ class OfficeHostService:
     # ---- internals ----------------------------------------------------------
 
     def _require_backend(self) -> HostBackend:
-        if self._backend is None:
+        # Readiness, not just existence. A backend with no shell attached would
+        # launch a real Word and then have nowhere to put it — a window on the
+        # user's desktop that Workbench claims to be hosting.
+        if self._backend is None or not self._backend.ready():
             raise HostRefusedError(
                 "native_hosting_disabled", self._detail(onlyoffice_enabled=False)
             )

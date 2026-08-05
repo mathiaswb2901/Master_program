@@ -44,9 +44,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsChild, RegisterClassExW,
-    SetWindowLongPtrW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, WINDOW_EX_STYLE,
-    WM_NCCREATE, WM_NCDESTROY, WM_SETFOCUS, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    SetWindowLongPtrW, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, SW_HIDE,
+    SW_SHOWNA, WINDOW_EX_STYLE, WM_NCCREATE, WM_NCDESTROY, WM_SETFOCUS, WNDCLASSEXW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use super::geometry::PhysicalRect;
@@ -236,6 +236,21 @@ pub(super) fn guest_of(panel: HWND) -> Option<WindowId> {
 }
 
 /// Destroy one of our windows. Safe to call on a window that is already gone.
+/// Show or hide a panel window, and with it everything inside it.
+///
+/// `SW_HIDE`/`SW_SHOWNA` rather than `SW_SHOW`: the panel comes back because a
+/// tab was selected, and a window that *activated* itself on the way would take
+/// the keyboard from whatever the user is typing in. Children follow their
+/// parent's visibility, so the guest needs no separate call — and does not get
+/// one, because its own `WS_VISIBLE` bit belongs to the application.
+pub(super) fn set_visible(window: WindowId, visible: bool) {
+    if window.is_null() {
+        return;
+    }
+    // SAFETY: `ShowWindow` validates the handle and fails rather than faulting.
+    let _ = unsafe { ShowWindow(window.hwnd(), if visible { SW_SHOWNA } else { SW_HIDE }) };
+}
+
 pub(super) fn destroy(window: WindowId) {
     if window.is_null() {
         return;

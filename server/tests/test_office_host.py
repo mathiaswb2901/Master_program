@@ -12,6 +12,8 @@ PowerPoint is refused, and a process we did not launch is never adopted.
 
 import asyncio
 import json
+import sys
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -51,6 +53,8 @@ from workbench_server.services.office_host.service import (
     build_backend,
     detect_office,
 )
+from workbench_server.services.office_host.shell_backend import ShellHostBackend
+from workbench_server.services.office_host.shell_channel import ShellChannel
 from workbench_server.services.office_host.state import (
     LEGAL_TRANSITIONS,
     TERMINAL_STATES,
@@ -155,9 +159,9 @@ class SlowLaunch(FakeHostBackend):
         super().__init__()
         self.gate = asyncio.Event()
 
-    async def launch(self, path: Path, kind: Any) -> HostHandle:
+    async def launch(self, path: Path, kind: Any, host_id: str) -> HostHandle:
         await self.gate.wait()
-        return await super().launch(path, kind)
+        return await super().launch(path, kind, host_id)
 
 
 class HangingBackend(FakeHostBackend):
@@ -178,9 +182,9 @@ class HangingBackend(FakeHostBackend):
         if self.hang == method:
             await self.forever.wait()
 
-    async def launch(self, path: Path, kind: Any) -> HostHandle:
+    async def launch(self, path: Path, kind: Any, host_id: str) -> HostHandle:
         await self._maybe_hang("launch")
-        return await super().launch(path, kind)
+        return await super().launch(path, kind, host_id)
 
     async def embed(self, handle: HostHandle, rect: PanelRect) -> None:
         await self._maybe_hang("embed")
@@ -365,6 +369,71 @@ async def test_bounds_that_arrive_during_the_launch_are_where_the_window_lands(
     assert ("embed", "1024x768") in backend.calls
     assert ("embed", "640x480") not in backend.calls
     assert ("set_bounds", "0,0 1024x768") not in backend.calls
+
+
+async def test_a_hidden_panel_hides_the_window_it_holds(tmp_path: Path) -> None:
+    """A hosted window is a real window: switching editor tabs puts a `div`
+    behind another one and leaves a Word painted over it. Something has to say
+    so, and saying it twice must not cost a Win32 call."""
+    backend = FakeHostBackend()
+    service, _ = make_service(tmp_path, backend)
+    info = await service.open(document(tmp_path), RECT)
+
+    await service.set_visible(info.host_id, False)
+    assert backend.calls[-1] == ("set_visible", "hide")
+    await service.set_visible(info.host_id, False)  # the same answer again
+    assert backend.calls.count(("set_visible", "hide")) == 1
+
+    await service.set_visible(info.host_id, True)
+    assert backend.calls[-1] == ("set_visible", "show")
+
+
+async def test_a_tab_hidden_during_the_launch_does_not_come_back_as_a_window(
+    tmp_path: Path,
+) -> None:
+    """The same race as the resize during a launch, and worse: the window is
+    *shown* by the embed, so a tab switched away from while Word was starting
+    would put a real document over whatever the user moved to."""
+    backend = SlowLaunch()
+    service, bus = make_service(tmp_path, backend)
+    opening = asyncio.create_task(service.open(document(tmp_path), RECT))
+    await until(lambda: bus.states() == ["launching"])
+
+    host_id = bus.hosts()[-1].host_id
+    await service.set_visible(host_id, False)
+    assert ("set_visible", "hide") not in backend.calls  # nothing to hide yet
+    backend.gate.set()
+    info = await opening
+
+    assert info.state == "embedded"
+    assert backend.calls[-1] == ("set_visible", "hide")
+
+
+async def test_showing_or_hiding_a_settled_host_is_a_conflict(tmp_path: Path) -> None:
+    backend = FakeHostBackend()
+    service, _ = make_service(tmp_path, backend)
+    info = await service.open(document(tmp_path), RECT)
+    await service.close(info.host_id)
+
+    with pytest.raises(HostStateError):
+        await service.set_visible(info.host_id, False)
+
+
+async def test_capabilities_report_whether_a_shell_is_attached(tmp_path: Path) -> None:
+    """The UI degrades from this: the same server serves a browser tab, which
+    can never host anything, and the fake backend hosts nothing anywhere."""
+    backend = FakeHostBackend()
+    service, _ = make_service(tmp_path, backend, mode="on", fake=True)
+    assert service.capabilities(onlyoffice_enabled=True).native_hosting is True
+
+    backend.available = False  # what "no shell attached" looks like from here
+    caps = service.capabilities(onlyoffice_enabled=True)
+    assert caps.native_hosting is False
+    assert caps.hostable_kinds == []
+    assert caps.fallback == "onlyoffice"
+    with pytest.raises(HostRefusedError) as refused:
+        await service.open(document(tmp_path), RECT)
+    assert refused.value.reason == "native_hosting_disabled"
 
 
 async def test_closing_settles_the_host_and_reaps_the_instance(tmp_path: Path) -> None:
@@ -882,17 +951,38 @@ def test_capabilities_report_hosting_honestly(
     assert caps.detail
 
 
-def test_auto_does_not_host_natively_today(tmp_path: Path) -> None:
-    """The owner decision, encoded: native hosting becomes the default only once
-    hang isolation is proven, so `auto` on a real machine hosts nothing."""
+def test_auto_hosts_natively_only_where_it_actually_can(tmp_path: Path) -> None:
+    """The owner decision, re-encoded now that hang isolation is proven.
+
+    `auto` no longer means "never": it means "wherever the machine can". With no
+    shell to host into — the browser tab this same server also serves — that is
+    still nowhere, and the answer says which of the two it is.
+    """
+    # No channel: nothing the backend could send a `SetParent` to.
     assert build_backend("auto", fake=False) is None
     service, _ = make_service(tmp_path, None, mode="auto", fake=False, office_installed=True)
     caps = service.capabilities(onlyoffice_enabled=True)
 
     assert caps.native_hosting is False
-    assert caps.office_detected is True  # Office is here; we still do not host it
+    assert caps.shell_attached is False
+    assert caps.office_detected is True
     assert caps.fallback == "onlyoffice"
-    assert "hang isolation" in caps.detail
+    assert "desktop shell" in caps.detail
+
+
+def test_auto_builds_the_real_backend_when_a_channel_exists() -> None:
+    """The other half: on Windows with a channel, `auto` is the real thing."""
+    backend = build_backend("auto", fake=False, channel=ShellChannel())
+    if sys.platform != "win32":  # pragma: no cover - the CI matrix is Windows
+        assert backend is None
+        return
+    assert isinstance(backend, ShellHostBackend)
+    # …and it still refuses to claim it can host with nobody attached.
+    assert backend.ready() is False
+
+
+def test_off_beats_a_channel_and_a_working_machine() -> None:
+    assert build_backend("off", fake=False, channel=ShellChannel()) is None
 
 
 def test_capabilities_fall_back_to_onlyoffice_when_it_is_configured(tmp_path: Path) -> None:
@@ -1052,6 +1142,49 @@ def test_capabilities_on_a_default_machine_report_no_native_hosting(tmp_path: Pa
         assert client.post("/api/office/host", json={"path": "report.docx"}).status_code == 503
         # The browser path is untouched by any of this.
         assert client.get("/api/office/status").json()["enabled"] is False
+
+
+def test_the_shell_channel_is_what_makes_a_shell_attached(tmp_path: Path) -> None:
+    """The socket *is* the presence: there is no hello message and no
+    heartbeat, so connecting and disconnecting is the whole protocol for
+    "something here can host a window"."""
+    with TestClient(hosting_app(tmp_path)) as client:
+        assert client.get("/api/office/capabilities").json()["shell_attached"] is False
+        with client.websocket_connect("/ws/office-host"):
+            assert client.get("/api/office/capabilities").json()["shell_attached"] is True
+        # The disconnect is seen as the endpoint's `finally` runs, which is not
+        # synchronous with the context manager exiting on this side.
+        for _ in range(50):
+            if client.get("/api/office/capabilities").json()["shell_attached"] is False:
+                break
+            time.sleep(0.02)
+        assert client.get("/api/office/capabilities").json()["shell_attached"] is False
+
+
+def test_visibility_over_http(tmp_path: Path) -> None:
+    document(tmp_path)
+    with TestClient(hosting_app(tmp_path)) as client:
+        host = client.post(
+            "/api/office/host", json={"path": "report.docx", "rect": RECT.model_dump()}
+        ).json()
+        assert (
+            client.post(
+                f"/api/office/host/{host['host_id']}/visible", json={"visible": False}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post("/api/office/host/host-nope/visible", json={"visible": True}).status_code
+            == 404
+        )
+        client.post(f"/api/office/host/{host['host_id']}/close")
+        # A settled host has no window to show or hide: a conflict, not a 500.
+        assert (
+            client.post(
+                f"/api/office/host/{host['host_id']}/visible", json={"visible": True}
+            ).status_code
+            == 409
+        )
 
 
 def test_powerpoint_over_http_is_a_refusal_with_a_message(tmp_path: Path) -> None:

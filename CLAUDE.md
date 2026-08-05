@@ -110,8 +110,14 @@ ruling it out.
   checkout the main session uses. One writer per checkout, always.
 - `--amend`/`reset`/`rebase` only after verifying `git log -1` shows the expected HEAD;
   never put `git commit` at the tail of a long `&&` chain.
-- Run the app: `uv run workbench-server` (workspace = CWD it starts from). Office
-  editing needs env: `WORKBENCH_ONLYOFFICE_URL=http://localhost:8880` and
+- Run the app: `uv run workbench-server` (workspace = CWD it starts from).
+  **Native Office hosting** (a real Word docked in a panel) needs the desktop
+  shell — `cd desktop && npm run tauri dev` — and nothing else: `auto` is on, and
+  `GET /api/office/capabilities` says why when it is not available.
+  `WORKBENCH_OFFICE_NATIVE=off` turns it off; `WORKBENCH_OFFICE_FAKE=1` walks the
+  whole lifecycle with no Office and no window (it is what the E2E suite drives).
+  OnlyOffice stays the preview/diff/fallback path and needs env:
+  `WORKBENCH_ONLYOFFICE_URL=http://localhost:8880` and
   `WORKBENCH_ONLYOFFICE_JWT_SECRET` = `services.CoAuthoring.secret.session.string` from
   `C:\Program Files\ONLYOFFICE\DocumentServer\config\local.json` (native local install,
   services `Ds*Svc`, port 8880).

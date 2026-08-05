@@ -77,14 +77,24 @@ the moat.
   the whole mechanism is exercised by `cargo test` with no Office installed, and four
   documented Win32 behaviours turned out to be false in this configuration —
   `WM_PARENTNOTIFY`, click routing, `AttachThreadInput`, `SWP_ASYNCWINDOWPOS` (see
-  ARCHITECTURE.md). **Hang isolation is now quantified rather than feared**: a wedged
-  guest leaves the host painting and pumping its own messages, but costs ~1 s per
-  resize frame — and the same move from a thread attached to no input queue takes
-  ~0.15 ms, which is the containment path. Still open here: that containment, the COM
-  bridge (agents reading/writing the live document), the **host panel** — which waits
-  for the tool registry so it registers itself instead of editing `App.tsx` — and
-  packaging: the shell runs from source (`cd desktop && npm run tauri dev`); a bundled
-  installer that carries its own Python needs `tauri build` work not done yet.
+  ARCHITECTURE.md). **Word is now docked for real** (PR 4): opening a `.docx` in the
+  desktop shell starts a *private* Word through COM (~1.6 s), proves the window is one
+  Workbench started, reparents it into the panel, and follows the panel as it is
+  resized, hidden behind another tab, and closed — leaving no `WINWORD.EXE` behind.
+  Measured on the author's machine, click to docked: **1.7 s**. What landed with it:
+  the `ShellHostBackend` (COM + Job Object for the process, `/ws/office-host` command
+  channel for the window, because `SetParent` can only run in the shell), the
+  self-registering **host panel** (one new module plus one line in `ui/src/tools.ts`),
+  `set_visible` — a real window does not hide because a `div` did — and the fallback
+  chain: no shell, no Office, hosting off, PowerPoint, a document already open
+  elsewhere, a launch that failed, an embed that was refused all end in a working
+  OnlyOffice editor or the degraded card, never a broken panel. **Hang isolation is
+  proven and `auto` is on**: a wedged guest costs a resize frame ~19 µs instead of
+  ~1 s (see the decisions log for the full table and the control). Still open here:
+  the COM bridge (agents reading and writing the *live* document, and with it the
+  Office skills), Excel beyond the launch path, and packaging — the shell runs from
+  source (`cd desktop && npm run tauri dev`); a bundled installer that carries its own
+  Python needs `tauri build` work not done yet.
 - ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
   Pydantic `PlanArtifact` → native clickable plan cards in chat (options, steps, file
   refs); decisions return to the agent as typed JSON; pending-plan replay on reconnect
@@ -491,6 +501,48 @@ without forking — the difference between a fixed app and an instrument.
   from a thread that owns no window in the parent chain takes ~0.15 ms — and is
   deliberately left to its own PR. `WORKBENCH_OFFICE_NATIVE=auto` stays off until then,
   as decided.
+
+- 2026-08-05 — **Hang isolation is proven, so `WORKBENCH_OFFICE_NATIVE=auto` is
+  ON** (PR 4). The decision above made native hosting conditional on one number.
+  Re-measured on this machine, through the production path, with the guest
+  deliberately wedged (`hosting_tests::hang_isolation_measurement`, run with
+  `cargo test -- --ignored --nocapture`):
+
+  | 10 resize frames, guest hung | before | after |
+  |---|---|---|
+  | our panel + clip child | 69 µs | 69 µs |
+  | including the guest | **~10 s** (≈1 s/frame) | **187 µs** (≈19 µs/frame) |
+
+  The control still costs what it always did: one direct `SetWindowPos` on the
+  hung guest, from the main thread, took **9.98 s** in the same run — so the
+  number above is containment, not a fixture that failed to hang. The host also
+  keeps its own message loop (50/50 posted messages dispatched), keeps painting,
+  and is not judged hung by Windows; and a frame issued *during* the hang really
+  lands once the guest recovers, so nothing is being dropped instead of
+  deferred. The mechanism is a worker thread that owns no window in the parent
+  chain (`host::mover`), because input-queue attachment — the thing that gives
+  us focus routing for free — is what made the old path wait.
+
+  **Consequence:** `auto` now resolves to hosting natively wherever the machine
+  can, i.e. Windows + an Office to launch + the desktop shell attached. Any of
+  those missing is reported by `GET /api/office/capabilities` and the UI falls
+  back to OnlyOffice. `off` still wins over everything.
+
+- 2026-08-05 — **Two Office behaviours measured, and the design changed for
+  both** (PR 4). (1) Opening a document that another instance already has open
+  does not fail and does not raise — it **blocks indefinitely** behind a "File
+  In Use" prompt that `DisplayAlerts = wdAlertsNone` does not suppress (four
+  minutes, still waiting). (2) Office also stops mid-launch to ask questions of
+  its own: "the last time you opened this, it caused a serious error" appeared
+  after a killed instance and blocked `Documents.Open` for three minutes. Both
+  would wedge the single COM apartment thread, and with it every host after it.
+  So: the "already open" question is answered *before* the open, from the
+  **Running Object Table** — which sees a document opened by an instance we did
+  not launch, and (measured) does *not* see the one behind a stale `~$` lock
+  file, while a live owner file cannot be told from a stale one by opening it —
+  and the process is identified and put in its Job Object **before**
+  `Documents.Open` is called, so a launch that never returns can be ended from
+  another thread instead of leaking a Word and a worker.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

@@ -151,7 +151,13 @@ pub(super) fn embed(
 /// Best-effort by design. A guest that died between the embed and here leaves
 /// nothing to restore, and reporting that as a failure would turn "the user
 /// closed Word" into an error the panel has to explain.
+///
+/// **Settles the geometry worker first.** Guest moves are queued on another
+/// thread ([`super::mover`]), and one still in flight would land *after* the
+/// `SetWindowPos` below — putting the user's window at a rectangle that was
+/// only ever meaningful inside a clip child it has just left.
 pub(super) fn release(embedded: &EmbeddedGuest) -> Result<(), HostError> {
+    super::mover::mover().settle(embedded.guest);
     let guest = embedded.guest.hwnd();
     // SAFETY: as in `embed` — plain Win32 calls on a handle the API validates.
     unsafe {

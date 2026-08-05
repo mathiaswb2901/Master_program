@@ -16,6 +16,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { parseChord } from "./keys";
+import { officeHostTool } from "./panels/OfficeHostPanel";
 import {
   applyDefaultLayout,
   danglingShortcutIds,
@@ -459,10 +460,23 @@ describe("the registered tools", () => {
     ]);
   });
 
-  it("render every open-file kind exactly once", () => {
+  /**
+   * Two tools offer a view for `office`, and that is the seam working rather
+   * than a collision: the native host claims the kind by being registered
+   * first, and renders OnlyOffice itself on every machine that cannot dock a
+   * real window. What must stay true is that *one* of them is chosen, and
+   * which one.
+   */
+  it("resolves each open-file kind to exactly one view", () => {
     const kinds = documentViews(TOOLS).map((view) => view.kind);
     expect(kinds).toEqual(["office"]);
-    expect(new Set(kinds).size).toBe(kinds.length);
+    // Two tools offer a view for `office` and that is the seam working: the
+    // native host claims the kind by registering first and renders OnlyOffice
+    // itself wherever it cannot dock a real window. Mounting both would give
+    // every open document a second, hidden editor.
+    expect(documentViewFor(TOOLS, "office")?.component).toBe(
+      officeHostTool.documentView?.component,
+    );
   });
 
   /**

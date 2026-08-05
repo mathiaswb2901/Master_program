@@ -92,8 +92,15 @@ class FakeHostBackend:
         # argument to embed() or poll(), and a real backend has the same
         # amnesia — whatever it knows after launch, it knows from the handle.
         self._branches: dict[int, FakeFailure | None] = {}
+        #: Whether the fake claims it could host. Settable so a test can drive
+        #: the "policy says yes, nothing to host into" branch that the real
+        #: backend reports when no desktop shell is attached.
+        self.available = True
 
-    async def launch(self, path: Path, kind: HostAppKind) -> HostHandle:
+    def ready(self) -> bool:
+        return self.available
+
+    async def launch(self, path: Path, kind: HostAppKind, host_id: str) -> HostHandle:
         self.calls.append(("launch", path.name))
         branch = self.failure or failure_for(path)
         if branch == "launch_failed":
@@ -123,6 +130,9 @@ class FakeHostBackend:
 
     async def set_bounds(self, handle: HostHandle, rect: PanelRect) -> None:
         self.calls.append(("set_bounds", f"{rect.x},{rect.y} {rect.width}x{rect.height}"))
+
+    async def set_visible(self, handle: HostHandle, visible: bool) -> None:
+        self.calls.append(("set_visible", "show" if visible else "hide"))
 
     async def detach(self, handle: HostHandle) -> None:
         self.calls.append(("detach", str(handle.pid)))

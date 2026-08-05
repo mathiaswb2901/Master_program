@@ -509,9 +509,35 @@ risky part testable before it is written.
 
 ```
 routers/office_host.py ──► OfficeHostService ──► HostBackend (Protocol)
-   REST                       state machine        ├── FakeHostBackend   (today)
-   /ws/events ◄── OfficeHostEvent on the bus       └── Win32/COM backend (later PR)
+   REST                       state machine        ├── FakeHostBackend  (CI, no Office)
+   /ws/events ◄── OfficeHostEvent on the bus       └── ShellHostBackend (the real one)
+                                                        │
+                                     office_com.py ◄────┤ the process: COM launch,
+                                     (COM + Job Object)  │ ownership, poll, reap
+                                                        │
+                                   shell_channel.py ◄───┘ the window: embed, move,
+                                    (/ws/office-host)      hide, detach, release
+                                            │
+                          ui/src/officeHost.ts ──► Tauri IPC ──► host/ (Rust)
 ```
+
+**The real backend is split down the middle, and the split is the honest one.**
+The *process* is the server's: it launched Word, it holds the pid and the Job
+Object, and it is the thing that has to reap on shutdown. The *window* is the
+shell's, because `SetParent` has to run on the thread that owns the Tauri
+window — in another process. A `#[tauri::command]` can only be called from the
+page, so the server pushes typed `HostCommand` frames down `/ws/office-host`
+and the webview turns each one into a Tauri call and acks it. The page is a
+courier, never a decision-maker: it never decides *whether* to embed, which is
+what keeps one authority over a window that outlives any given page load (a
+reload drops the socket and finds everything still docked).
+
+**Units cross exactly once.** Every rectangle on the wire is physical pixels
+(`PanelRect`); the Rust commands take CSS pixels and multiply by the window's
+own scale factor. `ui/src/officeHost.ts` divides by `devicePixelRatio` on the
+way through — the same number, so the two cancel and the physical rectangle the
+server asked for is the one that lands. Sizes are derived from rounded edges on
+both sides, so two adjacent panels cannot leave a one-pixel seam.
 
 **Lifecycle.** `launching → embedding → embedded`, with `detached` (window given
 back to the desktop, document still open) as the one live state you can return
@@ -554,17 +580,68 @@ arriving while the launch or the embed is still in flight are written there and
 read back by the embed itself, so a panel resized during Word's ~1s startup is
 embedded where it *is*, not where it was when the request was sent.
 
+**Starting Word is the dangerous part, and the order below is why it is safe.**
+`DispatchEx` yields a *private* instance (a pid that did not exist), and a new
+frame window appears about 0.8 s later — measured — **before any document is
+opened**, and it is the same `HWND` `doc.ActiveWindow.Hwnd` reports afterwards.
+So the process is identified and put in its Job Object *first*, and only then is
+`Documents.Open` called. That matters because Office stops to ask questions:
+"the last time you opened this, it caused a serious error" blocked an open for
+three minutes during this PR's testing, and a document another instance already
+has open blocks it indefinitely. Both would wedge the single COM apartment
+thread; instead the launch has a 30 s ceiling and the instance behind it can be
+ended from another thread (`office_com.abandon`) because the job was taken
+before the risky call. The "already open elsewhere" question is answered before
+the open, from the **Running Object Table** — stale-proof, unlike the `~$` owner
+file, which survives a crash and (measured) cannot be told from a live one by
+opening it.
+
+**Ownership is checked twice over**: the frame we host must be a window that did
+not exist, belonging to a process that did not exist. One new window can still
+belong to an old process — a single Word owns several frames — and reparenting
+one of those would take over the user's session.
+
+**And "new" is never allowed to be ambiguous.** A second, genuinely new instance
+can appear *during* a launch — the user double-clicks a `.docx` at the wrong
+second — and then two frames are new behind two pids that were not running
+before, so "the new one" no longer names a single window. Picking either is a
+coin toss whose losing side puts the user's own window in a Job Object with
+`KILL_ON_JOB_CLOSE`. So Excel is asked which frame it owns (`Application.Hwnd`,
+a correlation rather than an inference) and Word — which has no such property
+before a document is open — must produce exactly one new pid across two looks,
+or the launch fails with nothing contained. The self-check after `Documents.Open`
+carries the same rule the other way: a document that lands in a frame belonging
+to a *different* process proves the contained pid was never ours, and that job is
+released with its kill flag cleared instead of being terminated.
+
+**Closing never kills first, and never discards at all.** `close` saves the
+document, asks the application to quit, and waits; an instance that is
+gone-or-saved may then be killed through its job. A document whose save
+**failed** is never closed — `Close` here means `wdDoNotSaveChanges`, and the
+"keep your changes?" prompt that would normally stand in the way was silenced at
+launch, so closing would destroy the edit both certainly and invisibly. (Nor is
+letting Word prompt an option: that modal blocks the COM call with no timeout,
+which is the hang the whole apartment design is shaped around.) The save is
+retried, because the measured failures are transient; if it still will not
+write, the instance is deliberately let go — its own alerts turned back on, the
+job's kill flag cleared before the handle closes — so the user keeps their
+unsaved work as an ordinary window on their desktop. Same for one that will not
+close after a save that worked. Either way the host record carries
+`close_failed` and the sweep re-asks until the window is really gone.
+
 **Two owner decisions are encoded, not just documented** (2026-08-05).
 PowerPoint is **preview-only**: it is single-instance and exposes no
 `Application.Hwnd` to prove a window is ours, so the service refuses a
 PowerPoint host (`powerpoint_preview_only`) rather than risk reparenting the
 user's own open presentation. And native hosting stays behind
-`WORKBENCH_OFFICE_NATIVE`, where **`auto` currently resolves to *not* hosting
-natively** — it becomes the default only once hang isolation is proven.
+`WORKBENCH_OFFICE_NATIVE`, where **`auto` now resolves to hosting natively
+wherever the machine can** — Windows, an Office to launch, and the desktop shell
+attached — because the hang isolation it was conditional on is built and
+measured (see below, and the decisions log).
 `GET /api/office/capabilities` says all of this out loud (mode, whether hosting
-is available at all, whether Office was detected, whether the *fake* backend is
-answering, and whether the fallback is OnlyOffice or read-only preview) so the
-UI degrades from a fact rather than a guess.
+is available at all, whether Office was detected, whether a shell is attached,
+whether the *fake* backend is answering, and whether the fallback is OnlyOffice
+or read-only preview) so the UI degrades from a fact rather than a guess.
 
 **The fake backend** (`WORKBENCH_OFFICE_FAKE=1`, off by default, warned about at
 startup — the `WORKBENCH_FAKE_AGENT` precedent) walks the same lifecycle in
@@ -573,10 +650,22 @@ programmatically or by the *name of the document* (`…-refuse-embed.docx`,
 `…-crash-after-embed.docx`, `…-already-open.docx`, …), so every branch is
 reachable from a test and, later, from the UI.
 
-**Deliberately deferred:** the pywin32 COM bridge (and with it the agent-facing
-document tools) and the panel — which lands after the tool registry, so it can
-register itself instead of editing `App.tsx`. Nothing here changes the
-OnlyOffice path below.
+**The panel** (`ui/src/panels/OfficeHostPanel.tsx`, registered in `tools.ts`)
+claims the `office` open-file kind and renders OnlyOffice *itself* wherever it
+cannot dock a real window — so OnlyOffice became the thing it falls back to
+rather than the thing it replaced. Two tools now offer a view for the same kind
+and the registry resolves it (earliest wins, deduplicated in `documentViews` so
+a `keepMounted` kind cannot be mounted twice). The panel measures its own
+rectangle every animation frame and reports it: a hosted window is not laid out
+by CSS, and a zero-sized measurement is how "this tab went behind another one"
+arrives — no coupling to dockview, no guessing from the active path — which
+becomes `set_visible(false)`, because a real window does not disappear when its
+`div` does. Refusals render as sentences about the user's document with the
+preview path one click away, never as errors.
+
+**Deliberately deferred:** the COM bridge that lets agents read and write the
+*live* open document (and with it the Office skills), and Excel beyond the
+launch path. Nothing here changes the OnlyOffice path below.
 
 ### Native window hosting (`desktop/src-tauri/src/host/`)
 
@@ -630,16 +719,28 @@ now a test in `host/hosting_tests.rs`:
 | `SetFocus` across processes needs `AttachThreadInput` | It does not, for a parent/child pair: that relationship already attaches the input queues. No `AttachThreadInput` call exists in this crate |
 | `SWP_ASYNCWINDOWPOS` keeps a hung guest from stalling the host | **It does not**, for the same reason: the flag only posts when the two threads are on *different* input queues, and being our child put them on the same one. `DeferWindowPos` also rejects the flag outright (`ERROR_INVALID_PARAMETER`), so our own two windows are batched and the guest is moved separately |
 
-**Hang isolation is the open risk, and it is now quantified.** With the guest
-deliberately wedged (`hosting_tests::hang_isolation_measurement`): the host
-window keeps its own message loop (50/50 posted messages dispatched), keeps
-painting, and Windows does not judge it hung — but a resize costs **~1 s per
-frame** because the guest's `SetWindowPos` waits. Moving *our* two windows alone
-stays at ~0.02 ms, and the same guest move issued from a thread that owns no
-window in the parent chain — and so is attached to no input queue — takes
-**~0.15 ms**. That is the containment path, measured rather than assumed, and it
-is deliberately not implemented here: `WORKBENCH_OFFICE_NATIVE=auto` stays off
-until it is.
+**Hang isolation was the open risk. It is now contained, and measured after the
+fix** (`host/mover.rs`). A wedged guest still leaves the host window pumping its
+own messages (50/50 posted messages dispatched), painting, and not judged hung
+by Windows. What changed is the cost of a resize frame. Ten frames against a
+hung guest, through the production path:
+
+| ten resize frames, guest hung | time |
+|---|---|
+| our panel + clip child alone | 69 µs |
+| including the guest, via `host::mover` | **187 µs** |
+| one direct `SetWindowPos` from the main thread (the old path) | **9.98 s** |
+
+The control is kept deliberately: without it the containment number would be
+indistinguishable from "the guest was not actually hung". The mechanism is a
+worker thread that owns **no window in the parent chain** and is therefore
+attached to no input queue, which is the condition `SWP_ASYNCWINDOWPOS` needed
+all along. It carries latest-wins coalescing (a drag storm collapses instead of
+queueing) and a settle barrier, so a queued move can never land *after* a window
+has been handed back to the desktop at a rectangle that only meant something
+inside a clip child. A frame issued during the hang really lands once the guest
+recovers — asserted, so a worker that dropped moves could not pass by being
+fast. This is what unblocked `WORKBENCH_OFFICE_NATIVE=auto`.
 
 ### OnlyOffice (preview/diff/fallback)
 
