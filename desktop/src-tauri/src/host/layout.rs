@@ -13,38 +13,35 @@
 //!   storm that ends where it started is one apply, not two hundred.
 //!
 //! **The guest is moved separately, and that is a measured decision rather than
-//! an oversight.** `SWP_ASYNCWINDOWPOS` is what keeps a busy — or hung — guest
-//! from stalling a drag: it posts the request to the owning thread instead of
-//! sending it. `DeferWindowPos` **rejects that flag**: adding it fails the call
-//! with `ERROR_INVALID_PARAMETER`, which is not in the documentation and is
-//! asserted in `hosting_tests::deferwindowpos_rejects_the_asynchronous_flag`.
-//! So the split follows the boundary that matters anyway: our two windows,
-//! owned by this thread, go in one batch; the one window owned by another
-//! process gets its own asynchronous call. (Mixing a parent and its child in a
-//! single batch turns out to be fine — that part of the folklore is wrong, and
-//! the same test says so.)
+//! an oversight.** `DeferWindowPos` **rejects `SWP_ASYNCWINDOWPOS`**: adding it
+//! fails the call with `ERROR_INVALID_PARAMETER`, which is not in the
+//! documentation and is asserted in
+//! `hosting_tests::deferwindowpos_rejects_the_asynchronous_flag`. So the split
+//! follows the boundary that matters anyway: our two windows, owned by this
+//! thread, go in one batch; the one window owned by another process is handed
+//! to [`super::mover`]. (Mixing a parent and its child in a single batch turns
+//! out to be fine — that part of the folklore is wrong, and the same test says
+//! so.)
 //!
-//! **And `SWP_ASYNCWINDOWPOS` does not do what we need it to.** Its
+//! **And `SWP_ASYNCWINDOWPOS` alone does not do what we need it to.** Its
 //! documentation is conditional: the request is posted "if the calling thread
 //! and the thread that owns the window are attached to **different input
 //! queues**". Making the guest our child is precisely what attaches those two
-//! queues — the same mechanism that hands us focus routing for free — so the
-//! condition is false and the call waits. Measured against a deliberately hung
-//! guest (`hosting_tests::hang_isolation_measurement`):
+//! queues — the same mechanism that hands us focus routing for free — so from
+//! *this* thread the condition is false and the call waits. Measured against a
+//! deliberately hung guest (`hosting_tests::hang_isolation_measurement`):
 //!
 //! | 10 moves, guest hung | time |
 //! |---|---|
 //! | panel + clip child (ours) | **0.2 ms** |
-//! | the same, including the guest | **10.0 s** |
-//! | the guest alone, from a thread that owns no window in the chain | **0.15 ms** |
+//! | a direct `SetWindowPos` on the guest, from this thread | **~10 s** |
+//! | the same call from a thread that owns no window in the chain | **~0.15 ms** |
 //!
-//! So the flag is kept — it is correct, it costs nothing, and it does help for
-//! any guest whose queue is not attached — but it is not the containment it
-//! looks like. The last row is: a worker thread that owns none of these windows
-//! is attached to nothing, and the same call from there returns immediately.
-//! Moving guest geometry onto such a thread is the fix, and it is deliberately
-//! **not** in this PR: hang isolation is its own piece of work, and this one's
-//! job was to measure it honestly.
+//! The flag is therefore kept and the *thread* is what changed: guest geometry
+//! goes to [`super::mover`], whose worker owns no window and so is attached to
+//! no input queue, which is the condition the flag needed all along. That is
+//! the containment, and it is why [`apply`] no longer returns a Win32 error for
+//! the guest — see [`super::mover`] for why fire-and-forget is the honest shape.
 //!
 //! The rest of the flags: `SWP_NOCOPYBITS` skips preserving the old client
 //! bits, which is wasted work when everything is about to repaint;
@@ -53,12 +50,13 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SetWindowPos, HDWP,
-    SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOZORDER,
+    BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, HDWP, SET_WINDOW_POS_FLAGS,
+    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOZORDER,
 };
 
 use super::geometry::{HostLayout, PhysicalRect};
-use super::HostError;
+use super::mover;
+use super::{HostError, WindowId};
 
 /// Which layout frames are worth a Win32 call.
 ///
@@ -101,12 +99,17 @@ impl Coalescer {
 /// Flags for our own windows, moved as one batch on the thread that owns them.
 pub(super) const OURS: SET_WINDOW_POS_FLAGS =
     SET_WINDOW_POS_FLAGS(SWP_NOCOPYBITS.0 | SWP_NOACTIVATE.0 | SWP_NOZORDER.0);
-/// Flags for the guest: the same, plus the asynchronous post that keeps another
-/// process's message loop off ours.
+/// Flags for the guest: the same, plus the asynchronous post — which only
+/// actually posts from [`super::mover`]'s unattached worker, and that is the
+/// whole reason the worker exists.
 pub(super) const GUEST: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(OURS.0 | SWP_ASYNCWINDOWPOS.0);
 
-/// Apply one layout: the panel and its clip child together, then the guest
-/// asynchronously.
+/// Apply one layout: the panel and its clip child together on this thread, and
+/// the guest handed to the geometry worker.
+///
+/// The `Result` is about **our** two windows only. A guest move cannot fail the
+/// caller because it has not happened yet when this returns — which is exactly
+/// the containment: a wedged guest costs the frame nothing.
 pub(super) fn apply(
     panel: HWND,
     clip: HWND,
@@ -116,24 +119,15 @@ pub(super) fn apply(
     // SAFETY: the HDWP is threaded through every call and consumed exactly
     // once by `EndDeferWindowPos`; a failed `DeferWindowPos` invalidates it and
     // frees its resources, which is why the `?` abandons it rather than ending
-    // it. The `SetWindowPos` afterwards is a plain call on a validated handle.
+    // it.
     unsafe {
         let mut batch = BeginDeferWindowPos(2)?;
         batch = defer(batch, panel, layout.panel)?;
         batch = defer(batch, clip, layout.clip)?;
         EndDeferWindowPos(batch)?;
-
-        if let Some(guest) = guest {
-            SetWindowPos(
-                guest,
-                None,
-                layout.guest.x,
-                layout.guest.y,
-                layout.guest.width,
-                layout.guest.height,
-                GUEST,
-            )?;
-        }
+    }
+    if let Some(guest) = guest {
+        mover::mover().place(WindowId::from_hwnd(guest), layout.guest);
     }
     Ok(())
 }

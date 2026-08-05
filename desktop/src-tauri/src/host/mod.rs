@@ -26,13 +26,22 @@
 //! chrome the guest is offset by. Keeping those two apart means the offset
 //! never leaks into the rectangle the rest of the code reasons about.
 //!
-//! **Everything Win32 happens on the main thread**, because that is the thread
-//! that owns the Tauri window and pumps its messages. Creating our panel window
-//! anywhere else would put its WndProc on a thread with no pump and attach yet
-//! another input queue to the pile. [`main_thread::on_main`] enforces it, and —
-//! rather than trusting the documented claim that a synchronous
-//! `#[tauri::command]` already runs there — measures it: the first hop logs
-//! which path it took.
+//! **Everything Win32 that owns a window happens on the main thread**, because
+//! that is the thread that owns the Tauri window and pumps its messages.
+//! Creating our panel window anywhere else would put its WndProc on a thread
+//! with no pump and attach yet another input queue to the pile.
+//! [`main_thread::on_main`] enforces it, and — rather than trusting the
+//! documented claim that a synchronous `#[tauri::command]` already runs there —
+//! measures it: the first hop logs which path it took.
+//!
+//! **With exactly one deliberate exception: guest geometry** ([`mover`]).
+//! Because a reparented guest's input queue is attached to the main thread's, a
+//! wedged guest made every resize frame cost ~1 s. Moving it from a thread that
+//! owns *no* window in the chain — and so is attached to nothing — costs ~0.15
+//! ms instead. That worker touches no window of ours, creates none, and pumps
+//! nothing; it only ever posts `SetWindowPos` at a handle. See [`mover`] for the
+//! measurement and for the ordering guarantee that keeps a released window from
+//! being moved after it has gone back to the desktop.
 //!
 //! **What the guest process costs us.** A guest is launched into a Windows Job
 //! Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and reaped by closing that
@@ -61,6 +70,7 @@ pub mod guest;
 mod hosting_tests;
 pub mod layout;
 mod main_thread;
+pub mod mover;
 mod watchdog;
 
 use std::collections::HashMap;
@@ -71,7 +81,7 @@ use serde::Serialize;
 
 pub use commands::{
     host_close, host_detach, host_embed, host_focus, host_list, host_poll, host_set_bounds,
-    shutdown, EMBEDDED_EVENT, LOST_EVENT,
+    host_set_visible, shutdown, EMBEDDED_EVENT, LOST_EVENT,
 };
 #[cfg(debug_assertions)]
 pub use commands::{host_hang_guest, host_open_guest};

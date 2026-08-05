@@ -29,7 +29,8 @@ from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
 from workbench_server.services.office import OfficeService
-from workbench_server.services.office_host import OfficeHostService, build_backend
+from workbench_server.services.office_host import OfficeHostService, ShellChannel, build_backend
+from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
@@ -96,8 +97,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     # Native Office hosting. The backend is None on any machine that cannot host
     # (and whenever the policy says not to), which is not an error: the
-    # capabilities endpoint reports it and the UI degrades to OnlyOffice.
-    host_backend = build_backend(settings.office_native, settings.office_fake)
+    # capabilities endpoint reports it and the UI degrades to OnlyOffice. The
+    # channel is built whatever the policy, so the endpoint exists and a shell
+    # that connects to a server with hosting off is *told* so by `capabilities`
+    # rather than meeting a socket that refuses.
+    host_channel = ShellChannel()
+    host_backend = build_backend(settings.office_native, settings.office_fake, host_channel)
     if settings.office_fake and host_backend is not None:
         log.warning(
             "office_host.fake_mode_enabled",
@@ -111,6 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         host_backend,
         mode=settings.office_native,
         fake=settings.office_fake,
+        channel=host_channel,
     )
 
     @asynccontextmanager
@@ -126,6 +132,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Before the watcher: a hosted window outliving the server would be an
         # Office instance nobody owns, still wearing our panel's chrome.
         await office_host_service.shutdown()
+        await host_channel.close()
+        if isinstance(host_backend, ShellHostBackend):
+            # Every instance has been reaped above; this only lets the COM
+            # apartment thread go.
+            await host_backend.aclose()
         await provenance_service.stop()
         await shortcuts_service.stop()
         await watcher.stop()
@@ -143,6 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_index = session_index
     app.state.office = office_service
     app.state.office_host = office_host_service
+    app.state.office_host_channel = host_channel
     app.state.shortcuts = shortcuts_service
     app.state.provenance = provenance_service
     app.state.layouts = layouts_service
@@ -161,6 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.ws_router)
     app.include_router(office.router)
     app.include_router(office_host.router)
+    app.include_router(office_host.ws_router)
     app.include_router(shortcuts.router)
     app.include_router(provenance.router)
     app.include_router(layouts.router)

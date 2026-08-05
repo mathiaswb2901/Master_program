@@ -134,6 +134,7 @@ describe("command registry", () => {
       "session.jump.9",
       "terminal.new",
       "terminal.close",
+      "office.detachHost",
       "scratchpad.open",
       // The Layouts tool's *static* commands. Its per-layout rows are dynamic
       // (the saved set changes while the app runs) and so are not in here —

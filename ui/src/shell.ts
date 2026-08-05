@@ -121,3 +121,27 @@ export async function closeShellWindow(): Promise<void> {
 export async function cancelShellClose(): Promise<void> {
   await invoke("cancel_close");
 }
+
+/**
+ * One shell command whose *answer* matters, and whose failure is the caller's
+ * to explain.
+ *
+ * The escape hatch for capabilities that only exist natively and are not
+ * behaviours of the app itself — today, docking a real Office window
+ * (`officeHost.ts`). It stays here rather than importing `@tauri-apps/api`
+ * somewhere else, because "the Tauri API is reached from exactly one module" is
+ * the invariant that lets the browser build keep working; naming no command
+ * here is what keeps this file free of capabilities.
+ *
+ * Rejects outside the shell instead of returning null: a caller that needs a
+ * native window has no meaningful "did nothing" branch, and the office host
+ * asks `isTauri()` before it ever gets here.
+ */
+export async function callShell<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  if (!isTauri()) throw new Error(`${command} needs the Workbench desktop shell`);
+  const { invoke: call } = await import("@tauri-apps/api/core");
+  return await call<T>(command, args);
+}

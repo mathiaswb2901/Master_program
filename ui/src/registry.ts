@@ -381,14 +381,26 @@ export function panelFocusCommands(
   }));
 }
 
-/** Views for the open-file kinds, in registry order. */
+/**
+ * The view for each open-file kind, in registry order — **one per kind**.
+ *
+ * Two tools may offer a view for the same kind, and that is the seam rather
+ * than a collision: the native Office host claims `office` by registering
+ * before the OnlyOffice tool, and renders OnlyOffice itself wherever it cannot
+ * dock a real window. Earliest registration wins, which is the same rule
+ * `documentViewFor` gives, and deduplicating *here* is what keeps the two
+ * consistent — without it a `keepMounted` kind would be mounted twice, one
+ * hidden editor per losing tool.
+ */
 export function documentViews(
   tools: readonly WorkbenchTool[],
 ): DocumentViewContribution[] {
-  return tools
-    .filter(isEnabled)
-    .map((tool) => tool.documentView)
-    .filter((view): view is DocumentViewContribution => view !== undefined);
+  const byKind = new Map<OpenFile["kind"], DocumentViewContribution>();
+  for (const tool of tools.filter(isEnabled)) {
+    const view = tool.documentView;
+    if (view !== undefined && !byKind.has(view.kind)) byKind.set(view.kind, view);
+  }
+  return [...byKind.values()];
 }
 
 export function documentViewFor(

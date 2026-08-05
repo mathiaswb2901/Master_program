@@ -84,9 +84,11 @@ HostReason = Literal[
     "native_hosting_disabled",
 ]
 
-#: ``WORKBENCH_OFFICE_NATIVE``. ``auto`` currently resolves to *not* hosting
-#: natively: the window-hosting backend does not ship yet, and it only becomes
-#: the default once hang isolation is proven (owner decision, 2026-08-05).
+#: ``WORKBENCH_OFFICE_NATIVE``. ``auto`` resolves to hosting natively wherever
+#: it is actually possible — Windows, an Office to launch, and the desktop shell
+#: attached. It was gated on hang isolation being proven (owner decision,
+#: 2026-08-05); that landed with the shell's window-less geometry worker and the
+#: measurement in ``hosting_tests::hang_isolation_measurement``.
 OfficeNativeMode = Literal["auto", "on", "off"]
 
 
@@ -164,6 +166,65 @@ class SetBoundsRequest(BaseModel):
     rect: PanelRect
 
 
+class SetVisibleRequest(BaseModel):
+    """POST /api/office/host/{host_id}/visible — the panel went behind another
+    tab, or came back.
+
+    A hosted window is a real window: it does not disappear because the ``div``
+    that describes it got ``display: none``. Something has to say so.
+    """
+
+    visible: bool
+
+
+#: What the desktop shell is asked to do with a hosted window. One action per
+#: window-facing method of :class:`~...office_host.backend.HostBackend`, because
+#: the shell is where those four actually happen — ``launch``, ``poll`` and the
+#: process half of ``close`` are the server's own work and never come here.
+HostCommandAction = Literal["embed", "set_bounds", "set_visible", "detach", "close"]
+
+
+class HostCommand(BaseModel):
+    """One window operation, pushed to the shell over ``/ws/office-host``.
+
+    **Every rectangle here is in physical pixels**, like :class:`PanelRect`
+    everywhere else on the wire. The shell divides by its own
+    ``devicePixelRatio`` before calling into Rust, which takes CSS pixels and
+    multiplies by the window's scale factor again — the same number both ways,
+    so the physical rectangle the server asked for is the one that lands.
+    """
+
+    type: Literal["host_command"] = "host_command"
+    #: Correlates the ack. Unique per command, not per host.
+    command_id: str
+    host_id: str
+    action: HostCommandAction
+    #: The guest's ``HWND``, for ``embed``. None for everything else — the shell
+    #: has known the window since the embed.
+    window_id: int | None = None
+    #: Where the panel is, for ``embed`` and ``set_bounds``.
+    rect: PanelRect | None = None
+    #: For ``set_visible``.
+    visible: bool | None = None
+
+
+class HostCommandAck(BaseModel):
+    """The shell's answer to one :class:`HostCommand`.
+
+    ``code`` is the shell's own refusal code (``embed_refused``,
+    ``window_gone``, ``unknown_host``, …), kept as free text rather than an
+    enum: it is produced by the Rust side, and a shell one version ahead must
+    not fail to parse here. The server maps the ones it knows and treats the
+    rest as a plain failure.
+    """
+
+    type: Literal["host_command_ack"] = "host_command_ack"
+    command_id: str
+    ok: bool
+    code: str | None = None
+    message: str | None = None
+
+
 class OfficeCapabilities(BaseModel):
     """GET /api/office/capabilities — what this machine can actually do.
 
@@ -181,6 +242,10 @@ class OfficeCapabilities(BaseModel):
     office_detected: bool
     #: The in-process fake backend is answering (``WORKBENCH_OFFICE_FAKE=1``).
     fake_backend: bool
+    #: The desktop shell is connected to the host channel. A browser tab cannot
+    #: reparent a window, so without this there is nothing to host *into* —
+    #: which is why it is reported rather than inferred from the user agent.
+    shell_attached: bool = False
     #: Applications that can be hosted right now; empty when hosting is off.
     hostable_kinds: list[HostAppKind] = Field(default_factory=list)
     #: The OnlyOffice Document Server is configured and reachable-in-principle.
