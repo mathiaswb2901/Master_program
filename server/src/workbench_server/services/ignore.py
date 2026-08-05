@@ -42,6 +42,33 @@ def is_ignored_dir(path: Path) -> bool:
     return path.name in IGNORED_DIRS or is_cache_dir(path)
 
 
+def is_hidden_dir(root: Path, path: Path) -> bool:
+    """True if ``path`` is a directory the tree hides, or sits inside one.
+
+    :func:`is_ignored_dir` judges one directory by itself, which is all a
+    listing loop needs to filter its own children. It is *not* enough to answer
+    "may this directory be listed at all": a caller can name
+    ``node_modules/vite`` directly, and every parent-level filter that would
+    have stopped it was skipped by asking for it by name.
+
+    So this is the same rule applied to the whole path — the directory and
+    every ancestor below the root, which is the walk
+    :meth:`IgnoreIndex.ignored` does for files on the watcher's hot path. The
+    root is never hidden from itself: a workspace opened inside a tagged
+    directory has to stay usable.
+    """
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return True  # outside the workspace entirely
+    directory = root
+    for part in parts:
+        directory = directory / part
+        if is_ignored_dir(directory):
+            return True
+    return False
+
+
 class IgnoreIndex:
     """:func:`is_ignored_dir` applied to a whole path, memoized per directory.
 

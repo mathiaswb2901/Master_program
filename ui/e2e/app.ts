@@ -16,8 +16,8 @@ export async function gotoApp(page: Page): Promise<void> {
 /** Wait until the workspace tree has actually arrived. */
 export async function workspaceReady(page: Page): Promise<void> {
   await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();
-  // The tree renders empty until GET /api/files/tree resolves; the seeded
-  // folder is the first thing every journey needs to exist.
+  // The tree renders nothing until GET /api/files/dir (the root listing)
+  // resolves; the seeded folder is the first thing every journey needs to exist.
   await expect(page.getByRole("treeitem", { name: "src" })).toBeVisible();
 }
 

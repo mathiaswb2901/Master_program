@@ -445,6 +445,15 @@ through the token file and fails the build if a colour-only one lands on a sprin
   changed this and you have not looked yet". Carries an `aria-label`/tooltip naming
   the session, never colour alone (§6.4); it clears when the file is opened or its
   provenance bar dismissed. Git markers reuse the same slot in semantic colours.
+- **Virtualised**: only the rows the panel can show (plus a small overscan) exist in
+  the DOM, positioned by `index × 26px` inside a spacer of the full height. The row
+  height above is therefore *arithmetic*, not only styling — changing `--row-height`
+  means changing the constant it is asserted against (`ui/e2e/perf/rowGeometry.test.ts`).
+- **Keyboard**: the WAI-ARIA tree model, since virtualisation rules out tabbing through
+  every row — one roving tab stop, ↑/↓ move, → opens or descends, ← closes or steps out
+  to the parent, Home/End jump, Enter/Space activate the focused row. Focus follows the
+  moved row and scrolls it into view; `aria-level`/`posinset`/`setsize` are explicit,
+  because the DOM no longer holds the rows a screen reader would otherwise count.
 
 ### 6.3 Chat: messages, tool calls, permission prompts
 - Column max-width **760px**, centered in panel, 16px side padding, 14px/22px body.

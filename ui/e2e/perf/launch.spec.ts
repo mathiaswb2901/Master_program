@@ -26,16 +26,27 @@ import { installTelemetry, readTelemetry, record, round } from "./instrument";
  * | | tree rows | FCP | long tasks |
  * |---|---|---|---|
  * | before the double-walk fix | 1,569 / 1,659 / 1,588 ms | ~440 ms | 2, ~200 ms |
- * | after  | 976 / 1,209 / 1,145 / 1,134 ms | ~440 ms | 2, ~200 ms |
+ * | after it (PR #35) | 976 / 1,209 / 1,145 / 1,134 ms | ~440 ms | 2, ~200 ms |
+ * | this PR's own base (bb447b6) | 1,710 ms | ~840 ms | 2, ~354 ms |
+ * | after the lazy tree | 990 ms | ~670 ms | 4, ~490 ms |
  *
- * The ceiling is ~2.5x today's number. It is a ratchet, not a target: the
- * target is a file tree that is there before the user's hand leaves the mouse,
- * and every Feel PR that gets closer is expected to lower this line in the same
- * diff. Note what the table does *not* show moving — first contentful paint and
- * the long-task total are unchanged, because the bytes and the parse are the
- * next problem and this PR did not touch them.
+ * The last pair is this PR, measured back to back on the same commit range:
+ * the first paint of the tree no longer waits on a recursive walk of the
+ * workspace. It waits on one `os.scandir` of the root — **1.7 ms and 0.4 KB**
+ * against the 5,005-file fixture, where the walk it replaced was **494 ms and
+ * 471 KB** (measured in-process, 20 requests each). Note the base moved *up*
+ * from PR #35's row while this branch was out: visual artifacts and Word
+ * hosting landed on master and the entry chunk grew. That is the point of
+ * measuring the base rather than quoting the last recorded number.
+ *
+ * The ceiling is a ratchet, not a target: the target is a file tree that is
+ * there before the user's hand leaves the mouse, and every Feel PR that gets
+ * closer is expected to lower this line in the same diff. Note what the table
+ * still does *not* show moving — first contentful paint and the long-task total,
+ * because those are the entry chunk (4.1 MB raw, ~88% Monaco) and no file-tree
+ * work touches them. That is the next item in the track.
  */
-const LAUNCH_CEILING_MS = 3_000;
+const LAUNCH_CEILING_MS = 1_500;
 
 test("cold launch reaches a clickable file tree", { tag: "@wallclock" }, async ({ page }, info) => {
   await installTelemetry(page);

@@ -62,6 +62,10 @@ export function QuickBar() {
     if (open) {
       setQuery(prefill);
       setSel(0);
+      // The file list is the whole workspace in one walk, and this is the only
+      // surface that wants it. Fetched here — when the user asks to search —
+      // rather than at launch or on every watcher event.
+      void useStore.getState().ensureFileIndex();
     }
   }, [open, prefill]);
 
