@@ -10,6 +10,7 @@ the model and the user dominate, so budgeting it would promise a measurement
 nobody takes.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -96,11 +97,12 @@ class TestRegistry:
     def test_every_tool_declares_a_name_schema_and_output_format(self) -> None:
         assert [spec.name for spec in AGENT_TOOLS] == ["get_workspace_state", "present_plan"]
         for spec in AGENT_TOOLS:
-            # ``output_format`` and ``max_result_bytes`` are required fields, so
-            # an omission is a type error — this asserts the values are the ones
-            # we actually ship.
+            # ``output_format``, ``max_result_bytes`` and ``max_schema_bytes``
+            # are required fields, so an omission is a type error — this asserts
+            # the values are the ones we actually ship.
             assert spec.output_format == "compact-json"
             assert spec.max_result_bytes > 0
+            assert spec.max_schema_bytes > 0
             assert isinstance(spec.input_schema, dict)
 
     def test_names_are_unique(self) -> None:
@@ -134,6 +136,48 @@ class TestDescriptionBudget:
         for spec in AGENT_TOOLS:
             assert "\n" not in spec.description, spec.name
             assert "```" not in spec.description, spec.name
+
+
+class TestSchemaBudget:
+    """The budget nobody sees until it is huge.
+
+    A description is loaded once per session and a result once per call, but an
+    input schema rides along with *every request*, used or not. The scene graph
+    made this the binding constraint, and the shape of ``visuals.VisualBlock``
+    was chosen against these numbers rather than argued about in review.
+    """
+
+    def test_each_input_schema_fits_its_ceiling(self) -> None:
+        for spec in AGENT_TOOLS:
+            over = f"{spec.name}: {spec.schema_bytes} bytes of schema"
+            assert spec.schema_bytes <= spec.max_schema_bytes, over
+
+    def test_a_tool_that_takes_nothing_advertises_nothing(self) -> None:
+        """Two bytes, and a ceiling that fails the day arguments appear here."""
+        assert GET_WORKSPACE_STATE.input_schema == {}
+        assert GET_WORKSPACE_STATE.schema_bytes == 2
+
+    def test_the_scene_graph_is_most_of_the_plan_schema_and_is_measured(self) -> None:
+        """States the split rather than leaving it to a comment: if the five
+        original-kind branches or the visual branch move materially, the number
+        someone reads in review is this one."""
+        schema = PRESENT_PLAN.input_schema
+        variants = schema["properties"]["nodes"]["items"]["oneOf"]
+        visual = [v for v in variants if v["properties"]["kind"]["const"] == "visual"]
+        assert len(visual) == 1
+        drawn = len(json.dumps(visual[0], separators=(",", ":")).encode())
+        assert 5_000 < drawn < 7_000, drawn
+        assert PRESENT_PLAN.schema_bytes < 2 * drawn
+
+    def test_the_schema_carries_no_keyword_that_only_restates_a_name(self) -> None:
+        """``title``/``type``-beside-``const``/empty ``default`` are stripped
+        (``plans._denoise``) — 1.1 kB of every request, for nothing the model
+        can act on. Asserted at the top level, where pydantic always emits one."""
+        assert "title" not in PRESENT_PLAN.input_schema
+        kind = PRESENT_PLAN.input_schema["properties"]["nodes"]["items"]["oneOf"][0]["properties"][
+            "kind"
+        ]
+        assert set(kind) == {"const"}
 
 
 class TestResultBudget:

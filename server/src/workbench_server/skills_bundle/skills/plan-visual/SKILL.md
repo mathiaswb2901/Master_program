@@ -33,7 +33,7 @@ returns a tool error). Answer in chat instead.
 ```
 
 `title` <= 120 chars, `summary` <= 600 and optional. At most **15 nodes**, each
-with a unique `node_id`. Four node kinds, all discriminated by `kind`:
+with a unique `node_id`. Five node kinds, all discriminated by `kind`:
 
 | kind | use it for | caps |
 |---|---|---|
@@ -41,6 +41,7 @@ with a unique `node_id`. Four node kinds, all discriminated by `kind`:
 | `option_group` | a choice the user makes | 2–6 `options` |
 | `step_list` | the concrete work, in order | 1–20 `steps` |
 | `question` | one genuine unknown | `text` <= 400 |
+| `visual` | numbers and structure, drawn | 1–6 `blocks`, <= 8 leaves |
 
 ### option_group
 
@@ -82,6 +83,40 @@ with a unique `node_id`. Four node kinds, all discriminated by `kind`:
 One unknown per node, and only unknowns you genuinely cannot resolve yourself.
 Answers come back as `annotations` keyed by `node_id`. Do not use questions to
 re-ask something the user already told you.
+
+### visual
+
+Send **structure and numbers**; Workbench computes the geometry and draws every
+pixel. Never markup, never SVG, never coordinates — there is no field for them.
+
+```json
+{"kind": "visual", "node_id": "day", "title": "Day-ahead result", "blocks": [
+  {"items": [{"kind": "chart", "title": "Price and dispatch",
+    "x": {"kind": "time", "start": "2026-10-25T00:00:00+02:00",
+          "step_minutes": 60, "timezone": "Europe/Stockholm"},
+    "y": {"kind": "value", "label": "Price", "unit": "EUR/MWh"},
+    "y_right": {"kind": "value", "label": "Dispatch", "unit": "MW"},
+    "series": [{"label": "SE3", "values": [41.2, 38.7]},
+               {"label": "Åsen 2", "style": "step", "values": [0, -5],
+                "axis": "right"}]}]},
+  {"layout": "split", "items": [{"kind": "table", "title": "Before", ...},
+                                {"kind": "table", "title": "After", ...}]}]}
+```
+
+- A block is `single` (1 item), `row`/`grid` (1–4), or `split` (exactly 2:
+  before, after). Blocks hold leaves and **never nest**.
+- Leaf kinds: `table` (typed columns `text|numeric|code`, optional `highlights`),
+  `chart`, `diagram` (nodes + edges, acyclic — we lay it out), `code_diff`
+  (`before`/`after` + `language`), `metrics`.
+- A **time** x axis is an instant plus a step, labelled in an IANA zone, so a
+  23- or 25-hour day draws correctly. Do not send `x` on a series then.
+- Use `style: "step"` for anything that holds a value across a settlement
+  period — a dispatch schedule drawn as a line claims ramps that never happened.
+- Draw only when a picture beats a sentence: a shape over time, a comparison, a
+  pipeline. Three numbers are a sentence.
+
+Full field list, caps and worked examples: **`reference/visual.md`** in this
+skill's directory. Read it before your first `visual`, not on every card.
 
 ## Budget
 

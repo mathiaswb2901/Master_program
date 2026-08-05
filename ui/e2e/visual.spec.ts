@@ -1,0 +1,114 @@
+/**
+ * Journey 9 — a visual artifact, end to end.
+ *
+ * The fake agent presents a plan whose one node is a `visual`: every leaf kind,
+ * every block layout, on a real 25-hour market day (`services/fake_agent.py`).
+ *
+ * Asserts, in the order they would break:
+ *  - the card renders every leaf natively — a table with tabular figures on the
+ *    column the *schema* typed numeric, an SVG chart whose step series is drawn
+ *    as steps, a diagram we laid out from nodes with no coordinates, a diff,
+ *    and a row of metrics;
+ *  - the DST day is drawn and labelled as 25 hours in the market's own zone —
+ *    the assertion a generic time axis passes on 363 days a year and fails on
+ *    this one;
+ *  - a cell whose text looks like markup renders as **text**: no script, no
+ *    element, nothing added to the document;
+ *  - **zero network requests** are issued while the artifact renders. That is
+ *    the property that made us build this instead of adopting a third-party
+ *    artifact bridge, and the only place it can be proven is in a real browser;
+ *  - the decision still round-trips to the agent, so a drawn card is a card.
+ */
+
+import { expect, test } from "@playwright/test";
+
+import { assistantBlocks, newSession, openApp, sendChat } from "./app";
+
+test("visual artifact: drawn natively, DST-correct, inert, and answerable", async ({ page }) => {
+  await openApp(page);
+  await newSession(page);
+
+  // Every request the page makes from here on, recorded before the message that
+  // produces the artifact is sent.
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    requests.push(`${request.method()} ${request.url()}`);
+  });
+
+  await sendChat(page, "visual please");
+
+  const card = page.locator(".wb-plan-card");
+  const visual = card.locator(".wb-vis");
+  await expect(card).toBeVisible();
+  await expect(visual).toBeVisible();
+
+  await test.step("every leaf kind rendered natively", async () => {
+    await expect(visual.locator(".wb-vis-metrics")).toHaveCount(1);
+    await expect(visual.locator("svg.wb-vis-chart")).toHaveCount(1);
+    await expect(visual.locator("table.wb-vis-table")).toHaveCount(2);
+    await expect(visual.locator("svg.wb-vis-diagram")).toHaveCount(1);
+    await expect(visual.locator(".wb-vis-diff")).toHaveCount(1);
+    // Blocks: single, single, split, row — the layouts, not a stack of divs.
+    await expect(visual.locator(".wb-vis-block.is-split")).toHaveCount(1);
+    await expect(visual.locator(".wb-vis-block.is-row")).toHaveCount(1);
+  });
+
+  await test.step("the schema, not the text, decides the presentation", async () => {
+    const price = visual.locator("table.wb-vis-table td.is-numeric").first();
+    await expect(price).toHaveCSS("font-variant-numeric", "tabular-nums");
+    await expect(price).toHaveCSS("text-align", "right");
+    // A highlighted cell is tinted *and* carries its role word for a reader who
+    // cannot see the tint (DESIGN.md §7).
+    await expect(visual.locator("td.is-error")).toHaveCount(1);
+    await expect(visual.locator("td.is-error")).toContainText("Problem");
+  });
+
+  await test.step("the 25-hour day is drawn as 25 hours in the market's clock", async () => {
+    const caption = visual.locator(".wb-vis-grid-caption");
+    await expect(caption).toHaveText("25 Oct · Europe/Stockholm · 25 h");
+    // Ticks land on grid points, so no label ever names an instant the day does
+    // not contain. How *many* there are depends on the panel's width — the
+    // Agent panel is whatever the previously-restored layout left it — so this
+    // asserts the shape of every label, not a count; the exhaustive DST cases
+    // (missing 02:00, duplicated 02:00) live in `visual/timeAxis.test.ts`.
+    const ticks = await visual.locator("svg.wb-vis-chart text.is-x").allTextContents();
+    expect(ticks.length).toBeGreaterThanOrEqual(2);
+    expect(ticks[0]).toBe("00:00");
+    expect(ticks.every((tick) => /^\d{2}:\d{2}$/.test(tick))).toBe(true);
+    // A step series holds each value across its interval: its path has two
+    // points per value, which a line series never does.
+    const paths = await visual.locator("svg.wb-vis-chart path.wb-vis-line").count();
+    expect(paths).toBe(2);
+  });
+
+  await test.step("markup in a cell is text, and nothing was added to the page", async () => {
+    const cell = visual.locator("td", { hasText: "<script>" });
+    await expect(cell).toHaveCount(1);
+    await expect(cell).toHaveText("<script>alert('xss')</script>");
+    const inert = await page.evaluate(() => {
+      const root = document.querySelector(".wb-vis");
+      return {
+        scripts: document.querySelectorAll("script[src*='xss'], script:not([type])").length,
+        embedded:
+          root?.querySelectorAll("img, iframe, object, embed, a, form, script").length ?? -1,
+        handlers: root?.querySelectorAll("[onclick], [onerror], [onload]").length ?? -1,
+        alerted: "__xss__" in window,
+      };
+    });
+    expect(inert.embedded).toBe(0);
+    expect(inert.handlers).toBe(0);
+    expect(inert.alerted).toBe(false);
+  });
+
+  await test.step("rendering the artifact issued no network request", async () => {
+    // Not "no image request" — none at all. A visual payload has no field we
+    // could fetch, and the renderer has no code that would.
+    expect(requests, `unexpected requests: ${requests.join(", ")}`).toEqual([]);
+  });
+
+  await test.step("a drawn card is still a card the agent hears back from", async () => {
+    await card.getByRole("button", { name: "Approve" }).click();
+    await expect(card.locator(".wb-plan-verdict")).toHaveText("Approved");
+    await expect(assistantBlocks(page).last()).toContainText("plan approve: no choices");
+  });
+});

@@ -4,9 +4,15 @@ When an agent proposes multi-step work or alternatives it calls ``present_plan``
 with a :class:`PlanArtifact` instead of streaming a wall of markdown; Workbench
 renders it as a native, clickable card and hands the user's decision back as a
 :class:`PlanResponse`. The schema is deliberately closed — a discriminated union
-of four node kinds with hard size caps — so the model chooses *content* and our
+of five node kinds with hard size caps — so the model chooses *content* and our
 own React components own the *rendering*. Free-form HTML from a model is not a
 product primitive; this is.
+
+The fifth kind, :class:`VisualNode`, extends that stance from prose to pictures:
+its payload is a typed scene graph (``models/visuals.py``) of tables, charts,
+diagrams, diffs and metrics from which Workbench computes every coordinate. The
+model sends structure and numbers; not one byte of markup, CSS or geometry
+crosses the wire.
 
 Sizes are capped here rather than trusted: an oversized or malformed plan comes
 back to the agent as a validation error it can fix, not as a broken card.
@@ -17,6 +23,13 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from workbench_server.models.visuals import (
+    MAX_VISUAL_BLOCKS,
+    MAX_VISUAL_LEAVES,
+    VisualBlock,
+    leaf_count,
+)
+
 # One card must stay readable in a chat column; these are product limits, not
 # implementation limits. Exceeding them is an agent error worth reporting.
 MAX_NODES = 15
@@ -24,6 +37,9 @@ MAX_OPTIONS = 6
 MAX_STEPS = 20
 MAX_FILE_REFS = 8
 MAX_PROS_CONS = 6
+#: Visual nodes per card. A plan that wants five pictures wants a dashboard,
+#: and a dashboard is a panel (PR 4), not a card in a 760px chat column.
+MAX_VISUAL_NODES = 3
 
 NodeId = Annotated[str, Field(min_length=1, max_length=64)]
 ShortText = Annotated[str, Field(min_length=1, max_length=200)]
@@ -94,22 +110,46 @@ class MarkdownNode(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class VisualNode(BaseModel):
+    """A drawn artifact: a short stack of blocks, each holding typed leaves.
+
+    Depth stops here. Blocks hold leaves and leaves hold data, so the payload
+    cannot nest — see ``models/visuals.py`` for why that is a safety property
+    and a schema-budget property before it is a design one.
+    """
+
+    kind: Literal["visual"] = "visual"
+    node_id: NodeId
+    title: str = Field(default="", max_length=120)
+    blocks: list[VisualBlock] = Field(min_length=1, max_length=MAX_VISUAL_BLOCKS)
+
+    @field_validator("blocks")
+    @classmethod
+    def _check_leaf_budget(cls, blocks: list[VisualBlock]) -> list[VisualBlock]:
+        count = leaf_count(blocks)
+        if count > MAX_VISUAL_LEAVES:
+            raise ValueError(f"{count} leaves in one visual, at most {MAX_VISUAL_LEAVES}")
+        return blocks
+
+
 PlanNode = Annotated[
-    OptionGroupNode | StepListNode | QuestionNode | MarkdownNode,
+    OptionGroupNode | StepListNode | QuestionNode | MarkdownNode | VisualNode,
     Field(discriminator="kind"),
 ]
 
 
+# ``plan_id`` is minted here and never accepted from the agent: the tool body
+# strips the key before validating (``handle_present_plan``) because a default
+# factory alone would happily keep an agent-supplied value. That matters — the
+# tool result the agent reads contains ``plan_id``, and an agent that echoes it
+# back on the re-present after a ``revise`` verdict would produce a card the UI
+# dedupes away, leaving the user nothing to answer.
+#
+# A comment rather than a docstring on purpose: a class docstring becomes the
+# schema's ``description`` and travels to the model on every request, and this
+# paragraph is about our own internals, which the model can do nothing with.
 class PlanArtifact(BaseModel):
-    """A whole plan card.
-
-    ``plan_id`` is minted here and never accepted from the agent: the tool body
-    strips the key before validating (``handle_present_plan``) because a default
-    factory alone would happily keep an agent-supplied value. That matters — the
-    tool result the agent reads contains ``plan_id``, and an agent that echoes it
-    back on the re-present after a ``revise`` verdict would produce a card the UI
-    dedupes away, leaving the user nothing to answer.
-    """
+    """A whole plan card."""
 
     plan_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12], max_length=64)
     title: str = Field(min_length=1, max_length=120)
@@ -122,6 +162,14 @@ class PlanArtifact(BaseModel):
         ids = [node.node_id for node in nodes]
         if len(set(ids)) != len(ids):
             raise ValueError("node_id must be unique within a plan")
+        return nodes
+
+    @field_validator("nodes")
+    @classmethod
+    def _visual_budget(cls, nodes: list[PlanNode]) -> list[PlanNode]:
+        visuals = sum(isinstance(node, VisualNode) for node in nodes)
+        if visuals > MAX_VISUAL_NODES:
+            raise ValueError(f"{visuals} visual nodes in one plan, at most {MAX_VISUAL_NODES}")
         return nodes
 
 
@@ -191,6 +239,11 @@ def _flatten(node: Any, defs: dict[str, Any]) -> Any:
     through the CLI are not guaranteed, and this schema has no recursion, so
     inlining is both safe and cheaper than debugging a silently-empty tool. The
     ``oneOf`` branches keep their ``kind`` const, so nothing is lost.
+
+    Inlining is what makes the *shape* of the scene graph a budget question and
+    not only a design one: every extra place a leaf union appears is another
+    full copy of five leaf schemas in every session's context (``visuals.py``,
+    ``VisualBlock``). Non-recursive is also what makes this terminate.
     """
     if isinstance(node, dict):
         ref = node.get("$ref")
@@ -203,12 +256,63 @@ def _flatten(node: Any, defs: dict[str, Any]) -> Any:
     return node
 
 
+#: Defaults that restate what ``required`` already says. A field absent from
+#: ``required`` is optional; that it falls back to the empty string, the empty
+#: list or null adds nothing a model can act on. A *meaningful* default
+#: (``"linear"``, ``60``, ``"single"``) is kept — that one it does act on.
+_EMPTY_DEFAULTS: tuple[Any, ...] = ("", [], {}, None)
+
+
+def _is_noise(key: str, value: Any, node: dict[str, Any]) -> bool:
+    """Whether a schema keyword is pure cost.
+
+    ``title`` restates the property name it hangs off ("Node Id" for
+    ``node_id``); ``type`` and ``default`` beside a ``const`` restate the const;
+    an empty ``default`` restates optionality. Every one of them is paid for on
+    every request of every session (CLAUDE.md's tool budget), and none of them
+    changes what the model can send.
+    """
+    if key == "title":
+        return True
+    if key in ("type", "default") and "const" in node:
+        return True
+    if key == "default":
+        return any(value is empty or value == empty for empty in _EMPTY_DEFAULTS) or isinstance(
+            value, dict
+        )
+    return False
+
+
+def _denoise(node: Any, in_names: bool = False) -> Any:
+    """Strip those keywords — but only where they are *keywords*.
+
+    ``in_names`` marks the one place a dict's keys are field names rather than
+    schema keywords (the body of ``properties``), because the scene graph has
+    leaves with a literal ``title`` field and dropping that would delete a
+    caption from the contract instead of a label from the schema.
+    """
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if in_names:
+                out[key] = _denoise(value)
+                continue
+            if _is_noise(key, value, node):
+                continue
+            out[key] = _denoise(value, in_names=key == "properties")
+        return out
+    if isinstance(node, list):
+        return [_denoise(item) for item in node]
+    return node
+
+
 def plan_input_schema() -> dict[str, Any]:
     """JSON Schema the agent sees for ``present_plan``: PlanArtifact minus the
-    server-minted ``plan_id``, with all definitions inlined."""
+    server-minted ``plan_id``, with all definitions inlined and the keywords
+    that only restate the property name stripped."""
     schema = PlanArtifact.model_json_schema()
     defs = schema.pop("$defs", {})
-    inlined = _flatten(schema, defs)
+    inlined = _denoise(_flatten(schema, defs))
     if not isinstance(inlined, dict):  # pragma: no cover - model_json_schema returns a dict
         raise TypeError("plan schema is not an object")
     properties = inlined.get("properties")

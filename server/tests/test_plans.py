@@ -28,6 +28,12 @@ from workbench_server.services.agent_sessions import PlanAlreadyPendingError, Se
 from workbench_server.services.agent_tools import handle_present_plan
 
 
+def node_variants(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ``oneOf`` branches of the node union, one per PlanNode kind."""
+    variants: list[dict[str, Any]] = schema["properties"]["nodes"]["items"]["oneOf"]
+    return variants
+
+
 def plan_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "title": "Fix the DST boundary in the SE3 bidder",
@@ -179,12 +185,63 @@ class TestPlanInputSchema:
         assert set(schema["properties"]) == {"title", "summary", "nodes"}
         assert "plan_id" not in schema.get("required", [])
 
-    def test_schema_describes_all_four_node_kinds(self) -> None:
+    def test_schema_describes_all_five_node_kinds(self) -> None:
         kinds = {
-            variant["properties"]["kind"]["const"]
-            for variant in plan_input_schema()["properties"]["nodes"]["items"]["oneOf"]
+            variant["properties"]["kind"]["const"] for variant in node_variants(plan_input_schema())
         }
-        assert kinds == {"option_group", "step_list", "question", "markdown"}
+        assert kinds == {"option_group", "step_list", "question", "markdown", "visual"}
+
+    def test_the_scene_graph_inlines_its_leaves_exactly_once(self) -> None:
+        """The whole shape of ``visuals.VisualBlock`` is chosen for this number.
+        Inlining is per *occurrence*, so a block union of three container kinds
+        would put five leaf schemas in the model's context four times over,
+        on every request of every session. One container, one copy — and this is
+        the test that fails if someone "tidies" it into three."""
+        compact = json.dumps(plan_input_schema(), separators=(",", ":"))
+        assert compact.count('"const":"table"') == 1
+
+    def test_the_scene_graph_terminates(self) -> None:
+        """Non-recursive is not a style note: ``_flatten`` inlines every ref, so
+        one recursive edge would never return. Reaching this assertion at all is
+        half the test; the other half is that the leaves really are the bottom."""
+        visual = next(
+            variant
+            for variant in node_variants(plan_input_schema())
+            if variant["properties"]["kind"]["const"] == "visual"
+        )
+        block = visual["properties"]["blocks"]["items"]
+        leaf_kinds = {
+            option["properties"]["kind"]["const"]
+            for option in block["properties"]["items"]["items"]["oneOf"]
+        }
+        assert leaf_kinds == {"table", "chart", "diagram", "code_diff", "metrics"}
+        # A leaf's own properties are data, never another block.
+        for option in block["properties"]["items"]["items"]["oneOf"]:
+            assert "blocks" not in option["properties"]
+            assert "items" not in option["properties"] or option["properties"]["kind"]["const"] in {
+                "metrics"
+            }
+
+    def test_noise_keywords_are_stripped_but_the_title_field_survives(self) -> None:
+        """``title`` is both a schema keyword pydantic invents for every field
+        and a real field on every visual leaf. Dropping the keyword is worth
+        ~1.1 kB of every request; dropping the field would delete a caption from
+        the product."""
+        schema = plan_input_schema()
+        assert "title" not in schema["properties"]["nodes"]["items"]["oneOf"][0]
+        table = next(
+            option
+            for variant in node_variants(schema)
+            if variant["properties"]["kind"]["const"] == "visual"
+            for option in variant["properties"]["blocks"]["items"]["properties"]["items"]["items"][
+                "oneOf"
+            ]
+            if option["properties"]["kind"]["const"] == "table"
+        )
+        assert table["properties"]["title"]["maxLength"] == 80
+        # A meaningful default stays; an empty one restates `required` and goes.
+        assert table["properties"]["columns"]["items"]["properties"]["type"]["default"] == "text"
+        assert "default" not in table["properties"]["title"]
 
 
 class TestWireFrames:
