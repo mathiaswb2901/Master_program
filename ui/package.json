@@ -9,6 +9,9 @@
     "lint": "eslint .",
     "test": "vitest run",
     "e2e": "npm run build && playwright test",
+    "perf": "npm run build && playwright test --config playwright.perf.config.ts",
+    "perf:blocking": "npm run build && playwright test --config playwright.perf.config.ts --grep-invert @wallclock",
+    "perf:report": "npm run build && playwright test --config playwright.perf.config.ts --grep @wallclock",
     "preview": "vite preview"
   },
   "dependencies": {
