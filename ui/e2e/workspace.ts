@@ -6,11 +6,20 @@
  * Read, an office document (for degraded mode) and a `.workbench/shortcuts.md`
  * carrying one working shortcut and one malformed entry.
  *
- * Why the env var: `playwright.config.ts` is loaded by the runner *and* by every
- * worker process, so creating the directory unconditionally would give each
- * worker a different workspace. The runner creates it first and publishes the
- * path through `process.env`, which workers inherit — so `E2E_WORKSPACE` is the
+ * Why two env vars: `playwright.config.ts` is loaded by the runner *and* by
+ * every worker process, so creating the directory unconditionally would give
+ * each worker a different workspace. The runner seeds one and publishes it as
+ * `WB_E2E_WORKSPACE_ACTIVE`, which workers inherit — so `E2E_WORKSPACE` is the
  * same directory everywhere, in the config, in the specs, and in the server.
+ * That handoff is internal; nobody sets it by hand.
+ *
+ * `WB_E2E_WORKSPACE` is the public knob, and it means one thing: *seed this
+ * run's workspace here* (instead of a fresh temp directory) so a failing
+ * journey can be re-run against a path you chose. It must therefore name an
+ * empty or nonexistent directory. A run against a workspace a previous run
+ * left behind would hit the `src/bid.py` journey 1 expects to create, and the
+ * seeded files journeys 3 and 4 expect to find as they were written — so a
+ * non-empty one is refused up front rather than failing obscurely later.
  *
  * The directory is deliberately left behind: it holds the exact state a failing
  * journey left, next to the Playwright trace.
@@ -20,7 +29,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/** Public: "seed this run's workspace here". Empty or nonexistent, or nothing. */
 export const WORKSPACE_ENV = "WB_E2E_WORKSPACE";
+/** Internal: the seeded path, runner -> workers. Set below, never by hand. */
+const ACTIVE_ENV = "WB_E2E_WORKSPACE_ACTIVE";
 
 /**
  * Prefix of the temp directory, and a constraint on every terminal marker in
@@ -76,12 +88,37 @@ function seed(root: string): void {
   fs.writeFileSync(path.join(root, ".workbench", "shortcuts.md"), SHORTCUTS_FILE, "utf-8");
 }
 
+/** Validate a requested workspace: it must be an empty or nonexistent directory. */
+function prepare(requested: string): string {
+  const root = path.resolve(requested);
+  if (!fs.existsSync(root)) {
+    fs.mkdirSync(root, { recursive: true });
+    return root;
+  }
+  if (!fs.statSync(root).isDirectory()) {
+    throw new Error(`${WORKSPACE_ENV}=${root} is not a directory.`);
+  }
+  if (fs.readdirSync(root).length > 0) {
+    throw new Error(
+      `${WORKSPACE_ENV}=${root} is not empty. The suite seeds the workspace it runs in and ` +
+        `the journeys write to it, so it must start empty — unset the variable for a fresh ` +
+        `temp directory, or point it at an empty (or nonexistent) path.`,
+    );
+  }
+  return root;
+}
+
 function ensureWorkspace(): string {
-  const existing = process.env[WORKSPACE_ENV];
-  if (existing !== undefined && existing !== "") return existing;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), WORKSPACE_PREFIX));
+  const active = process.env[ACTIVE_ENV];
+  if (active !== undefined && active !== "") return active; // a worker: already seeded
+  const requested = process.env[WORKSPACE_ENV];
+  const root =
+    requested !== undefined && requested !== ""
+      ? prepare(requested)
+      : fs.mkdtempSync(path.join(os.tmpdir(), WORKSPACE_PREFIX));
   seed(root);
-  process.env[WORKSPACE_ENV] = root;
+  process.env[ACTIVE_ENV] = root;
+  process.env[WORKSPACE_ENV] = root; // resolved, for anything reading it downstream
   return root;
 }
 

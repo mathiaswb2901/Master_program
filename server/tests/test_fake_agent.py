@@ -157,6 +157,32 @@ async def test_stay_busy_holds_the_turn_open(
     assert session.state == "idle"
 
 
+async def test_stay_busy_with_a_tool_holds_after_the_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both triggers together move the hold behind the tool result, so the row
+    is settled while the turn is still running. The E2E chat journey asserts
+    exactly that state, and it is the only way to distinguish a per-tool settle
+    from the UI settling every row wholesale when the turn ends."""
+    monkeypatch.setattr(fake_agent, "BUSY_HOLD_S", 0.2)
+    session = manager_for(workspace_with_notes(tmp_path)).create("")
+    queue = session.subscribe()
+    session.send_user_message("use tool please and stay busy")
+
+    settled: ToolSettled | None = None
+    while settled is None:
+        event = await asyncio.wait_for(queue.get(), timeout=10)
+        assert not isinstance(event, TurnDoneEvent), "the turn ended before the tool settled"
+        if isinstance(event, ToolSettled):
+            settled = event
+    state_at_settle = session.state
+    assert settled.ok is True
+
+    await drain(queue, TurnDoneEvent)
+    assert state_at_settle == "working"  # the row settled mid-turn, not at the end
+    assert session.state == "idle"
+
+
 async def test_factory_builds_one_client_per_session(tmp_path: Path) -> None:
     factory = fake_client_factory()
     manager = SessionManager(tmp_path, factory, max_sessions=4)

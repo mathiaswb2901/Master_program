@@ -17,7 +17,10 @@ What one user message produces, in order:
 
 * a short markdown reply, streamed as text deltas;
 * ``stay busy``      — the turn is held open long enough for a UI to observe
-  the working state before it settles;
+  the working state before it settles. Combined with ``use tool`` the hold
+  moves to *after* the tool's result, which is the only way a UI test can tell
+  a row that settled on its own result apart from one the UI settled wholesale
+  when the turn ended;
 * ``use tool``       — a ``Read`` of a real file in the session folder: a
   tool-use note and, separately, its result;
 * ``ask permission`` — a permission prompt through the bridge, then the
@@ -57,10 +60,11 @@ TOOL_TRIGGER = "use tool"
 PERMISSION_TRIGGER = "ask permission"
 PLAN_TRIGGER = "plan please"
 
-#: How long ``stay busy`` holds the turn open. Long enough for a UI test to see
-#: the session chip pulse and to settle again afterwards, short enough that the
-#: whole suite stays under a few minutes. This is the *only* wall-clock wait in
-#: fake mode — the tests themselves never sleep, they wait on the app's signals.
+#: How long ``stay busy`` holds the turn open (before the reply, or after the
+#: tool result when ``use tool`` is asked for too). Long enough for a UI test to
+#: see the session chip pulse and to settle again afterwards, short enough that
+#: the whole suite stays under a few minutes. This is the *only* wall-clock wait
+#: in fake mode — the tests never sleep, they wait on the app's signals.
 BUSY_HOLD_S = 1.5
 
 #: Cap on the excerpt a fake ``Read`` returns; the session caps again on the way
@@ -220,13 +224,21 @@ class FakeAgentClient:
     async def receive_response(self) -> AsyncIterator[Any]:
         prompt = self._prompt
         lowered = prompt.lower()
-        if BUSY_TRIGGER in lowered:
+        busy = BUSY_TRIGGER in lowered
+        uses_tool = TOOL_TRIGGER in lowered
+        # Where the hold goes is the whole point of combining the two triggers:
+        # after the tool's result, the turn is still open while the row is
+        # already settled — the state a UI can only reach by handling the
+        # tool's own result frame.
+        if busy and not uses_tool:
             await asyncio.sleep(BUSY_HOLD_S)
         for chunk in reply_text(prompt).splitlines(keepends=True):
             yield _delta(chunk)
-        if TOOL_TRIGGER in lowered:
+        if uses_tool:
             for message in self._read_a_file():
                 yield message
+            if busy:
+                await asyncio.sleep(BUSY_HOLD_S)
         if PERMISSION_TRIGGER in lowered:
             allowed = await self._bridge.ask_permission("Bash", {"command": PERMISSION_COMMAND})
             yield _delta(f"\n\npermission: {'allowed' if allowed else 'denied'}\n")

@@ -6,13 +6,25 @@
 
 import { expect, type Locator, type Page } from "@playwright/test";
 
-/** Open the app and wait until the workspace tree has actually arrived. */
-export async function openApp(page: Page): Promise<void> {
+/** Navigate, and wait for nothing. Split out of `openApp` for the one assertion
+ * that races a timer: the shortcuts problems toast auto-dismisses ~6 s after
+ * the load that raised it, which is inside `workspaceReady`'s own budget. */
+export async function gotoApp(page: Page): Promise<void> {
   await page.goto("/");
+}
+
+/** Wait until the workspace tree has actually arrived. */
+export async function workspaceReady(page: Page): Promise<void> {
   await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();
   // The tree renders empty until GET /api/files/tree resolves; the seeded
   // folder is the first thing every journey needs to exist.
   await expect(page.getByRole("treeitem", { name: "src" })).toBeVisible();
+}
+
+/** Open the app and wait until it is usable — how every journey starts. */
+export async function openApp(page: Page): Promise<void> {
+  await gotoApp(page);
+  await workspaceReady(page);
 }
 
 export function treeItem(page: Page, name: string): Locator {
@@ -86,4 +98,22 @@ export async function sendChat(page: Page, text: string): Promise<void> {
 /** The assistant blocks rendered so far (markdown, one per streamed turn). */
 export function assistantBlocks(page: Page): Locator {
   return page.locator(".wb-msg-block");
+}
+
+/**
+ * Is a settled tool row on screen *inside a turn that is still running*?
+ *
+ * Read in one DOM snapshot on purpose. `turn_done` settles every unsettled row
+ * and flips the session to idle in the same store update, so a UI that had lost
+ * per-tool settling can never satisfy this — while two separate `expect`s could
+ * be satisfied by it, or could fail a correct UI, depending only on where the
+ * turn ended between them. Poll it: the fake agent holds the turn open after
+ * the tool result precisely so this becomes true for a while.
+ */
+export function toolSettledMidTurn(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const settled = document.querySelectorAll(".wb-tool-row.is-settled").length;
+    const badge = document.querySelector(".wb-chat-header .wb-badge")?.textContent ?? "";
+    return settled === 1 && badge.includes("Working");
+  });
 }
