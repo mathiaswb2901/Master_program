@@ -16,7 +16,12 @@ from typing import Any
 
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
-from workbench_server.models.plans import PlanArtifact, PlanResponse
+from workbench_server.models.plans import (
+    AnnotationAnchor,
+    PlanAnnotation,
+    PlanArtifact,
+    PlanResponse,
+)
 from workbench_server.services.agent_tools import (
     AGENT_TOOLS,
     GET_WORKSPACE_STATE,
@@ -36,7 +41,13 @@ def result_text(result: dict[str, Any]) -> str:
 
 
 class _Bridge:
-    """SessionBridge stub: the user approves, as proposed."""
+    """SessionBridge stub: the user approves, as proposed — and marks two parts.
+
+    Two anchored notes rather than none, because anchors changed the *shape* of
+    this result (`{"anchor":{"kind","node_id","path":[…]},"text":…}` is about
+    100 bytes of structure before a word is typed) and a budget measured on the
+    shape we no longer send is a budget that cannot fail.
+    """
 
     async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
         return True
@@ -46,6 +57,24 @@ class _Bridge:
             plan_id=artifact.plan_id,
             verdict="approve",
             choices={"approach": "local"},
+            annotations=[
+                PlanAnnotation(
+                    anchor=AnnotationAnchor(
+                        kind="part",
+                        node_id="scene",
+                        path=["leaf", 2, "row", 1, "col", "Price"],
+                    ),
+                    text="This price is the second 02:00, not the first.",
+                ),
+                PlanAnnotation(
+                    anchor=AnnotationAnchor(
+                        kind="part",
+                        node_id="scene",
+                        path=["leaf", 1, "series", "SE3 day-ahead", "point", 12],
+                    ),
+                    text="Negative here is real, keep it.",
+                ),
+            ],
             comment="Go, but keep the .bak.",
         )
 
@@ -208,6 +237,16 @@ class TestResultBudget:
         assert len(text.encode()) <= PRESENT_PLAN.max_result_bytes
         assert "\n" not in text
         assert PlanResponse.model_validate_json(text).verdict == "approve"
+
+    async def test_an_anchor_reaches_the_agent_as_data_it_can_act_on(self) -> None:
+        """The point of the whole anchor design, asserted at the one place the
+        agent actually reads: the note comes back naming the row and the column,
+        in the agent's own vocabulary — not a selector, not a screen position,
+        and not a sentence the agent would have to parse."""
+        text = result_text(await handle_present_plan(_Bridge(), representative_plan_payload()))
+        note = PlanResponse.model_validate_json(text).annotations[0]
+        assert note.anchor.node_id == "scene"
+        assert note.anchor.path == ["leaf", 2, "row", 1, "col", "Price"]
 
     async def test_a_validation_error_stays_within_the_budget(self) -> None:
         """A malformed call must not answer with a wall of pydantic prose — the

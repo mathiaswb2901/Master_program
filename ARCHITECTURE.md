@@ -433,9 +433,10 @@ back — its hooks and permission rules, not only its skills.
 **Visual plan artifacts:** `present_plan` (the second context-bridge tool) takes a
 `PlanArtifact` — a closed, size-capped discriminated union of option groups, step
 lists, questions, markdown and *visuals* (`models/plans.py`), never free-form markup —
-which the UI renders as a native card; the user's choices, annotations and verdict come
-back to the agent as a typed `PlanResponse` through the same future-and-timeout
-discipline as permissions. A timeout or an interrupt resolves to verdict
+which the UI renders as a native card; the user's choices, annotations (each carrying
+an *anchor* — see below — so a note can point at one cell rather than a whole node) and
+verdict come back to the agent as a typed `PlanResponse` through the same
+future-and-timeout discipline as permissions. A timeout or an interrupt resolves to verdict
 `no_decision`, never an implied approval, and an `approve` that leaves an option
 group unchosen is dropped rather than passed on as one. `plan_id` is minted by the
 tool body (the key is stripped from the agent's arguments, not merely absent from
@@ -497,6 +498,50 @@ scene graph closes all three by construction rather than by policy:
 
 A safety property asserted only in prose is a property until someone edits the
 file, so each bullet above has a test named after it.
+
+**Annotation anchors** (`models/plans.py`, `services/plan_anchors.py`,
+`ui/src/plan/anchors.ts`) are what make a drawn card answerable at the
+resolution it is read at. A `PlanAnnotation` is `{anchor, text}`, and the anchor
+has four kinds: the **plan**, a whole **node** (what every annotation used to
+be, and still the fallback), a **part** of a drawn leaf, or a **range** of
+characters in a `markdown`/`question` text.
+
+*An anchor is a semantic path the renderer emits, never a CSS selector.* That is
+the design decision, and it is worth stating as a rejection, because recording
+what the user clicked — an element id, a selector, a bounding box — is the
+obvious implementation and is wrong three times over. A selector is our
+*stylesheet* leaking into the agent's input: it breaks when a class is renamed,
+it is meaningless to a model reading it, and it addresses the page rather than
+the payload. `["leaf", 2, "row", 14, "col", "Price"]` names **data** — it
+survives a re-render, a restyle and a theme change (`Visual.test.tsx` asserts
+the same cell emits the same path across a state change *and* across a
+highlight landing on that very cell); it is directly actionable, because it is
+the agent's own payload addressed in the agent's own vocabulary; and it is
+**validated against the artifact before it travels**, so an anchor naming a row
+that does not exist is a malformed decision the session refuses (and says so
+over `agent_error`), not a note about nothing. Positional where the payload is
+ordered (leaves, rows, points, edges), named where the payload carries a name (a
+column label, a series label, a diagram node id) — and a name that is empty or
+ambiguous falls back to the position, because an address resolving to two things
+is not an address. The grammar is validated in the model (pairs, a closed set of
+keys, a non-negative index where an index belongs — a `selector` key is not a
+key), the *target* in the service, which is the only half that needs the plan.
+
+**Annotate mode** is a per-card mode (`Alt+A`, or the QuickBar's "Annotate the
+plan"), contributed through the Agent tool's descriptor rather than as a tool of
+its own — a plan card has no panel, no status item and no resource, so a second
+registry entry would be a second name for the Agent. In the mode every
+anchorable part becomes a real `<button>` (inside SVG, a `<g role="button">`
+answering Enter and Space), so the whole mode is keyboard-operable, which
+DESIGN.md §7 makes a requirement rather than a nicety; a chart's points are
+reached in two steps (series, then a point strip labelled in the market's own
+clock) because six series of four hundred points may not be 2,400 tab stops.
+Cost is deliberate: outside the mode a part with no note renders exactly what it
+rendered before anchors existed — no wrapper, no attribute, no handler — so the
+18,000-mark render budget is untouched. Notes accumulate on the card and travel
+**with the verdict, in the one `PlanResponse`**; sending notes without deciding
+would be a second channel to the agent and is deliberately not built here (M5
+item 3, PR 5).
 
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage

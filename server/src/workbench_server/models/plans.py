@@ -19,9 +19,9 @@ back to the agent as a validation error it can fix, not as a broken card.
 """
 
 import uuid
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from workbench_server.models.visuals import (
     MAX_VISUAL_BLOCKS,
@@ -197,11 +197,129 @@ class PlanArtifact(BaseModel):
 PlanVerdict = Literal["approve", "revise", "reject", "no_decision"]
 
 
-class PlanAnnotation(BaseModel):
-    """Free text the user attached to one node (also how questions are answered)."""
+# ---- anchors -----------------------------------------------------------------
 
-    node_id: NodeId
+# **An anchor is a semantic path the renderer emits, never a CSS selector.**
+#
+# That is the whole design decision, and it is worth stating as a rejection: the
+# obvious way to let a user point at part of a picture is to record what they
+# clicked — an element id, a selector, a bounding box. All three are wrong here.
+# A selector is *our stylesheet* leaking into the agent's input: it breaks the
+# next time a class is renamed, it means nothing to a model reading it, and it
+# would let anything that can influence markup address a part of the artifact it
+# was never given. A path like ``["leaf", 2, "row", 14, "col", "Price"]`` is the
+# opposite on all three counts: it survives a re-render and a restyle because it
+# names *data*, the agent can act on it directly (it is the agent's own payload,
+# addressed in the agent's own vocabulary), and every segment is validated
+# against the artifact before it travels — an anchor cannot name a row that does
+# not exist, so it cannot be used to say something the artifact does not contain.
+#
+# Positional where the payload is ordered (rows, points, edges, leaves), named
+# where the payload carries a name (a column label, a series label, a diagram
+# node id) — see ``services/plan_anchors.py``, which resolves both.
+
+#: One segment: a key we chose, or an index into the payload's own ordering / a
+#: name the payload itself carries.
+AnchorSegment = int | Annotated[str, Field(min_length=1, max_length=64)]
+
+#: Longest legal path. ``leaf n series "x" point i`` is six segments and nothing
+#: in the scene graph nests deeper, so eight is headroom, not a shape.
+MAX_ANCHOR_PATH = 8
+
+#: Which leaf of a ``visual`` node, counted flat over its blocks. Every ``part``
+#: path starts here, because a part is always part of a drawn leaf.
+_LEAF_KEY = "leaf"
+#: Keys whose value indexes the payload's own ordering.
+_INDEX_KEYS = frozenset({_LEAF_KEY, "row", "point", "edge", "line"})
+#: Keys whose value is a name the payload carries.
+_NAME_KEYS = frozenset({"node", "side"})
+#: Keys taking either — a label when the payload gives a usable one, else the
+#: index. The renderer decides which (``ui/src/plan/anchors.ts``).
+_EITHER_KEYS = frozenset({"col", "series", "metric"})
+_PART_KEYS = _INDEX_KEYS | _NAME_KEYS | _EITHER_KEYS
+
+
+def _is_index(value: AnchorSegment) -> bool:
+    """A non-negative int. ``bool`` is an ``int`` subclass and is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+class AnnotationAnchor(BaseModel):
+    """What a note points at: the plan, a node, a part of a drawn leaf, or a
+    text range. `path` is a semantic path into the artifact, never a selector."""
+
+    kind: Literal["plan", "node", "part", "range"] = "node"
+    #: Empty only for ``kind="plan"``.
+    node_id: str = Field(default="", max_length=64)
+    #: ``(key, value)`` pairs: ``["leaf", 2, "row", 14, "col", "Price"]``.
+    path: list[AnchorSegment] = Field(default_factory=list, max_length=MAX_ANCHOR_PATH)
+
+    # Grammar only. Whether row 14 *exists* needs the artifact, and lives in
+    # ``services/plan_anchors.py`` — so a malformed shape is a schema error and
+    # a wrong target is a rejected decision, which are different failures.
+    @model_validator(mode="after")
+    def _check_grammar(self) -> Self:
+        if self.kind == "plan":
+            if self.node_id or self.path:
+                raise ValueError("a plan anchor names no node and carries no path")
+            return self
+        if not self.node_id:
+            raise ValueError(f"a {self.kind} anchor needs a node_id")
+        if self.kind == "node":
+            if self.path:
+                raise ValueError("a node anchor carries no path")
+            return self
+        if self.kind == "range":
+            match self.path:
+                case ["from", int() as start, "to", int() as end] if (
+                    _is_index(start) and _is_index(end) and start < end
+                ):
+                    return self
+            raise ValueError('a range anchor is ["from", start, "to", end] with 0 <= start < end')
+        return self._check_part_path()
+
+    def _check_part_path(self) -> Self:
+        if not self.path:
+            raise ValueError("a part anchor needs a path")
+        if len(self.path) % 2:
+            raise ValueError("a part path is (key, value) pairs")
+        if self.path[0] != _LEAF_KEY:
+            raise ValueError(f"a part path starts with {_LEAF_KEY!r} — a part is part of a leaf")
+        seen: set[str] = set()
+        for key, value in zip(self.path[::2], self.path[1::2], strict=True):
+            if not isinstance(key, str) or key not in _PART_KEYS:
+                raise ValueError(f"unknown path key {key!r}")
+            if key in seen:
+                raise ValueError(f"path key {key!r} appears twice")
+            seen.add(key)
+            if key in _INDEX_KEYS and not _is_index(value):
+                raise ValueError(f"{key} takes a non-negative index, got {value!r}")
+            if key in _NAME_KEYS and not isinstance(value, str):
+                raise ValueError(f"{key} takes a name, got {value!r}")
+            if key in _EITHER_KEYS and not (isinstance(value, str) or _is_index(value)):
+                raise ValueError(f"{key} takes a label or an index, got {value!r}")
+        return self
+
+
+def node_anchor(node_id: str) -> AnnotationAnchor:
+    """The whole-node anchor — what every annotation was before parts existed,
+    and still the fallback when a user annotates a node rather than a part."""
+    return AnnotationAnchor(kind="node", node_id=node_id)
+
+
+class PlanAnnotation(BaseModel):
+    """A note the user attached to one part of the plan (also how questions are
+    answered). `anchor` says which part; whole-node is the fallback."""
+
+    anchor: AnnotationAnchor
     text: str = Field(min_length=1, max_length=600)
+
+
+#: Notes on one card. A plan holds at most 15 nodes, but a *part* anchor makes
+#: one node worth marking up several times over — a table with four wrong cells
+#: is one node and four notes. 40 is what a user can plausibly write on one card
+#: before deciding, and it keeps the response the agent reads bounded.
+MAX_ANNOTATIONS = 40
 
 
 class PlanResponse(BaseModel):
@@ -209,7 +327,7 @@ class PlanResponse(BaseModel):
     verdict: PlanVerdict
     #: node_id -> option_id, one entry per option group the user resolved.
     choices: dict[str, str] = Field(default_factory=dict, max_length=MAX_NODES)
-    annotations: list[PlanAnnotation] = Field(default_factory=list, max_length=MAX_NODES)
+    annotations: list[PlanAnnotation] = Field(default_factory=list, max_length=MAX_ANNOTATIONS)
     comment: str = Field(default="", max_length=2000)
 
 

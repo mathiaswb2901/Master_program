@@ -14,7 +14,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { anchorKey, partAnchor } from "../plan/anchors";
 import type { ChartLeaf, DiagramLeaf, TableLeaf, VisualLeaf, VisualNode } from "../types";
+import type { VisualAnnotation } from "./annotate";
 import { VisualView } from "./Visual";
 
 const MARKUP = "<script>alert('xss')</script>";
@@ -254,5 +256,169 @@ describe("visual renderer — the schema decides the presentation", () => {
     };
     const out = html(node);
     for (const layout of ["is-single", "is-split", "is-grid"]) expect(out).toContain(layout);
+  });
+});
+
+// ---- anchors -----------------------------------------------------------------
+
+/**
+ * The claim the whole anchor design rests on: **the same part emits the same
+ * path**, whatever the app is doing around it.
+ *
+ * A selector-based anchor would fail every case below — a renamed class, a mode
+ * class on an ancestor, a highlight that changes an element's classes, a note
+ * that adds a marker inside it. A path names data, so none of them touch it.
+ */
+
+function annotating(overrides: Partial<VisualAnnotation> = {}): VisualAnnotation {
+  return { nodeId: "scene", notes: {}, editing: null, onPick: () => undefined, ...overrides };
+}
+
+/** The keys as the DOM will hold them: an anchor key is JSON, and React escapes
+ * its quotes on the way into the attribute (a browser hands them back decoded,
+ * which is what the E2E journey reads). */
+function anchorsIn(node: VisualNode, annotation: VisualAnnotation): string[] {
+  const out = renderToStaticMarkup(<VisualView node={node} annotation={annotation} />);
+  return [...out.matchAll(/data-anchor="([^"]+)"/g)].map((match) =>
+    match[1].replaceAll("&quot;", '"'),
+  );
+}
+
+/** The path of one table cell, as the renderer stamped it. */
+function cellAnchor(node: VisualNode, annotation: VisualAnnotation, row: number): string {
+  const wanted = anchorKey(partAnchor("scene", ["leaf", 0, "row", row, "col", "Price"]));
+  const found = anchorsIn(node, annotation).find((key) => key === wanted);
+  expect(found, `no anchor for row ${String(row)}`).toBeDefined();
+  return wanted;
+}
+
+describe("visual renderer — anchors", () => {
+  const rows = [
+    ["02:00 (1st)", "-3.8"],
+    ["02:00 (2nd)", "-6.1"],
+  ];
+
+  it("emits a path for every anchorable part, one per datum", () => {
+    const keys = anchorsIn(scene(table(rows)), annotating());
+    // Two rows: a row handle and two cells each.
+    expect(keys).toHaveLength(6);
+    expect(keys).toContain(anchorKey(partAnchor("scene", ["leaf", 0, "row", 1])));
+    expect(keys).toContain(
+      anchorKey(partAnchor("scene", ["leaf", 0, "row", 1, "col", "Price"])),
+    );
+  });
+
+  it("keeps the same path across a state change", () => {
+    const node = scene(table(rows));
+    const before = cellAnchor(node, annotating(), 1);
+    // Two real state changes in the card: a note lands on a *neighbouring*
+    // cell (re-render, new markers, new classes) and the editor opens on it.
+    const neighbour = anchorKey(partAnchor("scene", ["leaf", 0, "row", 0, "col", "Price"]));
+    const after = cellAnchor(
+      node,
+      annotating({ notes: { [neighbour]: "wrong fold" }, editing: neighbour }),
+      1,
+    );
+    expect(after).toBe(before);
+  });
+
+  it("keeps the same path when the payload restyles the very cell it names", () => {
+    // A highlight is pure presentation — it changes the cell's classes and adds
+    // a screen-reader word. An anchor that moved here would be a selector by
+    // another name.
+    const plain = cellAnchor(scene(table(rows)), annotating(), 1);
+    const styled = cellAnchor(
+      scene(table(rows, { highlights: [{ row: 1, column: 1, role: "error" }] })),
+      annotating(),
+      1,
+    );
+    expect(styled).toBe(plain);
+  });
+
+  it("names a column by its label, and by its index when the label is ambiguous", () => {
+    const ambiguous = table(rows, {
+      columns: [
+        { label: "Price", type: "text", unit: "" },
+        { label: "Price", type: "numeric", unit: "EUR/MWh" },
+      ],
+    });
+    const keys = anchorsIn(scene(ambiguous), annotating());
+    expect(keys).toContain(anchorKey(partAnchor("scene", ["leaf", 0, "row", 0, "col", 1])));
+  });
+
+  it("counts leaves flat over blocks, so the second block's table is leaf 1", () => {
+    const node: VisualNode = {
+      kind: "visual",
+      node_id: "scene",
+      title: "",
+      blocks: [
+        { layout: "single", items: [table([["a", "1"]])] },
+        { layout: "single", items: [table([["b", "2"]])] },
+      ],
+    };
+    const keys = anchorsIn(node, annotating());
+    expect(keys).toContain(anchorKey(partAnchor("scene", ["leaf", 1, "row", 0, "col", "Price"])));
+  });
+
+  it("anchors a diagram box by its id and an edge by its position", () => {
+    const keys = anchorsIn(scene(diagram), annotating());
+    expect(keys).toContain(anchorKey(partAnchor("scene", ["leaf", 0, "node", "opt"])));
+    expect(keys).toContain(anchorKey(partAnchor("scene", ["leaf", 0, "edge", 0])));
+  });
+
+  it("anchors a diff line by its side and line number in the payload", () => {
+    const diff: VisualLeaf = {
+      kind: "code_diff",
+      title: "",
+      language: "python",
+      before: "hours = range(24)\nfor h in hours:\n",
+      after: "hours = delivery_hours(day, tz)\nfor h in hours:\n",
+    };
+    const keys = anchorsIn(scene(diff), annotating());
+    expect(keys).toContain(
+      anchorKey(partAnchor("scene", ["leaf", 0, "side", "before", "line", 0])),
+    );
+    expect(keys).toContain(anchorKey(partAnchor("scene", ["leaf", 0, "side", "after", "line", 0])));
+  });
+
+  it("costs nothing when there is no annotation to make", () => {
+    // The render budget (`budget.test.tsx`) is 18,000 marks; a wrapper element
+    // per mark would eat it. Outside annotate mode, an unnoted part is not an
+    // element at all.
+    const out = html(scene(table(rows), chart, diagram));
+    expect(out).not.toContain("data-anchor");
+    expect(out).not.toContain("wb-vis-part");
+  });
+
+  it("shows a note in place while the mode is off", () => {
+    // A note you can only see by turning a mode back on is a note you will not
+    // act on before deciding.
+    const noted = anchorKey(partAnchor("scene", ["leaf", 0, "row", 1, "col", "Price"]));
+    const annotation: VisualAnnotation = {
+      nodeId: "scene",
+      notes: { [noted]: "wrong fold" },
+      editing: null,
+      onPick: null,
+    };
+    expect(anchorsIn(scene(table(rows)), annotation)).toEqual([noted]);
+    const out = renderToStaticMarkup(
+      <VisualView node={scene(table(rows))} annotation={annotation} />,
+    );
+    expect(out).toContain("wrong fold");
+    // Inert: no button, no tab stop, nothing to click by accident.
+    expect(out).not.toContain("<button");
+  });
+
+  it("keeps markup in a cell as text with an anchor on it", () => {
+    // The scene graph's threat model, re-run with annotations present: an
+    // anchor adds a wrapper, and the wrapper must not become a way in.
+    const out = renderToStaticMarkup(
+      <VisualView node={scene(table([[MARKUP, "1"]]))} annotation={annotating()} />,
+    );
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    for (const tag of ["<img", "<iframe", "<a ", "<form"]) expect(out).not.toContain(tag);
+    expect(out).not.toMatch(/\son[a-z]+=/);
+    expect(out).not.toContain(" style=");
   });
 });

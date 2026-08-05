@@ -143,27 +143,35 @@ def workspace_state_result(state: UiState) -> dict[str, Any]:
 
 PRESENT_PLAN = AgentToolSpec(
     name="present_plan",
+    # Every character here is paid for on every request of every session, so
+    # the anchors clause (PR 3) was bought rather than added: the wording above
+    # it was tightened by 60 characters first. See the ceiling test.
     description=(
-        "Show the user an interactive plan card and wait for their decision. "
-        "Use it instead of chat prose whenever you propose multi-step work "
-        "or ask the user to choose between alternatives. Nodes render natively: "
-        "option_group (user picks one), step_list (ordered steps; file_refs open "
+        "Show an interactive plan card and wait for the user's decision. "
+        "Use it instead of chat prose for multi-step work or a choice between "
+        "alternatives. Nodes render natively: "
+        "option_group (user picks one), step_list (ordered; file_refs open "
         "editor tabs), question, markdown, visual (tables, charts, diagrams, diffs, "
-        "metrics — we draw them from your numbers; read the workbench:plan-visual "
-        "skill first). Returns JSON {plan_id, verdict, choices, annotations, comment}. "
+        "metrics — we draw from your numbers; read the workbench:plan-visual "
+        "skill first). Returns {plan_id, verdict, choices, annotations, comment}; "
+        "annotations are {anchor,text}; anchor.path names the part it is about. "
         "verdict "
-        "'approve' means proceed with the chosen options; 'revise' means rework the "
-        "plan using their comments and present it again; 'reject' means drop this "
+        "'approve' means proceed with the choices; 'revise' means rework it from "
+        "their comments and present a new card; 'reject' means drop this "
         "approach; 'no_decision' means the user never answered (timeout or "
         "interrupt) — stop and ask in chat, never treat it as approval."
     ),
     output_format="compact-json",
-    # The envelope is 129 bytes for the representative approval; 512 covers a
-    # verdict, the chosen options and a couple of sentences of the user's own
-    # comment. What rides along past that is the user's typing, not ours to
-    # budget — the ceiling is on the shape, and the one path we *can* overrun
-    # (a validation error) is clamped to it in `handle_present_plan`.
-    max_result_bytes=512,
+    # The envelope was 129 bytes for a bare approval and 512 was the ceiling.
+    # Anchors (PR 3) changed the *shape*: an annotation is now
+    # `{"anchor":{"kind","node_id","path":[...]},"text":...}`, about 100 bytes
+    # of structure before the user has typed a word, and the representative
+    # approval below — two anchored notes, a choice and a comment — measures
+    # 409. 768 covers roughly four such notes. What rides past that is the
+    # user's own typing, not ours to budget: the ceiling is on the shape, and
+    # the one path we *can* overrun (a validation error) is clamped to it in
+    # `handle_present_plan`.
+    max_result_bytes=768,
     # 8,370 bytes measured for the five node kinds: 2,388 for the four original
     # ones and 5,981 for the scene graph (models/visuals.py). 9,500 leaves room
     # for a leaf kind's fields to grow but not for a sixth leaf kind to arrive

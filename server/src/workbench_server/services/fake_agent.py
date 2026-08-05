@@ -41,12 +41,13 @@ What one user message produces, in order:
   picture is several events (``services/usage.py``). Deliberately a trigger and
   not a default, because "no rate-limit event has ever arrived" is the state a
   real account is most likely to be in and the surface has to be tested in it;
-* ``visual please``  — a plan whose one node is a ``visual``: every leaf kind
+* ``visual please``  — a plan whose first node is a ``visual``: every leaf kind
   and every block layout at once, on a real 25-hour market day, with a cell
-  whose text looks like markup. A separate trigger rather than a bigger
-  ``plan please`` on purpose — that card is the regression test for the four
-  original node kinds, and growing it would quietly change what that journey
-  proves.
+  whose text looks like markup — followed by a two-sentence markdown caveat,
+  which is the node a *text-range* anchor points into. A separate trigger
+  rather than a bigger ``plan please`` on purpose — that card is the regression
+  test for the four original node kinds, and growing it would quietly change
+  what that journey proves.
 
 Never enabled by default (``Settings.fake_agent``), and ``main.py`` logs a
 warning on startup when it is: a workbench that quietly answers with canned
@@ -64,7 +65,9 @@ from typing import Any
 import structlog
 
 from workbench_server.models.plans import (
+    AnnotationAnchor,
     FileRef,
+    MarkdownNode,
     OptionGroupNode,
     PlanArtifact,
     PlanOption,
@@ -321,9 +324,19 @@ VISUAL_DISPATCH = [
 ]  # fmt: skip
 
 
+#: Prose the annotate journey slices a *range* anchor out of. Two sentences,
+#: because the point of the assertion is that the user points at **one** of
+#: them. It trails the visual node rather than leading it, so
+#: ``plan.nodes[0]`` is still the scene the visual journey reaches for.
+VISUAL_CAVEAT = (
+    "Prices are provisional until the market clears. The second 02:00 uses the fold-1 curve."
+)
+
+
 def fake_visual_plan() -> PlanArtifact:
     """The card ``visual please`` presents: one visual node exercising every
-    leaf kind and every block layout, on a real 25-hour market day."""
+    leaf kind and every block layout, on a real 25-hour market day — plus a
+    two-sentence markdown caveat, which is what a text-range anchor points into."""
     return PlanArtifact(
         title="Åsen 2 — 25 October dispatch",
         summary="The autumn clock change: 25 delivery hours, two of them 02:00.",
@@ -422,7 +435,8 @@ def fake_visual_plan() -> PlanArtifact:
                         ],
                     ),
                 ],
-            )
+            ),
+            MarkdownNode(node_id="caveat", text=VISUAL_CAVEAT),
         ],
     )
 
@@ -460,11 +474,26 @@ def reply_text(prompt: str) -> str:
     return f"**Fake agent** answering.\n\n- echo: {echoed}\n- mode: scripted, no tokens spent\n"
 
 
+def anchor_echo(anchor: AnnotationAnchor) -> str:
+    """One anchor as a slash path: ``scene/leaf/2/row/1/col/Price``.
+
+    A flattening for a *test assertion*, not a second wire format — the agent
+    receives the typed anchor. Written this way so the E2E journey can assert
+    the exact part the user pointed at arrived, in one string, without the
+    assertion having to know how a JSON list is serialized.
+    """
+    if anchor.kind == "plan":
+        return "plan"
+    return "/".join([anchor.node_id, *(str(segment) for segment in anchor.path)])
+
+
 def plan_echo(response: PlanResponse) -> str:
     """How the fake reports the decision it got back — the assertion the E2E
-    plan journey makes that the *agent* really received the user's choice."""
+    plan journey makes that the *agent* really received the user's choice, and
+    (since PR 3) the exact parts of the artifact their notes point at."""
     choices = ", ".join(f"{node}={option}" for node, option in sorted(response.choices.items()))
-    return f"\n\nplan {response.verdict}: {choices or 'no choices'}\n"
+    notes = "; ".join(f"{anchor_echo(note.anchor)}={note.text}" for note in response.annotations)
+    return f"\n\nplan {response.verdict}: {choices or 'no choices'}\n\nnotes: {notes or 'none'}\n"
 
 
 def first_workspace_file(folder: Path) -> Path | None:

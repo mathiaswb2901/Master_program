@@ -548,8 +548,29 @@ export interface PlanArtifact {
 /** "no_decision" is timeout/interrupt — never an implied approval. */
 export type PlanVerdict = "approve" | "revise" | "reject" | "no_decision";
 
-export interface PlanAnnotation {
+/** A segment of an anchor path: a key we chose, or an index into the payload's
+ * own ordering / a name the payload itself carries. */
+export type AnchorSegment = string | number;
+
+/**
+ * What a note points at.
+ *
+ * `path` is a **semantic path the renderer emits**, never a CSS selector:
+ * `["leaf", 2, "row", 14, "col", "Price"]` survives a re-render and a restyle
+ * because it names data, and the server proves it points into the artifact
+ * before the agent ever sees it (`services/plan_anchors.py`). See
+ * `ui/src/plan/anchors.ts` for the emitting half.
+ */
+export interface AnnotationAnchor {
+  kind: "plan" | "node" | "part" | "range";
+  /** Empty only for `kind: "plan"`. */
   node_id: string;
+  /** `(key, value)` pairs; empty for `plan` and `node`. */
+  path: AnchorSegment[];
+}
+
+export interface PlanAnnotation {
+  anchor: AnnotationAnchor;
   text: string;
 }
 
@@ -558,6 +579,7 @@ export interface PlanResponse {
   verdict: PlanVerdict;
   /** node_id -> option_id for every option group the user resolved. */
   choices: Record<string, string>;
+  /** At most 40 (server-capped) — a part anchor makes one node worth several. */
   annotations: PlanAnnotation[];
   comment: string;
 }
