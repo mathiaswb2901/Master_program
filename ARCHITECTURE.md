@@ -297,6 +297,14 @@ scene graph closes all three by construction rather than by policy:
 - **Nothing is unbounded.** Rows, columns, series, points, nodes, edges, diff
   lines, leaves per node and visual nodes per card are all capped in the schema, so
   a runaway artifact is a tool error the agent can fix, not a wedged renderer.
+  Those caps bound one leaf each, and their *product* is the number that decides
+  whether a card renders: eight leaves inside the chart cap is 19,200 marks, and a
+  card holds three such nodes. So a visual node also carries an aggregate cap
+  (`MAX_VISUAL_MARKS`), and both halves are measured rather than argued —
+  `test_visuals.py::TestRenderBudget` builds the payload at every cap at once and
+  watches it be rejected, and `visual/budget.test.tsx` renders a whole card at the
+  ceiling (18,000 marks → 20,619 elements, ~0.2 s) to prove the ceiling is one the
+  renderer can draw.
 - **Nothing recurses.** Depth stops at the leaf, which is what keeps rendering cost
   bounded in the payload *and* keeps `plan_input_schema()`'s ref-inlining
   terminating. It is also a token budget: the leaf union is inlined once, and

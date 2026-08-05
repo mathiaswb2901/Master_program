@@ -26,8 +26,10 @@ from pydantic import BaseModel, Field, field_validator
 from workbench_server.models.visuals import (
     MAX_VISUAL_BLOCKS,
     MAX_VISUAL_LEAVES,
+    MAX_VISUAL_MARKS,
     VisualBlock,
     leaf_count,
+    mark_count,
 )
 
 # One card must stay readable in a chat column; these are product limits, not
@@ -129,6 +131,21 @@ class VisualNode(BaseModel):
         count = leaf_count(blocks)
         if count > MAX_VISUAL_LEAVES:
             raise ValueError(f"{count} leaves in one visual, at most {MAX_VISUAL_LEAVES}")
+        return blocks
+
+    # Counting leaves is not counting work: eight leaves, each inside its own
+    # cap, is 19,200 chart points, and this card may hold three of them. The
+    # per-leaf caps bound one picture; this bounds the scene.
+    @field_validator("blocks")
+    @classmethod
+    def _check_render_budget(cls, blocks: list[VisualBlock]) -> list[VisualBlock]:
+        marks = mark_count(blocks)
+        if marks > MAX_VISUAL_MARKS:
+            raise ValueError(
+                f"{marks} drawn marks in one visual, at most {MAX_VISUAL_MARKS} "
+                "(a chart point, a table cell, a diagram node or edge, a diff "
+                "line, a metric) — send fewer points, rows or leaves"
+            )
         return blocks
 
 

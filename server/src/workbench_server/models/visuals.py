@@ -59,6 +59,20 @@ MAX_DIFF_CHARS = 2000
 #: so this is what keeps a pathological payload from pinning the UI thread.
 MAX_DIFF_LINES = 120
 
+#: Drawn marks in one visual node, summed over its leaves — a chart point, a
+#: table cell, a diagram box or arrow, a diff line, a metric. One mark is
+#: roughly one DOM element the renderer emits.
+#:
+#: Every cap above bounds *one* leaf; only this one bounds their product, and
+#: the product is where the arithmetic stops being reassuring. Eight leaves at
+#: the chart cap is 8 x 6 x 400 = 19,200 points, and three visual nodes is a
+#: card of 57,600 SVG elements — every individual cap respected and a chat
+#: column that stops responding. 6,000 leaves room for two full-width charts
+#: (2 x 6 x 400 = 4,800) plus the tables and metrics that are read with them,
+#: and holds a whole card to 3 x 6,000 = 18,000 marks, which
+#: ``ui/src/visual/budget.test.tsx`` renders inside a measured budget.
+MAX_VISUAL_MARKS = 6000
+
 #: The whole colour language of a visual. "neutral" is the absence of a role.
 VisualRole = Literal["neutral", "accent", "success", "warning", "error"]
 
@@ -288,6 +302,17 @@ def _has_cycle(ids: list[str], edges: list[DiagramEdge]) -> bool:
 # ---- code diff --------------------------------------------------------------
 
 
+def diff_lines(body: str) -> int:
+    """Lines in one side of a diff — an empty side is zero, not one.
+
+    A trailing newline counts as one line more than the renderer will draw
+    (``matchLines`` reads it as ending a line, not starting an empty one).
+    Deliberate: this number is both a cap and a cost estimate, and a cap that
+    over-counts by one rejects slightly early, while one that under-counts lets
+    a payload through that the renderer then has to draw."""
+    return body.count("\n") + 1 if body else 0
+
+
 # ``language`` is a tag we put in a data attribute — never a loader, never a
 # path; the pattern is what keeps it that way.
 class CodeDiffLeaf(BaseModel):
@@ -304,7 +329,7 @@ class CodeDiffLeaf(BaseModel):
         if not self.before and not self.after:
             raise ValueError("a code_diff needs at least one of before/after")
         for name, body in (("before", self.before), ("after", self.after)):
-            lines = body.count("\n") + 1 if body else 0
+            lines = diff_lines(body)
             if lines > MAX_DIFF_LINES:
                 raise ValueError(f"{name} has {lines} lines, at most {MAX_DIFF_LINES}")
         return self
@@ -362,3 +387,30 @@ class VisualBlock(BaseModel):
 
 def leaf_count(blocks: list[VisualBlock]) -> int:
     return sum(len(block.items) for block in blocks)
+
+
+def leaf_marks(leaf: TableLeaf | ChartLeaf | DiagramLeaf | CodeDiffLeaf | MetricsLeaf) -> int:
+    """What one leaf costs the renderer, counted in marks it must emit.
+
+    Not an estimate of *time* — an estimate of DOM elements, which is what a
+    browser's cost is linear in here (a scatter point is a ``<circle>``, a table
+    cell a ``<td>``, a diff line a ``<span>``). A line or step series draws one
+    path rather than one element per point, so counting its points over-states
+    it; over-stating is the safe direction for a budget, and it keeps the number
+    independent of a styling word the payload can change."""
+    match leaf:
+        case TableLeaf():
+            return len(leaf.rows) * len(leaf.columns)
+        case ChartLeaf():
+            return sum(len(series.values) for series in leaf.series)
+        case DiagramLeaf():
+            return len(leaf.nodes) + len(leaf.edges)
+        case CodeDiffLeaf():
+            return diff_lines(leaf.before) + diff_lines(leaf.after)
+        case MetricsLeaf():
+            return len(leaf.items)
+
+
+def mark_count(blocks: list[VisualBlock]) -> int:
+    """The whole scene's cost — the number :data:`MAX_VISUAL_MARKS` bounds."""
+    return sum(leaf_marks(leaf) for block in blocks for leaf in block.items)

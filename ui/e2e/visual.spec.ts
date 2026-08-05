@@ -9,6 +9,10 @@
  *    column the *schema* typed numeric, an SVG chart whose step series is drawn
  *    as steps, a diagram we laid out from nodes with no coordinates, a diff,
  *    and a row of metrics;
+ *  - no leaf lets colour be the only signal (DESIGN.md §7): a roled diagram box
+ *    and a roled metric wear a heavier edge than their neutral neighbours *and*
+ *    name the role in words. Computed style is only real in a browser, so this
+ *    is the one place the visible half of that pair can be asserted;
  *  - the DST day is drawn and labelled as 25 hours in the market's own zone —
  *    the assertion a generic time axis passes on 363 days a year and fails on
  *    this one;
@@ -61,6 +65,42 @@ test("visual artifact: drawn natively, DST-correct, inert, and answerable", asyn
     // cannot see the tint (DESIGN.md §7).
     await expect(visual.locator("td.is-error")).toHaveCount(1);
     await expect(visual.locator("td.is-error")).toContainText("Problem");
+  });
+
+  await test.step("no leaf lets colour be the only signal", async () => {
+    // DESIGN.md §7. The role vocabulary is shared across leaves, so the *pair*
+    // has to be too: a word for a reader who cannot see the tint, and an edge
+    // heavier than the same element wears with no role for one who can see it
+    // but not the hue. The weights are CSS, so this is the only place they are
+    // real — vitest sees markup, not computed style.
+    const weights = await page.evaluate(() => {
+      const px = (selector: string, property: string): number => {
+        const element = document.querySelector(selector);
+        if (element === null) return -1;
+        return parseFloat(getComputedStyle(element).getPropertyValue(property));
+      };
+      return {
+        // `[class="wb-vis-node"]` is the node with no role at all.
+        plainBox: px('svg.wb-vis-diagram g[class="wb-vis-node"] rect', "stroke-width"),
+        roledBox: px("svg.wb-vis-diagram g.wb-vis-node.is-accent rect", "stroke-width"),
+        plainFigure: px('.wb-vis-metric[class="wb-vis-metric"]', "border-left-width"),
+        roledFigure: px(".wb-vis-metric.is-accent", "border-left-width"),
+      };
+    });
+    expect(weights.plainBox).toBeGreaterThan(0);
+    expect(weights.roledBox).toBeGreaterThan(weights.plainBox);
+    expect(weights.plainFigure).toBeGreaterThan(0);
+    expect(weights.roledFigure).toBeGreaterThan(weights.plainFigure);
+
+    // An `svg` with role="img" has one accessible name, so a diagram node's
+    // role word lives there; a metric carries its own in a `u-sr-only` span.
+    await expect(visual.locator("svg.wb-vis-diagram")).toHaveAttribute(
+      "aria-label",
+      /Optimizer \(Highlighted\).*Bid file \(Good\).*Gate 12:00 \(Warning\)/,
+    );
+    await expect(visual.locator(".wb-vis-metric.is-warning")).toContainText(
+      "Warning: Negative hours",
+    );
   });
 
   await test.step("the 25-hour day is drawn as 25 hours in the market's clock", async () => {

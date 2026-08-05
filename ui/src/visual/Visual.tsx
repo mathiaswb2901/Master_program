@@ -45,7 +45,17 @@ function roleClass(role: VisualRole): string {
   return role === "neutral" ? "" : ` is-${role}`;
 }
 
-/** Screen-reader word for a role, so colour is never the only signal (§7). */
+/**
+ * Screen-reader word for a role, so colour is never the only signal (§7).
+ *
+ * Every surface that carries a role carries this word too — a table cell and a
+ * metric in a `u-sr-only` span, a diagram node inside the drawing's accessible
+ * name (an `svg` with `role="img"` has *one* accessible name, so a hidden span
+ * in the markup would never be announced). The visible half of the pair is a
+ * heavier edge than the same element wears with no role: `visual.css` moves a
+ * table cell from no inset to 2px, a diagram box from a 1px stroke to 2px, and
+ * a metric's rule from 2px to 4px.
+ */
 const ROLE_WORD: Record<VisualRole, string> = {
   neutral: "",
   accent: "Highlighted",
@@ -53,6 +63,11 @@ const ROLE_WORD: Record<VisualRole, string> = {
   warning: "Warning",
   error: "Problem",
 };
+
+/** A node's label as the drawing's accessible name says it: `Bid file (Good)`. */
+function roleLabel(label: string, role: VisualRole): string {
+  return role === "neutral" ? label : `${label} (${ROLE_WORD[role]})`;
+}
 
 function LeafTitle({ text }: { text: string }) {
   return text === "" ? null : <h4 className="wb-vis-title">{text}</h4>;
@@ -417,7 +432,9 @@ function DiagramView({ leaf }: { leaf: DiagramLeaf }) {
           height={height}
           viewBox={`0 0 ${String(width)} ${String(height)}`}
           role="img"
-          aria-label={`${leaf.title || "Diagram"}: ${leaf.nodes.map((n) => n.label).join(", ")}`}
+          aria-label={`${leaf.title || "Diagram"}: ${leaf.nodes
+            .map((n) => roleLabel(n.label, n.role))
+            .join(", ")}`}
         >
           <defs>
             <marker
@@ -517,7 +534,12 @@ function MetricsView({ leaf }: { leaf: MetricsLeaf }) {
       <dl className="wb-vis-metrics">
         {leaf.items.map((metric, index) => (
           <div key={index} className={`wb-vis-metric${roleClass(metric.role)}`}>
-            <dt>{metric.label}</dt>
+            <dt>
+              {metric.role !== "neutral" && (
+                <span className="u-sr-only">{ROLE_WORD[metric.role]}: </span>
+              )}
+              {metric.label}
+            </dt>
             <dd>
               <span className="wb-vis-figure u-tabular">{metric.value}</span>
               {metric.unit !== "" && <span className="wb-vis-unit">{metric.unit}</span>}

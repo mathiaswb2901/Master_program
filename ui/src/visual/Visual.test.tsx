@@ -168,6 +168,52 @@ describe("visual renderer — the schema decides the presentation", () => {
     expect(out).toContain("is-error");
   });
 
+  it("names the role in words on every leaf that carries one, not just tables", () => {
+    // DESIGN.md §7 is "colour never the sole signal", and the roles share one
+    // vocabulary across every leaf — so every leaf that tints must also say the
+    // word. Tables did from the start; diagram nodes and metrics are the two
+    // that tinted silently. The visible half of the pair is a heavier edge than
+    // the neutral state wears, which is CSS and is asserted in the E2E journey.
+    for (const [role, word] of [
+      ["accent", "Highlighted"],
+      ["success", "Good"],
+      ["warning", "Warning"],
+      ["error", "Problem"],
+    ] as const) {
+      const drawn = html(
+        scene({
+          kind: "diagram",
+          title: "Pipeline",
+          nodes: [
+            { id: "a", label: "Plain", role: "neutral" },
+            { id: "b", label: "Marked", role },
+          ],
+          edges: [{ source: "a", target: "b", label: "" }],
+        }),
+      );
+      // An `svg` with role="img" has exactly one accessible name, so the word
+      // has to be *in* it — a hidden span inside would never be announced.
+      expect(drawn).toContain(`Marked (${word})`);
+      expect(drawn).toContain(`wb-vis-node is-${role}`);
+      // ...and the neutral node is not decorated with a word it has no role for.
+      expect(drawn).toContain("Plain,");
+
+      const figures = html(
+        scene({
+          kind: "metrics",
+          title: "",
+          items: [
+            { label: "Plain", value: "1", unit: "", role: "neutral" },
+            { label: "Marked", value: "2", unit: "", role },
+          ],
+        }),
+      );
+      expect(figures).toContain(`<span class="u-sr-only">${word}: </span>Marked`);
+      expect(figures).toContain(`wb-vis-metric is-${role}`);
+      expect(figures).toContain("<dt>Plain</dt>");
+    }
+  });
+
   it("draws a step series as steps and a line as a line", () => {
     const out = html(scene(chart));
     // A step path doubles each y as it holds the value across its interval.

@@ -360,6 +360,18 @@
   dominant-baseline: middle;
 }
 
+/* Role tints, and — as everywhere else in this file — the non-colour half of
+   the signal (§7). A roled box wears a 2px stroke against the neutral box's
+   1px, and its role word rides in the drawing's accessible name (`roleLabel`);
+   an `svg` with `role="img"` has one accessible name, so a hidden span inside
+   it would never be read. */
+.wb-vis-node.is-accent rect,
+.wb-vis-node.is-success rect,
+.wb-vis-node.is-warning rect,
+.wb-vis-node.is-error rect {
+  stroke-width: 2;
+}
+
 .wb-vis-node.is-accent rect {
   fill: var(--accent-muted);
   stroke: var(--accent);
@@ -461,6 +473,18 @@
   line-height: var(--type-lg-line);
   font-weight: var(--weight-medium);
   color: var(--text-primary);
+}
+
+/* A roled figure's rule doubles to 4px against the neutral 2px, and the padding
+   gives back the two pixels so a row of metrics stays on one baseline grid. The
+   colour names *which* role; the weight says there is one at all, and the
+   `u-sr-only` word in the `dt` says both without either (§7). */
+.wb-vis-metric.is-accent,
+.wb-vis-metric.is-success,
+.wb-vis-metric.is-warning,
+.wb-vis-metric.is-error {
+  border-left-width: 4px;
+  padding-left: calc(var(--space-4) - 2px);
 }
 
 .wb-vis-metric.is-accent {

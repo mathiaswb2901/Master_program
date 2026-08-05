@@ -20,6 +20,13 @@ visual        node_id, title (<= 80), blocks (1–6)
 Blocks hold leaves. Leaves hold data. **Nothing nests further**, and at most
 **8 leaves** and **3 visual nodes** exist in one card.
 
+One more budget spans the leaves: a visual node may draw at most **6000 marks**
+— a chart point, a table cell, a diagram node or edge, a diff line, a figure —
+summed over all of them. Every per-leaf cap below can be met and this one still
+missed (eight charts at 6 x 400 is 19,200), so if you get that error, send fewer
+points or fewer leaves, not a different leaf kind. Two full-size charts plus the
+tables read beside them fit inside it.
+
 - `single` — exactly 1 item. `split` — exactly 2, read as before/after.
 - `row` — side by side, `grid` — wrapping. Both stack automatically in a narrow
   panel, so never split something that must be read together.

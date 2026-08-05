@@ -34,15 +34,27 @@ from workbench_server.models.plans import (
     plan_input_schema,
 )
 from workbench_server.models.visuals import (
+    MAX_DIAGRAM_EDGES,
+    MAX_DIAGRAM_NODES,
     MAX_DIFF_LINES,
+    MAX_METRICS,
     MAX_POINTS,
     MAX_SERIES,
+    MAX_TABLE_COLUMNS,
     MAX_TABLE_ROWS,
     MAX_VISUAL_LEAVES,
+    MAX_VISUAL_MARKS,
     ChartLeaf,
+    CodeDiffLeaf,
+    DiagramLeaf,
+    MetricsLeaf,
     TableLeaf,
     TimeAxis,
     VisualBlock,
+    diff_lines,
+    leaf_count,
+    leaf_marks,
+    mark_count,
 )
 
 CET = timezone(timedelta(hours=1))
@@ -74,6 +86,63 @@ def chart(**overrides: Any) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
+
+
+def full_chart(points: int = MAX_POINTS, series: int = MAX_SERIES) -> dict[str, Any]:
+    """A chart at its own caps, drawn as ``scatter`` — the worst DOM case there
+    is, one ``<circle>`` per point, where a line series would emit one path."""
+    return {
+        "kind": "chart",
+        "series": [
+            {"label": f"s{i}", "style": "scatter", "values": [float(n) for n in range(points)]}
+            for i in range(series)
+        ],
+    }
+
+
+def worst_case_blocks(marks: int) -> list[dict[str, Any]]:
+    """``MAX_VISUAL_LEAVES`` leaves totalling exactly ``marks``, with every
+    other cap also at its limit: two scatter charts at 6 x 400, two tables at
+    50 x 8, a 20-node/30-edge diagram, a 120-line-a-side diff, six metrics, and
+    one chart sized to land the total on the number asked for.
+
+    A payload no agent would send, which is the point — it is the shape the
+    per-leaf caps permit, and the one the aggregate cap has to answer for."""
+    diagram = {
+        "kind": "diagram",
+        "nodes": [{"id": f"n{i}", "label": f"N{i}"} for i in range(MAX_DIAGRAM_NODES)],
+        # Forward-only, so it stays the acyclic DAG the layout needs: a chain
+        # plus every skip-one edge, up to the edge cap.
+        "edges": [
+            {"source": f"n{i}", "target": f"n{i + span}"}
+            for span in (1, 2)
+            for i in range(MAX_DIAGRAM_NODES - span)
+        ][:MAX_DIAGRAM_EDGES],
+    }
+    # Two sides that share no line, so the renderer's matcher really does emit
+    # one row per line of each — 240, the number counted here.
+    before = "\n".join("x = 1" for _ in range(MAX_DIFF_LINES))
+    after = "\n".join("y = 2" for _ in range(MAX_DIFF_LINES))
+    fixed: list[dict[str, Any]] = [
+        full_chart(),
+        full_chart(),
+        table(
+            columns=[{"label": f"c{i}"} for i in range(MAX_TABLE_COLUMNS)],
+            rows=[[f"{r}.{c}" for c in range(MAX_TABLE_COLUMNS)] for r in range(MAX_TABLE_ROWS)],
+        ),
+        table(
+            columns=[{"label": f"c{i}"} for i in range(MAX_TABLE_COLUMNS)],
+            rows=[[f"{r}.{c}" for c in range(MAX_TABLE_COLUMNS)] for r in range(MAX_TABLE_ROWS)],
+        ),
+        diagram,
+        leaf("code_diff", before=before, after=after),
+        leaf("metrics", items=[{"label": f"m{i}", "value": "1"} for i in range(MAX_METRICS)]),
+    ]
+    spent = sum(
+        leaf_marks(VisualBlock.model_validate({"items": [item]}).items[0]) for item in fixed
+    )
+    items = [*fixed, full_chart(points=marks - spent, series=1)]
+    return [{"layout": "row", "items": items[i : i + 4]} for i in (0, 4)]
 
 
 def visual(*items: dict[str, Any], layout: str = "single") -> dict[str, Any]:
@@ -313,6 +382,98 @@ class TestBlockShape:
         nodes = [dict(visual(table()), node_id=f"v{i}") for i in range(MAX_VISUAL_NODES + 1)]
         with pytest.raises(ValidationError, match=f"at most {MAX_VISUAL_NODES}"):
             PlanArtifact.model_validate(plan_with(*nodes))
+
+
+# ---- the whole scene's cost --------------------------------------------------
+#
+# Every cap above bounds one leaf. None of them bounds the *product*, and the
+# product is the number that decides whether a card renders or wedges a chat
+# column: eight leaves each inside the chart cap is 19,200 points, and a card
+# holds three such nodes. This section is the aggregate, which is the only cap
+# that can be argued from arithmetic rather than from a single field's size.
+
+
+class TestRenderBudget:
+    def test_marks_are_counted_per_leaf_kind(self) -> None:
+        """One mark is roughly one element the renderer emits, so the count is
+        per kind: cells, points, boxes-plus-arrows, diff lines, figures."""
+        counted = {
+            "table": leaf_marks(TableLeaf.model_validate(table())),
+            "chart": leaf_marks(ChartLeaf.model_validate(chart())),
+            "diagram": leaf_marks(
+                DiagramLeaf.model_validate(
+                    leaf(
+                        "diagram",
+                        nodes=[{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                        edges=[{"source": "a", "target": "b"}],
+                    )
+                )
+            ),
+            "code_diff": leaf_marks(
+                CodeDiffLeaf.model_validate(leaf("code_diff", before="a\nb", after="a"))
+            ),
+            "metrics": leaf_marks(
+                MetricsLeaf.model_validate(leaf("metrics", items=[{"label": "C", "value": "1"}]))
+            ),
+        }
+        assert counted == {
+            "table": 4,  # 2 rows x 2 columns
+            "chart": 3,  # one series of three points
+            "diagram": 3,  # two boxes and an arrow
+            "code_diff": 3,  # two lines before, one after
+            "metrics": 1,
+        }
+        # A trailing newline counts one line more than the renderer draws. The
+        # budget over-counts on purpose (``diff_lines``): rejecting a shade
+        # early is safe, admitting a payload we then have to draw is not.
+        assert diff_lines("a\n") == 2
+
+    def test_every_per_leaf_cap_at_once_is_still_rejected(self) -> None:
+        """The scenario the per-leaf caps do not cover: eight leaves, each one a
+        chart at *its* cap. Legal field by field, 19,200 SVG marks in one node,
+        and three of these fit in a card. This is the arithmetic the aggregate
+        cap exists to stop, and it must stop it as a fixable tool error."""
+        biggest = full_chart()
+        assert leaf_marks(ChartLeaf.model_validate(biggest)) == MAX_SERIES * MAX_POINTS
+        blocks = [{"layout": "row", "items": [biggest] * 4} for _ in range(2)]
+        node = {"kind": "visual", "node_id": "scene", "blocks": blocks}
+        with pytest.raises(ValidationError, match="19200 drawn marks"):
+            PlanArtifact.model_validate(plan_with(node))
+
+    def test_the_error_tells_the_agent_what_to_send_instead(self) -> None:
+        over = worst_case_blocks(MAX_VISUAL_MARKS + 1)
+        node = {"kind": "visual", "node_id": "scene", "blocks": over}
+        with pytest.raises(ValidationError, match="send fewer points, rows or leaves"):
+            PlanArtifact.model_validate(plan_with(node))
+
+    def test_the_worst_case_card_validates_and_is_bounded(self) -> None:
+        """A node at the cap is *legal* — the budget is a ceiling, not a ban —
+        and the whole card's worst case is that ceiling times the node cap.
+        ``ui/src/visual/budget.test.tsx`` renders exactly this total and holds
+        it to a measured time; the number below is the contract between them."""
+        blocks = worst_case_blocks(MAX_VISUAL_MARKS)
+        nodes = [
+            {"kind": "visual", "node_id": f"v{i}", "blocks": blocks}
+            for i in range(MAX_VISUAL_NODES)
+        ]
+        artifact = PlanArtifact.model_validate(plan_with(*nodes))
+        drawn = [node for node in artifact.nodes if isinstance(node, VisualNode)]
+        assert len(drawn) == MAX_VISUAL_NODES
+        assert all(leaf_count(node.blocks) == MAX_VISUAL_LEAVES for node in drawn)
+        total = sum(mark_count(node.blocks) for node in drawn)
+        assert total == MAX_VISUAL_NODES * MAX_VISUAL_MARKS == 18_000
+
+    def test_the_cap_still_admits_the_pictures_it_is_for(self) -> None:
+        """A budget nobody can spend is a ban. Two full-width charts — a
+        fortnight of hourly price and dispatch, six series each — plus the
+        tables read beside them must fit, or the cap is set wrong."""
+        two_charts = [{"layout": "row", "items": [full_chart(), full_chart()]}]
+        assert (
+            mark_count([VisualBlock.model_validate(block) for block in two_charts])
+            == 2 * MAX_SERIES * MAX_POINTS
+        )
+        node = {"kind": "visual", "node_id": "scene", "blocks": two_charts}
+        assert PlanArtifact.model_validate(plan_with(node)).nodes[0].kind == "visual"
 
 
 # ---- the DST contract --------------------------------------------------------
