@@ -1,5 +1,5 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
-import type { IDockviewPanelProps } from "dockview";
+import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
 import { Fragment, useEffect } from "react";
 
 import { focusPanel } from "../dock";
@@ -10,6 +10,7 @@ import {
   monacoThemeName,
   setActiveEditor,
 } from "../monaco";
+import { paneInstance } from "../panes";
 import { documentViewFor, documentViews, type WorkbenchTool } from "../registry";
 import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
@@ -130,7 +131,132 @@ function ConflictBar({ file }: { file: OpenFile }) {
   );
 }
 
-export function EditorAreaPanel(_props: IDockviewPanelProps) {
+/**
+ * Every Monaco instance in the app is mounted through this.
+ *
+ * `setActiveEditor` used to be a mount-time fact because there was one editor.
+ * With a file pane beside the tab strip there can be several, and the one that
+ * matters is the one holding the caret — otherwise an on-disk change restores
+ * the *other* editor's cursor and scroll position (`monaco.ts`,
+ * `setModelContent`). So the registration follows focus, not mounting.
+ */
+const onEditorMount: OnMount = (editor, monaco) => {
+  setActiveEditor(editor);
+  editor.onDidFocusEditorText(() => setActiveEditor(editor));
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+    const s = useStore.getState();
+    if (s.activePath) void s.saveFile(s.activePath);
+  });
+};
+
+/**
+ * Shared Monaco options — one object, because a file pane and the tab strip
+ * have to render the same editor or the app has two editors that merely look
+ * alike.
+ */
+const EDITOR_OPTIONS = {
+  fontSize: 13,
+  lineHeight: 20,
+  fontFamily: MONO_FONT,
+  fontLigatures: false,
+  minimap: { enabled: false },
+  automaticLayout: true,
+  scrollBeyondLastLine: false,
+  fixedOverflowWidgets: true,
+  padding: { top: 8, bottom: 8 },
+  renderLineHighlight: "line",
+} as const;
+
+/**
+ * The Editor tool renders two ways, decided by the pane's id (`../panes.ts`).
+ *
+ *  - `editors` — the default pane: the tab strip over every open file. The
+ *    panel Workbench has always had, and still the home of the `keepMounted`
+ *    document views (an OnlyOffice instance is too expensive to tear down on a
+ *    tab switch);
+ *  - `editors#<path>` — a pane showing one file, side by side with another.
+ *    The path is workspace-relative, which is what makes a saved layout come
+ *    back on the same two files rather than on two empty editors.
+ */
+export function EditorAreaPanel(props: IDockviewPanelProps) {
+  const path = paneInstance(props.api.id);
+  return path === null ? <EditorTabs /> : <FilePane path={path} api={props.api} />;
+}
+
+/** One file, filling its pane. */
+function FilePane({ path, api }: { path: string; api: DockviewPanelApi }) {
+  const file = useStore((s) => s.openFiles.find((f) => f.path === path));
+  const theme = useStore((s) => s.theme);
+  // A pane restored from a layout names a file nothing has opened yet.
+  const missing = file === undefined;
+  useEffect(() => {
+    if (missing) void useStore.getState().openFile(path);
+  }, [missing, path]);
+
+  // Ctrl+S saves the file you are looking at, so the focused pane decides which
+  // one that is — the same rule the session panes follow.
+  useEffect(() => {
+    if (api.isActive) useStore.getState().setActiveFile(path);
+    const subscription = api.onDidActiveChange((event) => {
+      if (event.isActive) useStore.getState().setActiveFile(path);
+    });
+    return () => subscription.dispose();
+  }, [api, path]);
+
+  if (file === undefined) return <div className="wb-pane-single" />;
+  const view = documentViewFor(TOOLS, file.kind);
+  return (
+    <div className="wb-pane-single">
+      {file.loadError !== null ? (
+        <div className="wb-editor-message">
+          Cannot open {file.name}: {file.loadError}
+        </div>
+      ) : view !== null ? (
+        // A view that must stay mounted is one instance per open file, owned by
+        // the tab strip (a second OnlyOffice editor on the same document is a
+        // co-editing session with yourself). Say so rather than opening one.
+        view.keepMounted === true ? (
+          <div className="wb-pane-note">
+            <span className="wb-pane-note-msg u-truncate">
+              {file.name} opens in the Editor pane.
+            </span>
+            <button
+              type="button"
+              className="wb-btn wb-btn-sm wb-btn-outline"
+              onClick={() => {
+                useStore.getState().setActiveFile(path);
+                focusPanel("editors");
+              }}
+            >
+              Show it
+            </button>
+          </div>
+        ) : (
+          <div className={view.hostClassName}>
+            <view.component file={file} />
+          </div>
+        )
+      ) : (
+        <div className="wb-editor-body">
+          <Editor
+            path={editorPathProp(file.path)}
+            defaultValue={file.buffer}
+            defaultLanguage={languageForPath(file.path)}
+            theme={monacoThemeName(theme)}
+            onMount={onEditorMount}
+            onChange={(value) => {
+              if (value !== undefined) useStore.getState().updateBuffer(file.path, value);
+            }}
+            loading={<div className="wb-editor-message">Loading editor…</div>}
+            options={EDITOR_OPTIONS}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EditorTabs() {
   const openFiles = useStore((s) => s.openFiles);
   const activePath = useStore((s) => s.activePath);
   const theme = useStore((s) => s.theme);
@@ -142,14 +268,6 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
   const activeView = active === null ? null : documentViewFor(TOOLS, active.kind);
 
   useEffect(() => () => setActiveEditor(null), []);
-
-  const onMount: OnMount = (editor, monaco) => {
-    setActiveEditor(editor);
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      const s = useStore.getState();
-      if (s.activePath) void s.saveFile(s.activePath);
-    });
-  };
 
   if (openFiles.length === 0) {
     return (
@@ -211,23 +329,12 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
             defaultValue={active.buffer}
             defaultLanguage={languageForPath(active.path)}
             theme={monacoThemeName(theme)}
-            onMount={onMount}
+            onMount={onEditorMount}
             onChange={(value) => {
               if (value !== undefined) useStore.getState().updateBuffer(active.path, value);
             }}
             loading={<div className="wb-editor-message">Loading editor…</div>}
-            options={{
-              fontSize: 13,
-              lineHeight: 20,
-              fontFamily: MONO_FONT,
-              fontLigatures: false,
-              minimap: { enabled: false },
-              automaticLayout: true,
-              scrollBeyondLastLine: false,
-              fixedOverflowWidgets: true,
-              padding: { top: 8, bottom: 8 },
-              renderLineHighlight: "line",
-            }}
+            options={EDITOR_OPTIONS}
           />
         )}
       </div>
@@ -280,6 +387,25 @@ export const editorTool: WorkbenchTool = {
   panel: {
     component: EditorAreaPanel,
     defaultLocation: { area: "center" },
+    // Plural: two files side by side is the oldest reason anyone splits a
+    // window. The instance key is the workspace-relative path.
+    singleton: false,
+    instances: {
+      // Open files only. "Every file in the workspace" is what the QuickBar's
+      // own file search is for, and offering 5,000 rows here would bury the
+      // sessions and the terminals under them.
+      options: () =>
+        useStore
+          .getState()
+          .openFiles.map((file) => ({
+            id: `editors.${file.path}`,
+            title: file.name,
+            detail: file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "",
+            category: "Open files",
+            key: () => file.path,
+          })),
+      titleFor: (key) => key.split("/").pop() ?? key,
+    },
   },
   commands: [
     {

@@ -18,11 +18,13 @@
 
 import type { SerializedDockview } from "dockview";
 
+import { parsePaneId } from "./panes";
 import {
   defaultLayout,
   orderPlacements,
   panelTools,
   placementOf,
+  type PaneVocabulary,
   type PanelLocation,
   type PanelPlacement,
   type WorkbenchTool,
@@ -116,6 +118,15 @@ export interface PrunedLayout {
   /** Component ids nothing is registered under, in the order first seen. Empty
    * on the happy path; non-empty is what the user is told about, once. */
   dropped: string[];
+  /**
+   * Pane ids dropped for a reason other than an unknown tool: the tool is here
+   * but the *pane* is not addressable — a second `files#2` pane written by a
+   * version where Files was plural, or a `terminal#1` whose id and
+   * `contentComponent` disagree. Reported separately because the sentence is
+   * different: nothing was removed from Workbench, this one arrangement said
+   * something this Workbench cannot mean.
+   */
+  droppedPanes: string[];
 }
 
 type Json = Record<string, unknown>;
@@ -124,13 +135,29 @@ const isRecord = (value: unknown): value is Json =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * Vet a persisted layout against the components the app can render.
+ * Vet a persisted layout against the panes this app can actually address.
  *
  * Returns null when the value is not a layout at all (corrupt, or from a
  * version whose shape we do not know) or when nothing usable survived — both
- * mean "use the default arrangement". Otherwise the layout with every unknown
+ * mean "use the default arrangement". Otherwise the layout with every unusable
  * panel removed: empty groups collapse, empty branches collapse, a dropped
  * active view is forgotten, and the whole arrangement is kept.
+ *
+ * **Two ways a panel can be unusable**, and they are not the same event:
+ *
+ *  - its `contentComponent` names a tool that is gone (removed, renamed, or
+ *    gated off by `when`). dockview would create the panel anyway, hand React
+ *    `undefined` as the element type, and take the window down on render;
+ *  - the tool is here but the *pane id* is not one this Workbench can mean:
+ *    it carries an instance key for a tool that is a singleton today, or its id
+ *    and its component disagree about which tool it hosts. That pane is
+ *    unreachable by every pane command — nothing can focus it, split it or
+ *    close it — and a second copy of a singleton renders the same state twice.
+ *    A file written by a newer version, or hand-edited, produces exactly this.
+ *
+ * Both are handled the same way and reported separately (`PrunedLayout`),
+ * because an unknown *instance* costs one pane while an unknown *tool* is a
+ * capability the user no longer has.
  *
  * `maximizedNode` is a *path* into the grid, so it is only carried over when
  * nothing was dropped — after a structural change it could point at a different
@@ -139,22 +166,28 @@ const isRecord = (value: unknown): value is Json =>
  * dockview's `SerializedDockview`: `toJSON` writes that key and the published
  * type does not declare it.)
  */
-export function pruneLayout(value: unknown, known: ReadonlySet<string>): PrunedLayout | null {
+export function pruneLayout(value: unknown, known: PaneVocabulary): PrunedLayout | null {
   if (!isRecord(value)) return null;
   const grid = value.grid;
   const panels = value.panels;
   if (!isRecord(grid) || !isRecord(panels) || !isRecord(grid.root)) return null;
 
   const dropped: string[] = [];
+  const droppedPanes: string[] = [];
   const kept: Json = {};
   for (const [id, panel] of Object.entries(panels)) {
     if (!isRecord(panel)) continue;
     const component = panel.contentComponent;
-    if (typeof component === "string" && known.has(component)) {
-      kept[id] = panel;
+    if (typeof component !== "string") continue;
+    if (!known.components.has(component)) {
+      if (!dropped.includes(component)) dropped.push(component);
       continue;
     }
-    if (typeof component === "string" && !dropped.includes(component)) dropped.push(component);
+    if (!addressablePane(id, component, known)) {
+      if (!droppedPanes.includes(id)) droppedPanes.push(id);
+      continue;
+    }
+    kept[id] = panel;
   }
   if (Object.keys(kept).length === 0) return null;
 
@@ -163,7 +196,7 @@ export function pruneLayout(value: unknown, known: ReadonlySet<string>): PrunedL
 
   const prunedGrid: Json = { ...grid, root };
   // Only a structurally untouched grid may keep its maximized-node path.
-  if (dropped.length > 0) delete prunedGrid.maximizedNode;
+  if (dropped.length + droppedPanes.length > 0) delete prunedGrid.maximizedNode;
 
   const layout: Json = { ...value, grid: prunedGrid, panels: kept };
   if (typeof value.activeGroup === "string" && !groupIds(root).has(value.activeGroup)) {
@@ -181,7 +214,23 @@ export function pruneLayout(value: unknown, known: ReadonlySet<string>): PrunedL
   // The one cast in the module: dockview's published `SerializedDockview` omits
   // `grid.maximizedNode`, which its own serializer writes and its deserializer
   // reads, so the tree above is intentionally wider than the declared type.
-  return { layout: layout as unknown as SerializedDockview, dropped };
+  return { layout: layout as unknown as SerializedDockview, dropped, droppedPanes };
+}
+
+/**
+ * Can this app address the pane this id names?
+ *
+ * The id has to agree with the panel's component about which tool it hosts, and
+ * only a tool that is plural *today* may carry an instance key. Everything else
+ * about the key — whether that session still exists, whether the file is still
+ * on disk — is the pane's own business, deliberately: sessions and files load
+ * long after the layout does, so a restore that vetted them would drop panes
+ * for being early rather than for being wrong.
+ */
+function addressablePane(id: string, component: string, known: PaneVocabulary): boolean {
+  const { toolId, instance } = parsePaneId(id);
+  if (toolId !== component) return false;
+  return instance === null || known.plural.has(component);
 }
 
 function reviseFloating(group: Json, kept: Json): Json {
@@ -229,4 +278,11 @@ function groupIds(node: Json, into: Set<string> = new Set()): Set<string> {
 export function droppedPanelsMessage(dropped: readonly string[]): string {
   const what = dropped.length === 1 ? "panel is" : "panels are";
   return `Restored your layout without ${dropped.join(", ")} — that ${what} no longer part of Workbench.`;
+}
+
+/** Sentence for the other half: the tools are all here, these *panes* were not
+ * ones this Workbench can address (`addressablePane`). */
+export function droppedPanesMessage(dropped: readonly string[]): string {
+  const what = dropped.length === 1 ? "pane" : "panes";
+  return `Restored your layout without ${String(dropped.length)} ${what} this Workbench cannot open (${dropped.join(", ")}).`;
 }

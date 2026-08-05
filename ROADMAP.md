@@ -303,6 +303,34 @@ Ordered by what unblocks what.
    (switch to Default, or open it from the QuickBar), and switching to a preset rebuilds
    the dock — so the terminals in it restart, while switching to a *saved* layout reuses
    the panels that are already there.
+2b. ~~**The pane system — tmux, not a four-panel IDE.**~~ **done.** The owner's central
+   complaint after item 2 was that it "still feels like a cheap VS Code editor… I want
+   something super modular like TMUX", and the registry (item 1) was the prerequisite
+   that made it buildable. What tmux actually gives its users, translated: **any pane
+   splits in two** (`Alt+S` / `Alt+Shift+S`, then a picker for what goes in it), **any
+   pane runs anything** (every registered tool, every live session, every open file,
+   a new shell), **the keyboard owns the window** (`Alt+←→↑↓` to move,
+   `Alt+Shift+←→↑↓` to swap, `Alt+O` to cycle, `Alt+X` to close), and **the arrangement
+   is yours** — four agent sessions in a 2×2 is now a thing you build in four keystrokes
+   rather than a thing the app does not have.
+   The idea that makes it survive a restart is the **pane id** (`ui/src/panes.ts`):
+   `toolId` or `toolId#instanceKey`, where the key is `agent#<session_id>`,
+   `editors#<path>`, `terminal#<n>`. dockview serializes panel ids into
+   `.workbench/layouts.json` and nothing else about a panel, so the id *is* the
+   persistence — no second store, no id map, and a saved layout brings back *those*
+   conversations rather than that many empty panes. `pruneLayout` gained the matching
+   vetting: an instance pane of a tool that is a singleton today, or one whose id and
+   component disagree, is dropped with its own sentence, while a key that has simply not
+   loaded yet is left alone (sessions arrive long after the layout does). The picker is
+   the QuickBar in a new **pick mode** rather than a second overlay — a capability hands
+   it rows, and `QuickBar.tsx` still names no capability. The split affordance reaches
+   the tab strip through a new `groupActions` registry contribution, so `App.tsx` still
+   names none either. Deliberately deferred: an editor pane for a `keepMounted` document
+   view (a second OnlyOffice editor on one file is a co-editing session with yourself —
+   the pane says where to open it instead); a live session's on-screen transcript is
+   still not replayed after a reload, which is the pre-existing agent-socket behaviour
+   and not something a pane id can fix; and swapping two panes resizes nothing but does
+   not preserve a *tab group's* internal order when a pane holds several tabs.
 3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
    (PRs 1–2 landed: the schema and its renderer). Asked for after watching an
    agentic-workflow video where the agent renders an interactive artifact instead of

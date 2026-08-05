@@ -303,10 +303,17 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
   selected row `--surface-selected` with 2px `--accent` left edge; category headers 11px
   uppercase `--text-tertiary`.
 - Categories are sections, in this order: the window's own commands (uncategorized, no
-  header), then **Layouts**, then **Shortcuts**. Uncategorized always leads; the
-  registry's categorized rows precede the file's, so a header is always a header and
+  header), then **Panes**, **Layouts**, then **Shortcuts**. Uncategorized always leads;
+  the registry's categorized rows precede the file's, so a header is always a header and
   never appears mid-list. A capability adds a section by putting a `category` on its
   commands — the QuickBar knows no section names.
+- **Pick mode.** A capability may hand the QuickBar a list of its own instead of files
+  or commands — the pane picker (§6.11) is the one that does. Same overlay, same rows,
+  same keys: only the dialog's accessible name, the placeholder and the rows change, and
+  the `>` hint disappears because the prefix has no meaning inside a pick. Sections are
+  ranked *within* themselves and never reordered against each other, because in a pick
+  the section names are the vocabulary. `Esc` reads **cancel**, not close: the gesture
+  that opened it is abandoned. There is no second overlay language in this app.
 - Keycap hints: 11px mono on `--surface-elevated`, 1px `--border-default`,
   `--radius-xs`, padding 1px 5px.
 - Motion: fade + scale 0.98→1 in 140ms `--ease-standard`; exit 100ms fade.
@@ -350,6 +357,11 @@ commands and their default chords on its tool descriptor (`docs/tools.md`), and
 | `Alt+1..9` | Jump to the n-th most recent session |
 | `Alt+T` | New terminal |
 | `Alt+M` | Toggle focus mode (§6.9) |
+| `Alt+S` / `Alt+Shift+S` | Split this pane right / downwards (§6.11) |
+| `Alt+←→↑↓` | Focus the pane in that direction |
+| `Alt+Shift+←→↑↓` | Swap this pane with the one in that direction |
+| `Alt+O` | Focus the next pane |
+| `Alt+X` | Close this pane |
 
 **Pass-through:** inside xterm and Monaco — both full keyboard applications — only
 chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the
@@ -415,6 +427,52 @@ one capability (`ui/src/panels/Layouts.tsx`) and both are stated in one place: t
   link or one outline button — never a filled button in an empty state.
 - Always name the shortcut: "Open a file — Ctrl+P" with keycap styling (§6.5).
 - Document panels' empty/loading states render on paper colors (§2.8), not panel colors.
+
+### 6.11 Panes: splitting, focus, and what goes in one
+
+Workbench is a tiling window manager that happens to host an editor. A **pane** is one
+dockview group; any pane splits in two, anything registered goes in the new one, and the
+arrangement belongs to the user. The whole system is one capability
+(`ui/src/panels/Panes.tsx`) and it adds exactly three surfaces.
+
+- **The split affordance.** Two 12px outline glyphs — a square divided vertically, a
+  square divided horizontally — in 20px hit areas at the right end of **the focused
+  pane's** tab strip, `--text-tertiary`, `--surface-hover` + `--text-primary` on hover.
+  On the focused pane only: chrome recedes (§1.1), and a control on all six tab strips in
+  a full window is five controls nobody is looking at — where the keyboard is, is where
+  the mouse path belongs. Panel tabs themselves gain nothing (§6.1 stands).
+- **Pane focus** is stated exactly as it already was: the focused group's tab strip
+  carries the 1px `--accent` top edge (§6.1). Splitting, swapping and directional
+  movement all leave that mark on the pane you ended up in — it is the only feedback the
+  keyboard commands produce, and it must never be ambiguous, so **exactly one** pane
+  carries it.
+- **The focused pane is the one you are talking to.** With several agent panes open,
+  the session that `Enter`, *Interrupt* and a `prompt` shortcut mean is the one in the
+  focused pane; likewise `Ctrl+S` saves the file in the focused editor pane and a `shell`
+  shortcut types into the focused terminal pane. This is the tmux rule, and it is why no
+  pane needs a "make me active" control of its own.
+- **The picker** is the QuickBar in pick mode (§6.5), never a second overlay: the same
+  640px surface, the same 40px rows, the same keycaps and the same `↑↓ / Enter / Esc`
+  footer. It is titled by the gesture ("Split this pane to the right") and its sections
+  are the vocabulary of what a pane can hold — **Panels** (every registered tool),
+  **Agent** / **Agent sessions**, **Terminal**, **Open files**.
+- **One pane per identity.** Picking something that already has a pane *moves* that pane
+  into the split rather than cloning it. Two panes of the same conversation, the same
+  file or the same shell would be two views claiming one thing, and a saved arrangement
+  could not restore either faithfully.
+- **A pane entering** is the one panel-level movement in the app: opacity 0→1 with a
+  0.985→1 scale over `--duration-2` `--ease-standard` (§5, opacity and transform only).
+  Nothing else about a split animates — the grid resize is 1:1 with the pointer as it
+  always was, and `prefers-reduced-motion` already flattens the duration globally.
+- **A pane whose binding no longer resolves** — a session that stopped, a document that
+  must open in the Editor pane — says so in a one-line bar with the anatomy of §6.1's
+  conflict and provenance bars (12px, `--warn-bg`, bottom hairline, one 24px outline
+  button on the right). Never an empty pane, never a modal.
+- **The floor is one pane.** Closing the last one is refused with a warning toast: a dock
+  with nothing in it has no tab to click and no pane to split, and "Switch to the Default
+  layout" (§6.9) is how the rest comes back.
+- **The default arrangement is unchanged.** A new workspace still opens Files / Editor /
+  Agent / Terminal in the same four places; nobody has to build a layout to start.
 
 ---
 

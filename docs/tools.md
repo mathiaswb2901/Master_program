@@ -56,7 +56,9 @@ command is one a user would reach for without looking.
 
 | Field | Effect |
 |---|---|
-| `panel` | A dockview panel. `defaultLocation.area` is `center` \| `left` \| `right` \| `bottom` (`size` = initial width, or height for `bottom`). `openByDefault: false` keeps it out of the startup layout until a command opens it — and gives its tab a close button, since that tab is its only way back. `singleton: false` allows more than one instance. `badge` is one component rendered after the tab title (dot-only, DESIGN.md §6.4). |
+| `panel` | A dockview panel. `defaultLocation.area` is `center` \| `left` \| `right` \| `bottom` (`size` = initial width, or height for `bottom`). `openByDefault: false` keeps it out of the startup layout until a command opens it — and gives its tab a close button, since that tab is its only way back. `singleton: false` allows more than one pane of it — see **Plural tools** below. `badge` is one component rendered after the tab title (dot-only, DESIGN.md §6.4). |
+| `panel.instances` | What a *second* pane of a plural tool is bound to: `options()` (the rows the pane picker offers) and `titleFor(key)` (what such a pane calls itself). See **Plural tools**. |
+| `groupActions` | One control at the right end of every pane's tab strip, for a tool that acts on panes rather than living in one. The pane system's split glyphs are the only one (DESIGN.md §6.11); there is room for one. |
 | `documentView` | Renders one `OpenFile` kind inside the editor area (`kind`, `component`, `hostClassName`, `keepMounted`). This is how Office panels attach — the editor area asks the registry, not a list of extensions. |
 | `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row; `category` puts it in its own QuickBar section. |
 | `dynamicCommands` | `{ key, build }` for commands whose *set* changes while the app runs — one row per saved layout, and one per recent workspace later. `build` is called only when `key()` changes, because the merged command list is read on every keystroke. **Dynamic commands never carry a chord**: a chord has to be static to be pinned by a test and to lose a `shortcuts.md` collision deterministically. |
@@ -93,6 +95,72 @@ Agent-facing tools are *not* here — see below.
   id behind in `.workbench/layouts.json`. The layout system drops it and keeps the rest
   (`ui/src/layouts.ts`); what you owe it is a **stable `id`** — renaming one is a rename
   of the user's saved arrangement too.
+- **A tool id may not contain `#`** — it is the pane-id separator, and a tool called
+  `a#b` would make every pane of it address a tool called `a` (`panes.test.ts`, against
+  the real registry).
+
+## Plural tools (more than one pane of the same thing)
+
+Any pane in Workbench splits in two and anything registered goes in the new one
+(`ui/src/panels/Panes.tsx`, DESIGN.md §6.11). A tool that is worth having **twice** —
+four agent sessions on screen, two shells, two files side by side — sets
+`singleton: false` and declares `instances`:
+
+```ts
+panel: {
+  component: TerminalPanel,
+  defaultLocation: { area: "bottom", size: 260 },
+  singleton: false,
+  instances: {
+    options: () => [{
+      id: "terminal.new",
+      title: "New terminal",
+      detail: "a shell in its own pane",
+      category: "Terminal",
+      key: () => useStore.getState().nextTerminalPaneKey(),
+    }],
+    titleFor: (key) => `Terminal ${key}`,
+  },
+},
+```
+
+Your panel component then decides how to render from **its own pane id**:
+
+```tsx
+export function TerminalPanel(props: IDockviewPanelProps) {
+  const paneKey = paneInstance(props.api.id);   // ui/src/panes.ts
+  return paneKey === null ? <TerminalTabs /> : <TerminalPane paneKey={paneKey} … />;
+}
+```
+
+### The instance key is a contract, like the tool id
+
+A pane id is `toolId` or `toolId#instanceKey`, split on the **first** `#`. dockview
+serializes panel ids into `.workbench/layouts.json` and nothing else about a panel, so
+**the pane id is the whole of what a restart gets back**. Three rules follow:
+
+- the key must still mean the same thing after a restart — `agent#<session_id>`,
+  `editors#<workspace-relative path>`, `terminal#<n>`. Changing what a key means renames
+  the user's saved arrangement, exactly as renaming a tool id does;
+- `key()` is a thunk and may be `async`, because minting one sometimes takes a round trip
+  ("New agent session" creates the session, then binds the pane to its id). Answering
+  `null` abandons the split rather than binding a pane to nothing;
+- **be honest about what does not survive.** `terminal#2` restores the pane, its number
+  and a fresh shell: the PTY dies with the WebSocket and the server releases it. Say so
+  in the module rather than implying the process comes back.
+
+### What the rest of the app does for you
+
+- **The picker** lists your rows automatically, in registry order, sectioned by
+  `category` — no registration beyond the descriptor.
+- **`pruneLayout`** drops an instance pane whose tool is a singleton today, or whose id
+  and component disagree, and keeps the rest (`ui/src/layouts.ts`). It deliberately does
+  *not* vet the key itself: sessions and files load long after the layout does, so a pane
+  bound to something that has not arrived yet must not be dropped for being early. Handle
+  that inside your panel — a one-line note bar, never an empty pane (DESIGN.md §6.11).
+- **Focus is the selector.** The focused pane is the one the app means: bind on
+  `props.api.onDidActiveChange` and make your pane's session/file/terminal the active one
+  there. That is what let `Chat.tsx` be mounted four times without a single change to it.
 
 ## Agent-facing tools
 

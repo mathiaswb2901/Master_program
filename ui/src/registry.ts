@@ -26,10 +26,11 @@
  * `TOOLS` (types only), so the derivations are unit-tested rather than assumed.
  */
 
-import type { DockviewApi, IDockviewPanelProps } from "dockview";
+import type { DockviewApi, IDockviewHeaderActionsProps, IDockviewPanelProps } from "dockview";
 import type { FunctionComponent } from "react";
 
 import type { Command } from "./commands";
+import { paneId, parsePaneId } from "./panes";
 import type { OpenFile } from "./store";
 import type { ShortcutKind } from "./types";
 
@@ -44,6 +45,43 @@ export interface PanelLocation {
   size?: number;
 }
 
+/**
+ * One thing a plural tool could put in a new pane — a row in the pane picker.
+ *
+ * `key` is a **thunk** because the two kinds of row are the same kind of row:
+ * "session `abc`" answers with a key it already has, while "New terminal" mints
+ * one, and "New agent session" has to go and create the session first. The
+ * caller awaits it and places `toolId#<key>` (`ui/src/panels/Panes.tsx`).
+ * Answering `null` means the row decided not to open anything after all — a
+ * session that failed to start, for instance — and the split is abandoned
+ * rather than bound to nothing.
+ */
+export interface PaneInstanceOption {
+  /** Stable row identity for React and for the picker's filter. */
+  id: string;
+  title: string;
+  detail?: string;
+  /** Section header in the picker (DESIGN.md §6.5 categories). */
+  category: string;
+  key: () => string | null | Promise<string | null>;
+}
+
+/**
+ * How a tool is *plural*: what a new pane of it can be bound to, and what a
+ * pane calls itself once it is.
+ *
+ * A tool that sets `singleton: false` without this still opens more than one
+ * pane — it just has nothing to offer the picker and no title for a restored
+ * instance, which is why every shipped plural tool declares it.
+ */
+export interface PaneInstances {
+  /** Rows the pane picker offers for this tool, most useful first. */
+  options: () => readonly PaneInstanceOption[];
+  /** Title for a pane bound to this key — including one restored from disk
+   * whose binding no longer resolves, which must still read as something. */
+  titleFor: (key: string) => string;
+}
+
 export interface PanelContribution {
   component: FunctionComponent<IDockviewPanelProps>;
   defaultLocation: PanelLocation;
@@ -52,6 +90,9 @@ export interface PanelContribution {
   openByDefault?: boolean;
   /** One instance only — opening again focuses it. Default true. */
   singleton?: boolean;
+  /** What a *second, third, N-th* pane of this tool is bound to. Meaningless
+   * on a singleton; required in practice on anything that is not (`panes.ts`). */
+  instances?: PaneInstances;
   /**
    * Rendered after the tab title: one aggregate signal the tool owns, for a
    * state worth seeing while the panel is behind another (DESIGN.md §6.4 —
@@ -150,6 +191,14 @@ export interface WorkbenchTool {
    * goes away. Everything else should be reaching for `openToolPanel`.
    */
   onDockReady?: (api: DockviewApi | null) => void;
+  /**
+   * A control at the right end of **every pane's** tab strip, for a tool that
+   * acts on panes rather than living in one — the split affordance is the one
+   * (DESIGN.md §6.11). Contributed here so `App.tsx` hands dockview a component
+   * without naming the capability that drew it; the component decides for
+   * itself which panes it appears on (`isGroupActive`).
+   */
+  groupActions?: FunctionComponent<IDockviewHeaderActionsProps>;
   /**
    * Whether this tool is present at all: false takes out its panel, its
    * commands and its status items together.
@@ -291,6 +340,81 @@ export function panelComponents(
     if (tool.panel !== undefined) components[tool.id] = tool.panel.component;
   }
   return components;
+}
+
+/** Tools that may have more than one pane, by id. */
+export function pluralPanelIds(tools: readonly WorkbenchTool[]): Set<string> {
+  return new Set(
+    panelTools(tools)
+      .filter((tool) => tool.panel?.singleton === false)
+      .map((tool) => tool.id),
+  );
+}
+
+/**
+ * What a pane id is allowed to say, right now.
+ *
+ * `components` is what dockview can render; `plural` is which of those may
+ * carry an instance key. Both are registry facts, read fresh — a persisted
+ * layout is vetted against them before dockview is allowed near it
+ * (`layouts.ts`).
+ */
+export interface PaneVocabulary {
+  components: ReadonlySet<string>;
+  plural: ReadonlySet<string>;
+}
+
+export function paneVocabulary(tools: readonly WorkbenchTool[]): PaneVocabulary {
+  return { components: new Set(Object.keys(panelComponents(tools))), plural: pluralPanelIds(tools) };
+}
+
+/** An option with the tool it belongs to — which is all the picker needs to
+ * turn a row into a pane id (`paneId(toolId, await key())`). */
+export type PaneChoice = PaneInstanceOption & { toolId: string };
+
+/**
+ * Every row the pane picker offers, in registry order.
+ *
+ * **Every** tool with a panel gets a row for its default pane, plural or not —
+ * that row is the way back to a pane you closed, and without it closing the
+ * Terminal panel would leave "Switch to the Default layout" as the only route
+ * to another one. A plural tool then adds a row per thing it can be bound to
+ * (each live session, each open file, a new terminal).
+ */
+export function paneInstanceOptions(tools: readonly WorkbenchTool[]): PaneChoice[] {
+  return panelTools(tools).flatMap((tool) => {
+    const base: PaneChoice = {
+      toolId: tool.id,
+      id: tool.id,
+      title: tool.title,
+      category: "Panels",
+      key: () => null,
+    };
+    const instances = tool.panel?.singleton === false ? tool.panel.instances : undefined;
+    if (instances === undefined) return [base];
+    return [base, ...instances.options().map((option) => ({ ...option, toolId: tool.id }))];
+  });
+}
+
+/**
+ * What a pane calls itself. A default pane is its tool's title; an instance
+ * pane asks the tool, which is also what keeps a *restored* pane readable when
+ * its binding no longer resolves ("Session gone" beats a raw id).
+ */
+export function paneTitle(tools: readonly WorkbenchTool[], id: string): string {
+  const { toolId, instance } = parsePaneId(id);
+  const tool = panelTools(tools).find((candidate) => candidate.id === toolId);
+  if (tool === undefined) return id;
+  if (instance === null) return tool.title;
+  return tool.panel?.instances?.titleFor(instance) ?? `${tool.title} ${instance}`;
+}
+
+/** The one control every pane's tab strip carries, or null. First enabled tool
+ * that contributes one wins — there is room for exactly one. */
+export function groupActionsComponent(
+  tools: readonly WorkbenchTool[],
+): FunctionComponent<IDockviewHeaderActionsProps> | undefined {
+  return tools.filter(isEnabled).find((tool) => tool.groupActions !== undefined)?.groupActions;
 }
 
 export interface PanelTabInfo {
@@ -495,7 +619,10 @@ export function openToolPanel(
     existing.api.setActive();
     return;
   }
-  const id = existing === undefined ? toolId : `${toolId}:${String(Date.now())}`;
+  // A second pane of a plural tool is a pane *id*, not an ad-hoc string: the id
+  // is the whole of what a restart gets back (`panes.ts`), so even the one this
+  // command mints has to be in that vocabulary.
+  const id = existing === undefined ? toolId : paneId(toolId, String(Date.now()));
   const placement: PanelPlacement = {
     id,
     component: toolId,

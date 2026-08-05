@@ -69,6 +69,17 @@ export interface TerminalTab {
   generation: number;
   /** PTY session alive: drives the running-process dot (DESIGN.md §6.6). */
   alive: boolean;
+  /**
+   * The pane that owns this terminal, or null for one in the Terminal panel's
+   * tab strip.
+   *
+   * `id` is a per-session counter and means nothing after a reload; the pane
+   * key is the half that survives, because it is what `terminal#<key>` writes
+   * into the layout file (`ui/src/panes.ts`). The PTY itself never survives —
+   * the socket closes with the page and the server releases it — so what comes
+   * back is the pane, its number and a fresh shell.
+   */
+  paneKey: string | null;
 }
 
 export type ChatItem =
@@ -137,6 +148,33 @@ export interface SessionFlags {
   error: boolean;
 }
 
+/** One row of a `QuickPick`. Deliberately the shape the QuickBar already
+ * renders (title, right-hand detail, section header) so a pick surface is the
+ * QuickBar rather than a second overlay language (DESIGN.md §6.5). */
+export interface QuickPickRow {
+  key: string;
+  title: string;
+  detail?: string;
+  category?: string;
+  run: () => void;
+}
+
+/**
+ * A list some capability asks the QuickBar to show, filtered by typing, instead
+ * of files or commands.
+ *
+ * The rows are a thunk supplied by whoever opened it, which is the whole point:
+ * `QuickBar.tsx` stays a surface that names no capability, exactly as `App.tsx`
+ * and `commands.ts` do. The split picker (`ui/src/panels/Panes.tsx`) is the
+ * first user of it.
+ */
+export interface QuickPick {
+  /** Accessible name of the dialog, e.g. "Split this pane". */
+  label: string;
+  placeholder: string;
+  rows: () => QuickPickRow[];
+}
+
 interface WorkbenchStore {
   theme: Theme;
   tree: TreeNode | null;
@@ -158,6 +196,8 @@ interface WorkbenchStore {
   quickBarOpen: boolean;
   /** Text the QuickBar opens with — ">" puts it straight into command mode. */
   quickBarPrefill: string;
+  /** A one-shot list the QuickBar shows instead of files and commands. */
+  quickPick: QuickPick | null;
   terminals: TerminalTab[];
   activeTerminalId: number | null;
   toasts: Toast[];
@@ -186,7 +226,15 @@ interface WorkbenchStore {
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
   setQuickBarOpen: (open: boolean, prefill?: string) => void;
+  /** Open the QuickBar on a supplied list. Closing it clears the list. */
+  openQuickPick: (pick: QuickPick) => void;
   newTerminal: () => void;
+  /** The terminal this pane owns, created on first sight of the pane. Returns
+   * its id, so the pane can render it without a second lookup. */
+  ensureTerminalPane: (paneKey: string) => number;
+  /** Lowest pane number no terminal pane is using — what a new terminal pane is
+   * called, and stable across a reload because the panes register themselves. */
+  nextTerminalPaneKey: () => string;
   closeTerminal: (id: number) => void;
   setActiveTerminal: (id: number) => void;
   restartTerminal: (id: number) => void;
@@ -240,8 +288,17 @@ interface WorkbenchStore {
    * dropped it) says so instead of opening the wrong one. */
   openSessionById: (sessionId: string) => void;
   openLiveSession: (info: SessionInfo) => void;
+  /** Start streaming this session without changing what the keyboard talks to
+   * — what an agent *pane* does on mount, so four panes stream at once. */
+  attachSession: (sessionId: string) => void;
+  /** Make this session the one `sendChat`, `interrupt` and a `prompt` shortcut
+   * mean. Called when a session pane takes focus: the focused pane is the one
+   * you are talking to, exactly as in tmux. */
+  focusSession: (sessionId: string) => void;
   openTranscript: (info: SessionInfo) => Promise<void>;
-  createSessionIn: (folder: string) => Promise<void>;
+  /** Resolves with the new session's id, so a caller that is opening a *pane*
+   * for it can bind the pane to it (`agent#<session_id>`); null if it failed. */
+  createSessionIn: (folder: string) => Promise<string | null>;
   resumeSession: () => Promise<void>;
   sendChat: (text: string) => void;
   decidePermission: (requestId: string, allow: boolean) => void;
@@ -267,11 +324,20 @@ let toastSeq = 0;
 /** Serialized problem list already toasted — see `refreshShortcuts`. */
 let lastShortcutProblems = "[]";
 
-/** Put the caret back in the chat box after a prompt shortcut fills it. One
- * chat is mounted at a time (the active session), so the selector is exact. */
+/**
+ * Put the caret back in the chat box after a prompt shortcut fills it.
+ *
+ * More than one chat can be mounted now — a pane per session is the point of
+ * the pane system — so "the chat box" is the one in the **focused pane**, and
+ * the first one on screen only as a fallback for a window with no focused pane
+ * (dockview marks it `.dv-active-group`). Getting this wrong types a user's
+ * prompt into a conversation they were not looking at.
+ */
 function focusChatInput(): void {
   window.setTimeout(() => {
-    const input = document.querySelector<HTMLTextAreaElement>(".wb-chat-input textarea");
+    const input =
+      document.querySelector<HTMLTextAreaElement>(".dv-active-group .wb-chat-input textarea") ??
+      document.querySelector<HTMLTextAreaElement>(".wb-chat-input textarea");
     if (input === null) return;
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
@@ -385,7 +451,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     lastCostUsd: null,
     quickBarOpen: false,
     quickBarPrefill: "",
-    terminals: [{ id: 1, title: "Terminal 1", generation: 0, alive: true }],
+    quickPick: null,
+    terminals: [{ id: 1, title: "Terminal 1", generation: 0, alive: true, paneKey: null }],
     activeTerminalId: 1,
     toasts: [],
     pendingClosePath: null,
@@ -434,16 +501,52 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       get().setTheme(get().theme === "dark" ? "light" : "dark");
     },
 
-    setQuickBarOpen: (open, prefill = "") => set({ quickBarOpen: open, quickBarPrefill: prefill }),
+    // A plain open always leaves pick mode: `Ctrl+P` mid-pick means "never
+    // mind, find me a file", not "filter the panes by filename".
+    setQuickBarOpen: (open, prefill = "") =>
+      set({ quickBarOpen: open, quickBarPrefill: prefill, quickPick: null }),
+
+    openQuickPick: (pick) => set({ quickBarOpen: true, quickBarPrefill: "", quickPick: pick }),
 
     newTerminal: () =>
       set((s) => {
         const id = ++terminalSeq;
         return {
-          terminals: [...s.terminals, { id, title: `Terminal ${id}`, generation: 0, alive: true }],
+          terminals: [
+            ...s.terminals,
+            { id, title: `Terminal ${id}`, generation: 0, alive: true, paneKey: null },
+          ],
           activeTerminalId: id,
         };
       }),
+
+    ensureTerminalPane: (paneKey) => {
+      const existing = get().terminals.find((t) => t.paneKey === paneKey);
+      if (existing !== undefined) return existing.id;
+      const id = ++terminalSeq;
+      set((s) => ({
+        terminals: [
+          ...s.terminals,
+          { id, title: `Terminal ${paneKey}`, generation: 0, alive: true, paneKey },
+        ],
+      }));
+      return id;
+    },
+
+    nextTerminalPaneKey: () => {
+      // Derived from the terminals that exist, never from a counter: a counter
+      // restarts at 1 on every reload while the restored panes are still called
+      // 1 and 2, and the third pane would collide with the first.
+      //
+      // The tab strip's numbers are in the same set on purpose. They are two
+      // numbering spaces — a tab is called `Terminal <id>` and a pane
+      // `Terminal <key>` — and a window showing two different shells both
+      // labelled "Terminal 1" is worse than a number being skipped.
+      const taken = new Set(get().terminals.map((t) => t.paneKey ?? String(t.id)));
+      let next = 1;
+      while (taken.has(String(next))) next += 1;
+      return String(next);
+    },
 
     closeTerminal: (id) =>
       set((s) => {
@@ -1055,6 +1158,22 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }));
     },
 
+    attachSession: (sessionId) => {
+      ensureAgentSocket(sessionId);
+      set((s) =>
+        sessionId in s.chats ? {} : { chats: { ...s.chats, [sessionId]: { items: [] } } },
+      );
+    },
+
+    focusSession: (sessionId) => {
+      get().attachSession(sessionId);
+      // A transcript and a live pane cannot both be what the keyboard means, so
+      // taking focus into a session pane closes the transcript view — the same
+      // thing `openLiveSession` does, minus the flag reset, because arriving at
+      // a pane is not the same event as opening a session.
+      set({ activeSessionId: sessionId, transcriptView: null });
+    },
+
     openTranscript: async (info) => {
       try {
         const transcript = await api.getTranscript(info.folder, info.session_id);
@@ -1071,9 +1190,11 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         set((s) => ({ sessionStates: { ...s.sessionStates, [info.session_id]: info.state } }));
         get().openLiveSession(info);
         void get().refreshSessions();
+        return info.session_id;
       } catch (err) {
         console.error("session create failed", err);
         get().pushToast("error", `New session failed: ${errorDetail(err)}`);
+        return null;
       }
     },
 

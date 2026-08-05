@@ -11,7 +11,7 @@ import { DirtyCloseModal, ShellCloseModal } from "./panels/Modal";
 import { QuickBar } from "./panels/QuickBar";
 import { StatusBar } from "./panels/StatusBar";
 import { Toasts } from "./panels/Toasts";
-import { panelComponents, panelTabInfo } from "./registry";
+import { groupActionsComponent, panelComponents, panelTabInfo } from "./registry";
 import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
 import { TOOLS } from "./tools";
@@ -19,6 +19,10 @@ import { TOOLS } from "./tools";
 // Which panels exist, what they are called and where they dock are properties
 // of the registered tools (`tools.ts`) — this file names none of them.
 const components = panelComponents(TOOLS);
+// The one control a pane's tab strip carries beyond its tabs (DESIGN.md §6.11).
+// Registry-supplied, so this file still names no capability — it does not know
+// that what it is mounting is the split affordance.
+const groupActions = groupActionsComponent(TOOLS);
 
 const BASE_TITLE = "Workbench";
 
@@ -37,7 +41,15 @@ const anyNeedsAttention = (states: Record<string, string>): boolean =>
  */
 function PanelTab(props: IDockviewPanelHeaderProps) {
   const { icon: Icon, badge: Badge, closable } = panelTabInfo(TOOLS, props.api.component);
-  const title = props.api.title ?? props.api.id;
+  // Subscribed, not read once: a pane bound to something that names itself
+  // later renames its own tab (a new agent session is "new session" until its
+  // first message), and dockview does not re-render a tab component for that.
+  const [title, setTitle] = useState(props.api.title ?? props.api.id);
+  useEffect(() => {
+    setTitle(props.api.title ?? props.api.id);
+    const subscription = props.api.onDidTitleChange((event) => setTitle(event.title));
+    return () => subscription.dispose();
+  }, [props.api]);
   return (
     <div className="wb-panel-tab u-truncate">
       {Icon !== undefined && <Icon />}
@@ -144,6 +156,9 @@ export default function App() {
             <DockviewReact
               components={components}
               defaultTabComponent={PanelTab}
+              {...(groupActions !== undefined
+                ? { rightHeaderActionsComponent: groupActions }
+                : {})}
               theme={WORKBENCH_THEME}
               onReady={onReady}
             />

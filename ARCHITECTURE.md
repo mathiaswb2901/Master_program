@@ -125,7 +125,9 @@ contribute any of:
 | `dynamicCommands` | Rows whose *set* changes while the app runs — one per saved layout today. Re-derived only when the tool's `key()` changes, since the merged list is read on every keystroke, and never chord-bearing: a chord must be static to be pinned by a test and to win a `shortcuts.md` collision deterministically |
 | `statusContributions` | Items in the status bar's left/centre/right regions. The bar owns the regions and nothing that goes in them |
 | `shortcutKinds` / `shortcutActions` | Which `shortcuts.md` kinds this panel *hosts an insertion for* (the Terminal claims `shell`, the Agent `prompt`) and which it *carries out* (Layouts claims `layout`) — so `commands.ts` names neither a panel nor a kind |
-| `onDockReady` | The live `DockviewApi`, for a tool that operates on the dock rather than living in it. Exactly one does |
+| `panel.instances` | What a *second* pane of a plural tool is bound to — the rows the pane picker offers, and what such a pane calls itself. See "Panes" below |
+| `onDockReady` | The live `DockviewApi`, for a tool that operates on the dock rather than living in it. Two do: the layout system and the pane system |
+| `groupActions` | One control at the right end of every pane's tab strip, for a tool that acts on panes rather than living in one. The split affordance is the only one, and it is why `App.tsx` can mount it without knowing what it is |
 | `when` | A predicate that takes the whole tool out — panel, commands and status items together. **Boot-time**: it is asked once per tool and remembered, because the things it feeds are derived at different moments and a tool that enabled itself later would be half present |
 
 A panel's tab is closable exactly when it is *not* in the startup layout: one
@@ -161,6 +163,44 @@ chord: a registered chord beats a `shortcuts.md` one and `Alt` is the only
 modifier that file may use, so every chord a tool takes is one a user cannot
 have — a price the Terminal's `Alt+T` earns and a worked example does not.
 `docs/tools.md` is the walkthrough.
+
+## Panes
+
+The window is tiled, not fixed: any pane splits in two, anything registered goes
+in the new one, and there may be several panes of the same tool — four agent
+sessions, two shells, two files. The system is one capability
+(`ui/src/panels/Panes.tsx`, with the pure half in `ui/src/panes.ts`) that
+contributes no panel of its own.
+
+**A pane's identity is its dockview panel id, and that is the whole design.**
+The id is `toolId` or `toolId#instanceKey`, split on the first `#`. dockview
+serializes panel ids into `.workbench/layouts.json` and nothing else about a
+panel's contents, so the id *is* the persistence: whatever a pane is bound to has
+to be expressible in that string or it does not come back. `agent#<session_id>`
+restores that conversation, `editors#<workspace-relative path>` that file,
+`terminal#<n>` that pane and its number (with a fresh shell — the PTY dies with
+the socket and the server releases it, which no layout file can undo). There is
+no second store, no id map and no migration, and an instance key is therefore a
+**contract** exactly as a tool id is.
+
+`pruneLayout` vets pane ids as well as components: a pane carrying an instance
+key for a tool that is a singleton *today*, or one whose id and
+`contentComponent` disagree, is unaddressable by every pane command and is
+dropped with its own message. It deliberately does not vet the key itself —
+sessions and files load long after the layout does, so a pane bound to something
+that has not arrived yet must not be dropped for being early; the panel says so
+itself instead.
+
+Two seams keep the shell capability-free. The picker is the **QuickBar in pick
+mode**: a capability hands `store.ts` a list of rows, so there is one overlay
+language in the app and `QuickBar.tsx` still names no capability. The split
+affordance reaches the tab strip through `groupActions`, so `App.tsx` mounts a
+component without knowing what it draws.
+
+Focus is the selector: the focused pane is the session `Enter` and *Interrupt*
+mean, the file `Ctrl+S` saves, and the shell a `shortcuts.md` `shell` entry types
+into. That is why `Chat.tsx` could be mounted four times without a change — each
+pane makes its own session the active one when it takes focus.
 
 **Agent-facing tools** carry the ergonomics budget on both sides.
 `services/agent_tools.py` is the server registry the SDK actually reads: name,
