@@ -91,9 +91,11 @@ the moat.
   and never execute (no `run:` option, shell bodies single-line, no trailing newline),
   so a hostile workspace file can add QuickBar rows but not actions. Still open: agents
   get a skill to add entries on request (ships with the skills bundle).
-- **Tool registry**: panels/commands/skills register in one place instead of hardwiring
-  in `App.tsx` (product principle 1). Registration carries an **agent-ergonomics
-  budget**, enforced through machinery that already exists rather than a new harness:
+- **Tool registry** — *the foundation of the Modular track below; build it before any
+  further panel lands*: panels/commands/skills register in one place instead of
+  hardwiring in `App.tsx` (product principle 1). Registration carries an
+  **agent-ergonomics budget**, enforced through machinery that already exists rather
+  than a new harness:
   output format is a required typed field on registration (so `mypy --strict` fails an
   omission), and each tool's own tests assert a ceiling on description length and on the
   serialized size of a representative result (so the quality gate fails bloat). Thin
@@ -139,18 +141,67 @@ the moat.
   calls, permission prompts and plan artifacts through the real factory/bridge seams —
   no Claude login, no tokens, deterministic frames.
 
-### M5 — Parallel (worktrees + Mission Control)
+## Two tracks from here (2026-08-05)
 
-- Managed worktree pool: backend `WorktreeService` (acquire/release/reap, dirty-slot
-  `needs_review` protection, per-slot watchers), multi-root file/terminal access through
-  a root registry (path jail preserved per root), worktree-bound agent sessions.
-- Mission Control board: all sessions as cards (status, current activity, cost), inline
-  permission chips answerable from the board; orchestrator session kind with a
-  mission-control MCP toolset (spawn/list/read/send/wait/stop workers), worker budget +
-  cost ceiling, escalate-to-board permission policy (never auto-allow shell).
-- **Security hardening pulled forward** (OSS bar item 1): per-launch auth token injected
-  into the UI + strict WS Origin checks — agent-spawned workers and multi-root access
-  widen the unauthenticated localhost surface unacceptably.
+M4's Office work and the modularity work below are **parallel tracks, not a sequence**.
+They touch different parts of the codebase (Office: Rust host + Python COM bridge;
+Modular: the UI shell and registry), so both run at once. The milestone table stays as
+the record of scope; the tracks are how it gets built.
+
+- **Moat track** — the Office host sequence (M4): domain layer with a fake backend →
+  Rust window hosting → Word docked → COM bridge + agent tools → Excel. What no
+  competitor can copy quickly.
+- **Modular track** — M5 below, reordered so the *seam* comes first. What the product
+  feels like every day.
+
+**Why the registry goes first, before any other panel.** Every capability still queued —
+the Office host panel, the Mission Control board, the validation review panel, the
+objective strip — is a panel plus commands plus shortcuts. Built today, each one edits
+`App.tsx` by hand: six more central edits, six more merge conflicts between parallel
+lanes, and "modular" stays a slogan. Built after the registry, each one *registers
+itself* and touches no shared file. The registry is therefore not a feature but a
+throughput decision: it is what lets several lanes run without colliding, and it is the
+seam a user-authored plugin later plugs into. One PR now, paid back six times.
+
+### M5 — Modular & Parallel (the instrument feel, then the fleet)
+
+Ordered by what unblocks what.
+
+1. **Tool registry** (listed in M4, built first here): a typed registry where a
+   capability declares its panel, its commands, its default shortcuts and its
+   agent-facing tools in one place. `App.tsx` stops naming panels. Exit criterion: a
+   new panel can be added without editing any file that another lane is likely to touch.
+2. **Layout system** — the "work full screen" gap. dockview already supports far more
+   than we use: panel **maximize / focus mode**, floating and popped-out panels, and
+   full serialization. Add named, savable layouts ("review", "writing", "three
+   agents") switchable from the QuickBar and from `shortcuts.md`, plus **layout
+   persistence across restarts** — today every reload throws your arrangement away,
+   which is the single most anti-premium behaviour left in the app.
+3. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: bind a
+   layout, a registered tool, a workspace jump, or a saved agent objective to a chord.
+   The file becomes the user's own control surface over everything the registry knows.
+4. **Workspace switcher** — the workspace is currently whatever directory the server
+   was launched from. Switch projects from inside the app (recent list, QuickBar,
+   `shortcuts.md`), with per-workspace layout and session history. Supersedes the
+   first-run picker in the OSS bar item 3.
+5. **Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
+   dirty-slot `needs_review` protection, per-slot watchers), multi-root file/terminal
+   access through a root registry (path jail preserved per root), worktree-bound agent
+   sessions. Parallel projects that cannot step on each other.
+6. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
+   (status, current activity, cost), inline permission chips answerable from the board;
+   orchestrator session kind with a mission-control MCP toolset
+   (spawn/list/read/send/wait/stop workers), worker budget + cost ceiling,
+   escalate-to-board permission policy (never auto-allow shell).
+7. **Security hardening pulled forward** (OSS bar item 1): per-launch auth token
+   injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
+   access and a workspace switcher all widen the unauthenticated localhost surface
+   unacceptably.
+
+**The endgame this points at** (M7+, stated here so the seam is built for it): once
+capabilities register themselves, a *user* can add one. A documented tool contract plus
+the existing `.workbench/` conventions make user-authored panels and tools possible
+without forking — the difference between a fixed app and an instrument.
 
 ### M6 — Proof (validation + objectives)
 
@@ -294,3 +345,10 @@ Build for real external users, not just the author. Consequences, tracked as wor
   (3) End-to-end reproduction before a bug fix → `CLAUDE.md` standard. (4) Skill vetting
   bar for the bundle → `CLAUDE.md` standard + M4 carryover. See Decisions log for the
   measurements behind (1) and (4).
+
+- 2026-08-05 — **Modularity is the plan, not a polish item** (user): after using the
+  app, the gaps named as "we don't have it" — fixed layout with no full-screen/focus
+  mode, no layout persistence, panels hardcoded in `App.tsx`, no workspace switching —
+  are the difference between an app and an instrument, and belong in the plan rather
+  than a later design pass. → M5 reordered as the **Modular track**, run in parallel
+  with the Office moat track, registry first.
