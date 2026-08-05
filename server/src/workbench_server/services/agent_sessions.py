@@ -557,9 +557,23 @@ class SessionManager:
     def sessions(self) -> dict[str, AgentSession]:
         return self._sessions
 
+    @property
+    def max_concurrent(self) -> int:
+        """The ceiling ``create`` enforces (``WORKBENCH_MAX_CONCURRENT_SESSIONS``)."""
+        return self._max
+
+    def active_count(self) -> int:
+        """Sessions counted against that ceiling.
+
+        The rule is *working*, not *open*: an idle session costs nothing, so it
+        does not hold a slot. One definition, read by ``create`` below and by
+        ``GET /api/agents/limits`` — the UI greys "New agent session" off this
+        number, and two definitions would grey it at the wrong moment.
+        """
+        return sum(1 for s in self._sessions.values() if s.state != "idle")
+
     def create(self, folder_relative: str, resume_session_id: str | None = None) -> AgentSession:
-        live = sum(1 for s in self._sessions.values() if s.state != "idle")
-        if live >= self._max:
+        if self.active_count() >= self._max:
             raise TooManySessionsError(self._max)
         folder = (self._root / folder_relative).resolve()
         if folder != self._root and self._root not in folder.parents:

@@ -12,8 +12,9 @@
  * separator is only safe while no tool id contains it.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { SessionLimits } from "./types";
 import {
   cyclePane,
   oppositeDirection,
@@ -43,12 +44,14 @@ vi.mock("./monaco", () => ({
 }));
 
 /** A store with nothing in it — the state a fresh workspace is in, and the one
- * the picker still has to have rows for. */
+ * the picker still has to have rows for. Mutable: the session ceiling is a
+ * *number the server states*, so the rows it changes are asserted by moving it. */
 const emptyState = {
   openFiles: [],
   folders: [],
   terminals: [],
   activePath: null,
+  sessionLimits: null as SessionLimits | null,
   nextTerminalPaneKey: () => "1",
   createSessionIn: () => Promise.resolve(null),
 };
@@ -249,6 +252,39 @@ describe("the picker's rows, against the registry the app ships", () => {
   it("gives a singleton no instance key", async () => {
     const files = paneInstanceOptions(TOOLS).find((option) => option.toolId === "files");
     expect(await files?.key()).toBeNull();
+  });
+
+  // The ceiling is discovered *before* the gesture or not at all: picking the
+  // row spends a split on a round trip the server refuses, and `placeChoice`
+  // then abandons the split with only a toast to explain it.
+  describe("the agent's concurrent-session ceiling", () => {
+    const newSessionRow = (): { detail?: string; disabled?: boolean } | undefined =>
+      paneInstanceOptions(TOOLS).find((option) => option.id === "agent.new");
+
+    afterEach(() => {
+      emptyState.sessionLimits = null;
+    });
+
+    it("offers the row while a slot is free", () => {
+      emptyState.sessionLimits = { max_concurrent: 4, active: 3 };
+      expect(newSessionRow()?.disabled).toBe(false);
+    });
+
+    it("greys it at the ceiling, and says the cap and the setting", () => {
+      emptyState.sessionLimits = { max_concurrent: 4, active: 4 };
+      const row = newSessionRow();
+      expect(row?.disabled).toBe(true);
+      expect(row?.detail).toContain("4 of 4");
+      expect(row?.detail).toContain("WORKBENCH_MAX_CONCURRENT_SESSIONS");
+    });
+
+    // No numbers yet is not "you are at the limit": the listing has not landed,
+    // and refusing a session the server would have granted is the worse error.
+    it("predicts nothing before the first listing lands", () => {
+      expect(emptyState.sessionLimits).toBeNull();
+      expect(newSessionRow()?.disabled).toBe(false);
+      expect(newSessionRow()?.detail).toBe("workspace root");
+    });
   });
 
   it("names a pane from its id, falling back to something readable", () => {

@@ -479,6 +479,14 @@ export interface SessionStatusEvent {
   state: SessionState;
 }
 
+/** The concurrency ceiling and how close the workspace is to it. The count is
+ * sessions *working*, not sessions open — the server's own rule, served rather
+ * than guessed here (see `models/agents.py`). */
+export interface SessionLimits {
+  max_concurrent: number;
+  active: number;
+}
+
 export interface CreateSessionRequest {
   folder: string;
   resume_session_id?: string | null;

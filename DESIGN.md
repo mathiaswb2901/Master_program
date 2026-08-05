@@ -314,6 +314,13 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
   ranked *within* themselves and never reordered against each other, because in a pick
   the section names are the vocabulary. `Esc` reads **cancel**, not close: the gesture
   that opened it is abandoned. There is no second overlay language in this app.
+- **A row a pick cannot honour is shown, not hidden**: `--text-disabled` on both title
+  and detail, on a real `disabled` button so the arrows skip it and a screen reader says
+  so, and the **detail carries the reason** — the ceiling and the setting that raises it
+  ("4 of 4 sessions busy — raise `WORKBENCH_MAX_CONCURRENT_SESSIONS`"). It keeps its
+  place in its section: a row that vanishes answers "where did *New agent session* go?"
+  with silence, and a row that is offered and then refused spends the whole gesture
+  before saying so. Never a dead button (CLAUDE.md, panes).
 - Keycap hints: 11px mono on `--surface-elevated`, 1px `--border-default`,
   `--radius-xs`, padding 1px 5px.
 - Motion: fade + scale 0.98→1 in 140ms `--ease-standard`; exit 100ms fade.

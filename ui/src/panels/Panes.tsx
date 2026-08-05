@@ -296,6 +296,7 @@ function pickerRows(referenceId: string, direction: SplitDirection): QuickPickRo
     title: choice.title,
     ...(choice.detail !== undefined ? { detail: choice.detail } : {}),
     category: choice.category,
+    ...(choice.disabled === true ? { disabled: true } : {}),
     run: () => void placeChoice(choice, referenceId, direction),
   }));
 }

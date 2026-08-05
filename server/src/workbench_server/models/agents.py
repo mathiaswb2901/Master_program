@@ -38,6 +38,19 @@ class SessionStatusEvent(BaseModel):
     state: SessionState
 
 
+class SessionLimits(BaseModel):
+    """The concurrency ceiling, and how close this workspace is to it.
+
+    Served rather than re-derived in the UI on purpose: what the ceiling counts
+    is sessions that are *working*, not sessions that are open, and a client
+    guessing that rule from the listing would grey a button the server would
+    have honoured. ``max_concurrent`` is ``WORKBENCH_MAX_CONCURRENT_SESSIONS``.
+    """
+
+    max_concurrent: int
+    active: int
+
+
 class CreateSessionRequest(BaseModel):
     folder: str = ""  # workspace-relative
     resume_session_id: str | None = None

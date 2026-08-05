@@ -59,6 +59,33 @@ function recentSessions(): SessionInfo[] {
 const liveSessions = (): SessionInfo[] => recentSessions().filter((session) => session.live);
 
 /**
+ * Whether a new session would be refused, and what the picker says instead.
+ *
+ * The server caps concurrent sessions (`WORKBENCH_MAX_CONCURRENT_SESSIONS`,
+ * enforced in `services/agent_sessions.py`) and counts sessions *working*, not
+ * sessions open — so the numbers are read from `/api/agents/limits` rather than
+ * counted off the listing, which would grey the row at the wrong moment.
+ *
+ * Without this the ceiling is discovered *after* the split gesture, a round
+ * trip and a generic "New session failed" toast — and the split is abandoned
+ * with nothing on screen having mentioned a limit. Before the first listing
+ * lands there are no numbers and the row behaves as it always did; the 429
+ * toast is still the backstop for a count that moved under an in-flight split.
+ */
+function newSessionRow(): { detail: string; disabled: boolean } {
+  const limits = useStore.getState().sessionLimits;
+  if (limits === null || limits.active < limits.max_concurrent) {
+    return { detail: activeFolder() || "workspace root", disabled: false };
+  }
+  return {
+    detail:
+      `${String(limits.active)} of ${String(limits.max_concurrent)} sessions busy — ` +
+      "raise WORKBENCH_MAX_CONCURRENT_SESSIONS",
+    disabled: true,
+  };
+}
+
+/**
  * The Agent tool renders two ways, decided by the pane's id (`../panes.ts`).
  *
  *  - `agent` — the default pane: the session list plus whichever session the
@@ -100,17 +127,29 @@ function SessionPane({ sessionId, api }: { sessionId: string; api: DockviewPanel
   // would put a "stopped" note over a conversation that is about to appear.
   const loaded = useStore((s) => s.folders.length > 0);
 
+  // Both effects wait for `live`, and that gate is the whole discipline:
+  // `attachSession` opens a socket to `/ws/agent/<id>`, and a restored pane is
+  // a *claim* about a session, not evidence of one. A layout saved before the
+  // server restarted names an id `SessionManager` no longer has (its sessions
+  // are in memory only) — the server answers 4404 and the socket would retry
+  // for as long as the tab stayed open, once per dead pane, behind a note
+  // correctly saying the session is gone. `openSession`/`openLiveSession`/
+  // `openSessionById` have always looked the session up before connecting;
+  // this is a pane doing the same. (`ws.ts` refuses to retry a 4404 too — belt
+  // and braces, for a session that dies while its pane is open.)
   useEffect(() => {
+    if (!live) return;
     useStore.getState().attachSession(sessionId);
-  }, [sessionId]);
+  }, [live, sessionId]);
 
   useEffect(() => {
+    if (!live) return;
     if (api.isActive) useStore.getState().focusSession(sessionId);
     const subscription = api.onDidActiveChange((event) => {
       if (event.isActive) useStore.getState().focusSession(sessionId);
     });
     return () => subscription.dispose();
-  }, [api, sessionId]);
+  }, [api, live, sessionId]);
 
   // The tab follows the conversation: a session is "new session" until its
   // first message names it, and a pane still calling it that is a pane you
@@ -147,6 +186,11 @@ function AgentBrowser() {
   const folders = useStore((s) => s.folders);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const hasTranscript = useStore((s) => s.transcriptView !== null);
+  // Same ceiling, same answer as the pane picker's row — a button that is live
+  // here and greyed there would be two accounts of one limit.
+  const full = useStore(
+    (s) => s.sessionLimits !== null && s.sessionLimits.active >= s.sessionLimits.max_concurrent,
+  );
 
   const newSession = (): void => {
     void useStore.getState().createSessionIn(activeFolder());
@@ -157,7 +201,13 @@ function AgentBrowser() {
       <div className="wb-sessions">
         <div className="wb-sessions-header">
           <span className="u-label">Sessions</span>
-          <button type="button" className="wb-btn wb-btn-sm wb-btn-outline" onClick={newSession}>
+          <button
+            type="button"
+            className="wb-btn wb-btn-sm wb-btn-outline"
+            disabled={full}
+            title={full ? newSessionRow().detail : undefined}
+            onClick={newSession}
+          >
             New session
           </button>
         </div>
@@ -338,8 +388,8 @@ export const agentTool: WorkbenchTool = {
         {
           id: "agent.new",
           title: "New agent session",
-          detail: activeFolder() || "workspace root",
           category: "Agent",
+          ...newSessionRow(),
           // Creates the session first and answers with its id, so the pane is
           // born bound to it — an unbound pane would have nothing a saved
           // layout could bring back.

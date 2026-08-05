@@ -63,6 +63,15 @@ export interface PaneInstanceOption {
   detail?: string;
   /** Section header in the picker (DESIGN.md §6.5 categories). */
   category: string;
+  /**
+   * Offered but not choosable, with `detail` saying why.
+   *
+   * For a limit the tool knows about *before* the gesture — the agent's
+   * concurrent-session ceiling is the shipped one. The row stays where it is:
+   * removing it answers "where did New agent session go?" with nothing, and
+   * letting it be picked spends a split on a round trip that will be refused.
+   */
+  disabled?: boolean;
   key: () => string | null | Promise<string | null>;
 }
 

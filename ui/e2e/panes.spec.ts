@@ -288,3 +288,73 @@ test("picking a tool that already has a pane moves it, never clones it", async (
   expect(await panels(page)).toEqual(DEFAULT_PANELS);
   await expectTerminal(page, "PS ", 60_000);
 });
+
+/**
+ * The other end of "a saved layout brings back *those* conversations": what
+ * happens when it cannot.
+ *
+ * `SessionManager` keeps its sessions in a plain dict in memory, so every
+ * session id in `.workbench/layouts.json` is unknown to the next server
+ * process. The pane still restores — deliberately, since a key that has not
+ * loaded *yet* must not be dropped — and says the session is not running.
+ *
+ * What it must not do is open a socket anyway. `/ws/agent/{unknown}` is closed
+ * by the server with 4404, and a `ReconnectingSocket` that treated that as a
+ * blip would retry every ten seconds, per dead pane, for as long as the tab
+ * stayed open: a background reconnect storm behind a note correctly saying the
+ * session is gone. Restore a four-agent layout after a restart and that is four
+ * of them, and nothing on screen says so.
+ *
+ * The repro is the real thing rather than a mock: build a pane bound to a live
+ * session, let the debounced autosave write it, then rewrite that id on disk to
+ * one the server has never issued — which is byte-for-byte what a restart
+ * leaves behind — and reload.
+ */
+test("a pane restored onto a session the server no longer has stays quiet", async ({ page }) => {
+  await openApp(page);
+
+  await split(page, "Alt+S", "Split this pane to the right", "New agent session");
+  await expect
+    .poll(
+      async () => (await persistedPaneIds(page)).filter((id) => id.startsWith("agent#")).length,
+      { timeout: 10_000 },
+    )
+    .toBe(1);
+  const liveId = ((await persistedPaneIds(page)).find((id) => id.startsWith("agent#")) ?? "").slice(
+    "agent#".length,
+  );
+  expect(liveId, "a pane bound to a session id").not.toBe("");
+
+  // 12 hex chars, the shape `SessionManager.create` mints — and not one it has.
+  const dead = "dead0cafe911";
+  await test.step("the layout on disk names a session this server never had", async () => {
+    const before = (await (await page.request.get("/api/layouts")).json()) as LayoutsResponse;
+    const rewritten = JSON.parse(
+      JSON.stringify(before.state).split(liveId).join(dead),
+    ) as LayoutsResponse["state"];
+    await page.request.put("/api/layouts", { data: rewritten });
+  });
+
+  const sockets: string[] = [];
+  page.on("websocket", (ws) => sockets.push(ws.url()));
+
+  await page.reload();
+  await workspaceReady(page);
+
+  await test.step("the pane comes back, and says the session is gone", async () => {
+    await expect.poll(() => persistedPaneIds(page), { timeout: 10_000 }).toContain(`agent#${dead}`);
+    await expect(page.getByText("This session is not running any more.")).toBeVisible();
+  });
+
+  await test.step("and it is not reconnecting behind that note", async () => {
+    // The one deliberate wait in this suite, because the assertion is an
+    // *absence*. Unfixed, the socket opens on mount and retries at 0.5 s, 1 s
+    // and 2 s (`ws.ts` backoff) — four attempts inside this window, the first
+    // of them already made before the note above could render.
+    await page.waitForTimeout(3_000);
+    expect(sockets.filter((url) => url.includes(`/ws/agent/${dead}`))).toEqual([]);
+  });
+
+  await runCommand(page, "Switch to the Default layout");
+  expect(await panels(page)).toEqual(DEFAULT_PANELS);
+});

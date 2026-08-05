@@ -57,7 +57,7 @@ command is one a user would reach for without looking.
 | Field | Effect |
 |---|---|
 | `panel` | A dockview panel. `defaultLocation.area` is `center` \| `left` \| `right` \| `bottom` (`size` = initial width, or height for `bottom`). `openByDefault: false` keeps it out of the startup layout until a command opens it — and gives its tab a close button, since that tab is its only way back. `singleton: false` allows more than one pane of it — see **Plural tools** below. `badge` is one component rendered after the tab title (dot-only, DESIGN.md §6.4). |
-| `panel.instances` | What a *second* pane of a plural tool is bound to: `options()` (the rows the pane picker offers) and `titleFor(key)` (what such a pane calls itself). See **Plural tools**. |
+| `panel.instances` | What a *second* pane of a plural tool is bound to: `options()` (the rows the pane picker offers) and `titleFor(key)` (what such a pane calls itself). A row may set `disabled: true` with the reason in `detail` — a cap the tool knows about before the gesture. See **Plural tools**. |
 | `groupActions` | One control at the right end of every pane's tab strip, for a tool that acts on panes rather than living in one. The pane system's split glyphs are the only one (DESIGN.md §6.11); there is room for one. |
 | `documentView` | Renders one `OpenFile` kind inside the editor area (`kind`, `component`, `hostClassName`, `keepMounted`). This is how Office panels attach — the editor area asks the registry, not a list of extensions. |
 | `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row; `category` puts it in its own QuickBar section. |
@@ -161,6 +161,18 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
 - **Focus is the selector.** The focused pane is the one the app means: bind on
   `props.api.onDidActiveChange` and make your pane's session/file/terminal the active one
   there. That is what let `Chat.tsx` be mounted four times without a single change to it.
+  Gate that binding — and anything it acquires — on the resource being *confirmed* rather
+  than merely named: a restored pane is a claim, and `agent#<id>` after a restart names a
+  session the server no longer has. The Agent pane waits for the session to appear live
+  in the listing before it opens a socket, because a socket that reconnects behind a
+  correct "this session is gone" note is a reconnect storm nobody can see.
+- **A limit you know before the gesture belongs on the row.** `disabled: true` on an
+  instance option greys it in the picker with `detail` as the reason, and the keyboard
+  skips it (DESIGN.md §6.5). The agent's `New agent session` uses it: the server caps
+  concurrent sessions, so offering the row and refusing after the round trip would spend
+  the whole split before mentioning a limit. Read the cap from the server
+  (`GET /api/agents/limits`) rather than re-deriving it — that ceiling counts sessions
+  *working*, not sessions open, and a client that guessed would grey at the wrong moment.
 
 ## Agent-facing tools
 

@@ -78,6 +78,18 @@
   border-left-color: var(--accent);
 }
 
+/* A row that is shown so its reason can be read, not chosen (§6.5). It keeps
+   its place in the section — moving or hiding it would answer "where did New
+   agent session go?" with silence. */
+.wb-qb-row:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.wb-qb-row:disabled .wb-qb-row-detail {
+  color: var(--text-disabled);
+}
+
 .wb-qb-row-title {
   flex: none;
   max-width: 60%;

@@ -21,6 +21,7 @@ import type {
   PlanVerdict,
   ProvenanceEntry,
   SessionInfo,
+  SessionLimits,
   SessionState,
   SessionStatusEvent,
   ShortcutEntry,
@@ -156,6 +157,11 @@ export interface QuickPickRow {
   title: string;
   detail?: string;
   category?: string;
+  /** Shown, but not choosable — a row whose reason for existing is that the
+   * user can see *why* it is unavailable. Put that reason in `detail`; the
+   * QuickBar renders it on a real `disabled` button, so the keyboard skips it
+   * and a screen reader announces it. */
+  disabled?: boolean;
   run: () => void;
 }
 
@@ -183,6 +189,9 @@ interface WorkbenchStore {
   folders: FolderSessions[];
   sessionStates: Record<string, SessionState>;
   sessionFlags: Record<string, SessionFlags>;
+  /** Server-stated concurrency ceiling, refreshed with the listing. null until
+   * the first refresh lands (or if it failed) — treat that as "no prediction". */
+  sessionLimits: SessionLimits | null;
   activeSessionId: string | null;
   transcriptView: { session: SessionInfo; messages: TranscriptMessage[] } | null;
   chats: Record<string, ChatState>;
@@ -443,6 +452,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     folders: [],
     sessionStates: {},
     sessionFlags: {},
+    sessionLimits: null,
     activeSessionId: null,
     transcriptView: null,
     chats: {},
@@ -1102,7 +1112,16 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
     refreshSessions: async () => {
       try {
-        const folders = await api.getSessions();
+        // Fetched with the listing so the two never disagree: the pane picker
+        // greys "New agent session" off these numbers, and a stale count would
+        // grey it while the server was still willing (or offer it while it was
+        // not). A failure here must not fail the listing — the picker simply
+        // stops predicting and the 429 toast explains it after the fact.
+        const [folders, limits] = await Promise.all([
+          api.getSessions(),
+          api.getSessionLimits().catch(() => null),
+        ]);
+        if (limits !== null) set({ sessionLimits: limits });
         for (const group of folders) {
           group.sessions.sort((a, b) => b.updated_at - a.updated_at);
         }
@@ -1193,7 +1212,22 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         return info.session_id;
       } catch (err) {
         console.error("session create failed", err);
-        get().pushToast("error", `New session failed: ${errorDetail(err)}`);
+        // The ceiling reads as a ceiling, not as an unexplained failure: 429 is
+        // the only refusal here a user can act on, and what they do about it is
+        // finish a session or raise the setting. The picker greys the row off
+        // `sessionLimits` before this, but the count can move under a split
+        // that was already in flight — so this stays the honest last word.
+        if (err instanceof api.ApiError && err.status === 429) {
+          const max = get().sessionLimits?.max_concurrent ?? null;
+          get().pushToast(
+            "warn",
+            `All ${max === null ? "" : String(max) + " "}session slots are busy. ` +
+              "Finish one, or raise WORKBENCH_MAX_CONCURRENT_SESSIONS.",
+          );
+        } else {
+          get().pushToast("error", `New session failed: ${errorDetail(err)}`);
+        }
+        void get().refreshSessions();
         return null;
       }
     },
@@ -1566,6 +1600,10 @@ function ensureAgentSocket(sessionId: string): ReconnectingSocket {
     onMessage: (data) => {
       useStore.getState().handleAgentMessage(sessionId, data as AgentServerMessage);
     },
+    // The server does not have this session (4404 — see `ws.ts`). Drop the
+    // entry rather than caching a socket that will never carry a frame again,
+    // so nothing later mistakes it for a live one.
+    onGone: () => agentSockets.delete(sessionId),
   });
   agentSockets.set(sessionId, socket);
   return socket;

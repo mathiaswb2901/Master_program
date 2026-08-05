@@ -202,6 +202,20 @@ mean, the file `Ctrl+S` saves, and the shell a `shortcuts.md` `shell` entry type
 into. That is why `Chat.tsx` could be mounted four times without a change — each
 pane makes its own session the active one when it takes focus.
 
+**A restored pane is a claim, and it acquires nothing until the claim is
+checked.** A layout outlives the resources it names — `SessionManager` holds its
+sessions in memory, so every `agent#<id>` in a saved layout is unknown to the
+next server process — and the pane that renders "this session is not running any
+more" must not be opening a socket behind that note. So the Agent pane waits for
+the session to appear *live* in the listing before it attaches, the discipline
+`openSession`/`openLiveSession` already followed, and `ReconnectingSocket`
+(`ui/src/ws.ts`) stops retrying when the server answers a close code in the
+4400s — a refusal, as against the dropped connection it exists to survive. The
+same rule in the other direction: a ceiling the tool can know *before* the
+gesture belongs on the picker row, so `New agent session` reads its cap from
+`GET /api/agents/limits` and greys itself with the number and the setting rather
+than spending a split on a round trip the server refuses.
+
 **Agent-facing tools** carry the ergonomics budget on both sides.
 `services/agent_tools.py` is the server registry the SDK actually reads: name,
 model-facing description, input schema, and a **required** `output_format`, so

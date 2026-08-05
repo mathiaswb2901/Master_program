@@ -569,6 +569,52 @@ async def test_concurrent_session_cap(tmp_path: Path) -> None:
         manager.create("")
 
 
+async def test_active_count_is_the_rule_create_enforces(tmp_path: Path) -> None:
+    """The UI greys "New agent session" off this number, so it must be the same
+    one ``create`` refuses on: sessions *working*, never sessions open."""
+    manager = SessionManager(tmp_path, make_factory([]), max_sessions=2)
+    assert manager.max_concurrent == 2
+    a = manager.create("")
+    b = manager.create("")
+    assert manager.active_count() == 0, "open but idle sessions hold no slot"
+
+    a.state = "working"
+    assert manager.active_count() == 1
+    b.state = "needs_attention"
+    assert manager.active_count() == 2
+
+    with pytest.raises(TooManySessionsError):
+        manager.create("")
+
+    # …and a slot freed by a session going idle is a slot the picker offers again.
+    a.state = "idle"
+    assert manager.active_count() == 1
+    manager.create("")
+
+
+def test_limits_endpoint_reports_cap_and_refusal(settings: Settings, tmp_path: Path) -> None:
+    """`GET /api/agents/limits` is what the picker predicts from, and 429 is what
+    it predicts — the two must agree at the boundary."""
+    app = create_app(settings)
+    app.state.session_manager = SessionManager(tmp_path, make_factory([]), max_sessions=1)
+
+    with TestClient(app) as client:
+        assert client.get("/api/agents/limits").json() == {"max_concurrent": 1, "active": 0}
+
+        created = client.post("/api/agents/sessions", json={"folder": ""})
+        assert created.status_code == 200
+        # Still idle: a session that is merely open has not spent the slot.
+        assert client.get("/api/agents/limits").json() == {"max_concurrent": 1, "active": 0}
+
+        manager: SessionManager = app.state.session_manager
+        next(iter(manager.sessions.values())).state = "working"
+        assert client.get("/api/agents/limits").json() == {"max_concurrent": 1, "active": 1}
+
+        refused = client.post("/api/agents/sessions", json={"folder": ""})
+        assert refused.status_code == 429
+        assert "limit" in refused.json()["detail"]
+
+
 async def test_folder_jail(tmp_path: Path) -> None:
     manager = SessionManager(tmp_path, make_factory([]), max_sessions=4)
     with pytest.raises(ValueError, match="escapes"):

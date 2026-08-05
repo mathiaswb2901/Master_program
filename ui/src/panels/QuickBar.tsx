@@ -43,6 +43,9 @@ interface Row {
   chord?: string;
   /** Section this row belongs to; a header is drawn where it changes. */
   category?: string;
+  /** Visible but not choosable — the row is here so the reason in `detail` is
+   * (DESIGN.md §6.5). Only a `quickPick` supplies these. */
+  disabled?: boolean;
   run: () => void;
 }
 
@@ -115,6 +118,7 @@ export function QuickBar() {
         title: row.title,
         detail: row.detail ?? "",
         ...(row.category !== undefined ? { category: row.category } : {}),
+        ...(row.disabled === true ? { disabled: true } : {}),
         run: row.run,
       }));
   } else if (actionsMode) {
@@ -153,19 +157,35 @@ export function QuickBar() {
         run: () => void useStore.getState().openFile(path),
       }));
   }
-  const selIdx = Math.min(sel, Math.max(0, rows.length - 1));
+  // The selection only ever lands on a row that can be run: a disabled row is
+  // there to be *read* (why "New agent session" is unavailable), and arrowing
+  // onto it would leave Enter doing nothing with no explanation.
+  const nextRunnable = (from: number, step: number): number => {
+    for (let i = from + step; i >= 0 && i < rows.length; i += step) {
+      if (rows[i]?.disabled !== true) return i;
+    }
+    return from;
+  };
+  /** Nearest runnable row: forwards first, then backwards. Answers `from` when
+   * every row is disabled, which the Enter guard below then declines. */
+  const runnableFrom = (from: number): number => {
+    const ahead = nextRunnable(from, 1);
+    return ahead === from ? nextRunnable(from, -1) : ahead;
+  };
+  const clamped = Math.min(sel, Math.max(0, rows.length - 1));
+  const selIdx = rows[clamped]?.disabled === true ? runnableFrom(clamped) : clamped;
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>): void => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSel(Math.min(selIdx + 1, rows.length - 1));
+      setSel(nextRunnable(selIdx, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSel(Math.max(selIdx - 1, 0));
+      setSel(nextRunnable(selIdx, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       const row = rows[selIdx];
-      if (row) {
+      if (row && row.disabled !== true) {
         row.run();
         close();
       }
@@ -208,13 +228,16 @@ export function QuickBar() {
               )}
               <button
                 type="button"
+                disabled={row.disabled === true}
                 ref={i === selIdx ? selRef : undefined}
                 className={"wb-qb-row" + (i === selIdx ? " is-selected" : "")}
                 onClick={() => {
                   row.run();
                   close();
                 }}
-                onMouseMove={() => setSel(i)}
+                onMouseMove={() => {
+                  if (row.disabled !== true) setSel(i);
+                }}
               >
                 <span className="wb-qb-row-title u-truncate">{row.title}</span>
                 <span className="wb-qb-row-detail u-truncate">{row.detail}</span>
