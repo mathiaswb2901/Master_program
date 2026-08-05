@@ -112,7 +112,10 @@ the moat.
   principle 4 this needs no second Office registration and no new panel: Word already
   lands as a `documentView` claiming kind `office`, so *Word beside Excel* is editor
   plurality (two `editors#<path>` panes) plus two concurrent hosts, and "full screen" is
-  the `Alt+M` that already ships. The server is already instance-shaped for it —
+  the `Alt+M` that already ships. (That same `Alt+M` — focus mode, M5 item 2, **done** —
+  is the whole answer to the owner's separate ask, *"if I want only code over my full
+  screen I should have that"*: it maximizes **any** pane, code or otherwise, and needs
+  nothing from Office or from panes.) The server is already instance-shaped for it —
   `OfficeHostInfo.host_id`, one host per document, a `rect: PanelRect` per host,
   `POST /api/office/host/{id}/bounds`, `OfficeHostEvent` on the shared bus,
   `GET /api/office/hosts` replaying to a reconnecting client. What is genuinely new is
@@ -551,9 +554,10 @@ infrastructure read as nothing produced, so the order below front-loads visible 
 change without cutting a gate. **0.** Land the two shape-changing lanes first:
 `feel/motion-foundation` (small, complete, owns `dockview.css` + `Layouts.tsx`), then
 **item 9 panes** rebased onto it — the single most visible change on this list, and it
-costs zero new scope because it is already in flight. **1.** Write product principle 4
-down *in that same PR*, plus the `CLAUDE.md` standard: free there, expensive anywhere else
-while five lanes hold these files. **2.** **Item 11 usage meters** — shortest path from
+costs zero new scope because it is already in flight. **1.** Product principle 4 and the
+`CLAUDE.md` "Panes are instances" standard **landed with this plan revision**, ahead of
+item 9's code, so the panes PR inherits them and must not re-touch those sections — five
+lanes hold these files and a second edit is pure conflict. **2.** **Item 11 usage meters** — shortest path from
 nothing to visible, and independent of panes, the watcher rewrite and Office, so it can
 run in parallel with step 1. **3.** **Item 10 activity** — the first new panel that panes
 makes worth having (you want to split it beside your editor and maximize it), and the feed
