@@ -5,6 +5,7 @@ import { create } from "zustand";
 import * as api from "./api";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { isOfficePath, preloadDocsApi } from "./office";
+import { cancelShellClose, closeShellWindow } from "./shell";
 import { promptInsertText, shellInsertText } from "./shortcuts";
 import { terminalHandle } from "./terminalInput";
 import { THEME_STORAGE_KEY, type Theme } from "./theme";
@@ -159,6 +160,9 @@ interface WorkbenchStore {
   toasts: Toast[];
   /** Path awaiting the "close dirty file?" decision; renders the confirm modal. */
   pendingClosePath: string | null;
+  /** True while the native shell's window close is held for the same decision,
+   * across every dirty buffer at once. Always false in a browser tab. */
+  pendingShellClose: boolean;
   /** GET /api/office/status result, fetched once at startup (retried on
    * office open if that failed); when enabled, api.js is preloaded so the
    * first office tab doesn't pay the script-load latency. */
@@ -184,6 +188,9 @@ interface WorkbenchStore {
   /** Guarded close: dirty buffers get a confirm modal instead of silent discard. */
   requestCloseFile: (path: string) => void;
   resolvePendingClose: (action: "save" | "discard" | "cancel") => Promise<void>;
+  /** The shell asked to close the window: prompt if anything is unsaved. */
+  requestShellClose: () => void;
+  resolveShellClose: (action: "save" | "discard" | "cancel") => Promise<void>;
   closeFile: (path: string) => void;
   createEntry: (path: string, kind: "file" | "dir") => Promise<void>;
   renameEntry: (path: string, newPath: string) => Promise<void>;
@@ -314,6 +321,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     activeTerminalId: 1,
     toasts: [],
     pendingClosePath: null,
+    pendingShellClose: false,
     officeStatus: null,
     shortcuts: [],
     shortcutProblems: [],
@@ -473,6 +481,42 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         if (file !== undefined && file.dirty) return;
       }
       get().closeFile(path);
+    },
+
+    requestShellClose: () => {
+      // Nothing to lose: let the window go without a prompt.
+      if (!get().openFiles.some((f) => f.dirty)) {
+        void closeShellWindow();
+        return;
+      }
+      set({ pendingShellClose: true });
+    },
+
+    resolveShellClose: async (action) => {
+      if (action === "cancel") {
+        set({ pendingShellClose: false });
+        void cancelShellClose();
+        return;
+      }
+      if (action === "save") {
+        for (const file of get().openFiles.filter((f) => f.dirty)) {
+          await get().saveFile(file.path);
+        }
+        const failed = get().openFiles.filter((f) => f.dirty);
+        if (failed.length > 0) {
+          // A save that did not land (the conflict bar says why) must not take
+          // the window down with it — that is the loss this prompt exists for.
+          set({ pendingShellClose: false });
+          void cancelShellClose();
+          get().pushToast(
+            "error",
+            `Not closing: ${failed.map((f) => f.name).join(", ")} could not be saved.`,
+          );
+          return;
+        }
+      }
+      set({ pendingShellClose: false });
+      await closeShellWindow();
     },
 
     closeFile: (path) => {

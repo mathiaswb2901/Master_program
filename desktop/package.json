@@ -1,0 +1,15 @@
+{
+  "name": "workbench-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tauri shell for Workbench: the native window the UI runs in.",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.1"
+  }
+}

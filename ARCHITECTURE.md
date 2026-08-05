@@ -4,7 +4,10 @@ One Python process, one webview window, one optional local Office engine.
 
 ```
 ┌───────────────────────────── Desktop window (Tauri) ─────────────────────────────┐
-│  React + dockview UI:  FileTree │ Monaco tabs │ Doc/Sheet/Slides │ Chat │ Term   │
+│  shell (desktop/src-tauri): window · backend supervision · close guard · title   │
+│ ┌─────────────────────────────── WebView2 ────────────────────────────────────┐  │
+│ │ React + dockview UI:  FileTree │ Monaco tabs │ Doc/Sheet/Slides │ Chat │ Term│  │
+│ └─────────────────────────────────────────────────────────────────────────────┘  │
 └──────────────┬────────────────────────────────────────────────────┬─────────────┘
                │ REST + WebSockets (localhost)                      │ iframe
 ┌──────────────▼──────────────────────────────┐      ┌──────────────▼─────────────┐
@@ -34,6 +37,47 @@ One Python process, one webview window, one optional local Office engine.
 5. **The Agent SDK is injected.** `services/agent_sessions.py` takes a client factory;
    the real one (`services/sdk_factory.py`) is the only module importing
    `claude_agent_sdk`. Tests script a fake client through the same seam.
+6. **The shell holds only what a browser tab cannot.** The UI runs unchanged in
+   a Vite tab and in the Tauri window; every native capability goes through
+   `ui/src/shell.ts`, which no-ops outside the shell. See below.
+
+## The desktop shell (`desktop/`)
+
+Not packaging polish — a **requirement**. Real Word/Excel/PowerPoint windows are
+reparented into panels (`SetParent`), and a browser tab has no HWND to parent
+them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns four things:
+
+| Concern | Why it cannot live in the UI |
+|---|---|
+| The native window | `dragDropEnabled: false` — an OS drag-drop handler over the whole window would fight the native children hosted there from PR 3 on |
+| Backend supervision (`backend.rs`) | Nothing in a webview can start or outlive a process |
+| Close guard | WebView2 ignores `beforeunload`, so a native close silently discarded dirty buffers |
+| Attention badge | `document.title` never reaches a native title bar or the taskbar |
+
+**Backend supervision.** One probe of `GET /api/health` decides: if a server is
+already listening the shell **attaches** — a developer's own `uv run
+workbench-server` keeps owning the workspace (its CWD *is* the workspace) and
+outlives the window. Otherwise the shell **spawns** one from the repo root with
+`CREATE_NO_WINDOW`, pipes its output into the shell log, and confines it to a
+Windows **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The job handle
+is held for the process lifetime and never closed, so the child dies when this
+process does — including a crash or a kill, where no shutdown code of ours would
+run. (Measured: a graceful-quit path left orphans; the job object did not.)
+Tauri creates the config's window after `setup` returns, so the spawn path
+*blocks* until health answers — otherwise the webview opens its sockets against
+a dead port, and while `/ws/events` reconnects, the terminal does not.
+Sidecars (`bundle.externalBin`, `tauri-plugin-shell`) are deliberately unused:
+documented orphan bugs, and no equivalent guarantee.
+
+**Close guard.** `CloseRequested` → `prevent_close()` → `workbench://close-requested`
+to the UI → the same confirm modal the editor tabs use, across every dirty
+buffer at once → `confirm_close` (or `cancel_close`) back over IPC. The guard is
+*armed by the UI* (`shell_ready`), never assumed: a webview that never ran our
+code closes normally instead of leaving a window that cannot be closed.
+
+**Both hosts, always.** `ui/src/shell.ts` is the only module importing
+`@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
+build never fetches the chunk and every call is inert in a tab.
 
 ## Module map (server/src/workbench_server/)
 
@@ -120,9 +164,9 @@ Word/Excel/PowerPoint, docked into Workbench panels via native window hosting
 (launch → find HWND by class `OpusApp`/`XLMAIN`/`PPTFrameClass` → `SetParent` into a
 host window + child styling; spike-proven). A COM automation bridge (pywin32) lets
 agents read/write the live open document instead of fighting file locks. This requires
-the Tauri shell — a browser tab cannot host native windows. The OnlyOffice integration
-below remains as preview, document diffing for review, and fallback when Office isn't
-installed.
+the Tauri shell — a browser tab cannot host native windows — which now exists (see
+above). The OnlyOffice integration below remains as preview, document diffing for
+review, and fallback when Office isn't installed.
 
 ### OnlyOffice (preview/diff/fallback)
 

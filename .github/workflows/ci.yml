@@ -86,10 +86,57 @@ jobs:
           path: ui/playwright-report
           retention-days: 7
 
+  # Does this PR touch the Tauri shell? A full Rust toolchain + tauri build is
+  # minutes of windows-latest, so the desktop job below is skipped when nothing
+  # under desktop/ changed. GitHub has no per-job `paths:` filter, hence this.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "desktop=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "$changed"
+          if echo "$changed" | grep -q '^desktop/'; then
+            echo "desktop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "desktop=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  desktop:
+    runs-on: windows-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.desktop == 'true' }}
+    defaults:
+      run:
+        working-directory: desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: Format check
+        run: cargo fmt --check
+      - name: Build
+        run: cargo build --locked
+      - name: Tests
+        run: cargo test --locked
+
   # The single check the master ruleset requires: green only when every job is green.
   quality-gate:
     runs-on: ubuntu-latest
-    needs: [server, ui, e2e]
+    needs: [changes, server, ui, e2e, desktop]
     if: always()
     steps:
       - name: Verify all jobs passed
@@ -97,7 +144,10 @@ jobs:
           results='${{ join(needs.*.result, ' ') }}'
           echo "job results: $results"
           for r in $results; do
-            if [ "$r" != "success" ]; then
+            # `skipped` is allowed for exactly one reason: `desktop` is
+            # path-filtered. server/ui/e2e/changes carry no `if:` and no
+            # `needs:`, so they can never be skipped — unreachable there.
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
               echo "a required job did not succeed"; exit 1
             fi
           done
