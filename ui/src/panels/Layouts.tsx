@@ -41,6 +41,7 @@ import {
   pruneLayout,
   type LayoutPreset,
 } from "../layouts";
+import { playDockMotion } from "../motion";
 import {
   applyPlacements,
   defaultLayout,
@@ -255,15 +256,42 @@ function applyPreset(dock: DockviewApi, preset: LayoutPreset): boolean {
 const matches = (a: string, b: string): boolean =>
   a.trim().toLowerCase() === b.trim().toLowerCase();
 
+/** Set while `switchToLayout` is rearranging, so the maximize listener does not
+ * also animate: a preset that ends maximized is one change to the window, and
+ * it gets one animation. */
+let switching = false;
+
+/**
+ * Replay the arrangement's arrival (DESIGN.md §5, `src/motion.ts`).
+ *
+ * Which of the two it is depends on where the window ended up, not on how it
+ * got there: a layout that fills the window with one panel *is* focus mode, and
+ * a user who cannot tell the difference should not be shown two.
+ */
+function playSwitchMotion(dock: DockviewApi): void {
+  playDockMotion(dock.hasMaximizedGroup() ? "focus" : "shift");
+}
+
 /** Switch to a layout by name — presets, the default, or one the user saved.
  * A name nobody has is a toast, never a broken window: this is reachable from
  * `shortcuts.md`, where the name is whatever the file happens to say. */
 export function switchToLayout(name: string): void {
   const dock = dockApiHandle();
   if (dock === null) return;
+  switching = true;
+  try {
+    switchWithin(dock, name);
+  } finally {
+    switching = false;
+  }
+}
+
+/** The body of `switchToLayout`, so every early return still clears the flag. */
+function switchWithin(dock: DockviewApi, name: string): void {
   if (matches(name, DEFAULT_LAYOUT_NAME)) {
     applyDefault(dock);
     useLayoutUi.setState({ current: null });
+    playSwitchMotion(dock);
     void persist();
     return;
   }
@@ -274,6 +302,7 @@ export function switchToLayout(name: string): void {
     // so there is nothing to relabel and nothing new to write.
     if (!applyPreset(dock, preset)) return;
     useLayoutUi.setState({ current: preset.name });
+    playSwitchMotion(dock);
     void persist();
     return;
   }
@@ -283,12 +312,15 @@ export function switchToLayout(name: string): void {
     return;
   }
   const outcome = applySerialized(dock, saved.state, `The "${saved.name}" layout`);
+  // Nothing was touched, so there is nothing to replay — animating here would
+  // be the window claiming it did something it declined to do.
   if (outcome === "unchanged") return;
   // `"default"` put the default arrangement on screen, which no saved name
   // describes — so the chip goes back to unnamed, exactly as `restore` does
   // for the same failure. Persisting `saved.name` over it would carry the
   // mislabelling to disk, where a reload would read it back as truth.
   useLayoutUi.setState({ current: outcome === "applied" ? saved.name : null });
+  playSwitchMotion(dock);
   void persist();
 }
 
@@ -388,6 +420,10 @@ function onDockReady(dock: DockviewApi | null): void {
     dock.onDidLayoutChange(() => scheduleSave()),
     dock.onDidMaximizedGroupChange(() => {
       useLayoutUi.setState({ maximized: dock.hasMaximizedGroup() });
+      // `persistenceArmed` doubles as "startup has settled": a window restored
+      // into focus mode has never been anything else, so there is no change to
+      // replay. `switching` is the other half — see `playSwitchMotion`.
+      if (persistenceArmed && !switching) playDockMotion("focus");
       scheduleSave();
     }),
   ];
