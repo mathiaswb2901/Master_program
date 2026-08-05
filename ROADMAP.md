@@ -398,6 +398,38 @@ because other sections and five running lanes reference these numbers.
    treats the panel key as opaque, so **the persisted layout format needs no change and
    every saved layout keeps working**; but `LAYOUT_PRESETS` name tool ids *as* panel ids,
    so no preset can currently express two of anything.
+2b. ~~**The pane system — tmux, not a four-panel IDE.**~~ **first PR landed** (item 9 is
+   the plan of record and stays open for the rest of it). The owner's central
+   complaint after item 2 was that it "still feels like a cheap VS Code editor… I want
+   something super modular like TMUX", and the registry (item 1) was the prerequisite
+   that made it buildable. What tmux actually gives its users, translated: **any pane
+   splits in two** (`Alt+S` / `Alt+Shift+S`, then a picker for what goes in it), **any
+   pane runs anything** (every registered tool, every live session, every open file,
+   a new shell), **the keyboard owns the window** (`Alt+←→↑↓` to move,
+   `Alt+Shift+←→↑↓` to swap, `Alt+O` to cycle, `Alt+X` to close), and **the arrangement
+   is yours** — four agent sessions in a 2×2 is now a thing you build in four keystrokes
+   rather than a thing the app does not have.
+   The idea that makes it survive a restart is the **pane id** (`ui/src/panes.ts`):
+   `toolId` or `toolId#instanceKey`, where the key is `agent#<session_id>`,
+   `editors#<path>`, `terminal#<n>`. dockview serializes panel ids into
+   `.workbench/layouts.json` and nothing else about a panel, so the id *is* the
+   persistence — no second store, no id map, and a saved layout brings back *those*
+   conversations rather than that many empty panes. `pruneLayout` gained the matching
+   vetting: an instance pane of a tool that is a singleton today, or one whose id and
+   component disagree, is dropped with its own sentence, while a key that has simply not
+   loaded yet is left alone (sessions arrive long after the layout does). The picker is
+   the QuickBar in a new **pick mode** rather than a second overlay — a capability hands
+   it rows, and `QuickBar.tsx` still names no capability. The split affordance reaches
+   the tab strip through a new `groupActions` registry contribution, so `App.tsx` still
+   names none either. Deliberately deferred: an editor pane for a `keepMounted` document
+   view (a second OnlyOffice editor on one file is a co-editing session with yourself —
+   the pane says where to open it instead); a live session's on-screen transcript is
+   still not replayed after a reload, which is the pre-existing agent-socket behaviour
+   and not something a pane id can fix; and swapping two panes resizes nothing but does
+   not preserve a *tab group's* internal order when a pane holds several tabs. Left to
+   item 9, not done here: hibernation, idle session reaping, `adopt(params)` tombstones,
+   a raised `max_concurrent_sessions`, and preset switching that reconciles against the
+   panes that already exist rather than rebuilding the dock over them.
 3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
    (PRs 1–2 landed: the schema and its renderer). Asked for after watching an
    agentic-workflow video where the agent renders an interactive artifact instead of
@@ -477,8 +509,12 @@ because other sections and five running lanes reference these numbers.
    injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
    access and a workspace switcher all widen the unauthenticated localhost surface
    unacceptably.
-9. **Panes — split anything, and the principle it carries** — *in flight*
-   (`m5/split-anything`). This is the owner's "super modular like TMUX" ask and the
+9. **Panes — split anything, and the principle it carries** — *first PR landed*
+   (`m5/split-anything`, item 2b): splitting, the pane id, the plural seam, the picker
+   and the keyboard are in. Still open here: hibernation, idle session reaping,
+   `adopt(params)` tombstones, the raised cap, preset reconciliation, and the
+   instance-count perf budget — the exit criterion below is not met yet.
+   This is the owner's "super modular like TMUX" ask and the
    implementation of product principle 4: `paneId := toolId | toolId#instanceKey`, so
    `agent#<session_id>`, `editors#<path>` and `terminal#<n>` are panes that survive a
    restart because the pane id *is* the persistence. The registry gains the plural seam

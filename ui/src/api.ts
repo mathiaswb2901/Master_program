@@ -23,6 +23,7 @@ import type {
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
+  SessionLimits,
   ShortcutsState,
   TranscriptResponse,
   TreeNode,
@@ -98,6 +99,8 @@ export const acknowledgeProvenance = (body: AcknowledgeRequest): Promise<OkRespo
   request("/api/provenance/acknowledge", jsonInit("POST", body));
 
 export const getSessions = (): Promise<FolderSessions[]> => request("/api/agents/sessions");
+
+export const getSessionLimits = (): Promise<SessionLimits> => request("/api/agents/limits");
 
 export const createSession = (body: CreateSessionRequest): Promise<SessionInfo> =>
   request("/api/agents/sessions", jsonInit("POST", body));

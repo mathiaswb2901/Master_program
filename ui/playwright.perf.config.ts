@@ -92,6 +92,11 @@ export default defineConfig({
         WORKBENCH_WORKSPACE_ROOT: PERF_WORKSPACE,
         WORKBENCH_CLAUDE_PROJECTS_DIR: path.join(PROJECTS_DIR, "projects"),
         WORKBENCH_LOG_LEVEL: "warning",
+        // The pane budget puts four agent sessions on screen at once, which
+        // needs sessions that start without a Claude login or a single token —
+        // the same switch the journey suite runs on. It changes the agent
+        // backend and nothing the other budgets in this lane measure.
+        WORKBENCH_FAKE_AGENT: "1",
       },
       url: `${SERVER_URL}/api/health`,
       reuseExistingServer: false,

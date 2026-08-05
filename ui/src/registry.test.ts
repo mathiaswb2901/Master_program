@@ -512,6 +512,22 @@ describe("the registered tools", () => {
       "Alt+8": "session.jump.8",
       "Alt+9": "session.jump.9",
       "Alt+T": "terminal.new",
+      // The pane system's keymap: `Alt` moves you, `Alt+Shift` moves the pane,
+      // and the three letters are tmux's (split, cycle, close). Every one of
+      // these is an `Alt` chord a user's `shortcuts.md` can no longer bind, and
+      // the justification is in `panels/Panes.tsx`.
+      "Alt+S": "pane.split.right",
+      "Alt+Shift+S": "pane.split.down",
+      "Alt+O": "pane.cycle",
+      "Alt+X": "pane.close",
+      "Alt+ArrowLeft": "pane.focus.left",
+      "Alt+ArrowRight": "pane.focus.right",
+      "Alt+ArrowUp": "pane.focus.up",
+      "Alt+ArrowDown": "pane.focus.down",
+      "Alt+Shift+ArrowLeft": "pane.swap.left",
+      "Alt+Shift+ArrowRight": "pane.swap.right",
+      "Alt+Shift+ArrowUp": "pane.swap.up",
+      "Alt+Shift+ArrowDown": "pane.swap.down",
       "Alt+M": "layout.focus",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",

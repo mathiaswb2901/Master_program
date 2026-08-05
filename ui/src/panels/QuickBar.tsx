@@ -44,12 +44,27 @@ interface Row {
   chord?: string;
   /** Section this row belongs to; a header is drawn where it changes. */
   category?: string;
+  /** Visible but not choosable — the row is here so the reason in `detail` is
+   * (DESIGN.md §6.5). Only a `quickPick` supplies these. */
+  disabled?: boolean;
   run: () => void;
+}
+
+/** Best of the two things a row shows. A pick row's detail is often the part
+ * the user is aiming at (a file's folder, a session's folder), so a query that
+ * matches only the detail must still find the row. */
+function rowScore(query: string, title: string, detail: string): number | null {
+  const a = fuzzyScore(query, title);
+  const b = detail === "" ? null : fuzzyScore(query, detail);
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
 }
 
 export function QuickBar() {
   const open = useStore((s) => s.quickBarOpen);
   const prefill = useStore((s) => s.quickBarPrefill);
+  const pick = useStore((s) => s.quickPick);
   const tree = useStore((s) => s.tree);
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
@@ -87,9 +102,35 @@ export function QuickBar() {
   const close = (): void => useStore.getState().setQuickBarOpen(false);
   const exiting = leaving ? " is-leaving" : "";
 
-  const actionsMode = query.startsWith(">");
+  // Three modes, one surface. A `quickPick` is a list some capability supplied
+  // (`store.ts`); it wins, because it was opened *for* that list — the `>`
+  // prefix is a file/command toggle and has no meaning inside one.
+  const actionsMode = pick === null && query.startsWith(">");
   let rows: Row[];
-  if (actionsMode) {
+  if (pick !== null) {
+    const q = query.trim();
+    const supplied = pick.rows();
+    // Ranked inside each section, never across them: the sections are the
+    // vocabulary ("Panels", "Agent sessions", "Files"), and a list that
+    // reshuffles its headers on every keystroke is unreadable.
+    const sections = [...new Set(supplied.map((row) => row.category ?? ""))];
+    rows = supplied
+      .map((row) => ({ row, score: rowScore(q, row.title, row.detail ?? "") }))
+      .filter((scored) => scored.score !== null)
+      .sort(
+        (a, b) =>
+          sections.indexOf(a.row.category ?? "") - sections.indexOf(b.row.category ?? "") ||
+          (b.score ?? 0) - (a.score ?? 0),
+      )
+      .map(({ row }) => ({
+        key: row.key,
+        title: row.title,
+        detail: row.detail ?? "",
+        ...(row.category !== undefined ? { category: row.category } : {}),
+        ...(row.disabled === true ? { disabled: true } : {}),
+        run: row.run,
+      }));
+  } else if (actionsMode) {
     const q = query.slice(1).trim();
     // Every command in the registry, so the QuickBar is the complete keyboard
     // path to the app — nothing is reachable only by mouse or only by chord.
@@ -125,19 +166,35 @@ export function QuickBar() {
         run: () => void useStore.getState().openFile(path),
       }));
   }
-  const selIdx = Math.min(sel, Math.max(0, rows.length - 1));
+  // The selection only ever lands on a row that can be run: a disabled row is
+  // there to be *read* (why "New agent session" is unavailable), and arrowing
+  // onto it would leave Enter doing nothing with no explanation.
+  const nextRunnable = (from: number, step: number): number => {
+    for (let i = from + step; i >= 0 && i < rows.length; i += step) {
+      if (rows[i]?.disabled !== true) return i;
+    }
+    return from;
+  };
+  /** Nearest runnable row: forwards first, then backwards. Answers `from` when
+   * every row is disabled, which the Enter guard below then declines. */
+  const runnableFrom = (from: number): number => {
+    const ahead = nextRunnable(from, 1);
+    return ahead === from ? nextRunnable(from, -1) : ahead;
+  };
+  const clamped = Math.min(sel, Math.max(0, rows.length - 1));
+  const selIdx = rows[clamped]?.disabled === true ? runnableFrom(clamped) : clamped;
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>): void => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSel(Math.min(selIdx + 1, rows.length - 1));
+      setSel(nextRunnable(selIdx, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSel(Math.max(selIdx - 1, 0));
+      setSel(nextRunnable(selIdx, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       const row = rows[selIdx];
-      if (row) {
+      if (row && row.disabled !== true) {
         row.run();
         close();
       }
@@ -154,11 +211,11 @@ export function QuickBar() {
           for those few frames, and hiding a focused subtree from the
           accessibility tree is worse than describing a dialog that is fading.
           `pointer-events: none` in the stylesheet is what makes it inert. */}
-      <div className={"wb-qb" + exiting} role="dialog" aria-label="Quick open">
+      <div className={"wb-qb" + exiting} role="dialog" aria-label={pick?.label ?? "Quick open"}>
         <input
           autoFocus
           className="wb-qb-input"
-          placeholder="Search files — type > for actions"
+          placeholder={pick?.placeholder ?? "Search files — type > for actions"}
           value={query}
           spellCheck={false}
           onChange={(e) => {
@@ -170,7 +227,11 @@ export function QuickBar() {
         <div className="wb-qb-results">
           {rows.length === 0 && (
             <div className="wb-qb-empty">
-              {actionsMode ? "No matching actions" : "No matching files"}
+              {pick !== null
+                ? "Nothing matches"
+                : actionsMode
+                  ? "No matching actions"
+                  : "No matching files"}
             </div>
           )}
           {rows.map((row, i) => (
@@ -180,13 +241,16 @@ export function QuickBar() {
               )}
               <button
                 type="button"
+                disabled={row.disabled === true}
                 ref={i === selIdx ? selRef : undefined}
                 className={"wb-qb-row" + (i === selIdx ? " is-selected" : "")}
                 onClick={() => {
                   row.run();
                   close();
                 }}
-                onMouseMove={() => setSel(i)}
+                onMouseMove={() => {
+                  if (row.disabled !== true) setSel(i);
+                }}
               >
                 <span className="wb-qb-row-title u-truncate">{row.title}</span>
                 <span className="wb-qb-row-detail u-truncate">{row.detail}</span>
@@ -210,11 +274,13 @@ export function QuickBar() {
           <span>
             <span className="wb-keycap">Enter</span> open
           </span>
+          {pick === null && (
+            <span>
+              <span className="wb-keycap">&gt;</span> actions
+            </span>
+          )}
           <span>
-            <span className="wb-keycap">&gt;</span> actions
-          </span>
-          <span>
-            <span className="wb-keycap">Esc</span> close
+            <span className="wb-keycap">Esc</span> {pick === null ? "close" : "cancel"}
           </span>
         </div>
       </div>
