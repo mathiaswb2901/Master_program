@@ -36,6 +36,27 @@ import { E2E_WORKSPACE, WORKSPACE_ENV } from "./e2e/workspace";
 // package. `process` is the only one used here.
 declare const process: { env: Record<string, string | undefined> };
 
+/**
+ * The backend under test is configured by this file and by nothing else.
+ *
+ * Playwright spawns `webServer` with `{...process.env, ...env}`, so every
+ * `WORKBENCH_*` variable in the developer's shell reconfigures the server the
+ * suite is asserting against. That is not hypothetical: CLAUDE.md tells this
+ * project's developers to export `WORKBENCH_ONLYOFFICE_URL` and
+ * `WORKBENCH_ONLYOFFICE_JWT_SECRET` for Office editing, which turns Office on
+ * and makes journey 7 wait for a degraded card the app is right not to render.
+ * `WORKBENCH_INHERIT_USER_SETTINGS` would go further and pull the developer's
+ * global hooks and permission rules into the sessions under test.
+ *
+ * Dropping the whole prefix makes a run on a working machine identical to a run
+ * on a bare CI runner — the difference between the two is exactly the class of
+ * bug an E2E gate exists to catch, so it must not be a source of them. The
+ * workspace handoff uses the `WB_E2E_` prefix and is untouched.
+ */
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("WORKBENCH_")) delete process.env[key];
+}
+
 /** Repo root: this file lives in `<root>/ui`. Resolved (no trailing separator,
  * which would escape the closing quote of the command below on Windows). */
 const REPO_ROOT = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");

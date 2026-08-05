@@ -2,7 +2,10 @@
  * Journey 7 — office documents with no Document Server configured.
  *
  * The suite runs without `WORKBENCH_ONLYOFFICE_URL`, which is the state most
- * users start in. Opening a .docx must land on the calm degraded card — on
+ * users start in — and is guaranteed rather than assumed: `playwright.config.ts`
+ * strips the whole `WORKBENCH_*` prefix out of the inherited environment, so a
+ * developer with Office configured still runs this journey. Opening a .docx
+ * must land on the calm degraded card — on
  * paper colors, per DESIGN.md §2.8/§6.1 — and must not throw, blank the panel,
  * or try to read the document's bytes.
  */
