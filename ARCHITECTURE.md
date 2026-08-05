@@ -26,7 +26,9 @@ One Python process, one webview window, one optional local Office engine.
    watcher (`services/watcher.py`) turns every filesystem change into a
    `FileChangedEvent` on the in-process bus, fanned out over `/ws/events`. Views
    reconcile via content hashes: a client that recognizes its own write's hash ignores
-   the echo; a clean buffer reloads silently; a dirty buffer prompts.
+   the echo; a clean buffer reloads silently; a dirty buffer prompts. Views may
+   update *incrementally* from those events — the file tree does — but never
+   without a path back to a fresh reading of the disk (see *The file tree*).
 2. **Every wire payload is a Pydantic model** (`models/`). WebSocket protocols are
    discriminated unions on `type`. The UI mirrors these in `ui/src/types.ts`.
 3. **Routers thin, services own logic.** A router validates, delegates, maps domain
@@ -257,7 +259,7 @@ in-process calls where the model and the user dominate.
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
 | `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host |
-| `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
+| `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
@@ -265,7 +267,7 @@ in-process calls where the model and the user dominate.
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
-| `services/workspace.py` | path jail, atomic writes, hashing, tree, `top_level_dirs` (one listing, no walk) |
+| `services/workspace.py` | path jail, atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
@@ -280,6 +282,87 @@ in-process calls where the model and the user dominate.
 | `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
+
+## The file tree
+
+Three properties, and each one is a budget in the perf lane rather than a claim
+here: it reads **one directory at a time**, it **patches itself** from the
+events it already receives, and it **renders only what is on screen**.
+
+```
+GET /api/files/dir?path=…   one os.scandir  ──►  dirs[path] = DirEntry[]
+/ws/events file_changed     one row edit    ──►  applyFileChange(dirs, event)
+                                                       │
+                              visibleRows(dirs, expanded) → flat row array
+                                                       │
+                              slice(first, last) → ~40 <button>s in the DOM
+```
+
+**Lazy, per directory.** `list_dir` is one `os.scandir` and returns childless
+`DirEntry` rows, so the cost of a listing is the size of *that* folder and
+nothing else — the root of the 5,005-file fixture and its 2,000-file directory
+are both exactly one listing. Expanding a folder always re-reads it, which is
+what makes an incrementally patched tree self-healing: every folder the user
+opens is verified against disk at the moment they open it. `GET /api/files/tree`
+— the full recursive walk — still exists, but it is now only the **search
+index** behind the QuickBar's fuzzy find and the chat's tool-row file links, and
+the UI fetches it *on demand*: when the QuickBar opens, or when an agent
+announces a tool call. Nothing fetches it at launch and nothing fetches it on a
+file change.
+
+**Delta updates, client-side.** A `file_changed` event names a path; the only
+listing that can have changed is its parent's, and the client already holds
+that. So the tree is patched in place (`ui/src/filetree.ts`, pure and
+unit-tested) instead of the server being asked to walk the workspace again.
+Twenty file changes used to cost twenty full walks and 9.4 MB of JSON; they now
+cost **zero requests** (`ui/e2e/perf/watcher.spec.ts`, which was shipped as an
+xfail in PR #35 for exactly this PR to convert). The alternative — a server-side
+index emitting deltas — was rejected: it is a second authority on what is on
+disk, it has to be invalidated by these same events anyway, and principle 1
+above says the answer to "what exists" is a listing, not a cache.
+
+**Disk stays the source of truth**, so the incremental path is bounded by three
+convergence rules rather than trusted forever:
+
+- **Expanding re-lists.** The one interaction that reveals rows also refetches
+  them. Anything a patch got wrong is corrected by the user's own next click.
+- **Reconnect re-lists.** Every (re)connect of `/ws/events` re-reads the root
+  and every expanded folder — one `scandir` per directory *on screen*, not per
+  directory that exists — which covers everything missed while offline.
+- **`tree_invalidated`.** A `CACHEDIR.TAG` appearing makes a whole subtree
+  vanish from what the tree may show, and no per-file event can say so: the
+  events from inside it are precisely the ones now being suppressed. The watcher
+  publishes this frame when it invalidates its own ignore memo, and the client
+  reconciles. Directories are also reported as `added` now (they never were),
+  because otherwise a folder created by `mkdir`, an agent or a build stayed
+  invisible — and so did every file created inside it, since the client had no
+  row to hang them on.
+
+**Virtualised, without a dependency.** A tree with everything collapsed is a
+list: flatten the expanded directories into an array of rows once, and rendering
+becomes indexing. A spacer holds the full scroll height; the rows the scroller
+can show, plus 8 of overscan at each end, are absolutely positioned by index.
+Expanding the 2,000-child directory used to take the DOM from 10 rows to 2,010
+in one commit — a single 400–500 ms main-thread task, the only interaction the
+audit found that visibly froze the window. It now mounts ~40 buttons whatever
+the folder holds. The arithmetic depends on two design tokens (`--row-height`,
+`--space-2`), so their agreement with the constants in `FileTree.tsx` is its own
+test (`ui/e2e/perf/rowGeometry.test.ts`) — a token edit that misaligned every
+row below the fold would otherwise be invisible to a suite that counts rows.
+
+Virtualisation ended "Tab through every row", so the panel implements the
+**WAI-ARIA tree keyboard model** instead: roving tabindex, Up/Down to move,
+Right to open or descend, Left to close or step out, Home/End, and the row's own
+`<button>` for Enter/Space. `aria-level`/`aria-posinset`/`aria-setsize` are
+explicit, because the DOM no longer holds the rows a screen reader would count.
+
+**One rule about what exists.** `services/ignore.py` is consulted by the
+listing, the walk and the watcher, and the client's sorted insert restates the
+server's order (`kind`, then lowercased name) so a row that arrives from an
+event lands where a refetch would have put it. That last one is not theoretical:
+the panel used to re-sort with `localeCompare`, which under the author's own
+`nb-NO` locale collates "Aaa" after "deep" — the tree and the server disagreed
+about order for anyone whose locale has its own alphabet.
 
 ## Terminal throughput
 

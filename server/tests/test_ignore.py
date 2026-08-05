@@ -66,6 +66,37 @@ class TestIgnoredDir:
         assert is_ignored_dir(build_cache(tmp_path / "target"))
 
 
+class TestHiddenDir:
+    """`is_ignored_dir` for a directory reached by name rather than by walking.
+
+    The listing endpoint takes a path from the wire, so the parent-level filter
+    that protects a walk was never run for it.
+    """
+
+    def test_the_directory_itself_counts(self, tmp_path: Path) -> None:
+        assert ignore.is_hidden_dir(tmp_path, build_cache(tmp_path / "target"))
+
+    def test_an_ancestor_counts(self, tmp_path: Path) -> None:
+        deep = build_cache(tmp_path / "target") / "debug" / "build"
+        deep.mkdir(parents=True)
+        assert ignore.is_hidden_dir(tmp_path, deep)
+
+    def test_a_named_ancestor_counts(self, tmp_path: Path) -> None:
+        assert ignore.is_hidden_dir(tmp_path, tmp_path / "ui/node_modules/vite")
+
+    def test_the_analysts_own_target_folder_is_not_hidden(self, tmp_path: Path) -> None:
+        prices = tmp_path / "analysis" / "target"
+        prices.mkdir(parents=True)
+        assert not ignore.is_hidden_dir(tmp_path, prices)
+
+    def test_the_root_is_never_hidden_from_itself(self, tmp_path: Path) -> None:
+        build_cache(tmp_path)
+        assert not ignore.is_hidden_dir(tmp_path, tmp_path)
+
+    def test_a_path_outside_the_root_is_hidden(self, tmp_path: Path) -> None:
+        assert ignore.is_hidden_dir(tmp_path, tmp_path.parent / "elsewhere")
+
+
 class TestIgnoreIndex:
     def test_artifact_under_a_cache_is_ignored(self, tmp_path: Path) -> None:
         artifact = build_cache(tmp_path / "desktop/src-tauri/target") / "debug/build/popup.toml"

@@ -6,6 +6,7 @@ import type {
   CallbackResponse,
   CreateRequest,
   CreateSessionRequest,
+  DirListing,
   DocEditorConfig,
   FileContent,
   FolderSessions,
@@ -61,6 +62,12 @@ const jsonInit = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
+/** One directory's children — what the file tree is built from. `""` = root. */
+export const getDir = (path: string): Promise<DirListing> =>
+  request(`/api/files/dir?path=${encodeURIComponent(path)}`);
+
+/** The whole workspace in one walk. The QuickBar's search index, fetched on
+ * demand — never from a watcher event. */
 export const getTree = (): Promise<TreeNode> => request("/api/files/tree");
 
 export const getFileContent = (path: string): Promise<FileContent> =>

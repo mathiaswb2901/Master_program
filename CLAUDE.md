@@ -75,6 +75,28 @@ ruling it out.
   A tool's `id` is a **stable contract**: saved layouts (`.workbench/layouts.json`)
   reference panels by it, so renaming one renames the user's saved arrangement too.
   See `docs/tools.md`.
+- **Panes are instances, not panels.** A pane is a `(toolId, instanceId)` pair — the
+  instance id is the dockview panel id, and "what am I pointed at" is a small
+  serializable `params` record (`{sessionId}`, `{ptyId}`, `{path}`) carried in the saved
+  layout. A tool declares whether it is singular or plural, and **plural is the default
+  for anything a user could plausibly want twice**; twice is the baseline, not a feature
+  request. Three consequences you apply without asking. (1) *Nothing assumes it is the
+  only one of itself* — not in its component, not in `store.ts`, not in a CSS selector,
+  not in a test. An `activeX: X | null` field in the app store is the shape of a
+  singleton assumption: it needs a comment saying why the window really has only one, or
+  it is a bug. (2) *A pane is a view onto a resource it does not own.* The PTY, the SDK
+  session, the Office window and the Monaco model live server-side or in one
+  module-level registry keyed by their own id (`terminalInput.ts` is the shipped
+  pattern); `params` names one. Closing a pane closes a view — whether the resource dies
+  with it is the tool's explicit decision, written in its descriptor, never an accident
+  of unmount. (3) *A restored pane is vetted before it is believed.* Layouts persist,
+  resources do not: every plural tool implements `adopt(params)`, and a pane whose
+  resource is gone renders a named tombstone with the one action that recovers it
+  (Reconnect, Resume, Reopen, Open in Word). A cap that is hit shows the cap and the
+  setting that raises it, never a dead button. Enforcement: every plural tool ships a
+  test that opens two instances and asserts they are independent through a save/restore
+  round trip, and an unscoped `page.locator` on a pane-internal class fails review.
+  "It works with one" is not evidence. (ROADMAP product principle 4.)
 - Windows-first: paths via `pathlib`, PTYs via pywinpty, test on PowerShell.
 - The shell (`desktop/src-tauri/`) owns only what a browser tab cannot do: the
   native window, backend supervision, close guard, window title. Anything the UI
@@ -92,6 +114,21 @@ ruling it out.
   measured payload plus a margin you can state. One shared number big enough for the
   chattiest tool is a test no other tool can fail. No separate benchmark harness — a
   budget that lives outside the quality gate does not bind.
+- **Three shapes every agent-facing result owes the model**, so a tool costs one call
+  instead of three (from the AXI standards, `kunchenguid/axi`, MIT, read 2026-08-05 —
+  principles only, nothing installed):
+  1. **Truncate with a stated size and a way to get the rest.** A capped result that
+     does not say what was cut leaves the model guessing whether it saw everything;
+     say how much was withheld and name the argument that widens the window. Silence
+     is what turns one call into three.
+  2. **Say "none" explicitly.** An empty result must state that it is empty, not return
+     blankness a model has to interpret as either "no matches" or "something broke".
+  3. **End with what to do next** when there is an obvious next step (the range beyond
+     this one, the file this refers to). A round trip costs far more than the sentence
+     that prevents it.
+  Rejected from the same source: TOON output format, claimed ~40% cheaper than JSON.
+  That gain is on large list payloads; ours are hundreds of bytes and compact JSON
+  already measured ~16% under pretty-printed. Revisit only if a list-heavy tool ships.
 - Bundled skills live in `server/src/workbench_server/skills_bundle/` (one local plugin,
   shipped as package data); each session gets them via `--plugin-dir` as
   `workbench:<name>` — session-scoped, nothing is ever written to `~/.claude`.

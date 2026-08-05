@@ -16,8 +16,8 @@ export async function gotoApp(page: Page): Promise<void> {
 /** Wait until the workspace tree has actually arrived. */
 export async function workspaceReady(page: Page): Promise<void> {
   await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();
-  // The tree renders empty until GET /api/files/tree resolves; the seeded
-  // folder is the first thing every journey needs to exist.
+  // The tree renders nothing until GET /api/files/dir (the root listing)
+  // resolves; the seeded folder is the first thing every journey needs to exist.
   await expect(page.getByRole("treeitem", { name: "src" })).toBeVisible();
 }
 
@@ -29,6 +29,24 @@ export async function openApp(page: Page): Promise<void> {
 
 export function treeItem(page: Page, name: string): Locator {
   return page.getByRole("treeitem", { name, exact: true });
+}
+
+/**
+ * Wait until the dock has finished moving (DESIGN.md §5.4).
+ *
+ * Focus mode and layout switches animate `.wb-dock` on a transform, and a
+ * transform is *in* `getBoundingClientRect()` — so any journey that reads panel
+ * geometry right after one of them measures the animation rather than the
+ * arrangement. Nothing the app itself measures is affected (dockview sizes from
+ * its own model; xterm and Monaco read used layout sizes, which transforms do
+ * not touch) — this is only for tests that read screen geometry.
+ */
+export async function dockSettled(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const dock = document.querySelector(".wb-dock");
+    if (dock === null) return;
+    await Promise.all(dock.getAnimations().map((a) => a.finished.catch(() => undefined)));
+  });
 }
 
 /** Right-click a tree row and pick a context-menu entry. */

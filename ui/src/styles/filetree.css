@@ -41,14 +41,25 @@
   min-height: 0;
   overflow: auto;
   background: var(--surface-panel);
+  /* --space-2, matching LIST_PAD in FileTree.tsx: the virtualiser measures its
+     window from the scroll position, so this offset is arithmetic, not decoration. */
   padding: var(--space-2) 0;
 }
 
+/* Full scroll height, none of the rows. Only the window the scroller can show
+   is mounted inside it, positioned by index — see FileTree.tsx. */
+.wb-tree-viewport {
+  position: relative;
+  width: 100%;
+}
+
 .wb-tree-row {
+  position: absolute;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  width: 100%;
   height: var(--row-height);
   padding-right: var(--space-4);
   font-size: var(--type-sm-size);
