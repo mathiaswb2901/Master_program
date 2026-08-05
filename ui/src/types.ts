@@ -104,15 +104,18 @@ export interface AcknowledgeRequest {
 }
 
 // ---- shortcuts.py -----------------------------------------------------------
-// One markdown file per scope (workspace + user-global), merged. An entry is
-// INSERTED into a surface, never executed — there is no "run" field by design.
+// One markdown file per scope (workspace + user-global), merged. Nothing an
+// entry can do executes: `shell` and `prompt` are INSERTED into a surface, and
+// `layout` names one of the user's own saved arrangements and moves panels.
+// There is no "run" field by design.
 
-export type ShortcutKind = "shell" | "prompt";
+export type ShortcutKind = "shell" | "prompt" | "layout";
 export type ShortcutSource = "workspace" | "global";
 
 export interface ShortcutEntry {
   name: string;
   kind: ShortcutKind;
+  /** shell/prompt: the text that is inserted. layout: the layout's name. */
   body: string;
   /** Single chord ("Alt+G"); null = reachable from the QuickBar only. */
   keys: string | null;
@@ -136,6 +139,33 @@ export interface ShortcutsChangedEvent {
   type: "shortcuts_changed";
   entry_count: number;
   problem_count: number;
+}
+
+// ---- layouts.py -------------------------------------------------------------
+// One JSON document per workspace (`.workbench/layouts.json`). The server never
+// interprets `state` — it is dockview's `api.toJSON()` output, and the rules
+// about which panels may appear in it are a registry fact, so validation lives
+// on this side (`ui/src/layouts.ts`).
+
+export interface NamedLayout {
+  name: string;
+  /** dockview's SerializedDockview. Opaque until `pruneLayout` vets it. */
+  state: unknown;
+}
+
+export interface LayoutsState {
+  /** The live arrangement, restored on the next load. null = never saved. */
+  current: unknown;
+  /** Which named layout `current` came from — advisory, for the status chip. */
+  current_name: string | null;
+  saved: NamedLayout[];
+}
+
+export interface LayoutsResponse {
+  state: LayoutsState;
+  /** Non-null when the file on disk could not be used — the UI toasts it and
+   * falls back to the default layout. */
+  problem: string | null;
 }
 
 // ---- office.py --------------------------------------------------------------

@@ -40,6 +40,8 @@ ruling it out.
   `StatusBar.tsx`: those files name no capability, and keeping it that way is what lets
   parallel lanes land panels without colliding. A tool takes an `Alt` chord only if the
   command earns it — registered chords beat `shortcuts.md`, which may bind nothing else.
+  A tool's `id` is a **stable contract**: saved layouts (`.workbench/layouts.json`)
+  reference panels by it, so renaming one renames the user's saved arrangement too.
   See `docs/tools.md`.
 - Windows-first: paths via `pathlib`, PTYs via pywinpty, test on PowerShell.
 - The shell (`desktop/src-tauri/`) owns only what a browser tab cannot do: the

@@ -135,6 +135,11 @@ describe("command registry", () => {
       "terminal.new",
       "terminal.close",
       "scratchpad.open",
+      // The Layouts tool's *static* commands. Its per-layout rows are dynamic
+      // (the saved set changes while the app runs) and so are not in here —
+      // they join in `allCommands`, after everything static.
+      "layout.focus",
+      "layout.save",
       "panel.files",
       "panel.editors",
       "panel.agent",
@@ -173,6 +178,11 @@ describe("command registry", () => {
 
 describe("shortcuts.md extension", () => {
   it("adds one command per entry, keeping the invariants across the merge", () => {
+    // Against the registry's own list (built-ins *and* the dynamic rows the
+    // Layouts tool contributes), not against `builtinCommands()` alone — the
+    // claim is "two more rows than without the file", whatever else is there.
+    mocks.state.shortcuts = [];
+    const withoutFile = allCommands().length;
     mocks.state.shortcuts = [
       entry({ name: "Status board", keys: "Alt+G" }),
       entry({ name: "Review", kind: "prompt", body: "Review.", keys: "Ctrl+Alt+R" }),
@@ -181,7 +191,24 @@ describe("shortcuts.md extension", () => {
     expectRegistryInvariants(merged);
     const added = merged.filter((command) => command.category === "Shortcuts");
     expect(added.map((command) => command.title)).toEqual(["Status board", "Review"]);
-    expect(merged.length).toBe(builtinCommands().length + 2);
+    expect(merged.length).toBe(withoutFile + 2);
+  });
+
+  // Dynamic rows come from the registry, so they are subject to every rule the
+  // static ones are — and they arrive before the file's, which is what puts the
+  // "Layouts" section above "Shortcuts" in an unfiltered palette.
+  it("lists the registry's dynamic commands ahead of the file's", () => {
+    mocks.state.shortcuts = [entry({ name: "Status board" })];
+    const categories = allCommands()
+      .map((command) => command.category)
+      .filter((category): category is string => category !== undefined);
+    expect([...new Set(categories)]).toEqual(["Layouts", "Shortcuts"]);
+  });
+
+  it("never gives a dynamic command a chord", () => {
+    const dynamic = allCommands().filter((command) => command.id.startsWith("layout.apply."));
+    expect(dynamic.length).toBeGreaterThan(0);
+    for (const command of dynamic) expect(command.keys).toBeUndefined();
   });
 
   it("binds a free chord to a shortcut", () => {

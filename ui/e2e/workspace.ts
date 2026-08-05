@@ -60,6 +60,11 @@ export const SHORTCUT_NAME = "Show the marker";
 export const SHORTCUT_BODY = "echo e2e-shortcut-marker";
 /** Name of the deliberately malformed entry, echoed in the problems toast. */
 export const BROKEN_SHORTCUT_NAME = "Broken entry";
+/** The `layout` entry: the one shortcut kind that acts rather than inserts.
+ * Journey 9 presses its chord and asserts the panels moved. */
+export const LAYOUT_SHORTCUT_NAME = "Fleet view";
+export const LAYOUT_SHORTCUT_TARGET = "Agents";
+export const LAYOUT_SHORTCUT_CHORD = "Alt+Y";
 
 /**
  * Two folders called `target`, seeded to be told apart only by `CACHEDIR.TAG`.
@@ -82,6 +87,14 @@ keys: Alt+G
 
 \`\`\`
 ${SHORTCUT_BODY}
+\`\`\`
+
+## ${LAYOUT_SHORTCUT_NAME}
+type: layout
+keys: ${LAYOUT_SHORTCUT_CHORD}
+
+\`\`\`
+${LAYOUT_SHORTCUT_TARGET}
 \`\`\`
 
 ## ${BROKEN_SHORTCUT_NAME}

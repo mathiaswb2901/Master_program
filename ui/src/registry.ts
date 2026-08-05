@@ -93,6 +93,25 @@ export interface StatusContribution {
  */
 export type ToolCommand = Omit<Command, "keys">;
 
+/**
+ * Commands that come and go while the app runs — one per saved layout today,
+ * one per recent workspace tomorrow. Kept separate from `commands` because the
+ * static list is built once (it is read on every keystroke) and because a chord
+ * has to be declared statically to be pinned by a test and to lose a collision
+ * to `shortcuts.md` deterministically. **Dynamic commands therefore carry no
+ * chords**; a user binds one from `shortcuts.md` instead.
+ */
+export interface DynamicCommands {
+  /** Cheap identity of the current set. Re-read on every keystroke, so this
+   * must be a string comparison, never a rebuild. */
+  key: () => string;
+  build: () => readonly ToolCommand[];
+}
+
+/** Joins the tools' keys in `dynamicCommandsKey`. A control byte, so no key a
+ * tool composes out of user-visible names can forge a different combination. */
+const KEY_SEPARATOR = "\u0001";
+
 export interface WorkbenchTool {
   id: string;
   /** Panel tab title, focus-command label, docs. */
@@ -102,6 +121,8 @@ export interface WorkbenchTool {
   panel?: PanelContribution;
   documentView?: DocumentViewContribution;
   commands?: readonly ToolCommand[];
+  /** Commands whose *set* changes at runtime (see `DynamicCommands`). */
+  dynamicCommands?: DynamicCommands;
   /** Default chords per command id — the tool's whole keymap, in one place. */
   shortcuts?: Readonly<Record<string, readonly string[]>>;
   statusContributions?: readonly StatusContribution[];
@@ -112,6 +133,23 @@ export interface WorkbenchTool {
    * the Agent `prompt`, and a tool that replaces either claims it back.
    */
   shortcutKinds?: readonly ShortcutKind[];
+  /**
+   * `shortcuts.md` kinds this tool *carries out* instead of inserting into a
+   * panel. The Layouts tool claims `layout`, whose body is the name of an
+   * arrangement — the one entry kind that acts, and the reason it may is that
+   * moving panels is all it can do (`docs/shortcuts.md`).
+   *
+   * A kind with no handler falls back to insertion, so removing the tool that
+   * claims one degrades to "nothing happens", never to the wrong surface.
+   */
+  shortcutActions?: Readonly<Partial<Record<ShortcutKind, (body: string) => void>>>;
+  /**
+   * The live dockview handle, for a tool that operates on the dock itself
+   * rather than living inside it — layout restore, persistence and focus mode
+   * are the ones. Called once when the dock is ready, and with `null` when it
+   * goes away. Everything else should be reaching for `openToolPanel`.
+   */
+  onDockReady?: (api: DockviewApi | null) => void;
   /**
    * Whether this tool is present at all: false takes out its panel, its
    * commands and its status items together.
@@ -172,6 +210,48 @@ export function toolCommands(tools: readonly WorkbenchTool[]): Command[] {
   return commands;
 }
 
+/**
+ * Every dynamic command of every enabled tool, in registry order. Never carries
+ * a chord (see `DynamicCommands`), so a dynamic command can shadow nothing.
+ */
+export function toolDynamicCommands(tools: readonly WorkbenchTool[]): Command[] {
+  return tools
+    .filter(isEnabled)
+    .flatMap((tool) => [...(tool.dynamicCommands?.build() ?? [])])
+    .map((command) => ({ ...command }));
+}
+
+/** Identity of the current dynamic command set, for memoizing the merged list.
+ * Read on every keystroke: it must stay a string join, not a rebuild. Keys are
+ * separated so two tools' keys cannot run together into a third combination's. */
+export function dynamicCommandsKey(tools: readonly WorkbenchTool[]): string {
+  return tools
+    .filter(isEnabled)
+    .map((tool) => (tool.dynamicCommands === undefined ? "" : tool.dynamicCommands.key()))
+    .join(KEY_SEPARATOR);
+}
+
+/** What carries out a `shortcuts.md` entry of this kind instead of inserting
+ * it, or null — in which case the entry is inserted as it always was. */
+export function shortcutAction(
+  tools: readonly WorkbenchTool[],
+  kind: ShortcutKind,
+): ((body: string) => void) | null {
+  for (const tool of tools.filter(isEnabled)) {
+    const action = tool.shortcutActions?.[kind];
+    if (action !== undefined) return action;
+  }
+  return null;
+}
+
+/** Hand the live dock to every tool that asked for it (`null` on teardown). */
+export function notifyDockReady(
+  tools: readonly WorkbenchTool[],
+  api: DockviewApi | null,
+): void {
+  for (const tool of tools.filter(isEnabled)) tool.onDockReady?.(api);
+}
+
 /** The panel a `shortcuts.md` entry of this kind is typed into, or null if no
  * enabled tool claims the kind (then the insertion goes wherever the store
  * sends it, without stealing focus). */
@@ -222,8 +302,8 @@ export interface PanelTabInfo {
    * Whether the tab carries a close button. True for exactly the panels that
    * are *not* in the startup layout: one arrived because a command opened it,
    * so the tab it arrived on is the way back. A startup panel stays chrome —
-   * closing one would strand the app until a reload (there is no layout
-   * persistence yet, M5 item 2).
+   * closing one is not how you rearrange the window; "Reset layout" and the
+   * named layouts are (`ui/src/panels/Layouts.tsx`).
    */
   closable: boolean;
 }
@@ -256,24 +336,32 @@ function layoutTools(tools: readonly WorkbenchTool[]): WorkbenchTool[] {
   return panelTools(tools).filter((tool) => tool.panel?.openByDefault !== false);
 }
 
-const placementOf = (tool: WorkbenchTool): PanelPlacement => ({
-  id: tool.id,
-  component: tool.id,
-  title: tool.title,
-  location: tool.panel?.defaultLocation ?? { area: "center" },
-});
+/** One panel's placement, at its own default location unless told otherwise. */
+export function placementOf(tool: WorkbenchTool, location?: PanelLocation): PanelPlacement {
+  return {
+    id: tool.id,
+    component: tool.id,
+    title: tool.title,
+    location: location ?? tool.panel?.defaultLocation ?? { area: "center" },
+  };
+}
 
 /**
- * The startup layout, as data, in creation order: `center` panels first —
- * everything else is placed against the first of them — which is what makes the
- * arrangement a property of the descriptors instead of a sequence of `addPanel`
- * calls in `App.tsx`.
+ * Creation order: `center` panels first, because everything else is placed
+ * against the first of them. Stable, so registry (or preset) order survives.
  */
-export function defaultLayout(tools: readonly WorkbenchTool[]): PanelPlacement[] {
-  const placements = layoutTools(tools).map(placementOf);
+export function orderPlacements(placements: readonly PanelPlacement[]): PanelPlacement[] {
   const rank = (placement: PanelPlacement): number =>
     placement.location.area === "center" ? 0 : 1;
-  return placements.sort((a, b) => rank(a) - rank(b));
+  return [...placements].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * The startup layout, as data — which is what makes the arrangement a property
+ * of the descriptors instead of a sequence of `addPanel` calls in `App.tsx`.
+ */
+export function defaultLayout(tools: readonly WorkbenchTool[]): PanelPlacement[] {
+  return orderPlacements(layoutTools(tools).map((tool) => placementOf(tool)));
 }
 
 /**
@@ -360,14 +448,22 @@ function addPlacement(api: DockviewApi, placement: PanelPlacement, reference: st
   });
 }
 
-/** Build the startup layout and leave the reference panel active. */
-export function applyDefaultLayout(api: DockviewApi, tools: readonly WorkbenchTool[]): void {
-  const placements = defaultLayout(tools);
+/**
+ * Add these placements to an empty dock, first one as the reference, and leave
+ * it active. The one way an arrangement is built from descriptors — the startup
+ * layout and every layout preset go through here.
+ */
+export function applyPlacements(api: DockviewApi, placements: readonly PanelPlacement[]): void {
   const first = placements[0];
   if (first === undefined) return;
   api.addPanel({ id: first.id, component: first.component, title: first.title });
   for (const placement of placements.slice(1)) addPlacement(api, placement, first.id);
   api.getPanel(first.id)?.api.setActive();
+}
+
+/** Build the startup layout and leave the reference panel active. */
+export function applyDefaultLayout(api: DockviewApi, tools: readonly WorkbenchTool[]): void {
+  applyPlacements(api, defaultLayout(tools));
 }
 
 /**
