@@ -29,12 +29,16 @@
 }
 
 /* A pane arriving — the one panel-level movement in the app (DESIGN.md §5:
- * opacity and transform, `--duration-2`). Under `prefers-reduced-motion` the
- * token is already 1 ms, so this becomes an instant appearance with no branch. */
+ * opacity and transform). On the **travel** channel, which is what a spring is
+ * for: the pane is moving, not tinting. Migrated off the legacy `--duration-2`
+ * / `--ease-standard` pair when the motion vocabulary landed — those alias onto
+ * the *tint* ease, which would have curved this like a colour change (tokens.css,
+ * "Legacy aliases"). The distance is a token so reduced motion can zero the
+ * travel and keep the fade without a branch here. */
 @keyframes wb-pane-in {
   from {
     opacity: 0;
-    transform: scale(0.985);
+    transform: scale(var(--motion-zoom-in));
   }
   to {
     opacity: 1;
@@ -43,7 +47,7 @@
 }
 
 .wb-pane-new {
-  animation: wb-pane-in var(--duration-2) var(--ease-standard);
+  animation: wb-pane-in var(--motion-enter);
 }
 
 /* ---- what a pane bound to one thing renders ------------------------------ */

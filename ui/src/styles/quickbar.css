@@ -23,13 +23,25 @@
   box-shadow: var(--shadow-3);
   overflow: hidden;
   z-index: 101;
-  animation: wb-qb-in var(--duration-2) var(--ease-standard);
+  animation: wb-qb-in var(--motion-enter);
 }
 
+/* Leaving is not entering played backwards: it is shorter, it does not spring,
+   and it does not shrink — the bar you have finished with should get out of the
+   way, not perform. `src/motion.ts` holds the mount open for
+   `--motion-exit-ms`. */
+.wb-qb.is-leaving,
+.wb-qb-backdrop.is-leaving {
+  animation: wb-fade-out var(--motion-exit);
+  pointer-events: none;
+}
+
+/* Centred with a transform, so the entrance carries the `translateX(-50%)`
+   rather than using the shared `wb-scale-in`. */
 @keyframes wb-qb-in {
   from {
     opacity: 0;
-    transform: translateX(-50%) scale(0.98);
+    transform: translateX(-50%) scale(var(--motion-scale-in));
   }
   to {
     opacity: 1;

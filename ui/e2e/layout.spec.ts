@@ -31,7 +31,7 @@
 import { expect, request, test, type Locator, type Page } from "@playwright/test";
 
 import type { LayoutsResponse } from "../src/types";
-import { gotoApp, openApp, treeItem, workspaceReady } from "./app";
+import { dockSettled, gotoApp, openApp, treeItem, workspaceReady } from "./app";
 import { LAYOUT_SHORTCUT_CHORD, LAYOUT_SHORTCUT_NAME, writeWorkspaceFile } from "./workspace";
 
 const SAVED_LAYOUT = "Bidding desk";
@@ -75,8 +75,13 @@ async function panels(page: Page): Promise<string[]> {
 
 /** Rendered size of each panel group, by tab title. Real geometry read from the
  * live DOM: a "maximized" panel that is not actually filling the window is
- * exactly the failure this journey exists to catch. */
+ * exactly the failure this journey exists to catch.
+ *
+ * `dockSettled` first, because focus mode animates the dock on a transform and
+ * a transform is part of `getBoundingClientRect()` — measured mid-flight, every
+ * panel reads ~1.5 % small and "restored exactly" is false by four pixels. */
 async function groupSizes(page: Page): Promise<Record<string, [number, number]>> {
+  await dockSettled(page);
   return page.evaluate(() => {
     const sizes: Record<string, [number, number]> = {};
     for (const group of document.querySelectorAll(".dv-groupview")) {

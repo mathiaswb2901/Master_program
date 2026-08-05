@@ -270,11 +270,12 @@ export async function placeChoice(
  * The seam the motion lane lands on.
  *
  * A pane arriving is the one panel-level change worth confirming with movement
- * (DESIGN.md §5: opacity/transform only, `--duration-2`). The class is added
- * here and removed by the animation itself; `panes.css` owns the timing and
- * reads it from the tokens, so when the motion vocabulary is revised this
- * inherits it without a change here. `prefers-reduced-motion` already drops the
- * duration to 1 ms globally (tokens.css), so there is nothing to gate.
+ * (DESIGN.md §5: opacity/transform only). The class is added here and removed
+ * by the animation itself; `panes.css` owns the timing and reads it from the
+ * tokens — it is on the **travel** channel (`--motion-enter`) now that the
+ * motion vocabulary has landed, which is the seam this was left as. Reduced
+ * motion zeroes the travel token and keeps the fade, so there is nothing to
+ * gate here.
  */
 function markNewPane(panel: IDockviewPanel): void {
   const element = panel.api.group.element;
