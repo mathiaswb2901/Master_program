@@ -18,13 +18,15 @@
  *    this one;
  *  - a cell whose text looks like markup renders as **text**: no script, no
  *    element, nothing added to the document;
- *  - **zero network requests** are issued while the artifact renders. That is
- *    the property that made us build this instead of adopting a third-party
- *    artifact bridge, and the only place it can be proven is in a real browser;
+ *  - **zero network requests** are issued while the artifact renders — recorded
+ *    from before the message that produces it until it is on screen, which is
+ *    exactly the window the claim is about. That is the property that made us
+ *    build this instead of adopting a third-party artifact bridge, and the only
+ *    place it can be proven is in a real browser;
  *  - the decision still round-trips to the agent, so a drawn card is a card.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Request } from "@playwright/test";
 
 import { assistantBlocks, newSession, openApp, sendChat } from "./app";
 
@@ -32,12 +34,18 @@ test("visual artifact: drawn natively, DST-correct, inert, and answerable", asyn
   await openApp(page);
   await newSession(page);
 
-  // Every request the page makes from here on, recorded before the message that
-  // produces the artifact is sent.
+  // Every request the page makes, recorded from before the message that
+  // produces the artifact until the artifact is on screen. The listener comes
+  // off at that point on purpose: the window has to be *the render*, and the
+  // seconds of inspection that follow are ordinary app life, in which Workbench's
+  // own control plane is entitled to talk (`Layouts.tsx` debounces an arrangement
+  // to `PUT /api/layouts` 500 ms after any dock change). Recording past the render
+  // would eventually catch one of those and call it an artifact fetching something.
   const requests: string[] = [];
-  page.on("request", (request) => {
+  const record = (request: Request): void => {
     requests.push(`${request.method()} ${request.url()}`);
-  });
+  };
+  page.on("request", record);
 
   await sendChat(page, "visual please");
 
@@ -45,6 +53,14 @@ test("visual artifact: drawn natively, DST-correct, inert, and answerable", asyn
   const visual = card.locator(".wb-vis");
   await expect(card).toBeVisible();
   await expect(visual).toBeVisible();
+  page.off("request", record);
+
+  await test.step("rendering the artifact issued no network request", () => {
+    // Not "no image request" — none at all, over the whole send-and-draw. A
+    // visual payload has no field we could fetch, and the renderer has no code
+    // that would.
+    expect(requests, `unexpected requests: ${requests.join(", ")}`).toEqual([]);
+  });
 
   await test.step("every leaf kind rendered natively", async () => {
     await expect(visual.locator(".wb-vis-metrics")).toHaveCount(1);
@@ -138,12 +154,6 @@ test("visual artifact: drawn natively, DST-correct, inert, and answerable", asyn
     expect(inert.embedded).toBe(0);
     expect(inert.handlers).toBe(0);
     expect(inert.alerted).toBe(false);
-  });
-
-  await test.step("rendering the artifact issued no network request", async () => {
-    // Not "no image request" — none at all. A visual payload has no field we
-    // could fetch, and the renderer has no code that would.
-    expect(requests, `unexpected requests: ${requests.join(", ")}`).toEqual([]);
   });
 
   await test.step("a drawn card is still a card the agent hears back from", async () => {
