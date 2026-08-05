@@ -244,13 +244,14 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host, usage |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
+| `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
 | `services/workspace.py` | path jail, atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
@@ -267,6 +268,7 @@ in-process calls where the model and the user dominate.
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 | `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
+| `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn cost; in-memory only |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
 ## The file tree
@@ -568,6 +570,73 @@ State is **in memory only** — a server restart forgets every attribution and
 `GET /api/provenance` comes back empty — and bounded: `MAX_TRACKED_PATHS` (500,
 LRU) entries and `MAX_PENDING_CLAIMS` (200) in-flight claims, so a long session
 cannot grow it without limit.
+
+## Plan usage
+
+Your Claude plan's own limits, inside the app (`services/usage.py`,
+`models/usage.py`, `routers/usage.py`, `ui/src/usage.ts`,
+`ui/src/panels/UsagePanel.tsx`).
+
+**The source, verified against the installed SDK** (claude-agent-sdk 0.2.129,
+bundled CLI 2.1.221), not assumed: the CLI emits a `rate_limit_event` frame
+which the SDK surfaces as `RateLimitEvent`, a member of the `Message` union — so
+it arrives on the same `receive_response()` stream as assistant text and tool
+results. It carries one `RateLimitInfo`: `status`
+(`allowed`/`allowed_warning`/`rejected`), `rate_limit_type`
+(`five_hour`/`seven_day`/`seven_day_opus`/`seven_day_sonnet`/`overage`, or
+`None`), `utilization` (0.0–1.0), `resets_at`, the three `overage_*` fields, and
+`raw`. `AgentSession._handle_sdk_message` translates it at the same seam it
+translates every other SDK message and hands it to `UsageService`, which
+publishes a whole `UsageSnapshot` on the shared bus (`usage` on `/ws/events`);
+`GET /api/usage` serves the same snapshot for initial load and reconnect.
+
+**One event describes one window.** This is the shape that decides the design:
+the five-hour figure and the weekly figures arrive as *separate* events, each
+when that window transitions. The snapshot is therefore accumulated a window at
+a time, and a window nobody has transitioned in is absent.
+
+**Four caveats, each with a rendering rather than a footnote:**
+
+1. **Stale until you talk to an agent.** The figures ride a live session's
+   stream, so they are as old as your last turn. Every bucket carries
+   `observed_at`, the snapshot carries a server-measured `age_s`, the panel
+   stamps both ("Updated 4m ago", "2h old" per meter), and past
+   `STALE_AFTER_S` (15 min) it says outright that the numbers are old. Age is
+   server age **plus local elapsed time** — never `Date.now() - observed_at`,
+   which would report clock skew as staleness.
+2. **It fires on transition, not on demand.** There is no query API: no `claude
+   usage` subcommand on the bundled CLI, `/usage` is TUI-only, and nothing in
+   the SDK reads current utilization. Hence no refresh button — the panel
+   explains the source instead of implying one would work.
+3. **An account may never emit it.** `buckets == []` is a first-class state with
+   its own designed surface, and the fallback is `UsageSessionCost` — what this
+   *process* has spent, from `ResultMessage.total_cost_usd`/`model_usage` —
+   labelled "Session cost — not plan usage", because it answers a different
+   question. The status-bar reading renders nothing at all in this state (§6.7:
+   counts hide at zero); the QuickBar command is how the panel stays reachable.
+4. **We report the buckets we are given.** No synthesized per-model weekly, no
+   extrapolated burn rate. A missing `utilization` renders as an em dash, never
+   as a zeroed bar; an event that named no window is reported as `unspecified`
+   rather than guessed at; an unrecognized `rate_limit_type` is logged and lands
+   there too, rather than being dropped. The only judgement on this side is the
+   display threshold at which a bar starts looking alarming (`WARN_AT` 75%,
+   `CRITICAL_AT` 90%) — and it defers to the SDK's own `status` first.
+
+State is **in memory only**, deliberately: this is live state about an
+*account*, not workspace data, so nothing is written to `.workbench/` and a
+restart reports "not known yet" — the same honest state as an account that never
+emits. Non-finite figures are dropped on the way in (NaN is not JSON, and one
+would fail the whole `/ws/events` fan-out), and the per-model cost map is
+bounded (`MAX_MODELS`).
+
+**The log counts as disk.** Writing no file of our own is only half of "in
+memory only": the desktop shell runs the backend as a child process and copies
+its stdout into `shell.log`, appended across restarts (`pump()` and `open_log()`
+in `desktop/src-tauri/src/backend.rs`), and structlog's default factory prints to
+stdout. Anything logged at or above `Settings.log_level` — `info` by default — is
+therefore on a packaged user's disk. Utilization and reset times are logged at
+`debug` only; the regression test asserts that at fd 1, which is the stream the
+shell actually reads.
 
 ## Office editing
 
@@ -926,7 +995,8 @@ Format spec: `docs/shortcuts.md`.
      streamed markdown reply, a `Read` of a real workspace file, a `Write` that really
      lands on disk (announced before the bytes, as a real tool call is), a second `Write`
      that is announced and then *fails* with nothing written, a permission
-     prompt, a fixed `PlanArtifact` — through the *same* factory and `SessionBridge` seams the
+     prompt, a fixed `PlanArtifact`, and three `RateLimitEvent`s (one per window,
+     the shape the CLI really sends) — through the *same* factory and `SessionBridge` seams the
      real SDK plugs into. Nothing else changes: the session state machine, both
      WebSocket fan-outs and every typed frame stay production code. This is what lets
      layer 4 exercise chat, tool rows, permissions and plan cards with no Claude login
@@ -938,7 +1008,7 @@ Format spec: `docs/shortcuts.md`.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
-   launched in a per-run temp workspace with fake-agent mode on. Nine journeys: file
+   launched in a per-run temp workspace with fake-agent mode on. Ten journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
    ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
    tool reaching the user through the registry alone), chat streaming and
@@ -948,7 +1018,14 @@ Format spec: `docs/shortcuts.md`.
    in a real browser), status chips and the attention badge, office degraded
    mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
    and links back to its session — *and* the negative half: an announced-but-failed
-   write followed by the user's own change, and the user's own saves, mark nothing).
+   write followed by the user's own change, and the user's own saves, mark nothing),
+   and **plan usage** (the empty state *first*, because it is the likeliest one an
+   account really shows, then the meters a rate-limit transition produces, their
+   stamps, the words next to the near-cap colour, the status reading that was
+   silent a moment earlier, and a reload proving the load path agrees with the
+   socket). The one state no browser journey can reach in time — a quarter-hour-old
+   snapshot — is a `renderToStaticMarkup` test instead
+   (`ui/src/panels/UsagePanel.test.tsx`).
    Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.
 5. **Perf lane** (`cd ui && npm run perf` — `ui/playwright.perf.config.ts`, its own

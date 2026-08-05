@@ -22,6 +22,7 @@ import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
+import { usageTool } from "./panels/UsagePanel";
 
 export const TOOLS: readonly WorkbenchTool[] = [
   filesTool,
@@ -35,6 +36,7 @@ export const TOOLS: readonly WorkbenchTool[] = [
   officeHostTool,
   officeTool,
   scratchpadTool,
+  usageTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its

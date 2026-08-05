@@ -36,6 +36,11 @@ What one user message produces, in order:
   outcome echoed as text;
 * ``plan please``    — a fixed :class:`PlanArtifact` through the bridge, then
   the user's verdict and choices echoed as text;
+* ``usage please``   — three ``RateLimitEvent`` messages, one per window, the
+  shape the CLI really emits: one event describes *one* bucket, so a full
+  picture is several events (``services/usage.py``). Deliberately a trigger and
+  not a default, because "no rate-limit event has ever arrived" is the state a
+  real account is most likely to be in and the surface has to be tested in it;
 * ``visual please``  — a plan whose one node is a ``visual``: every leaf kind
   and every block layout at once, on a real 25-hour market day, with a cell
   whose text looks like markup. A separate trigger rather than a bigger
@@ -49,6 +54,7 @@ text instead of an agent is worse than one that fails loudly.
 """
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
@@ -95,6 +101,7 @@ REFUSED_WRITE_TRIGGER = "refuse write"
 PERMISSION_TRIGGER = "ask permission"
 PLAN_TRIGGER = "plan please"
 VISUAL_TRIGGER = "visual please"
+USAGE_TRIGGER = "usage please"
 
 #: How long ``stay busy`` holds the turn open (before the reply, or after the
 #: tool result when ``use tool`` is asked for too). Long enough for a UI test to
@@ -120,6 +127,27 @@ WRITE_TARGET_NAME = "written-by-agent.md"
 #: What the scripted ``Write`` puts in that file. Changes on every call so a
 #: second write is a real change on disk, not a no-op the watcher never reports.
 WRITE_BODY = "# Written by the fake agent\n\nRevision {revision}.\n"
+
+#: Model id the fake reports spending nothing on. Obviously not a real one:
+#: a scripted client must never look like it billed a model.
+FAKE_MODEL = "fake-agent"
+
+#: The three windows ``usage please`` reports, and the state each is in — one
+#: below any threshold, one warning (carrying overage state, which the SDK
+#: hangs on another window's event), one already refused. Chosen to cover the
+#: whole semantic ramp in a single turn, so the E2E journey can assert that a
+#: bar near its cap carries a *label* and not just a colour (DESIGN.md §7).
+#: ``resets_at`` is an offset because "resets in 2 h" is the fact under test;
+#: it is stamped against the wall clock when the event is built.
+FAKE_RATE_LIMITS: tuple[tuple[str, str, float, int], ...] = (
+    ("five_hour", "allowed", 0.42, 2 * 3600),
+    ("seven_day", "allowed_warning", 0.86, 3 * 86400),
+    ("seven_day_opus", "rejected", 1.0, 5 * 86400),
+)
+
+#: Overage state the ``seven_day`` event carries alongside its own figures.
+FAKE_OVERAGE_STATUS = "rejected"
+FAKE_OVERAGE_REASON = "overage is not enabled for this account"
 
 #: Path the *refused* ``Write`` names and never creates. Must sort after the
 #: file a fake ``Read`` picks, for the same reason ``WRITE_TARGET_NAME`` does.
@@ -169,11 +197,53 @@ class UserMessage:
         self.content = content
 
 
+class RateLimitInfo:
+    """One window's state — the SDK dataclass's fields, snake_case as it
+    exposes them (the CLI's own JSON is camelCase; the SDK's parser renames)."""
+
+    def __init__(
+        self,
+        *,
+        status: str,
+        rate_limit_type: str | None,
+        utilization: float | None,
+        resets_at: int | None,
+        overage_status: str | None = None,
+        overage_resets_at: int | None = None,
+        overage_disabled_reason: str | None = None,
+    ) -> None:
+        self.status = status
+        self.rate_limit_type = rate_limit_type
+        self.utilization = utilization
+        self.resets_at = resets_at
+        self.overage_status = overage_status
+        self.overage_resets_at = overage_resets_at
+        self.overage_disabled_reason = overage_disabled_reason
+        self.raw: dict[str, Any] = {}
+
+
+class RateLimitEvent:
+    """What the CLI emits when a rate-limit window *transitions*. One event
+    carries one window — see ``services/usage.py`` for why that matters."""
+
+    def __init__(self, rate_limit_info: RateLimitInfo, session_id: str) -> None:
+        self.rate_limit_info = rate_limit_info
+        self.uuid = uuid.uuid4().hex
+        self.session_id = session_id
+
+
 class ResultMessage:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         self.total_cost_usd = 0.0
         self.is_error = False
+        #: Per-model spend, exactly the CLI's camelCase ``modelUsage`` shape.
+        #: Zeroed like ``total_cost_usd``: fake mode spends nothing, and a
+        #: fabricated dollar figure in a cost readout would be a lie the UI
+        #: could not tell from a real one.
+        self.model_usage: dict[str, dict[str, Any]] = {
+            FAKE_MODEL: {"costUSD": 0.0, "inputTokens": 0, "outputTokens": 0}
+        }
 
 
 def _delta(text: str) -> StreamEvent:
@@ -357,6 +427,33 @@ def fake_visual_plan() -> PlanArtifact:
     )
 
 
+def fake_rate_limit_events(session_id: str, now: float | None = None) -> list[RateLimitEvent]:
+    """The events ``usage please`` puts on the stream: one per window, with
+    reset times relative to when they are emitted."""
+    stamp = time.time() if now is None else now
+    events: list[RateLimitEvent] = []
+    for kind, status, utilization, resets_in in FAKE_RATE_LIMITS:
+        overage: dict[str, Any] = {}
+        if kind == "seven_day":
+            overage = {
+                "overage_status": FAKE_OVERAGE_STATUS,
+                "overage_disabled_reason": FAKE_OVERAGE_REASON,
+            }
+        events.append(
+            RateLimitEvent(
+                RateLimitInfo(
+                    status=status,
+                    rate_limit_type=kind,
+                    utilization=utilization,
+                    resets_at=int(stamp + resets_in),
+                    **overage,
+                ),
+                session_id,
+            )
+        )
+    return events
+
+
 def reply_text(prompt: str) -> str:
     """The markdown reply, as one string (streamed in chunks below)."""
     echoed = " ".join(prompt.split())[:120]
@@ -452,6 +549,11 @@ class FakeAgentClient:
         if VISUAL_TRIGGER in lowered:
             response = await self._bridge.present_plan(fake_visual_plan())
             yield _delta(plan_echo(response))
+        if USAGE_TRIGGER in lowered:
+            # Interleaved with the reply exactly as the real thing is: a
+            # rate-limit transition arrives mid-stream, not at the end of a turn.
+            for event in fake_rate_limit_events(self._session_id):
+                yield event
         yield ResultMessage(self._session_id)
 
     def _read_a_file(self) -> list[Any]:

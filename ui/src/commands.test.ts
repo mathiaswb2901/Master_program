@@ -136,6 +136,7 @@ describe("command registry", () => {
       "terminal.close",
       "office.detachHost",
       "scratchpad.open",
+      "usage.open",
       // The two tools that arrange panels rather than being one, in the order
       // `tools.ts` lists them: Panes splits the window, Layouts remembers it.
       "pane.split.right",

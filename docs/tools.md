@@ -200,8 +200,11 @@ This is the registration rule again, not an exception to it. A tool that puts it
 state in `store.ts` has put a capability back into a shared file — the same collision
 between parallel lanes that keeping `App.tsx` and `commands.ts` capability-free exists to
 prevent, arriving by a different door. The layout system (`ui/src/panels/Layouts.tsx`)
-is the first tool to own one; `useStore` is still what it reaches for to raise a toast,
-because toasts genuinely are app-wide.
+is the first tool to own one, and the usage meters (`ui/src/usage.ts`) the second —
+which also shows the other half of the pattern: a tool that needs live server events
+subscribes to `/ws/events` itself and filters for its own frames, rather than adding a
+branch to the app store's dispatch. `useStore` is still what a tool reaches for to raise
+a toast, because toasts genuinely are app-wide.
 
 If your tool's state starts being read from outside, that is the signal to move it to
 `store.ts` — not to export a getter from your module.
