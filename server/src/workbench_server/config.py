@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     def resolved_projects_dir(self) -> Path:
         return self.claude_projects_dir or (Path.home() / ".claude" / "projects")
 
+    # Managed worktree pool (M5): borrowed git worktrees so parallel agents get
+    # one writer per checkout. The pool root is deliberately NOT under the
+    # workspace — see services/worktrees.py — so the file tree and the watcher
+    # never see a slot. None = the machine-local app data dir.
+    worktree_root: Path | None = None
+    # How many slots the pool may grow to. Slots are created on demand and never
+    # destroyed, so this is the ceiling on borrowed checkouts, not a count that
+    # is allocated up front.
+    worktree_pool_size: int = 4
+    # Default lease, in seconds. One of the two idle signals: a slot is
+    # reclaimable only when the lease has expired *and* its owner process is
+    # gone. Long enough that an agent working unattended keeps its slot.
+    worktree_lease_seconds: float = 3600.0
+
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""
         root = self.workspace_root or Path.cwd()

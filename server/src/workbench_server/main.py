@@ -23,6 +23,7 @@ from workbench_server.routers import (
     provenance,
     shortcuts,
     terminal,
+    worktrees,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.event_bus import EventBus
@@ -38,6 +39,7 @@ from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
+from workbench_server.services.worktrees import WorktreeService
 
 log = structlog.get_logger()
 
@@ -60,6 +62,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # One JSON document per workspace, so different projects keep different
     # arrangements. Stateless: read and written on demand, nothing to start.
     layouts_service = LayoutsService(workspace.root)
+    # Borrowed git worktrees, one writer per checkout. The pool root lives under
+    # the machine's app data dir and NOT under the workspace, so the tree never
+    # walks a slot and the watcher never sees a checkout land in one.
+    worktree_service = WorktreeService(
+        workspace.root,
+        event_bus,
+        pool_root=settings.worktree_root,
+        capacity=settings.worktree_pool_size,
+        lease_seconds=settings.worktree_lease_seconds,
+    )
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
     # Fake mode replaces the SDK client and nothing else: same SessionManager,
@@ -127,6 +139,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         shortcuts_service.start()
         provenance_service.start()
         office_host_service.start()
+        # Reads the pool state and reconciles it with the disk. Never raises: a
+        # machine with no git, or a workspace that is not a repository, reports
+        # a `problem` on GET /api/worktrees and the rest of the app starts.
+        await worktree_service.start()
         yield
         await session_manager.close_all()
         # Before the watcher: a hosted window outliving the server would be an
@@ -158,6 +174,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.shortcuts = shortcuts_service
     app.state.provenance = provenance_service
     app.state.layouts = layouts_service
+    app.state.worktrees = worktree_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -177,6 +194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(shortcuts.router)
     app.include_router(provenance.router)
     app.include_router(layouts.router)
+    app.include_router(worktrees.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

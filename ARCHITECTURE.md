@@ -244,7 +244,7 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host, worktrees |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
@@ -252,6 +252,7 @@ in-process calls where the model and the user dominate.
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
+| `routers/worktrees.py` | list/acquire/release/renew/prune the managed worktree pool |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
 | `services/workspace.py` | path jail, atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
 | `services/watcher.py` | watchfiles -> bus |
@@ -266,6 +267,7 @@ in-process calls where the model and the user dominate.
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 | `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
+| `services/worktrees.py` | the managed worktree pool: borrowed detached checkouts, leases, dirty protection |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
@@ -893,6 +895,105 @@ contributes **no panel**: commands, a status chip, a `shortcuts.md` kind and an
   rebuilds the dock (`clear()` + placements) while switching to a *saved* layout
   uses `fromJSON(…, { reuseExistingPanels: true })`, which moves the panels that
   exist in both rather than recreating them.
+
+## The managed worktree pool
+
+`CLAUDE.md` has required "one writer per checkout, always" since M4, enforced by
+discipline. `services/worktrees.py` makes it a feature: a small pool of git
+worktrees a caller **borrows** a slot from, works in, and gives back. It is also
+the substrate Mission Control's workers need.
+
+```
+routers/worktrees.py ──► WorktreeService ──► git (asyncio.create_subprocess_exec)
+   REST                    slots by name          worktree add --detach
+   /ws/events ◄── WorktreeChangedEvent             status --porcelain
+                                                   reset --hard / clean -fd
+%LOCALAPPDATA%\Workbench\worktrees\<workspace-key>\
+   pool.json      the state document (atomic write, Windows-lock retry)
+   slot-01/ …     detached checkouts, kept warm, never removed
+```
+
+**Four decisions, implemented rather than described.**
+
+- **Detached HEAD.** Every slot is `git worktree add --detach`, so a pooled
+  worktree carries no branch and *"already checked out at …"* cannot happen —
+  the wall every fix-stage agent in this repo's own workflow hits when two lanes
+  want one branch. What a holder does inside its slot (branch, commit, push) is
+  the holder's business; what the pool hands out is a commit.
+- **Pool, never destroy.** There is no `git worktree remove` and no
+  `shutil.rmtree` in the module, asserted by watching every git argv a full
+  acquire→release→discard→prune cycle runs. A finished slot is reset and
+  returned, so `node_modules`, `.venv` and build caches stay with it: they are
+  *ignored* files and the only cleaning is `git clean -fd`, never `-x`. A cold
+  install is paid once per slot, not once per task. It also avoids a hazard
+  measured here — `git worktree remove` recurses through a Windows junction, so
+  any design that *links* dependencies into a slot can empty the checkout they
+  point at.
+- **Two idle signals.** A lease carries an `owner_pid` *and* an `expires_at`,
+  and `prune()` reclaims only when **both** say idle. The deadline holds a slot
+  for an agent working unattended with nothing of ours running; the pid holds it
+  past the deadline for an owner that is demonstrably still there. The liveness
+  probe is `OpenProcess` + `GetExitCodeProcess` and never `os.kill(pid, 0)` —
+  which on Windows CPython is `TerminateProcess`, i.e. a probe that kills what it
+  asks about. Its two imprecisions (a process that exited with code 259 reads as
+  alive, and so does a recycled pid) both hold a slot *longer*, which is the
+  direction that costs a wait rather than an agent's work.
+- **Fail safe on corrupt state.** A `pool.json` that is truncated, unreadable,
+  not JSON or from another version is not repaired — the pool is rebuilt from
+  what git reports on disk and **every** slot comes back `leased` under a
+  `recovered` lease. Assume in use; never assume free. A directory in the pool
+  root git does *not* know as a worktree becomes `needs_review` and is left
+  exactly where it is.
+
+**Dirty is sacred, and it outranks all four.** A slot whose `git status
+--porcelain` is non-empty is never handed out and never reclaimed without an
+explicit `force`; a status that *fails* is read as dirty, never as clean; and
+the disk beats the state file, so a slot recorded free with work in it is
+re-parked as `dirty` rather than given away. The one thing dirty protection is
+*not* is a one-way door: every sweep re-asks, and a slot git now reports clean is
+freed — which discards nothing, because there is nothing left to discard.
+
+**What Windows actually does, measured** (`test_worktrees.py`, with a real
+`CreateFile` share-mode-0 handle — Python's own `open()` shares everything and
+would prove nothing):
+
+| with an exclusive handle on a tracked file | result |
+|---|---|
+| `git status --porcelain` | reports it `M` — git cannot open it to compare, so it says changed |
+| `git reset --hard <other commit>` | `error: unable to unlink old 'model.py'` |
+| after the handle closes | status clean again, reset succeeds |
+
+So the dirty guard fires *before* any reset is attempted, which is the safest
+place for it to fire, and the reset failure sits behind it. Neither costs a
+byte. A reset that keeps failing is retried on a short bounded budget (the same
+shape `services/layouts.py` uses for `os.replace`) and then becomes
+`needs_review` — never `--force`, because git's reset is already forceful and
+the failure is the filesystem's.
+
+**The pool root is outside the workspace, and that is load-bearing.** It lives
+under `%LOCALAPPDATA%\Workbench\worktrees\<name>-<digest of the workspace path>`
+— *not* under `.workbench/`, because a worktree inside the workspace would be
+walked by `Workspace.tree()`, watched by the watcher and indexed as N more
+copies of the project: every file would appear `pool_size` times in the tree and
+every checkout would arrive as a watcher storm. The tests assert the property
+rather than assume it — `safe_path` refuses a slot, the tree does not list one,
+and a real `git worktree add` through the API produces no file event on
+`/ws/events`.
+
+**When the reset happens.** A clean slot is returned *as it is*; the
+`reset --hard` that repurposes it runs at **acquire** time. Acquire is the only
+moment the pool knows which commit to reset *to*, and it is the moment nothing
+is running in the slot — whereas a release fires exactly as the holder's own
+processes are letting go of their handles, which is when a Windows reset is most
+likely to fail. Commits a holder made and did not push survive that reset:
+nothing here runs `gc`, `worktree remove` or `clean -x`, so they stay in the
+object database, reachable through the slot's own `HEAD` reflog.
+
+**Not built yet** (ROADMAP M5 item 6 carries them): multi-root file and terminal
+access through a root registry, so a slot can be *opened* in the UI with the path
+jail preserved per root; worktree-bound agent sessions; and per-slot watchers.
+The pool is the substrate those need, and it stands alone without them — the
+endpoints are usable today by anything that can make an HTTP call.
 
 ## Shortcuts
 

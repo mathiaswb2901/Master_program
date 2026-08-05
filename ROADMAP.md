@@ -469,33 +469,69 @@ because other sections and five running lanes reference these numbers.
    first-run picker in the OSS bar item 3. Also unlocks **half B of item 12**: opening a
    session whose folder is outside the current workspace needs this (or the multi-root
    jail from item 6), which is why the session browser ships its read half first.
-6. **Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
-   dirty-slot `needs_review` protection, per-slot watchers), multi-root file/terminal
-   access through a root registry (path jail preserved per root), worktree-bound agent
-   sessions. Parallel projects that cannot step on each other.
+6. ~~**Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
+   dirty-slot `needs_review` protection)~~ — **the pool is done**
+   (`services/worktrees.py`, `models/worktrees.py`, `routers/worktrees.py`, landed
+   early and out of sequence because item 7 needs it). Still open in this item, and
+   deliberately: multi-root file/terminal access through a root registry (path jail
+   preserved per root), worktree-bound agent sessions, and per-slot watchers — the
+   pool stands alone without them and its endpoints are usable today. No UI yet
+   either: four UI lanes were live when it landed, so it shipped backend-only.
    **Four design decisions, taken from `kunchenguid/treehouse` (MIT, read 2026-08-05,
    not adopted as a dependency — a pool bound to agent sessions and inside our path
    jail has to be ours) and each of which we would otherwise have rediscovered the hard
-   way:**
+   way** — all four now **implemented**, each with a test named after it:
    - **Detached HEAD.** A pooled worktree carries no branch, so "already checked out in
      another worktree" cannot happen. Every fix-stage agent this session had to push
      from a differently-named local branch for exactly that reason; the whole class goes
-     away.
+     away. *Implemented* as `git worktree add --detach`; the test proves it the way it
+     bites, by watching `git checkout main` be refused *inside* a slot while the pool is
+     unbothered.
    - **Pool, never destroy.** A finished worktree is *reset and returned*, not removed —
      so `node_modules`, `.venv` and build caches stay with it and the cold install is
      paid once per slot rather than once per task. This is the honest answer to the
      problem PR #32 tried to solve by junctioning `node_modules` from the main checkout
      and had to be closed over: `git worktree remove` recurses *through* a Windows
      junction and would have emptied the main checkout. Never removing the worktree
-     removes the hazard along with the cost.
+     removes the hazard along with the cost. *Implemented*, and enforced on the commands
+     rather than in prose: a test watches every git argv a full
+     acquire→release→discard→prune cycle runs and fails on `worktree remove`, on
+     `clean -x` (which would delete the very caches this exists to keep) and on
+     `--force`. The reset itself runs at **acquire** time, which is the only moment the
+     pool knows what to reset *to* and the moment nothing is running in the slot.
    - **Two idle signals.** Process/owner exit *and* an explicit durable lease that
      survives with nothing running. Ours is cleaner than a subshell — a closed agent
      session or pane is an exact signal — but the lease is what stops a slot being
-     reaped while an agent is still working in it unattended.
+     reaped while an agent is still working in it unattended. *Implemented* as
+     `owner_pid` + `expires_at`, reclaimed only when **both** say idle, with a renewable
+     lease. The liveness probe is `OpenProcess` + `GetExitCodeProcess` and never
+     `os.kill(pid, 0)` — which on Windows CPython is `TerminateProcess`, i.e. a probe
+     that kills what it asks about. Its two imprecisions (exit code 259, a recycled pid)
+     both hold a slot *longer*, which is the direction that costs a wait rather than an
+     agent's work.
    - **Fail safe on corrupt state.** If the pool's state file is truncated or lost,
      rebuild from what is on disk and mark every slot **leased until verified** —
      assume in use, never assume free. Same instinct as the dirty-slot rule above, and
-     the right default for anything that can destroy work.
+     the right default for anything that can destroy work. *Implemented* for truncated,
+     unreadable, non-JSON *and* wrong-version documents; verified on a live server by
+     truncating `pool.json` and restarting, which came back with all three slots held
+     and the next acquire honestly refused.
+
+   **Dirty is sacred, and it outranks all four.** A slot with tracked changes or
+   untracked files is never handed out and never reclaimed without an explicit `force`,
+   a `git status` that *fails* counts as dirty, and the disk beats the state file.
+   What Windows really does was measured rather than assumed (a real `CreateFile`
+   share-mode-0 handle): an exclusively-held file reads as `M` to `git status`, so the
+   **dirty guard fires before any reset is attempted**, and the `reset --hard` behind it
+   fails with `unable to unlink`. Both are protective. The reset is retried on a bounded
+   budget and then becomes `needs_review` — never `--force`, because git's reset is
+   already forceful and the failure is the filesystem's. Dirty protection is not a
+   one-way door: every sweep re-asks, so a slot a transient lock parked comes back by
+   itself. The pool root is under the machine's app data dir and **not** in the
+   workspace, asserted three ways (the jail refuses it, the tree does not list it, a
+   real `worktree add` through the API produces no watcher event) — inside `.workbench/`
+   it would put N copies of the project in the file tree and turn every checkout into a
+   watcher storm.
 7. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
    (status, current activity, cost), inline permission chips answerable from the board;
    orchestrator session kind with a mission-control MCP toolset
@@ -666,7 +702,8 @@ because they share a row shape and building the live one first means the browser
 side-by-side Office proof. **6.** **Item 13 pop-out**, after panes and after the Office
 composition PR, which is what makes its native-window decision necessary. **7.** Then
 the existing order, unchanged and better founded: item 4 → item 5 (which unlocks item
-12's half B) → item 6 → item 7 → item 8. **8.** M6 and M7 untouched — and every surface
+12's half B) → item 6's carried halves (its pool landed early and out of sequence,
+because item 7 needs it) → item 7 → item 8. **8.** M6 and M7 untouched — and every surface
 added above ships in current `DESIGN.md` tokens and gets restyled with everything else
 in M7. No lane invents a look.
 
