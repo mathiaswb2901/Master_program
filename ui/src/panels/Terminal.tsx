@@ -220,6 +220,9 @@ export const terminalTool: WorkbenchTool = {
     component: TerminalPanel,
     defaultLocation: { area: "bottom", size: 260 },
   },
+  // A `shell` shortcut is typed into the active terminal, so this panel comes
+  // forward first — declared here so `commands.ts` routes by capability.
+  shortcutKinds: ["shell"],
   commands: [
     {
       id: "terminal.new",

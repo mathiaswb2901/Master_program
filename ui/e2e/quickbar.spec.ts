@@ -16,9 +16,9 @@
  *    for it (the snippet appears exactly once — an executed `echo` would print
  *    its argument a second time);
  *  - a **registered tool** reaches the user through the registry alone: the
- *    Scratchpad's command is in the QuickBar with its own chord, running it
- *    opens a panel that is not in the default layout, and what is typed there
- *    lands in a real workspace file.
+ *    Scratchpad's command is in the QuickBar, running it opens a panel that is
+ *    not in the default layout, what is typed there lands in a real workspace
+ *    file, and the tab it arrived on closes it again.
  */
 
 import path from "node:path/posix";
@@ -144,16 +144,19 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
     expect(occurrences, "the snippet was typed and never run").toBe(1);
   });
 
-  await test.step("a registered tool brings its own command, chord and panel", async () => {
+  await test.step("a registered tool brings its own command and panel", async () => {
     // The exit criterion of the tool registry, end to end. Scratchpad is one
     // module plus one line in `ui/src/tools.ts` — no App.tsx, no commands.ts,
-    // no CSS bundle — and this is what that buys: a QuickBar row with its own
-    // keycaps, a panel that is not in the default layout until the command
-    // opens it, and a real file on disk behind it.
+    // no CSS bundle — and this is what that buys: a QuickBar row, a panel that
+    // is not in the default layout until the command opens it, and a real file
+    // on disk behind it.
     await page.keyboard.press("Control+Shift+P");
     const quickbar = page.getByRole("dialog", { name: "Quick open" });
     const row = quickbar.locator(".wb-qb-row", { hasText: "Open Scratchpad" }).first();
-    await expect(row.locator(".wb-keycap")).toHaveText(["Alt", "S"]);
+    // No keycaps: the demo tool deliberately claims no chord, because a
+    // registered one would take an Alt chord away from the user's own
+    // shortcuts.md (which may bind nothing else).
+    await expect(row.locator(".wb-keycap")).toHaveCount(0);
 
     await expect(page.getByRole("textbox", { name: "Scratchpad" })).toHaveCount(0);
     await row.click();
@@ -168,5 +171,16 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
     );
     expect(saved.ok()).toBe(true);
     expect(((await saved.json()) as FileContent).content).toBe(SCRATCH_NOTE);
+  });
+
+  await test.step("and the panel it opened can be closed again", async () => {
+    // The other half of the on-demand path, and the reason it is asserted: the
+    // Scratchpad splits the right-hand side away from the Agent panel, so a
+    // panel that opens and cannot close leaves the layout broken for the rest
+    // of the session (there is no layout persistence yet). Fixed panels keep
+    // their chrome-only tabs — only an on-demand one gets this button.
+    await page.getByRole("button", { name: "Close Scratchpad" }).click();
+    await expect(page.getByRole("textbox", { name: "Scratchpad" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Close Agent" })).toHaveCount(0);
   });
 });

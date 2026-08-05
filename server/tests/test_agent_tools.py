@@ -20,9 +20,9 @@ from workbench_server.services.agent_tools import (
     AGENT_TOOLS,
     GET_WORKSPACE_STATE,
     MAX_DESCRIPTION_CHARS,
-    MAX_RESULT_BYTES,
     PRESENT_PLAN,
     allowed_tool_names,
+    clamp_result,
     handle_present_plan,
     workspace_state_result,
 )
@@ -96,9 +96,11 @@ class TestRegistry:
     def test_every_tool_declares_a_name_schema_and_output_format(self) -> None:
         assert [spec.name for spec in AGENT_TOOLS] == ["get_workspace_state", "present_plan"]
         for spec in AGENT_TOOLS:
-            # ``output_format`` is a required field, so an omission is a type
-            # error — this asserts the values are the ones we actually ship.
+            # ``output_format`` and ``max_result_bytes`` are required fields, so
+            # an omission is a type error — this asserts the values are the ones
+            # we actually ship.
             assert spec.output_format == "compact-json"
+            assert spec.max_result_bytes > 0
             assert isinstance(spec.input_schema, dict)
 
     def test_names_are_unique(self) -> None:
@@ -135,18 +137,31 @@ class TestDescriptionBudget:
 
 
 class TestResultBudget:
+    """Each ceiling is per tool and sized from the payload next to it, so it can
+    actually fail. A single global number big enough for the chattiest tool is
+    one no other tool can ever exceed — a budget that cannot fail does not
+    bind, which is the rule this file exists to keep (CLAUDE.md)."""
+
     def test_workspace_state_result_is_compact_json(self) -> None:
         text = result_text(workspace_state_result(representative_ui_state()))
-        assert len(text.encode()) <= MAX_RESULT_BYTES
+        assert len(text.encode()) <= GET_WORKSPACE_STATE.max_result_bytes
         # Compact, not pretty: the indented form of this very payload is
         # materially larger for no gain in what the model can read.
         assert "\n" not in text
         assert ", " not in text
         assert UiState.model_validate_json(text) == representative_ui_state()
 
+    def test_the_compact_form_is_the_cheaper_one(self) -> None:
+        """The reason `compact-json` is the default answer, as a number rather
+        than an assertion in a comment: same payload, both serializations."""
+        state = representative_ui_state()
+        compact = len(state.model_dump_json().encode())
+        pretty = len(state.model_dump_json(indent=2).encode())
+        assert compact < pretty
+
     async def test_present_plan_result_is_compact_json(self) -> None:
         text = result_text(await handle_present_plan(_Bridge(), representative_plan_payload()))
-        assert len(text.encode()) <= MAX_RESULT_BYTES
+        assert len(text.encode()) <= PRESENT_PLAN.max_result_bytes
         assert "\n" not in text
         assert PlanResponse.model_validate_json(text).verdict == "approve"
 
@@ -156,7 +171,29 @@ class TestResultBudget:
         bad = representative_plan_payload() | {"nodes": [{"kind": "html"}] * 20}
         result = await handle_present_plan(_Bridge(), bad)
         assert result["is_error"] is True
-        assert len(result_text(result).encode()) <= MAX_RESULT_BYTES
+        assert len(result_text(result).encode()) <= PRESENT_PLAN.max_result_bytes
+
+    async def test_a_pathological_validation_error_is_cut_to_the_budget(self) -> None:
+        """Ten distinct errors, each naming a long path — the case the ten-error
+        cap alone does not bound. Truncation is enforced, not hoped for."""
+        bad = representative_plan_payload() | {
+            "nodes": [
+                {"kind": "step_list", "node_id": f"n{index}" * 20, "steps": "not a list"}
+                for index in range(12)
+            ]
+        }
+        result = await handle_present_plan(_Bridge(), bad)
+        assert result["is_error"] is True
+        assert len(result_text(result).encode()) <= PRESENT_PLAN.max_result_bytes
+
+    def test_clamping_never_exceeds_the_limit_or_splits_a_character(self) -> None:
+        """Byte budgets over UTF-8: a cut mid-character must not produce mojibake
+        (paths and user comments are not ASCII — `Åsen`, `€/MWh`)."""
+        assert clamp_result("short", 64) == "short"
+        clamped = clamp_result("Åsen 2 " * 40, 32)
+        assert len(clamped.encode()) <= 32
+        assert clamped.endswith("…")
+        assert "�" not in clamped
 
     def test_the_argument_schemas_are_the_smallest_that_work(self) -> None:
         """A tool that takes nothing advertises nothing: an empty schema is one

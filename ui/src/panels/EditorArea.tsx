@@ -10,7 +10,7 @@ import {
   monacoThemeName,
   setActiveEditor,
 } from "../monaco";
-import { documentViews, type WorkbenchTool } from "../registry";
+import { documentViewFor, documentViews, type WorkbenchTool } from "../registry";
 import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
 import { TOOLS } from "../tools";
@@ -139,7 +139,7 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
   // kinds here: the Office tool claims `office`, and the native Office host
   // will claim it back the same way.
   const views = documentViews(TOOLS);
-  const activeView = active === null ? null : (views.find((v) => v.kind === active.kind) ?? null);
+  const activeView = active === null ? null : documentViewFor(TOOLS, active.kind);
 
   useEffect(() => () => setActiveEditor(null), []);
 

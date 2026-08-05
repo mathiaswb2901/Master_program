@@ -119,12 +119,20 @@ contribute any of:
 
 | Field | What registering gets you |
 |---|---|
-| `panel` | A dockview panel: component, where it docks, whether it opens with the app, whether it is a singleton. `App.tsx` names no panel — it renders `panelComponents(TOOLS)` and applies `defaultLayout(TOOLS)` |
+| `panel` | A dockview panel: component, where it docks, whether it opens with the app, whether it is a singleton, and the one badge its tab may carry. `App.tsx` names no panel — it renders `panelComponents(TOOLS)`, applies `defaultLayout(TOOLS)` and draws its tabs from `panelTabInfo(TOOLS, …)` |
 | `documentView` | A renderer for one `OpenFile` kind inside the editor area. Office claims `office`; the native Office host will claim it back through the same field |
 | `commands` + `shortcuts` | QuickBar rows and keymap entries. Commands are the same `Command` shape `commands.ts` already used, so the QuickBar, the pass-through policy and the `shortcuts.md` merge are unchanged; the chords live in one table per tool, which is the layer a user keymap file overrides later |
 | `statusContributions` | Items in the status bar's left/centre/right regions. The bar owns the regions and nothing that goes in them |
-| `agentTools` | The MCP tools this capability puts in a session's context, with the required output-format field (see below) |
-| `when` | A predicate that takes the whole tool out — panel, commands and status items together |
+| `shortcutKinds` | Which `shortcuts.md` kinds this panel hosts — the Terminal claims `shell`, the Agent `prompt` — so insertion is routed by capability rather than by a pair of panel ids in `commands.ts` |
+| `when` | A predicate that takes the whole tool out — panel, commands and status items together. **Boot-time**: it is asked once per tool and remembered, because the things it feeds are derived at different moments and a tool that enabled itself later would be half present |
+
+A panel's tab is closable exactly when it is *not* in the startup layout: one
+that a command opened must be dismissible by the tab it arrived on, while
+closing a startup panel would strand the app until a reload (layout persistence
+is M5 item 2).
+
+Agent-facing tools are **not** in this descriptor — `services/agent_tools.py` is
+their single registry (below).
 
 Derivation is what makes it a registry rather than a list: `Ctrl+1..N` focus
 commands are generated from the panels *in the default layout*, in registry
@@ -144,9 +152,13 @@ host them unchanged. That is the M7+ endgame in `ROADMAP.md` — the difference
 between a fixed app and an instrument.
 
 **The exit criterion, demonstrated.** `ui/src/panels/Scratchpad.tsx` is a whole
-capability — panel, command, chord, tab icon, a file on disk — added in one new
-module plus one line in `tools.ts`. It touches no file another work lane is
-likely to touch. `docs/tools.md` is the walkthrough.
+capability — a panel that opens on demand and closes again, its command, its tab
+icon, a file on disk — added in one new module plus one line in `tools.ts`. It
+touches no file another work lane is likely to touch. It deliberately claims no
+chord: a registered chord beats a `shortcuts.md` one and `Alt` is the only
+modifier that file may use, so every chord a tool takes is one a user cannot
+have — a price the Terminal's `Alt+T` earns and a worked example does not.
+`docs/tools.md` is the walkthrough.
 
 **Agent-facing tools** carry the ergonomics budget on both sides.
 `services/agent_tools.py` is the server registry the SDK actually reads: name,
@@ -155,14 +167,19 @@ model-facing description, input schema, and a **required** `output_format`, so
 the session's allow-list from that list, so a tool is added in one place. The
 budget is enforced where it can fail — `server/tests/test_agent_tools.py`
 asserts a ceiling on every description (loaded into every session's context, so
-paid for on every request) and on the serialized size of a representative
-result, and that results are compact JSON rather than pretty-printed. The UI
-descriptor's `agentTools` field is the capability's own declaration of what it
-adds, with the same description ceiling in `registry.test.ts`; the two are
-deliberately not wired together over the network, since a second copy of the
-model-facing text on the wire would be another authority to keep honest for no
-gain. Latency is not budgeted: these are in-process calls where the model and
-the user dominate.
+paid for on every request), a **per-tool** ceiling on the serialized result,
+sized from the measured representative payload plus a stated margin, and that
+results are compact JSON rather than pretty-printed. Per-tool because one shared
+number large enough for the chattiest tool is a number no other tool can exceed,
+and a budget that cannot fail does not bind. The one result path that is not
+ours to size — a pydantic validation error — is clamped to the ceiling rather
+than trusted to fit.
+
+There is no second copy of any of this in the UI. A capability declares its
+panel and commands in `ui/src/registry.ts` and its agent-facing tools here, once:
+a duplicate of the model-facing text on the client would be another authority to
+keep honest with nothing reading it. Latency is not budgeted: these are
+in-process calls where the model and the user dominate.
 
 ## Module map (server/src/workbench_server/)
 

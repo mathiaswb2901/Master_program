@@ -7,11 +7,13 @@ unmeasured — the format its result comes back in. :mod:`sdk_factory` builds th
 MCP server from these specs and derives the session's allow-list from them, so a
 tool is added in one place and bounded in one place.
 
-This is the server half of the tool registry; ``ui/src/registry.ts`` is the
-client half, where a capability declares the same tools alongside its panel.
-The two are deliberately not wired together over the network: this list is what
-the SDK actually reads, and duplicating it as a payload would be a second
-authority to keep honest for no gain.
+This is the *only* place an agent-facing tool is declared. ``ui/src/registry.ts``
+is the registry for what a capability contributes to the *window* — its panel,
+commands and status items — and deliberately says nothing about the tools that
+capability gives an agent: a second copy of the model-facing text, on the wire
+or in a descriptor, would be a second authority to keep honest with nothing
+reading it, and the first edit that touched one and not the other would go
+unnoticed.
 
 The budget is enforced by tests, never by a comment. Every description is loaded
 into every session's context, so it is a cost paid on every request (CLAUDE.md);
@@ -31,14 +33,16 @@ from workbench_server.models.plans import PlanArtifact, plan_input_schema
 from workbench_server.services.agent_sessions import PlanAlreadyPendingError, SessionBridge
 
 #: How a tool's result reaches the model. ``compact-json`` means no indent and
-#: no pretty separators — measured elsewhere at ~40% fewer tokens than the
-#: pretty form for the same payload, which is why it is the default answer.
+#: no pretty separators. Measured on the representative payload the tests use
+#: (``representative_ui_state`` — six open files, two dirty):
+#: ``model_dump_json()`` is 312 bytes against 371 with ``indent=2``, ~16% fewer,
+#: and the gap widens with nesting depth since every level adds its own
+#: indentation. It is a small win taken on every call of every session.
 OutputFormat = Literal["compact-json", "text", "markdown"]
 
-#: Ceilings the tests bind. Raising one is a deliberate act with a diff, which
-#: is the whole point: the alternative was a number nobody ever looked at.
+#: Ceiling on the model-facing description, shared: the cost is the same
+#: whatever the tool does. It binds — ``present_plan`` spends 708 of it.
 MAX_DESCRIPTION_CHARS = 800
-MAX_RESULT_BYTES = 2048
 
 MCP_SERVER_NAME = "workbench"
 
@@ -50,6 +54,12 @@ class AgentToolSpec:
     name: str
     description: str
     output_format: OutputFormat
+    #: Ceiling on this tool's serialized result, in bytes. Per tool, not global:
+    #: a shared number large enough for the chattiest tool cannot fail for any
+    #: other, which is how a budget becomes decoration. Size it from the
+    #: measured representative payload plus a margin you can say out loud (see
+    #: the two below), so that growing the result is a diff someone justifies.
+    max_result_bytes: int
     input_schema: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -68,6 +78,19 @@ def error_result(text: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "is_error": True}
 
 
+def clamp_result(text: str, limit: int) -> str:
+    """Cut a result to its tool's byte budget rather than hoping it fits.
+
+    For text an agent only reads (an error message), where the alternative to
+    truncation is an unbounded wall of prose it is charged for. Never for a
+    payload it parses — clamping valid JSON would hand it invalid JSON.
+    """
+    encoded = text.encode()
+    if len(encoded) <= limit:
+        return text
+    return encoded[: max(limit - 3, 0)].decode(errors="ignore") + "…"
+
+
 # ---- get_workspace_state ----------------------------------------------------
 
 GET_WORKSPACE_STATE = AgentToolSpec(
@@ -77,6 +100,11 @@ GET_WORKSPACE_STATE = AgentToolSpec(
         "and files with unsaved changes (do NOT edit those)."
     ),
     output_format="compact-json",
+    # 312 bytes for the six-tab session in the tests, so 512 buys roughly four
+    # more paths — a busy workspace, not a change of shape. Echoing anything
+    # per-file (hashes, dirty flags, line counts) blows it, which is the point:
+    # that is a redesign of what this tool costs, not an incremental edit.
+    max_result_bytes=512,
 )
 
 
@@ -107,6 +135,12 @@ PRESENT_PLAN = AgentToolSpec(
         "interrupt) — stop and ask in chat, never treat it as approval."
     ),
     output_format="compact-json",
+    # The envelope is 129 bytes for the representative approval; 512 covers a
+    # verdict, the chosen options and a couple of sentences of the user's own
+    # comment. What rides along past that is the user's typing, not ours to
+    # budget — the ceiling is on the shape, and the one path we *can* overrun
+    # (a validation error) is clamped to it in `handle_present_plan`.
+    max_result_bytes=512,
     input_schema=plan_input_schema(),
 )
 
@@ -123,7 +157,9 @@ async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> di
     full timeout. Minting here makes every presentation a fresh card.
 
     Validation errors come back as tool errors rather than exceptions: the agent
-    reads them and fixes its own arguments on the next call.
+    reads them and fixes its own arguments on the next call — clamped to this
+    tool's result budget, since pydantic's own message length is not ours and
+    ten of them can outweigh the plan they are about.
     """
     try:
         artifact = PlanArtifact.model_validate(
@@ -134,7 +170,9 @@ async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> di
             f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
             for error in exc.errors()[:10]
         )
-        return error_result(f"Invalid plan — fix and retry: {problems}")
+        return error_result(
+            clamp_result(f"Invalid plan — fix and retry: {problems}", PRESENT_PLAN.max_result_bytes)
+        )
     try:
         response = await bridge.present_plan(artifact)
     except PlanAlreadyPendingError as exc:

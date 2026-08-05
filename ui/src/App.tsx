@@ -11,7 +11,7 @@ import { DirtyCloseModal, ShellCloseModal } from "./panels/Modal";
 import { QuickBar } from "./panels/QuickBar";
 import { StatusBar } from "./panels/StatusBar";
 import { Toasts } from "./panels/Toasts";
-import { panelComponents } from "./registry";
+import { panelComponents, panelTabInfo } from "./registry";
 import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
 import { TOOLS } from "./tools";
@@ -25,24 +25,38 @@ const BASE_TITLE = "Workbench";
 const anyNeedsAttention = (states: Record<string, string>): boolean =>
   Object.values(states).some((state) => state === "needs_attention");
 
-/** Fixed panels: title only, no close button — closing them would strand the app.
- * The Agent tab carries an aggregate attention dot (DESIGN.md §6.4 dot-only). */
+/**
+ * Panel chrome, entirely from the descriptor: the tool's glyph, its title, the
+ * one badge it contributes, and a close button for a panel that is not in the
+ * startup layout.
+ *
+ * Only those close: a panel the app opened with has no way back if it is
+ * dismissed (no layout persistence yet), while one a command opened must be
+ * dismissible by the same tab it arrived on — otherwise the split it made stays
+ * for the session.
+ */
 function PanelTab(props: IDockviewPanelHeaderProps) {
-  const attention = useStore(
-    (s) => props.api.id === "agent" && anyNeedsAttention(s.sessionStates),
-  );
-  const Icon = TOOLS.find((tool) => tool.id === props.api.component)?.icon;
+  const { icon: Icon, badge: Badge, closable } = panelTabInfo(TOOLS, props.api.component);
+  const title = props.api.title ?? props.api.id;
   return (
     <div className="wb-panel-tab u-truncate">
       {Icon !== undefined && <Icon />}
-      {props.api.title ?? props.api.id}
-      {attention && (
-        <span
-          className="wb-tab-attention-dot"
-          role="img"
-          aria-label="A session needs attention"
-          title="A session needs attention"
-        />
+      {title}
+      {Badge !== undefined && <Badge />}
+      {closable && (
+        <button
+          type="button"
+          className="wb-panel-tab-close"
+          aria-label={`Close ${title}`}
+          title={`Close ${title}`}
+          onClick={(e) => {
+            // The tab's own click would activate the panel we are removing.
+            e.stopPropagation();
+            props.api.close();
+          }}
+        >
+          ×
+        </button>
       )}
     </div>
   );

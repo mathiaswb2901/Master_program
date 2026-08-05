@@ -1,12 +1,12 @@
 /**
  * Scratchpad — the registry's worked example.
  *
- * A whole capability in one file: a panel, the command that opens it, its
- * default chord and its tab icon. Adding it to Workbench cost this module plus
- * one line in `tools.ts`; it touches no file another work lane is likely to
- * touch — no `App.tsx`, no `commands.ts`, no `StatusBar.tsx`, no CSS bundle.
- * That is the tool registry's exit criterion, demonstrated rather than claimed
- * (docs/tools.md walks through it).
+ * A whole capability in one file: a panel that opens on demand and closes
+ * again, the command that opens it, and its tab icon. Adding it to Workbench
+ * cost this module plus one line in `tools.ts`; it touches no file another work
+ * lane is likely to touch — no `App.tsx`, no `commands.ts`, no `StatusBar.tsx`,
+ * no CSS bundle. That is the tool registry's exit criterion, demonstrated
+ * rather than claimed (docs/tools.md walks through it).
  *
  * Behaviour is deliberately small: a textarea persisted to the workspace's own
  * `.workbench/scratch.md` through the existing files API, so notes survive a
@@ -146,7 +146,8 @@ export const scratchpadTool: WorkbenchTool = {
     component: ScratchpadPanel,
     defaultLocation: { area: "right", size: 380 },
     // Not in the startup layout: the default arrangement is unchanged for
-    // anyone who never opens it.
+    // anyone who never opens it — and its tab gets a close button, so the split
+    // it makes is undoable by the tab it arrived on.
     openByDefault: false,
   },
   commands: [
@@ -157,5 +158,9 @@ export const scratchpadTool: WorkbenchTool = {
       run: () => openPanel("scratchpad"),
     },
   ],
-  shortcuts: { "scratchpad.open": ["Alt+S"] },
+  // No chord, deliberately. A registered command wins every collision with a
+  // user's `shortcuts.md`, and Alt is the only modifier that file may use — so
+  // a chord claimed here is taken from the user, silently. That price is worth
+  // paying for Alt+T; it is not worth paying for the registry's worked example.
+  // `shortcuts` is demonstrated by the tools that earn one (docs/tools.md).
 };

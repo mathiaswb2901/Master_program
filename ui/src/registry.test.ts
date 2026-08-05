@@ -17,7 +17,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { parseChord } from "./keys";
 import {
-  agentToolDeclarations,
   applyDefaultLayout,
   danglingShortcutIds,
   defaultLayout,
@@ -26,6 +25,9 @@ import {
   openToolPanel,
   panelComponents,
   panelFocusCommands,
+  panelTabInfo,
+  panelTools,
+  shortcutHost,
   statusItems,
   toolCommands,
   type WorkbenchTool,
@@ -99,21 +101,20 @@ describe("commands from a descriptor", () => {
     expect(commands.map((command) => command.keys)).toEqual([["Alt+A", "Ctrl+F4"], undefined]);
   });
 
-  it("folds a tool's `when` into every command it owns", () => {
-    let enabled = false;
+  it("keeps a command's own `when` live, and it alone", () => {
+    let hasFiles = false;
     const commands = toolCommands([
       tool({
         id: "demo",
-        when: () => enabled,
         commands: [
           { id: "demo.always", title: "Always", run: () => undefined },
-          { id: "demo.sometimes", title: "Sometimes", when: () => true, run: () => undefined },
+          { id: "demo.sometimes", title: "Sometimes", when: () => hasFiles, run: () => undefined },
         ],
       }),
     ]);
-    expect(commands.map((command) => command.when?.())).toEqual([false, false]);
-    enabled = true;
-    expect(commands.map((command) => command.when?.())).toEqual([true, true]);
+    expect(commands.map((command) => command.when?.())).toEqual([undefined, false]);
+    hasFiles = true;
+    expect(commands.map((command) => command.when?.())).toEqual([undefined, true]);
   });
 
   it("reports a shortcut table entry that names no command of that tool", () => {
@@ -162,20 +163,90 @@ describe("panels", () => {
     expect(focused).toEqual(["two"]);
   });
 
-  it("drops a disabled tool's panel, commands and status items alike", () => {
+  it("drops a disabled tool's panel, commands, views and status items alike", () => {
     const off = tool({
       id: "off",
       when: () => false,
       panel: { component: Stub, defaultLocation: { area: "left" } },
+      commands: [{ id: "off.go", title: "Go", run: () => undefined }],
       statusContributions: [{ region: "left", component: Stub }],
       documentView: { kind: "office", component: Stub, hostClassName: "x" },
-      agentTools: [{ name: "gone", description: "d", outputFormat: "text" }],
+      shortcutKinds: ["shell"],
     });
     expect(defaultLayout([off])).toEqual([]);
     expect(panelComponents([off])).toEqual({});
+    expect(toolCommands([off])).toEqual([]);
     expect(statusItems([off], "left")).toEqual([]);
     expect(documentViews([off])).toEqual([]);
-    expect(agentToolDeclarations([off])).toEqual([]);
+    expect(shortcutHost([off], "shell")).toBeNull();
+  });
+
+  // `when` is documented as a boot-time gate, not a live one. The consumers
+  // snapshot at different moments — dockview's components once, the status bar
+  // on every render — so a predicate that flipped later would leave a tool half
+  // present: a status item and a QuickBar row for a panel dockview was never
+  // told about. The answer is cached per tool; this is what pins that.
+  it("settles `when` at first derivation — a later flip changes nothing", () => {
+    let ready = false;
+    const late = tool({
+      id: "late",
+      when: () => ready,
+      panel: { component: Stub, defaultLocation: { area: "right" } },
+      commands: [{ id: "late.go", title: "Go", run: () => undefined }],
+      statusContributions: [{ region: "right", component: Stub }],
+    });
+    const tools = [withPanel("mid", "center"), late];
+    expect(panelComponents(tools)).toEqual({ mid: Stub });
+
+    ready = true;
+    // Re-derived *after* the flip, and still gone — including the status bar,
+    // which is the one consumer that asks again on every render.
+    expect(Object.keys(panelComponents(tools))).toEqual(["mid"]);
+    expect(toolCommands(tools)).toEqual([]);
+    expect(panelFocusCommands(tools, () => undefined).map((c) => c.id)).toEqual(["panel.mid"]);
+    expect(statusItems(tools, "right")).toEqual([]);
+  });
+
+  it("places a second centre panel inside the first group", () => {
+    const dock = fakeDock();
+    applyDefaultLayout(asDock(dock), [withPanel("mid", "center"), withPanel("also", "center")]);
+    expect(dock.panels[1]).toEqual({
+      id: "also",
+      component: "also",
+      title: "also",
+      position: { referencePanel: "mid", direction: "within" },
+    });
+  });
+
+  it("gives a close button to on-demand panels only", () => {
+    const onDemand = tool({
+      id: "extra",
+      icon: Stub,
+      panel: {
+        component: Stub,
+        defaultLocation: { area: "right" },
+        openByDefault: false,
+        badge: Stub,
+      },
+    });
+    const tools = [withPanel("mid", "center"), onDemand];
+    expect(panelTabInfo(tools, "mid")).toEqual({ closable: false });
+    expect(panelTabInfo(tools, "extra")).toEqual({ icon: Stub, badge: Stub, closable: true });
+    // Nothing registered under that id: bare chrome, never a close button.
+    expect(panelTabInfo(tools, "gone")).toEqual({ closable: false });
+  });
+
+  it("routes a shortcut kind to the panel that claims it", () => {
+    const tools = [
+      withPanel("mid", "center"),
+      tool({
+        id: "shell",
+        panel: { component: Stub, defaultLocation: { area: "bottom" } },
+        shortcutKinds: ["shell"],
+      }),
+    ];
+    expect(shortcutHost(tools, "shell")).toBe("shell");
+    expect(shortcutHost(tools, "prompt")).toBeNull();
   });
 
   it("builds the layout against the first centre panel and activates it", () => {
@@ -328,20 +399,64 @@ describe("the registered tools", () => {
     expect(new Set(kinds).size).toBe(kinds.length);
   });
 
-  // The ergonomics budget's UI half: a tool description is loaded into every
-  // session's context, so it is a cost paid on every request (CLAUDE.md). The
-  // server registry carries the same ceiling over the model-facing text
-  // (server/tests/test_agent_tools.py); this one binds the declarations here.
-  it("declare agent tools within the description budget", () => {
-    const declared = agentToolDeclarations(TOOLS);
-    expect(declared.map((agentTool) => agentTool.name)).toEqual([
-      "get_workspace_state",
-      "present_plan",
-    ]);
-    const names = declared.map((agentTool) => agentTool.name);
-    expect(new Set(names).size).toBe(names.length);
-    for (const agentTool of declared) {
-      expect(agentTool.description.length, agentTool.name).toBeLessThanOrEqual(120);
-    }
+  /**
+   * Every chord the app ships, against the command it runs.
+   *
+   * This is the one assertion a keymap refactor cannot get past. Uniqueness,
+   * parseability and `danglingShortcutIds` all catch a *typo*; none of them
+   * catches a chord that quietly moved to a different command — `Ctrl+F4` left
+   * on a valid-but-wrong id passes every other test in this file while a
+   * user's reflex now closes something else. Moving one here takes editing the
+   * literal, which is exactly the deliberate act it should be.
+   */
+  it("bind every shipped chord to the command it has always run", () => {
+    const bound = Object.fromEntries(
+      [...toolCommands(TOOLS), ...panelFocusCommands(TOOLS, () => undefined)].flatMap((command) =>
+        (command.keys ?? []).map((key) => [key, command.id]),
+      ),
+    );
+    expect(bound).toEqual({
+      "Ctrl+S": "file.save",
+      "Ctrl+PageDown": "editor.nextTab",
+      "Alt+PageDown": "editor.nextTab",
+      "Ctrl+PageUp": "editor.prevTab",
+      "Alt+PageUp": "editor.prevTab",
+      "Alt+W": "editor.close",
+      "Ctrl+F4": "editor.close",
+      "Alt+1": "session.jump.1",
+      "Alt+2": "session.jump.2",
+      "Alt+3": "session.jump.3",
+      "Alt+4": "session.jump.4",
+      "Alt+5": "session.jump.5",
+      "Alt+6": "session.jump.6",
+      "Alt+7": "session.jump.7",
+      "Alt+8": "session.jump.8",
+      "Alt+9": "session.jump.9",
+      "Alt+T": "terminal.new",
+      "Ctrl+1": "panel.files",
+      "Ctrl+2": "panel.editors",
+      "Ctrl+3": "panel.agent",
+      "Ctrl+4": "panel.terminal",
+    });
+  });
+
+  // Alt is the only modifier a user's `shortcuts.md` may bind, and a registered
+  // chord wins every collision — so every Alt chord above is one a user cannot
+  // have. The four that are taken earn it (tab close, the session jumps, a new
+  // terminal); a demo tool does not, which is why the Scratchpad ships none.
+  it("claim no chord for a tool that does not need one", () => {
+    expect(TOOLS.find((registered) => registered.id === "scratchpad")?.shortcuts).toBeUndefined();
+  });
+
+  it("close exactly the panels that open on demand", () => {
+    const closable = panelTools(TOOLS)
+      .filter((registered) => panelTabInfo(TOOLS, registered.id).closable)
+      .map((registered) => registered.id);
+    expect(closable).toEqual(["scratchpad"]);
+  });
+
+  it("host both shortcut kinds", () => {
+    expect(shortcutHost(TOOLS, "shell")).toBe("terminal");
+    expect(shortcutHost(TOOLS, "prompt")).toBe("agent");
   });
 });

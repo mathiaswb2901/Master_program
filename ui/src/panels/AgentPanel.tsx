@@ -196,6 +196,27 @@ function SessionCounts() {
 
 // ---- registration -----------------------------------------------------------
 
+/**
+ * The Agent tab's badge: one dot when any session is waiting on the user, so a
+ * question does not sit unseen behind another panel (DESIGN.md §6.4, dot-only —
+ * the count belongs in the status bar). Contributed by the descriptor rather
+ * than drawn by the tab component, which names no panel.
+ */
+function AttentionBadge() {
+  const attention = useStore((s) =>
+    Object.values(s.sessionStates).some((state) => state === "needs_attention"),
+  );
+  if (!attention) return null;
+  return (
+    <span
+      className="wb-tab-attention-dot"
+      role="img"
+      aria-label="A session needs attention"
+      title="A session needs attention"
+    />
+  );
+}
+
 /** Alt+1..9 — the n-th most recent session, live or resumable. */
 const sessionJumps = Array.from({ length: 9 }, (_, i) => ({
   id: `session.jump.${String(i + 1)}`,
@@ -218,7 +239,11 @@ export const agentTool: WorkbenchTool = {
   panel: {
     component: AgentPanel,
     defaultLocation: { area: "right", size: 380 },
+    badge: AttentionBadge,
   },
+  // A `prompt` shortcut is inserted into the chat box, so this panel comes
+  // forward first — declared here so `commands.ts` routes by capability.
+  shortcutKinds: ["prompt"],
   commands: [
     {
       id: "session.new",
@@ -234,19 +259,6 @@ export const agentTool: WorkbenchTool = {
     { region: "right", component: SessionCounts },
   ],
   // The context-bridge MCP tools this capability puts in every session's
-  // context. The server registry (services/agent_tools.py) is what the SDK
-  // reads; this is the capability's own declaration of what it costs, and
-  // carries the same description budget (registry.test.ts).
-  agentTools: [
-    {
-      name: "get_workspace_state",
-      description: "The file the user is looking at, open tabs, unsaved buffers.",
-      outputFormat: "compact-json",
-    },
-    {
-      name: "present_plan",
-      description: "Show an interactive plan card and block on the user's decision.",
-      outputFormat: "compact-json",
-    },
-  ],
+  // context are declared once, server-side, in services/agent_tools.py — the
+  // registry the SDK reads and the tests budget. Nothing in the UI reads them.
 };

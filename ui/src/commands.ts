@@ -33,7 +33,7 @@
 
 import { focusPanel } from "./dock";
 import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
-import { panelFocusCommands, toolCommands } from "./registry";
+import { panelFocusCommands, shortcutHost, toolCommands } from "./registry";
 import { shortcutCommands } from "./shortcuts";
 import { useStore } from "./store";
 import { TOOLS } from "./tools";
@@ -57,8 +57,15 @@ export interface Command {
  * Commands that belong to the window itself rather than to any capability.
  * Everything panel-specific lives on its tool; if a command here starts needing
  * to know what a panel is, it is in the wrong file.
+ *
+ * Split into a leading and a trailing half for one reason: order is what the
+ * user sees. The QuickBar sorts on relevance, which ties at zero for an empty
+ * query, so an empty command palette lists these in registry order — and the
+ * two QuickBar entries have always led it with the theme toggle at the end.
+ * Registry-contributed commands slot in between, where the hand-written list
+ * used to have them.
  */
-export const GLOBAL_COMMANDS: readonly Command[] = [
+const OPENING_COMMANDS: readonly Command[] = [
   {
     id: "quickbar.files",
     title: "Go to file…",
@@ -76,6 +83,9 @@ export const GLOBAL_COMMANDS: readonly Command[] = [
     // Always opens in command mode, including from an already-open file search.
     run: () => useStore.getState().setQuickBarOpen(true, ">"),
   },
+];
+
+const CLOSING_COMMANDS: readonly Command[] = [
   {
     id: "view.toggleTheme",
     title: "Toggle theme (dark/light)",
@@ -83,18 +93,22 @@ export const GLOBAL_COMMANDS: readonly Command[] = [
   },
 ];
 
+export const GLOBAL_COMMANDS: readonly Command[] = [...OPENING_COMMANDS, ...CLOSING_COMMANDS];
+
 /**
- * Global commands + everything the tool registry contributes. Static (a tool's
- * `when` is folded into its commands rather than filtering the list), so it is
- * built once — this is read on every keystroke in the app.
+ * Global commands + everything the tool registry contributes, in the order the
+ * QuickBar shows them (`commands.test.ts` pins it). Static — a tool's `when` is
+ * settled when the registry is first derived — so it is built once, which
+ * matters because this is read on every keystroke in the app.
  */
 let builtins: Command[] | null = null;
 
 export function builtinCommands(): Command[] {
   builtins ??= [
-    ...GLOBAL_COMMANDS,
-    ...panelFocusCommands(TOOLS, focusPanel),
+    ...OPENING_COMMANDS,
     ...toolCommands(TOOLS),
+    ...panelFocusCommands(TOOLS, focusPanel),
+    ...CLOSING_COMMANDS,
   ];
   return builtins;
 }
@@ -144,9 +158,12 @@ export function mergeCommands(
 }
 
 /** Inserting is the only thing a shortcut may do — the surface it lands in
- * gets focus so the user's next keystroke (Enter, or more typing) goes there. */
+ * gets focus so the user's next keystroke (Enter, or more typing) goes there.
+ * Which panel that is, is a registry question (`shortcutKinds` on the tool that
+ * hosts the kind), not a pair of panel ids written down here. */
 function runShortcut(entry: ShortcutEntry): void {
-  focusPanel(entry.kind === "shell" ? "terminal" : "agent");
+  const host = shortcutHost(TOOLS, entry.kind);
+  if (host !== null) focusPanel(host);
   useStore.getState().runShortcut(entry);
 }
 

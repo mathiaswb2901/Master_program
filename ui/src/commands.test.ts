@@ -106,21 +106,46 @@ describe("command registry", () => {
     }
   });
 
-  // The built-ins are no longer a hand-kept constant: three global commands,
-  // then panel focus and every command the registered tools own.
-  it("is assembled from the tool registry, not a constant", () => {
-    const ids = builtinCommands().map((command) => command.id);
-    expect(ids.slice(0, GLOBAL_COMMANDS.length)).toEqual([
+  // The built-ins are no longer a hand-kept constant — they are assembled from
+  // the registry — but the *order* is still what a user sees: the QuickBar
+  // sorts on relevance, which ties at zero for the empty query the palette
+  // opens with, so this list is the palette, top to bottom. Pinned in full,
+  // because reordering it silently moves the row under someone's second
+  // ArrowDown. Changing it is allowed; changing it by accident is not.
+  it("lists the commands in the order the QuickBar shows them", () => {
+    expect(builtinCommands().map((command) => command.id)).toEqual([
       "quickbar.files",
       "quickbar.commands",
+      // …the Editor tool's, then the Agent's, then the Terminal's, then the
+      // Scratchpad's — registry order (`tools.ts`), never declared here.
+      "file.save",
+      "editor.nextTab",
+      "editor.prevTab",
+      "editor.close",
+      "session.new",
+      "session.jump.1",
+      "session.jump.2",
+      "session.jump.3",
+      "session.jump.4",
+      "session.jump.5",
+      "session.jump.6",
+      "session.jump.7",
+      "session.jump.8",
+      "session.jump.9",
+      "terminal.new",
+      "terminal.close",
+      "scratchpad.open",
+      "panel.files",
+      "panel.editors",
+      "panel.agent",
+      "panel.terminal",
       "view.toggleTheme",
     ]);
-    // Owned by the Editor, Terminal and Agent tools respectively — none of them
-    // declared anywhere near `commands.ts`.
-    expect(ids).toEqual(expect.arrayContaining(["file.save", "terminal.new", "session.new"]));
-    expect(ids).toEqual(
-      expect.arrayContaining(["panel.files", "panel.editors", "panel.agent", "panel.terminal"]),
-    );
+  });
+
+  it("keeps every window-level command in the assembled list", () => {
+    const ids = builtinCommands().map((command) => command.id);
+    for (const command of GLOBAL_COMMANDS) expect(ids).toContain(command.id);
   });
 
   it("reaches the QuickBar command mode from any surface", () => {

@@ -191,19 +191,25 @@ Ordered by what unblocks what.
    `Alt+T` the Terminal's, `New agent session` and the `Alt+1..9` jumps the Agent's,
    and Office contributes a *document view* rather than a panel — the same field the
    native Office host will claim. `App.tsx`, `commands.ts` and `StatusBar.tsx` name no
-   capability any more; `Ctrl+1..4` is derived from the panels in the default layout,
-   in registry order, rather than from four fixed ids. **Exit criterion demonstrated**,
-   not claimed: the Scratchpad tool (`ui/src/panels/Scratchpad.tsx`) is a panel, a
-   command, a chord, a tab icon and a file on disk, added in one new module plus one
-   line in `tools.ts` — asserted end-to-end in the QuickBar journey. Server side,
-   `services/agent_tools.py` is the matching registry the SDK reads (name, description,
-   input schema, required `output_format`), and `test_agent_tools.py` binds the
-   ergonomics budget: a ceiling on every description and on the serialized size of a
-   representative result, plus compact JSON instead of the pretty-printed
-   `get_workspace_state` payload we were paying for on every call. Deliberately
-   deferred: registration is static — no dynamic plugin loader — but every derivation
-   takes a tools array rather than reading `TOOLS`, which is the seam one plugs into
-   (`ARCHITECTURE.md` §Tool registry, `docs/tools.md`).
+   capability any more — down to the Agent tab's attention dot (a `badge` on the
+   descriptor) and where a `shortcuts.md` entry is typed (`shortcutKinds`, so the
+   router asks the registry which panel hosts a kind); `Ctrl+1..4` is derived from the
+   panels in the default layout, in registry order, rather than from four fixed ids.
+   **Exit criterion demonstrated**, not claimed: the Scratchpad tool
+   (`ui/src/panels/Scratchpad.tsx`) is a panel, a command, a tab icon and a file on
+   disk, added in one new module plus one line in `tools.ts` — asserted end-to-end in
+   the QuickBar journey, opened and closed again. It claims no chord on purpose: a
+   registered chord beats a `shortcuts.md` one and `Alt` is all that file may bind, so
+   a chord taken here is one the user cannot have. Server side,
+   `services/agent_tools.py` is the *only* registry for agent-facing tools (name,
+   description, input schema, required `output_format` and `max_result_bytes`), and
+   `test_agent_tools.py` binds the ergonomics budget: a ceiling on every description
+   and a per-tool ceiling on the serialized result, sized from the measured payload,
+   plus compact JSON instead of the pretty-printed `get_workspace_state` payload we
+   were paying for on every call. Deliberately deferred: registration is static — no
+   dynamic plugin loader — but every derivation takes a tools array rather than reading
+   `TOOLS`, which is the seam one plugs into (`ARCHITECTURE.md` §Tool registry,
+   `docs/tools.md`).
 2. **Layout system** — the "work full screen" gap. dockview already supports far more
    than we use: panel **maximize / focus mode**, floating and popped-out panels, and
    full serialization. Add named, savable layouts ("review", "writing", "three

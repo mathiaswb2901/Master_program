@@ -2,12 +2,17 @@
  * The tool registry: what a Workbench capability *is*.
  *
  * A tool declares, in one descriptor next to its own code, everything the shell
- * needs to host it — a dockview panel, a document view, commands, the default
- * chords for those commands, status-bar items, and the agent-facing tools it
- * adds to a session's context. Nothing about a capability is spelled out in a
- * shared file any more: `App.tsx` names no panel, `commands.ts` holds no
- * panel-specific action, `StatusBar.tsx` knows no session chip. Adding one costs
- * a new module plus one line in `tools.ts`.
+ * needs to host it — a dockview panel (with its tab's glyph and badge), a
+ * document view, commands, the default chords for those commands, status-bar
+ * items, and which `shortcuts.md` kinds it hosts. Nothing about a capability is
+ * spelled out in a shared file any more: `App.tsx` names no panel,
+ * `commands.ts` holds no panel-specific action, `StatusBar.tsx` knows no
+ * session chip. Adding one costs a new module plus one line in `tools.ts`.
+ *
+ * The agent-facing tools a capability adds are *not* declared here. That
+ * registry is `server/src/workbench_server/services/agent_tools.py` — the one
+ * the SDK actually reads — and a second copy on this side would be another
+ * authority to keep honest with nothing reading it (ARCHITECTURE.md).
  *
  * Registration is **static** — `TOOLS` is an array assembled from per-tool
  * modules, so the bundler still sees every import and `tsc` still type-checks
@@ -26,6 +31,7 @@ import type { FunctionComponent } from "react";
 
 import type { Command } from "./commands";
 import type { OpenFile } from "./store";
+import type { ShortcutKind } from "./types";
 
 // ---- contributions ----------------------------------------------------------
 
@@ -41,12 +47,18 @@ export interface PanelLocation {
 export interface PanelContribution {
   component: FunctionComponent<IDockviewPanelProps>;
   defaultLocation: PanelLocation;
-  /** Tab title; defaults to the tool's title. */
-  title?: string;
-  /** In the startup layout. False = opened on demand by one of its commands. */
+  /** In the startup layout. False = opened on demand by one of its commands,
+   * which is also what makes its tab closable (see `panelTabInfo`). */
   openByDefault?: boolean;
   /** One instance only — opening again focuses it. Default true. */
   singleton?: boolean;
+  /**
+   * Rendered after the tab title: one aggregate signal the tool owns, for a
+   * state worth seeing while the panel is behind another (DESIGN.md §6.4 —
+   * dot-only, never a count). The Agent's "a session needs attention" dot is
+   * the shipped one; it lives here so the tab component names no panel.
+   */
+  badge?: FunctionComponent;
 }
 
 /**
@@ -75,21 +87,6 @@ export interface StatusContribution {
 }
 
 /**
- * Output shape an agent-facing tool returns. Required on every declaration, so
- * omitting it is a type error rather than an unmeasured cost — the UI half of
- * the ergonomics budget (`server/.../services/agent_tools.py` is the half the
- * SDK actually reads, and carries the same ceilings as tests).
- */
-export type AgentToolOutputFormat = "compact-json" | "text" | "markdown";
-
-export interface AgentToolDeclaration {
-  name: string;
-  /** One line, for humans reading the registry — not the model-facing text. */
-  description: string;
-  outputFormat: AgentToolOutputFormat;
-}
-
-/**
  * A tool's command, minus its chords: those live in the descriptor's
  * `shortcuts` table so a tool's keymap is one readable block, and so a user
  * keymap file later overrides exactly that layer (M5 item 3).
@@ -108,46 +105,82 @@ export interface WorkbenchTool {
   /** Default chords per command id — the tool's whole keymap, in one place. */
   shortcuts?: Readonly<Record<string, readonly string[]>>;
   statusContributions?: readonly StatusContribution[];
-  /** False takes the whole tool out: no panel, no commands, no status items. */
+  /**
+   * Which `shortcuts.md` kinds this tool's panel hosts: an entry of that kind
+   * is inserted there, and the panel is brought forward first. Declared here so
+   * the router in `commands.ts` names no panel — the Terminal claims `shell`,
+   * the Agent `prompt`, and a tool that replaces either claims it back.
+   */
+  shortcutKinds?: readonly ShortcutKind[];
+  /**
+   * Whether this tool is present at all: false takes out its panel, its
+   * commands and its status items together.
+   *
+   * **Evaluated once, when the registry is first derived** (module load), not
+   * live — the panel components handed to dockview, the startup layout and the
+   * built-in command list are each built once, so a predicate that flips later
+   * changes nothing on screen. Gate on facts that are settled by then: a build
+   * flag, the host (`isTauri()`), a capability compiled in or not. Anything
+   * that changes while the app runs belongs on a *command's* own `when`, which
+   * is re-read on every keystroke, or inside the panel itself — which is how
+   * the Office tool handles a document server that may not answer.
+   */
   when?: () => boolean;
-  agentTools?: readonly AgentToolDeclaration[];
 }
 
 // ---- derivations (pure; every one takes the tool array) ----------------------
 
-const isEnabled = (tool: WorkbenchTool): boolean => tool.when?.() !== false;
+/**
+ * `when`, asked once per tool and remembered — the documented boot-time
+ * semantics made true by construction rather than by convention.
+ *
+ * The consumers snapshot at different moments: dockview gets its components
+ * once, the layout is applied once, the command list is built once, while the
+ * status bar re-derives on every render. Were the predicate re-read, a tool
+ * that enabled itself afterwards would be *half* present — a status item and a
+ * QuickBar row for a panel dockview was never told about, and a focus command
+ * that never existed. One answer for the life of the array is the only
+ * consistent one, and it is what the field's doc comment promises.
+ */
+const enabled = new WeakMap<WorkbenchTool, boolean>();
 
-/** `a && b`, with `undefined` meaning "always". */
-function bothApply(
-  a: (() => boolean) | undefined,
-  b: (() => boolean) | undefined,
-): (() => boolean) | undefined {
-  if (a === undefined) return b;
-  if (b === undefined) return a;
-  return () => a() && b();
+function isEnabled(tool: WorkbenchTool): boolean {
+  const known = enabled.get(tool);
+  if (known !== undefined) return known;
+  const answer = tool.when?.() !== false;
+  enabled.set(tool, answer);
+  return answer;
 }
 
 /**
- * Every registered command, with its chords resolved from the owning tool's
- * `shortcuts` table.
- *
- * A tool's `when` is folded into each of its commands rather than filtering the
- * list here: the result is then static (safe to build once and cache) while the
- * predicate is still evaluated live by the QuickBar and the keymap.
+ * Every command of every enabled tool, with its chords resolved from the
+ * owning tool's `shortcuts` table. A command's own `when` is left untouched —
+ * that one *is* live, and the QuickBar and keymap re-read it on every
+ * keystroke.
  */
 export function toolCommands(tools: readonly WorkbenchTool[]): Command[] {
   const commands: Command[] = [];
-  for (const tool of tools) {
+  for (const tool of tools.filter(isEnabled)) {
     for (const command of tool.commands ?? []) {
       const keys = tool.shortcuts?.[command.id];
       commands.push({
         ...command,
-        when: bothApply(tool.when, command.when),
         ...(keys !== undefined && keys.length > 0 ? { keys: [...keys] } : {}),
       });
     }
   }
   return commands;
+}
+
+/** The panel a `shortcuts.md` entry of this kind is typed into, or null if no
+ * enabled tool claims the kind (then the insertion goes wherever the store
+ * sends it, without stealing focus). */
+export function shortcutHost(
+  tools: readonly WorkbenchTool[],
+  kind: ShortcutKind,
+): string | null {
+  const host = panelTools(tools).find((tool) => tool.shortcutKinds?.includes(kind) === true);
+  return host?.id ?? null;
 }
 
 /** Chord ids named by a `shortcuts` table that no command of that tool owns.
@@ -180,7 +213,34 @@ export function panelComponents(
   return components;
 }
 
-export const panelTitle = (tool: WorkbenchTool): string => tool.panel?.title ?? tool.title;
+export interface PanelTabInfo {
+  /** Glyph before the title. */
+  icon?: FunctionComponent;
+  /** Aggregate signal after the title (see `PanelContribution.badge`). */
+  badge?: FunctionComponent;
+  /**
+   * Whether the tab carries a close button. True for exactly the panels that
+   * are *not* in the startup layout: one arrived because a command opened it,
+   * so the tab it arrived on is the way back. A startup panel stays chrome —
+   * closing one would strand the app until a reload (there is no layout
+   * persistence yet, M5 item 2).
+   */
+  closable: boolean;
+}
+
+/** What the panel tab renders, for a dockview panel's `component` key. Unknown
+ * components (nothing registered under that id) get bare chrome. */
+export function panelTabInfo(
+  tools: readonly WorkbenchTool[],
+  component: string,
+): PanelTabInfo {
+  const tool = panelTools(tools).find((candidate) => candidate.id === component);
+  return {
+    ...(tool?.icon !== undefined ? { icon: tool.icon } : {}),
+    ...(tool?.panel?.badge !== undefined ? { badge: tool.panel.badge } : {}),
+    closable: tool?.panel?.openByDefault === false,
+  };
+}
 
 export interface PanelPlacement {
   /** dockview panel id. Equal to `component` for every singleton panel. */
@@ -199,7 +259,7 @@ function layoutTools(tools: readonly WorkbenchTool[]): WorkbenchTool[] {
 const placementOf = (tool: WorkbenchTool): PanelPlacement => ({
   id: tool.id,
   component: tool.id,
-  title: panelTitle(tool),
+  title: tool.title,
   location: tool.panel?.defaultLocation ?? { area: "center" },
 });
 
@@ -227,7 +287,7 @@ export function panelFocusCommands(
 ): Command[] {
   return layoutTools(tools).map((tool, index) => ({
     id: `panel.${tool.id}`,
-    title: `Focus ${panelTitle(tool)} panel`,
+    title: `Focus ${tool.title} panel`,
     ...(index < 9 ? { keys: [`Ctrl+${String(index + 1)}`] } : {}),
     run: () => focus(tool.id),
   }));
@@ -276,13 +336,6 @@ export function statusItems(
     });
   }
   return items;
-}
-
-/** Every agent-facing tool the registry declares, in registry order. */
-export function agentToolDeclarations(
-  tools: readonly WorkbenchTool[],
-): AgentToolDeclaration[] {
-  return tools.filter(isEnabled).flatMap((tool) => [...(tool.agentTools ?? [])]);
 }
 
 // ---- dockview application (thin: the placements above, applied) -------------
@@ -338,7 +391,7 @@ export function openToolPanel(
   const placement: PanelPlacement = {
     id,
     component: toolId,
-    title: panelTitle(tool),
+    title: tool.title,
     location: tool.panel.defaultLocation,
   };
   const reference = defaultLayout(tools)[0]?.id;
