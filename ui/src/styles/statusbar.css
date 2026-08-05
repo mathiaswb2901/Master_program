@@ -76,12 +76,26 @@
   font-size: var(--type-xs-size);
   color: var(--text-secondary);
   flex: none;
-  transition: background-color var(--duration-1) var(--ease-standard);
+  /* A chip changes because a session did, not because the user did — so the
+     change is eased on the tint channel, which is what makes a status bar read
+     as live rather than as a row of numbers being overwritten. */
+  transition:
+    background-color var(--motion-tint),
+    border-color var(--motion-tint),
+    color var(--motion-tint);
 }
 
 .wb-status-chip:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+  transition-duration: 0s;
+}
+
+/* The status dot inside a chip changes colour when the session's state does —
+   the one place a *semantic* colour is allowed to cross-fade rather than cut. */
+.wb-status-chip .wb-dot,
+.wb-status-count .wb-dot {
+  transition: background-color var(--motion-tint);
 }
 
 .wb-status-chip.is-active {

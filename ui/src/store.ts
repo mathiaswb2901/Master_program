@@ -4,6 +4,7 @@ import { create } from "zustand";
 
 import * as api from "./api";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
+import { withoutTransitions } from "./motion";
 import { isOfficePath, preloadDocsApi } from "./office";
 import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
 import { cancelShellClose, closeShellWindow } from "./shell";
@@ -419,8 +420,14 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     },
 
     setTheme: (theme) => {
-      if (theme === "light") document.documentElement.setAttribute("data-theme", "light");
-      else document.documentElement.removeAttribute("data-theme");
+      // A theme flip changes a colour on nearly every element, and every one
+      // of those carrying a colour transition would start one (DESIGN.md §5:
+      // the theme switch never animates). `withoutTransitions` makes it one
+      // style recalculation with transitions suppressed.
+      withoutTransitions(() => {
+        if (theme === "light") document.documentElement.setAttribute("data-theme", "light");
+        else document.documentElement.removeAttribute("data-theme");
+      });
       try {
         localStorage.setItem(THEME_STORAGE_KEY, theme);
       } catch {

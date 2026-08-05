@@ -218,13 +218,28 @@ JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptan
 criterion), Monaco off the entry chunk, the terminal's renderer and frame coalescing, and
 a virtualised file tree.
 
-**Motion, and a hard interlock.** The track is not only speed: an instrument that moves
-*well* reads as fast even when it is not. The **motion vocabulary** — the durations,
-easings and transition primitives, as `DESIGN.md` tokens — must land **before** M5 item 2
-(the layout system). Panel transitions written first and animated later are panel
-transitions that never get animated; born with the vocabulary, every later panel inherits
-it for free. This is a sequencing constraint between two tracks, so it is stated here
-rather than inside either.
+**Motion, and the interlock that was missed.** The track is not only speed: an instrument
+that moves *well* reads as fast even when it is not. The **motion vocabulary** was
+supposed to land **before** M5 item 2 (the layout system), so panel transitions would be
+born with it. It did not: the layout system landed first (PR #34) and focus mode shipped
+teleporting, and the vocabulary landed after it as a retrofit.
+
+**What the vocabulary is** (landed): spring-based rather than fixed-duration, as
+`DESIGN.md` §5 — rewritten in the same PR, because the doctrine it replaced *forbade*
+animating tab activation, panel resize, tree expand/collapse and the theme switch, and
+that restraint is half of what made the app read as static. Two easings and four
+durations, derived from stiffness/damping/bounce in `ui/src/design/springs.ts` and
+emitted as CSS `linear()`; two channels (travel = `transform`, tint = opacity/colour) so
+`prefers-reduced-motion` can zero the travel and keep the colour feedback; and a
+conformance test in the perf lane that fails the build on an animated layout property,
+a `transition: all`, a static `will-change` or a hover that eases in.
+
+**What the retrofit cost**, stated so the next interlock is taken seriously: focus mode
+and layout switches are animated from `ui/src/motion.ts` *after* dockview has already
+rearranged the grid — a replay of an arrival rather than a transition into it. Written in
+the other order, the layout system would have handed its own before/after geometry to the
+motion layer and the panels could genuinely travel between arrangements. Nothing is
+wrong; it is one indirection and one less expressive move than it would have been.
 
 **Exit criterion**, in the budgets' own terms: on the 5,005-file fixture, cold launch
 reaches a clickable file tree **under 800 ms**; twenty watcher events cost **zero** full

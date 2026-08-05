@@ -25,13 +25,16 @@
   flex-direction: column;
   gap: var(--space-5);
   z-index: 201;
-  animation: wb-modal-in var(--duration-3) var(--ease-standard);
+  animation: wb-modal-in var(--motion-enter);
 }
 
+/* Its own keyframe rather than `wb-scale-in`, because the modal is centred with
+   a transform: the entrance has to carry the `translateX(-50%)` along or it
+   would animate from the wrong half of the screen. */
 @keyframes wb-modal-in {
   from {
     opacity: 0;
-    transform: translateX(-50%) scale(0.98);
+    transform: translateX(-50%) scale(var(--motion-scale-in));
   }
   to {
     opacity: 1;
@@ -75,16 +78,10 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   z-index: 151;
-  animation: wb-menu-in var(--duration-2) var(--ease-standard);
-}
-
-@keyframes wb-menu-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  /* A menu arrives from just under the pointer that summoned it — 6px of rise
+     is the whole difference between "appeared" and "opened". */
+  animation: wb-rise-in var(--motion-enter);
+  transform-origin: top left;
 }
 
 .wb-menu-item {
@@ -96,10 +93,14 @@
   font-size: var(--type-md-size);
   color: var(--text-primary);
   text-align: left;
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
 }
 
 .wb-menu-item:hover {
   background: var(--surface-hover);
+  transition-duration: 0s;
 }
 
 .wb-menu-item:focus-visible {
@@ -137,18 +138,24 @@
   box-shadow: var(--shadow-2);
   font-size: var(--type-md-size);
   color: var(--text-primary);
-  animation: wb-toast-in var(--duration-3) var(--ease-standard);
+  /* A toast is the one thing on screen the user did not ask for, so it is the
+     one thing allowed to move to be noticed: it rises into the stack. */
+  animation: wb-rise-in var(--motion-enter);
 }
 
-@keyframes wb-toast-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* Success is the only celebratory state this app has, and `--motion-celebrate`
+   is the only spring that overshoots (DESIGN.md §5). Spent here and nowhere
+   else — an error that bounced would be flippant. */
+.wb-toast.is-success {
+  animation: wb-rise-in var(--motion-celebrate);
+}
+
+/* Leaving: out to the right and gone, faster than it arrived and with no
+   spring — a dismissal that springs is a dismissal arguing with you.
+   `src/motion.ts` keeps the element mounted for exactly `--motion-exit-ms`. */
+.wb-toast.is-leaving {
+  animation: wb-slide-out var(--motion-exit);
+  pointer-events: none;
 }
 
 .wb-toast.is-error {
@@ -184,9 +191,13 @@
   color: var(--text-tertiary);
   font-size: 14px;
   line-height: 1;
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
 }
 
 .wb-toast-close:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+  transition-duration: 0s;
 }

@@ -139,12 +139,78 @@
   --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);  /* menus, popovers */
   --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55); /* QuickBar, modals */
 
-  /* ---- Motion (opacity/transform only; see DESIGN.md §5) ---------------- */
-  --duration-1: 80ms;   /* hover washes, color changes */
-  --duration-2: 140ms;  /* tooltips, dropdowns, QuickBar in */
-  --duration-3: 200ms;  /* modals, toasts, panel-level fades */
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* ======================================================================
+     Motion — DESIGN.md §5 is binding; this is its implementation.
+
+     Two channels, and the split is the whole design:
+
+       TINT   opacity and colour. Cheap, not vestibular, and kept under
+              `prefers-reduced-motion: reduce`.
+       TRAVEL transform. What actually moves, and therefore what reduced
+              motion zeroes — both the durations *and* the distances below.
+
+     Never a third channel: nothing in this app animates a property that
+     triggers layout (`width`, `height`, `top`, `left`), and
+     `ui/e2e/perf/motion.test.ts` fails the build if one appears.
+     ====================================================================== */
+
+  /* ---- Springs (GENERATED — do not hand-edit) ---------------------------
+     Derived in `src/design/springs.ts` from a duration and a bounce figure,
+     via mass/stiffness/damping. `e2e/perf/motion.test.ts` fails if this block
+     and the derivation disagree; regenerate by running `npm run test` and
+     pasting what it prints. One easing per damping ratio, one duration per
+     distance: for a fixed damping ratio a spring's response is the same curve
+     in normalised time, so duration is the only dial. */
+  /* bounce 0 -> zeta 1, settles in 1.347x its duration (k = 39.5/d^2, c = 12.6/d) */
+  --ease-spring: linear(0, 0.0021 0.79%, 0.0175 2.36%, 0.0446 3.94%, 0.0802 5.51%, 0.1673 8.66%, 0.453 18.11%, 0.5564 22.05%, 0.6286 25.2%, 0.6913 28.35%, 0.7571 32.28%, 0.8006 35.43%, 0.8452 39.37%, 0.8867 44.09%, 0.9176 48.82%, 0.9436 54.33%, 0.9638 60.63%, 0.9782 67.72%, 0.9877 75.59%, 0.9942 85.83%, 0.9979 99.21%, 1);
+  /* bounce 0.3 -> zeta 0.7, settles in 1.457x its duration (k = 39.5/d^2, c = 8.8/d) */
+  --ease-spring-bounce: linear(0, 0.0025 0.79%, 0.0211 2.36%, 0.0547 3.94%, 0.1 5.51%, 0.2138 8.66%, 0.5976 18.11%, 0.7073 21.26%, 0.7787 23.62%, 0.8404 25.98%, 0.9077 29.13%, 0.9588 32.28%, 0.9958 35.43%, 1.0155 37.8%, 1.033 40.94%, 1.0425 44.09%, 1.046 48.03%, 1.0414 53.54%, 1.0147 68.5%, 1.0043 77.17%, 0.9985 88.98%, 0.998 99.21%, 1);
+  --spring-snap-ms: 190ms; /* duration 0.14s, crisp */
+  --spring-base-ms: 300ms; /* duration 0.22s, crisp */
+  --spring-bounce-ms: 590ms; /* duration 0.4s, bounce */
+
+  /* ---- Tint channel: never zeroed --------------------------------------- */
+  --ease-tint: cubic-bezier(0.2, 0, 0, 1);
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-tint-ms: 110ms;      /* a wash leaving, a chip changing colour */
+  --motion-tint-slow-ms: 180ms; /* panel-level fades, a layout swapping */
+  --motion-exit-ms: 120ms;      /* every dismissal; JS times unmounts by it */
+  --motion-tint: var(--motion-tint-ms) var(--ease-tint);
+  --motion-tint-slow: var(--motion-tint-slow-ms) var(--ease-tint);
+  --motion-exit: var(--motion-exit-ms) var(--ease-exit) both;
+
+  /* ---- Travel channel: zeroed under reduced motion ---------------------- */
+  --motion-move-snap: var(--spring-snap-ms) var(--ease-spring);
+  --motion-move: var(--spring-base-ms) var(--ease-spring);
+  --motion-enter: var(--spring-base-ms) var(--ease-spring) both;
+  --motion-celebrate: var(--spring-bounce-ms) var(--ease-spring-bounce) both;
+
+  /* Travel distances live as tokens so reduced motion can set them to zero
+     without touching a single duration — the fade survives, the movement does
+     not. Nothing may hard-code a translate or a scale. */
+  --motion-rise: 6px;      /* toasts, menus arriving from below */
+  --motion-lift: 10px;     /* a dismissal leaving sideways */
+  --motion-scale-in: 0.98; /* overlays: QuickBar, modal */
+  --motion-zoom-in: 0.985; /* the dock, when one panel takes the window */
+
+  /* Read by `src/motion.ts` for the two animations JS drives (focus mode, a
+     layout switch). Named separately so the reduced-motion block below can
+     retune them without lying about what a spring's settling time is. */
+  --motion-dock-ms: var(--spring-base-ms);
+  --motion-dock-ease: var(--ease-spring);
+  --motion-dock-fade: 0.62;
+  --motion-shift-ms: var(--motion-tint-slow-ms);
+  --motion-shift-ease: var(--ease-tint);
+  --motion-shift-fade: 0.45;
+
+  /* ---- Legacy aliases ---------------------------------------------------
+     Pre-spring names, kept so a stylesheet written before the channels landed
+     keeps working and inherits the spring for free. New work uses the channels
+     above; DESIGN.md §5 lists these as deprecated. */
+  --duration-1: var(--motion-tint-ms);
+  --duration-2: var(--spring-snap-ms);
+  --duration-3: var(--spring-base-ms);
+  --ease-standard: var(--ease-spring);
 }
 
 /* ==========================================================================
@@ -297,14 +363,96 @@ html {
   animation: wb-pulse 2s ease-in-out infinite;
 }
 
-/* Reduced motion: collapse durations, stop the pulse (dot stays steady). */
+/* ==========================================================================
+   Motion primitives (DESIGN.md §5)
+
+   One entrance and two exits, reused everywhere (an overlay centred with
+   `translateX(-50%)` needs its own, next to the component that centres it).
+   Each expresses its travel through a token, so the reduced-motion block below
+   turns every one of them into a pure fade by changing distances rather than by
+   disabling animation.
+   ========================================================================== */
+
+/* Arrives from just below: toasts, menus, popovers. */
+@keyframes wb-rise-in {
+  from { opacity: 0; transform: translateY(var(--motion-rise)); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Leaves sideways. Exits are shorter than entrances and never spring back. */
+@keyframes wb-slide-out {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(var(--motion-lift)); }
+}
+
+@keyframes wb-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* ==========================================================================
+   Theme switching is not motion (DESIGN.md §5)
+
+   Flipping `data-theme` changes the computed value of a colour on nearly every
+   element in the window. With colour transitions in the chrome — and there are
+   many — that starts a transition on each of them, so the switch becomes
+   hundreds of concurrent animations instead of one repaint. `src/motion.ts`
+   sets this attribute for the duration of the flip: one style recalculation,
+   zero transitions. `!important` because it has to beat every author rule in
+   the app, whatever its specificity.
+   ========================================================================== */
+:root[data-theme-switching] *,
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
+}
+
+/* ==========================================================================
+   Reduced motion — zero the travel, keep the tint (DESIGN.md §5)
+
+   `prefers-reduced-motion: reduce` is a vestibular setting, not a "no
+   animation" setting. Movement across the screen is the trigger; a colour
+   settling or a panel fading in is not, and removing those costs the user the
+   feedback the motion was carrying. So: every travel distance goes to zero,
+   every transform duration goes to zero, and the tint channel is left exactly
+   as it is. Entrances keep their duration and become pure fades.
+   ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --duration-1: 1ms;
-    --duration-2: 1ms;
-    --duration-3: 1ms;
+    /* No distance. Every keyframe above degrades to opacity alone. */
+    --motion-rise: 0px;
+    --motion-lift: 0px;
+    --motion-scale-in: 1;
+    --motion-zoom-in: 1;
+
+    /* No transform transitions at all. */
+    --motion-move-snap: 0s linear;
+    --motion-move: 0s linear;
+
+    /* Entrances stay, at the tint channel's pace, as fades. */
+    --motion-enter: var(--motion-tint-slow-ms) var(--ease-tint) both;
+    --motion-celebrate: var(--motion-tint-slow-ms) var(--ease-tint) both;
+    --motion-dock-ms: var(--motion-tint-slow-ms);
+    --motion-dock-ease: var(--ease-tint);
+    --motion-shift-ease: var(--ease-tint);
+
+    /* Deprecated aliases: `--duration-2/3` still drive a `transform` in one
+       stylesheet this design system does not own. */
+    --duration-2: 0s;
+    --duration-3: 0s;
   }
+
+  /* The pulse is a loop, and a loop is movement even when it is only opacity:
+     it never resolves, so it is the one tint animation reduced motion stops. */
   .u-agent-pulse {
     animation: none;
+  }
+
+  /* Bridge: the file-tree chevron rotates from `--duration-1`, which is a tint
+     duration and must stay non-zero for colour. Zeroed here, by name, because
+     the rule is the rule — `styles/filetree.css` belongs to another lane and
+     this goes away when it moves to `--motion-move-snap`. */
+  .wb-chevron {
+    transition-duration: 0s !important;
   }
 }
