@@ -24,7 +24,7 @@
 
 import type * as Monaco from "monaco-editor";
 
-import { cssVar, hexVar, toHex, type Theme } from "./theme";
+import { cssVar, documentTheme, hexVar, toHex, type Theme } from "./theme";
 
 export const MONO_FONT =
   "'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace";
@@ -35,17 +35,29 @@ let api: typeof Monaco | null = null;
 let loading: Promise<typeof Monaco> | null = null;
 
 /**
- * Load Monaco, configure it, and define the current theme. Safe to call from
- * anywhere, any number of times; the work happens once.
+ * Load Monaco, configure it, and define the theme. Safe to call from anywhere,
+ * any number of times; the work happens once.
  *
  * The theme is defined *here* rather than by the caller because it must exist
  * before the first `<Editor>` renders — `@monaco-editor/react` applies the
- * theme name on creation, and an unknown name silently falls back to `vs-dark`.
+ * theme name on creation, and for a name it does not know Monaco silently
+ * falls back to a built-in one.
+ *
+ * **This function takes no theme, and that is the point.** It used to, and the
+ * value was captured when the load was *scheduled* — which for the idle
+ * prefetch is long before it lands. `defineWorkbenchTheme` can do nothing while
+ * `api` is null, so a toggle inside that window was dropped, and the theme then
+ * defined here carried the stale *name* while reading the *live* tokens: the
+ * two disagreed, and the name the editor went on to ask for was never defined
+ * at all. Reading `documentTheme()` at the moment the bundle lands is what
+ * keeps the name and the colors describing the same theme, and there is no
+ * longer a parameter through which they can drift apart
+ * (`ui/e2e/theme.spec.ts`, `ui/src/monacoLoad.test.ts`).
  */
-export async function loadMonaco(theme: Theme): Promise<typeof Monaco> {
+export async function loadMonaco(): Promise<typeof Monaco> {
   loading ??= import("./monacoBundle").then((bundle) => {
     api = bundle.configureBundle();
-    defineWorkbenchTheme(theme);
+    defineWorkbenchTheme(documentTheme());
     return api;
   });
   return loading;
@@ -62,10 +74,10 @@ export async function loadMonaco(theme: Theme): Promise<typeof Monaco> {
  * exists to remove, not a smaller version of it. A page that never goes idle
  * simply loads the editor on demand, as it would have anyway.
  */
-export function prefetchMonaco(theme: Theme): void {
+export function prefetchMonaco(): void {
   if (loading !== null) return;
   const warm = (): void => {
-    void loadMonaco(theme);
+    void loadMonaco();
   };
   const idle = (globalThis as { requestIdleCallback?: (cb: () => void) => number })
     .requestIdleCallback;
@@ -82,9 +94,9 @@ export function monacoThemeName(theme: Theme): string {
  * data-theme attribute changes so both themes are defined from live values.
  * Chrome colors per DESIGN.md §2.8; syntax colors from the ANSI palette.
  *
- * A no-op before the editor is loaded: `loadMonaco` defines the theme that is
- * current at the moment it finishes, so a toggle that happened first is already
- * accounted for.
+ * A no-op before the editor is loaded, and safely so: `loadMonaco` defines
+ * whatever theme is current at the moment it finishes, so a toggle that landed
+ * inside the load window is picked up there rather than lost here.
  */
 export function defineWorkbenchTheme(theme: Theme): void {
   if (api === null) return;

@@ -9,7 +9,7 @@ import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
 import { cancelShellClose, closeShellWindow } from "./shell";
 import { promptInsertText, shellInsertText } from "./shortcuts";
 import { terminalHandle } from "./terminalInput";
-import { THEME_STORAGE_KEY, type Theme } from "./theme";
+import { documentTheme, THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
   FileChangedEvent,
@@ -254,8 +254,9 @@ interface WorkbenchStore {
   handleSessionStatus: (event: SessionStatusEvent) => void;
 }
 
-const initialTheme: Theme =
-  document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+/** `index.html` applies the persisted theme before first paint; the store just
+ * reads back what the document already wears (see `theme.ts`). */
+const initialTheme: Theme = documentTheme();
 
 let initialized = false;
 const loadingPaths = new Set<string>();

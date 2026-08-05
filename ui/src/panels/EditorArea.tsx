@@ -21,10 +21,12 @@ import { TOOLS } from "../tools";
  *
  * The factory awaits `loadMonaco` before importing the surface so that
  * `MonacoEnvironment`, the `@monaco-editor/react` loader and the workbench
- * theme are all configured before the first `<Editor>` mounts.
+ * theme are all configured before the first `<Editor>` mounts. It passes no
+ * theme: which theme is current is a question only the moment the bundle lands
+ * can answer, and `loadMonaco` asks it there (see `monaco.ts`).
  */
 const CodeEditor = lazy(async () => {
-  await loadMonaco(useStore.getState().theme);
+  await loadMonaco();
   return import("./CodeEditor");
 });
 
@@ -165,7 +167,7 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
   // editor warms nothing) and the launch is over.
   const workspaceLoaded = useStore((s) => s.tree !== null);
   useEffect(() => {
-    if (workspaceLoaded) prefetchMonaco(useStore.getState().theme);
+    if (workspaceLoaded) prefetchMonaco();
   }, [workspaceLoaded]);
 
   if (openFiles.length === 0) {

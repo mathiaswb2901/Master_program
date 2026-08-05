@@ -142,6 +142,18 @@ main.tsx ──► App ──► EditorArea (panel: tabs, empty state, provenanc
   helpers the store calls (`setModelContent`, `disposeModel`) no-op until the
   editor exists, which is the same answer as "no model for that path" and is what
   the store already handled.
+- **Anything read from a CSS token is read when the bundle lands, never when the
+  load is armed.** Loading late puts a window between "the prefetch is scheduled"
+  and "Monaco exists" in which `defineWorkbenchTheme` can do nothing — so a theme
+  toggle inside it is dropped, and a `Theme` captured at arming time is stale by
+  the time it is used while the tokens it reads are live. The two then describe
+  different themes, and the name `<Editor theme=…>` asks for is never registered:
+  Monaco substitutes a built-in theme for a name it does not know, silently, so
+  the first file opens in neither palette. Hence `loadMonaco()` takes no theme and
+  calls `documentTheme()` (`ui/src/theme.ts`) inside its `.then()` — the DOM
+  attribute, because `setTheme` flips it before it sets the store and the tokens
+  follow the attribute. Reproduced in `ui/e2e/theme.spec.ts`, pinned in
+  `ui/src/monacoLoad.test.ts`.
 - **The split is inside the panel, not at the registry.** The editor panel is in
   the startup layout, so lazy-loading its registered `panel.component` would defer
   nothing and would hand dockview a component that suspends with no boundary. The

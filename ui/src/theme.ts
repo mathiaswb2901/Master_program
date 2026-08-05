@@ -10,6 +10,21 @@ export type Theme = "dark" | "light";
 
 export const THEME_STORAGE_KEY = "workbench-theme";
 
+/**
+ * The theme the document is painted with *right now* — read from the attribute
+ * that decides which token values `cssVar` returns.
+ *
+ * This, rather than a `Theme` captured earlier, is the correct source for
+ * anything derived from live tokens, and it is deliberately the DOM rather than
+ * the store: `setTheme` flips the attribute *before* it sets the store, so
+ * mid-call the attribute is the new theme while the store is still the old one,
+ * and the attribute is what the tokens follow. `index.html` sets it before the
+ * first paint, so it is right from the first frame — before the store exists.
+ */
+export function documentTheme(): Theme {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+
 export function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
