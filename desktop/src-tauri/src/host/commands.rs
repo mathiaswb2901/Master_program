@@ -93,14 +93,17 @@ pub fn host_embed(
 ) -> Result<HostGeometry, HostError> {
     let scale = scale_factor(&window)?;
     let parent = parent_window(&window)?;
-    // Through the same scale factor as the rectangle: one DPI authority.
-    let inset = ((caption_inset.unwrap_or(0.0)).max(0.0) * scale).round() as i32;
+    // CSS pixels, exactly like the rectangle beside it, and stored that way:
+    // the physical inset is derived at each layout from the scale in force
+    // then, so a window that moves to another monitor stays right. Converting
+    // here and keeping the answer is the bug this used to have.
+    let inset_css = caption_inset.unwrap_or(0.0).max(0.0);
     let guest = WindowId(window_id as isize);
 
     let handle = app.clone();
     let id = host_id.clone();
     let geometry = on_main(&app, move || {
-        embed_into_panel(&handle, parent, id, guest, rect, scale, inset)
+        embed_into_panel(&handle, parent, id, guest, rect, scale, inset_css)
     })?;
 
     emit(
@@ -116,6 +119,11 @@ pub fn host_embed(
 
 /// The panel moved or resized. Called on every drag frame, so the cheap path —
 /// a layout identical to the last one — costs a lock and a comparison.
+///
+/// A resize is also how a **DPI change** arrives: dragging the window to a
+/// monitor at another scale moves every panel. So the scale factor is read
+/// again here and the whole layout re-derived from it — rectangle and caption
+/// inset both. Nothing scaled is carried over from the embed.
 #[tauri::command]
 pub fn host_set_bounds(
     app: AppHandle,
@@ -131,7 +139,7 @@ pub fn host_set_bounds(
         let panel = panels
             .get_mut(&host_id)
             .ok_or_else(|| HostError::unknown_host(&host_id))?;
-        let next = layout_for(rect, scale, panel.caption_inset)?;
+        let next = panel.layout_at(rect, scale)?;
         if let Some(applied) = panel.coalescer.next(next) {
             layout::apply(
                 panel.window.hwnd(),
@@ -155,16 +163,26 @@ pub fn host_set_bounds(
 /// Our two windows go; the process does not. That is the whole difference
 /// between `detach` and `close` in the Protocol, and getting it wrong means a
 /// user who dragged a document out of the panel loses their unsaved edits.
+///
+/// The keyboard usually stays with the document, and that is right: the window
+/// is still on screen, just outside the panel. [`reclaim_focus`] only acts when
+/// the focus was left on nothing — which here means a guest that died between
+/// the embed and the detach.
 #[tauri::command]
 pub fn host_detach(app: AppHandle, host_id: String) -> Result<(), HostError> {
     let handle = app.clone();
     on_main(&app, move || {
-        let registry = handle.state::<HostRegistry>();
-        let mut panels = lock(&registry)?;
-        let panel = panels
-            .get_mut(&host_id)
-            .ok_or_else(|| HostError::unknown_host(&host_id))?;
-        release_panel(panel);
+        let dead_ends = {
+            let registry = handle.state::<HostRegistry>();
+            let mut panels = lock(&registry)?;
+            let panel = panels
+                .get_mut(&host_id)
+                .ok_or_else(|| HostError::unknown_host(&host_id))?;
+            let ours = [panel.window, panel.clip];
+            release_panel(panel);
+            ours
+        };
+        reclaim_focus(&handle, &dead_ends);
         Ok(())
     })
 }
@@ -181,11 +199,15 @@ pub fn host_close(app: AppHandle, host_id: String) -> Result<(), HostError> {
                 .remove(&host_id)
                 .ok_or_else(|| HostError::unknown_host(&host_id))?
         };
+        let dead_ends = [panel.window, panel.clip];
         release_panel(&mut panel);
         // Dropping the process closes its job object, which is what actually
         // kills it. Doing that outside the registry lock keeps a two-second
         // worst-case wait off every other panel's path.
         drop(panel.process.take());
+        // The keyboard *after* the instance is gone, not before: until then the
+        // released window is still on the desktop and may legitimately hold it.
+        reclaim_focus(&handle, &dead_ends);
         Ok(())
     })
 }
@@ -271,7 +293,8 @@ pub(super) fn open_synthetic_guest(
         guest::SYNTHETIC_GUEST_CLASS,
         SYNTHETIC_GUEST_TIMEOUT,
     )?;
-    let inset = (f64::from(guest::SYNTHETIC_GUEST_CAPTION) * scale).round() as i32;
+    // The fixture's strip is quoted at 100%, which is what a CSS pixel is.
+    let inset_css = f64::from(guest::SYNTHETIC_GUEST_CAPTION);
     let guest_window = launched.window;
     let mut process = Some(launched.process);
 
@@ -285,7 +308,7 @@ pub(super) fn open_synthetic_guest(
             guest_window,
             rect,
             scale,
-            inset,
+            inset_css,
         )?;
         // Bind the process to the panel only once the embed has succeeded; a
         // refused embed drops it here, and dropping it is the kill.
@@ -351,7 +374,7 @@ fn embed_into_panel(
     guest: WindowId,
     rect: CssRect,
     scale: f64,
-    inset: i32,
+    inset_css: f64,
 ) -> Result<HostGeometry, HostError> {
     let registry = app.state::<HostRegistry>();
     let mut panels = lock(&registry)?;
@@ -364,7 +387,7 @@ fn embed_into_panel(
         )));
     }
 
-    let plan = layout_for(rect, scale, inset)?;
+    let plan = layout_for(rect, scale, inset_css)?;
     let window = class::create_panel(
         Some(parent.hwnd()),
         plan.panel,
@@ -400,12 +423,12 @@ fn embed_into_panel(
         guest: None,
         process: None,
         coalescer: Coalescer::default(),
-        caption_inset: inset,
+        caption_inset_css: inset_css,
     });
     panel.window = WindowId::from_hwnd(window);
     panel.clip = WindowId::from_hwnd(clip);
     panel.guest = Some(embedded);
-    panel.caption_inset = inset;
+    panel.caption_inset_css = inset_css;
     panel.coalescer = coalescer;
 
     Ok(HostGeometry {
@@ -417,7 +440,39 @@ fn embed_into_panel(
     })
 }
 
+/// The window the keyboard falls back to when no hosted document can hold it:
+/// the shell's own. `None` on a build or a moment with no main window, which is
+/// a reason to leave the focus alone rather than an error.
+fn app_window(app: &AppHandle) -> Option<WindowId> {
+    let webview = app.get_webview_window("main")?;
+    let hwnd = webview.as_ref().window().hwnd().ok()?;
+    Some(WindowId::from_hwnd(hwnd))
+}
+
+/// Put the keyboard back in the webview if the window that held it has gone.
+///
+/// `dead_ends` are this host's own windows — alive or not, they host nothing
+/// now, so focus sitting on one of them is focus on nothing.
+///
+/// Main thread only — focus is a property of an input queue, so this has to run
+/// on the thread that owns the windows. Cheap and usually a no-op: see
+/// [`super::focus::reclaim_if_stranded`] for what "stranded" means and why this
+/// cannot steal focus from another application.
+fn reclaim_focus(app: &AppHandle, dead_ends: &[WindowId]) {
+    let Some(window) = app_window(app) else {
+        return;
+    };
+    if super::focus::reclaim_if_stranded(window, dead_ends) {
+        crate::backend::log(
+            "office host: a hosted window left with the keyboard; handed it back to the webview",
+        );
+    }
+}
+
 /// Un-embed and destroy our windows, keeping whatever process there is.
+///
+/// Does not touch the focus: the caller does that once the lock is gone, so the
+/// registry is not held across a `SetFocus`.
 fn release_panel(panel: &mut Panel) {
     if let Some(embedded) = panel.guest.take() {
         if let Err(err) = embed::release(&embedded) {
@@ -500,9 +555,10 @@ fn emit<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: P) {
     }
 }
 
-/// One guest went away by itself. Called from the notice drain thread.
+/// One guest went away by itself. Called from the watchdog's sweep thread.
 pub(super) fn on_guest_gone(app: &AppHandle, host_id: String) {
     let registry = app.state::<HostRegistry>();
+    let mut dead_ends = Vec::new();
     if let Ok(mut panels) = lock(&registry) {
         if let Some(panel) = panels.get_mut(&host_id) {
             // The window is already destroyed; forget it so nothing tries to
@@ -511,7 +567,23 @@ pub(super) fn on_guest_gone(app: &AppHandle, host_id: String) {
             // on screen and something has to be in it.
             panel.guest = None;
             class::set_guest(panel.window.hwnd(), None);
+            // Still there, and now hosting nothing: `DestroyWindow` promotes a
+            // focused child's focus to its parent, so the keyboard may be
+            // sitting on one of these two.
+            dead_ends = vec![panel.window, panel.clip];
         }
+    }
+    // If the user was typing in that document when it died, the keyboard is now
+    // somewhere that cannot use it. Reclaiming is input-queue work and this is
+    // the watchdog's thread, so it has to be asked of the main one.
+    let handle = app.clone();
+    if let Err(err) = on_main(app, move || {
+        reclaim_focus(&handle, &dead_ends);
+        Ok(())
+    }) {
+        crate::backend::log(&format!(
+            "office host: could not hand the keyboard back after a lost guest: {err}"
+        ));
     }
     emit(
         app,

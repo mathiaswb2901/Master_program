@@ -204,8 +204,26 @@ struct Panel {
     /// Last applied layout, so a resize storm collapses to the frames that
     /// actually changed something.
     coalescer: Coalescer,
-    /// Physical pixels of self-drawn caption to hide.
-    caption_inset: i32,
+    /// Self-drawn caption to hide, in **CSS pixels** — the unit the UI sent it
+    /// in, kept that way on purpose.
+    ///
+    /// Storing the scaled value would make this panel a second DPI authority
+    /// frozen at the moment of the embed, which is the one thing
+    /// [`geometry`] exists to prevent. The physical inset is re-derived from
+    /// the scale factor in force, on every layout: see [`Panel::layout_at`].
+    caption_inset_css: f64,
+}
+
+impl Panel {
+    /// The layout this panel wants for `rect` at the scale in force **now**.
+    ///
+    /// Nothing derived from a scale factor is cached across calls. A window
+    /// dragged between two monitors at different DPI gets a resize, and this is
+    /// the call that has to answer it with different physical numbers for the
+    /// same CSS rectangle — the caption inset included.
+    fn layout_at(&self, rect: CssRect, scale: f64) -> Result<HostLayout, HostError> {
+        layout_for(rect, scale, self.caption_inset_css)
+    }
 }
 
 /// Every hosted panel this window owns.
@@ -256,15 +274,34 @@ pub struct HostGeometry {
 }
 
 /// Turn a CSS rectangle into the three physical rectangles a panel needs, at
-/// one scale factor. The only place the two unit systems meet.
-fn layout_for(rect: CssRect, scale: f64, caption_inset: i32) -> Result<HostLayout, HostError> {
+/// one scale factor.
+///
+/// The only place the two unit systems meet, and that now includes the caption
+/// inset: rectangle and inset are converted here, from the same number, on
+/// every call. Anything that converted one of them earlier and kept the result
+/// would be the second DPI authority this module exists to avoid.
+fn layout_for(rect: CssRect, scale: f64, caption_inset_css: f64) -> Result<HostLayout, HostError> {
     let panel: PhysicalRect = PhysicalRect::from_css(rect, scale)?;
-    Ok(geometry::host_layout(panel, caption_inset))
+    Ok(geometry::host_layout(
+        panel,
+        geometry::caption_inset_px(caption_inset_css, scale),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn panel_with_inset(caption_inset_css: f64) -> Panel {
+        Panel {
+            window: WindowId(0),
+            clip: WindowId(0),
+            guest: None,
+            process: None,
+            coalescer: Coalescer::default(),
+            caption_inset_css,
+        }
+    }
 
     #[test]
     fn one_scale_factor_drives_every_rectangle() {
@@ -274,13 +311,32 @@ mod tests {
             width: 400.0,
             height: 300.0,
         };
-        let layout = layout_for(rect, 1.5, 30).unwrap();
+        let layout = layout_for(rect, 1.5, 20.0).unwrap();
         assert_eq!(layout.panel.x, 150);
         assert_eq!(layout.panel.width, 600);
         assert_eq!(layout.clip.width, 600);
-        // The inset arrives already in physical pixels: the caller converts it
-        // through the same scale factor, so there is still only one authority.
+        // The inset goes through that same factor, here, rather than arriving
+        // pre-scaled from somewhere that used a different one.
         assert_eq!(layout.guest.y, -30);
+    }
+
+    #[test]
+    fn a_panel_re_derives_its_inset_when_the_scale_changes() {
+        // The registry entry a `host_set_bounds` reads. Embedded on a 200%
+        // monitor, then the window is dragged to a 100% one and dockview sends
+        // a resize: the same CSS rectangle, a different scale factor, and the
+        // inset has to follow it. Holding a physical inset here gave 28 twice.
+        let panel = panel_with_inset(14.0);
+        let rect = CssRect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        assert_eq!(panel.layout_at(rect, 2.0).unwrap().guest.y, -28);
+        assert_eq!(panel.layout_at(rect, 1.0).unwrap().guest.y, -14);
+        // And back, because a monitor move has no preferred direction.
+        assert_eq!(panel.layout_at(rect, 2.0).unwrap().guest.y, -28);
     }
 
     #[test]
@@ -291,7 +347,7 @@ mod tests {
             width: 0.0,
             height: 300.0,
         };
-        let err = layout_for(rect, 1.0, 0).unwrap_err();
+        let err = layout_for(rect, 1.0, 0.0).unwrap_err();
         assert_eq!(err.code, HostErrorCode::InvalidRect);
     }
 

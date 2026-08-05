@@ -27,8 +27,11 @@
 //! What is left here is real and needed. `WM_SETFOCUS` forwards focus to the
 //! guest, so a panel focused programmatically — a `Ctrl+N` chord, a command, a
 //! restored layout — puts the keyboard where the user expects it rather than on
-//! a window that draws nothing. And the class brush paints the panel surface in
-//! the moments before a guest covers it.
+//! a window that draws nothing. It forwards only to a window that is still a
+//! *descendant of this panel*: the stored handle is cleared by a sweep and can
+//! therefore be up to one sweep stale, and an HWND value Windows has recycled
+//! would take a plain `SetFocus` without complaining. And the class brush
+//! paints the panel surface in the moments before a guest covers it.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -40,7 +43,7 @@ use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassExW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsChild, RegisterClassExW,
     SetWindowLongPtrW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, WINDOW_EX_STYLE,
     WM_NCCREATE, WM_NCDESTROY, WM_SETFOCUS, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
     WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
@@ -280,10 +283,19 @@ unsafe extern "system" fn wnd_proc(
             // programmatic "focus that panel" put the caret in the document.
             if let Some(state) = state_of(hwnd) {
                 let guest = state.guest();
-                if !guest.0.is_null() {
-                    // SAFETY: a plain Win32 call; a stale handle fails rather
-                    // than faults, and a stale handle means the guest has gone,
-                    // which the watchdog is already about to notice.
+                // `IsChild`, and not merely a non-null handle. The stored value
+                // is cleared by the watchdog on its *next* sweep, so it can
+                // name a window that died up to half a second ago — and Windows
+                // recycles HWND values, so by then an unrelated window may
+                // legitimately answer to that number. `SetFocus` would then
+                // succeed and put the keyboard somewhere arbitrary, which is
+                // worse than doing nothing. Our guest is a descendant of this
+                // panel; a recycled handle is not.
+                //
+                // SAFETY: plain Win32 calls. `IsChild` validates both handles
+                // and answers FALSE for one that no longer exists, so the
+                // `SetFocus` beyond it is reached only for a live descendant.
+                if !guest.0.is_null() && unsafe { IsChild(hwnd, guest) }.as_bool() {
                     let _ = unsafe { SetFocus(Some(guest)) };
                 }
             }

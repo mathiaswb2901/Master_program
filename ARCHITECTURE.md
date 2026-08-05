@@ -456,7 +456,13 @@ guests first — otherwise closing Workbench would take a real Word down with it
 
 CSS pixels become physical pixels through **one** DPI authority, the window's own
 `scale_factor()`; edges are rounded and sizes derived from the rounded edges, so
-two adjacent panels cannot leave a one-pixel seam.
+two adjacent panels cannot leave a one-pixel seam. Nothing scaled is ever cached —
+the caption inset a panel hides is *stored* in CSS pixels and re-derived on every
+layout, because dragging the window to a monitor at another scale arrives as a
+plain resize and has to come back with different physical numbers for the same
+rectangle. Mind the unit boundary at the seam: these Rust commands take **CSS**
+pixels, while the Python `PanelRect` is documented in **physical** pixels. A
+bridge between the two must convert, or the rectangle is scaled twice.
 
 **Four things were measured that the documentation does not tell you**, each one
 now a test in `host/hosting_tests.rs`:

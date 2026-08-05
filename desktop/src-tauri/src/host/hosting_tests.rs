@@ -30,10 +30,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::class::{self, PanelState};
 use super::embed::{self, EmbeddedGuest};
-use super::geometry::{host_layout, HostLayout, PhysicalRect};
+use super::geometry::{host_layout, CssRect, HostLayout, PhysicalRect};
 use super::guest::{self, GuestProcess};
 use super::layout::{self, Coalescer};
-use super::{focus, WindowId};
+use super::{focus, Panel, WindowId};
 
 /// One desktop, one window test at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -324,6 +324,192 @@ fn a_self_drawn_caption_is_offset_out_of_the_panel() {
     assert_eq!(
         client_size(guest_hwnd).1,
         fixture.layout.panel.height + inset
+    );
+}
+
+/// **The cross-DPI regression.** A document embedded while the window is on a
+/// 200% monitor, then the window dragged to a 100% one: dockview lays the panel
+/// out again and `host_set_bounds` runs with the new scale factor.
+///
+/// Both halves of the layout have to come back through *that* factor. The panel
+/// used to keep the caption inset it had already scaled at embed time, so after
+/// the move the guest was offset by twice what it should be and the strip the
+/// clip child exists to hide came back into view. Measured on the real windows,
+/// because "the strip is visible again" is a claim about where Win32 actually
+/// put the guest.
+#[test]
+fn a_panel_that_changes_dpi_re_derives_its_caption_inset() {
+    let mut fixture = Fixture::new((640, 460), 0);
+    fixture.embed();
+    let guest_hwnd = fixture.guest_window.hwnd();
+    let clip_hwnd = fixture.clip;
+
+    // The registry entry the command layer keeps for this panel, with the
+    // inset in the CSS pixels the UI sent.
+    let panel = Panel {
+        window: WindowId::from_hwnd(fixture.panel),
+        clip: WindowId::from_hwnd(fixture.clip),
+        guest: None,
+        process: None,
+        coalescer: Coalescer::default(),
+        caption_inset_css: 14.0,
+    };
+    // One rectangle, in the CSS pixels dockview measures in. Moving a window
+    // between monitors does not change it; the scale factor is what changes.
+    let rect = CssRect {
+        x: 60.0,
+        y: 60.0,
+        width: 320.0,
+        height: 240.0,
+    };
+
+    // 200%, then 100%, then back — a monitor move has no preferred direction.
+    for (scale, expected) in [(2.0, 28), (1.0, 14), (2.0, 28)] {
+        fixture.apply(
+            panel
+                .layout_at(rect, scale)
+                .expect("a layout at this scale factor"),
+        );
+        assert!(
+            wait_until(|| { window_rect(guest_hwnd).top == window_rect(clip_hwnd).top - expected }),
+            "at scale {scale} the guest sits {} px above the clip, expected {expected}",
+            window_rect(clip_hwnd).top - window_rect(guest_hwnd).top
+        );
+    }
+}
+
+/// The stale-handle race the watchdog necessarily leaves open: a guest dies,
+/// Windows recycles its `HWND` *value* for some unrelated window, and a
+/// `WM_SETFOCUS` reaches the panel before the next sweep clears the handle.
+///
+/// `elsewhere` stands in for the window that inherited the number — live, ours,
+/// and not a descendant of the panel, which is the only thing that tells it
+/// apart from a real guest. A bare non-null check would hand it the keyboard.
+#[test]
+fn a_panel_does_not_forward_focus_to_a_window_that_is_not_its_guest() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+    class::set_guest(fixture.panel, Some(elsewhere));
+
+    focus::focus(WindowId::from_hwnd(fixture.panel)).expect("focusing the panel is accepted");
+    pump_for(Duration::from_millis(300));
+
+    assert_ne!(
+        focus::focused_here(),
+        Some(elsewhere),
+        "the panel handed the keyboard to a window that is not its guest"
+    );
+}
+
+/// A hosted document that goes away under the caret must not take the keyboard
+/// with it.
+///
+/// Windows clears the focus when it destroys the focused window, and the panel
+/// it was in is now empty — so without an explicit reclaim the user's only way
+/// back to a keyboard is the mouse. This is what `commands::on_guest_gone` does
+/// about it, and the same call covers the close/detach path where we destroy
+/// the panel ourselves.
+#[test]
+fn a_guest_that_disappears_does_not_strand_the_keyboard() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let guest_thread = focus::owning_thread(guest_window);
+
+    focus::focus(guest_window).expect("focusing the guest is accepted");
+    assert!(
+        wait_until(|| focus::focused_window_of(guest_thread) == Some(guest_window)),
+        "the keyboard never reached the guest, so this test would prove nothing"
+    );
+
+    fixture.embedded = None; // the window is about to die; nothing to release
+                             // SAFETY: a plain post to the guest's window, whose default handling
+                             // is `DestroyWindow` — the application quitting from its own menu.
+    unsafe {
+        let _ = PostMessageW(Some(guest_window.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the guest window survived WM_CLOSE"
+    );
+    settle();
+
+    // Where the keyboard actually ends up here is Win32's business — measured,
+    // it is the clip child, because `DestroyWindow` promotes a focused child's
+    // focus to its parent. What matters is that it is not somewhere the user
+    // can type, and in particular not already where the reclaim would put it.
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+    assert_ne!(
+        focus::focused_here(),
+        Some(elsewhere),
+        "the keyboard was already on the fallback; this test would prove nothing"
+    );
+
+    let dead_ends = [
+        WindowId::from_hwnd(fixture.panel),
+        WindowId::from_hwnd(fixture.clip),
+    ];
+    assert!(
+        focus::reclaim_if_stranded(elsewhere, &dead_ends),
+        "the reclaim declined a keyboard left on {:?}",
+        focus::focused_here()
+    );
+    assert_eq!(
+        focus::focused_here(),
+        Some(elsewhere),
+        "the keyboard was not handed back to a window the user can type in"
+    );
+}
+
+/// The same, on the path where *we* tear everything down: `host_close` releases
+/// the guest, destroys our two windows and then reaps the instance we launched.
+///
+/// The order is what this pins. Reclaiming before the reap finds the released
+/// window alive on the desktop and — correctly — leaves the keyboard alone,
+/// which strands it a moment later when the process dies. **Detach is not this
+/// case**: there the document stays open on the desktop, and a window the user
+/// can still see is entitled to keep the keyboard.
+#[test]
+fn closing_a_focused_panel_does_not_strand_the_keyboard() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let guest_thread = focus::owning_thread(guest_window);
+    focus::focus(guest_window).expect("focusing the guest is accepted");
+    assert!(
+        wait_until(|| focus::focused_window_of(guest_thread) == Some(guest_window)),
+        "the keyboard never reached the guest, so this test would prove nothing"
+    );
+
+    // Exactly what `host_close` does, in the same order.
+    let dead_ends = [
+        WindowId::from_hwnd(fixture.panel),
+        WindowId::from_hwnd(fixture.clip),
+    ];
+    let embedded = fixture.embedded.take().expect("embedded");
+    embed::release(&embedded).expect("releasing should succeed");
+    class::destroy(WindowId::from_hwnd(fixture.clip));
+    class::destroy(WindowId::from_hwnd(fixture.panel));
+    fixture.clip = HWND(std::ptr::null_mut());
+    fixture.panel = HWND(std::ptr::null_mut());
+    fixture.guest_process.reap();
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the guest window outlived its job object"
+    );
+    settle();
+
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+    assert!(
+        focus::reclaim_if_stranded(elsewhere, &dead_ends),
+        "the reclaim declined a keyboard left on {:?}",
+        focus::focused_here()
+    );
+    assert_eq!(
+        focus::focused_here(),
+        Some(elsewhere),
+        "the keyboard was not handed back to a window the user can type in"
     );
 }
 

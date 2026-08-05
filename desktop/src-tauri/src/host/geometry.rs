@@ -17,10 +17,21 @@ use serde::{Deserialize, Serialize};
 
 use super::HostError;
 
-/// The same ceiling `PanelRect` enforces in
-/// `server/src/workbench_server/models/office_host.py`, so a rectangle the
-/// Python layer would accept is one this layer accepts too. Physical pixels
-/// after scaling can exceed it; the check is on the CSS values, as there.
+/// The bound on a CSS extent. Numerically the same number `PanelRect` enforces
+/// in `server/src/workbench_server/models/office_host.py` — and deliberately
+/// **not** the same quantity.
+///
+/// `PanelRect` is documented as *physical* pixels relative to the host window;
+/// a [`CssRect`] is *CSS* pixels that this module multiplies by the window's
+/// `scale_factor()`. The bound is shared because it is a sanity limit on "an
+/// extent a display could plausibly have", which is true in either unit — not
+/// because the two types are interchangeable.
+///
+/// **A bridge from the Python `HostBackend` must convert.** Passing a
+/// `PanelRect` straight through as a `CssRect` scales it a second time: at 200%
+/// DPI a correctly sized physical rectangle comes out twice the size it asked
+/// for. Either divide by the scale factor on the way in, or change these
+/// commands to take physical pixels — but do one of them deliberately.
 const MAX_CSS_EXTENT: f64 = 100_000.0;
 
 /// A guest cannot usefully draw a caption taller than this, and a bad value
@@ -145,10 +156,32 @@ pub struct HostLayout {
     pub guest: PhysicalRect,
 }
 
-/// Lay out one hosted panel. `caption_inset` is in physical pixels and is
-/// clamped, never rejected — it is a cosmetic hint from the caller about how
-/// much self-drawn chrome to hide, and getting it wrong should misalign a
-/// window, not fail an embed.
+/// How much self-drawn caption to hide, in physical pixels at `scale`.
+///
+/// The inset reaches us in CSS pixels, like every other measurement the UI
+/// produces, and is converted here — through the same scale factor as the
+/// rectangle, and on **every** layout rather than once when the guest was
+/// embedded. Keeping a physical inset on the panel instead would freeze the DPI
+/// it was embedded at: drag the window to a monitor at a different scale and
+/// the offset is wrong by the ratio of the two, which shows up as the guest's
+/// own caption strip reappearing inside the panel (or a band of document
+/// clipped away that should not be).
+///
+/// Not fallible, for the same reason [`host_layout`] clamps rather than
+/// refuses: the inset is a cosmetic hint, and getting it wrong should misalign
+/// a window, not fail an embed.
+pub fn caption_inset_px(caption_inset_css: f64, scale: f64) -> i32 {
+    if !caption_inset_css.is_finite() || !scale.is_finite() {
+        return 0;
+    }
+    round_to_i32((caption_inset_css.max(0.0) * scale.max(0.0)).min(f64::from(MAX_CAPTION_INSET)))
+}
+
+/// Lay out one hosted panel. `caption_inset` is in physical pixels — normally
+/// whatever [`caption_inset_px`] made of the caller's CSS value — and is
+/// clamped, never rejected: it is a cosmetic hint about how much self-drawn
+/// chrome to hide, and getting it wrong should misalign a window, not fail an
+/// embed.
 pub fn host_layout(panel: PhysicalRect, caption_inset: i32) -> HostLayout {
     let inset = caption_inset.clamp(0, MAX_CAPTION_INSET);
     HostLayout {
@@ -305,6 +338,25 @@ mod tests {
         };
         let layout = host_layout(panel, 0);
         assert_eq!(layout.guest, layout.clip);
+    }
+
+    #[test]
+    fn the_caption_inset_is_converted_at_the_scale_in_force() {
+        // The same CSS hint, three monitors. This is the conversion that has to
+        // happen on every layout: a panel that stored the physical answer would
+        // keep 28 after being dragged from a 200% monitor to a 100% one.
+        assert_eq!(caption_inset_px(14.0, 1.0), 14);
+        assert_eq!(caption_inset_px(14.0, 1.5), 21);
+        assert_eq!(caption_inset_px(14.0, 2.0), 28);
+    }
+
+    #[test]
+    fn a_nonsense_caption_inset_is_a_flush_guest_rather_than_a_failure() {
+        assert_eq!(caption_inset_px(f64::NAN, 2.0), 0);
+        assert_eq!(caption_inset_px(f64::INFINITY, 2.0), 0);
+        assert_eq!(caption_inset_px(14.0, f64::NAN), 0);
+        assert_eq!(caption_inset_px(-10.0, 2.0), 0);
+        assert_eq!(caption_inset_px(1e9, 2.0), MAX_CAPTION_INSET);
     }
 
     #[test]
