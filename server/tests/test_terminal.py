@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -142,20 +143,29 @@ class ScriptedProc:
     `delay_before` sleeps inside `read` — in the worker thread, exactly where a
     blocking ConPTY read waits — which is how the "the window expired while a
     read was in flight" case is reached deterministically.
+
+    Reads are serialized on a lock, because a PTY's are: there is one handle,
+    and a read whose caller walked away still owns it until it returns — the
+    chunk it then takes off the script is consumed and gone, not left for the
+    next reader. Without that, a pump that cancels an in-flight read would look
+    lossless here only because a second concurrent read raced in and picked the
+    chunk up, which cannot happen against ConPTY.
     """
 
     def __init__(self, chunks: list[str], delay_before: dict[int, float] | None = None) -> None:
         self._chunks = deque(chunks)
         self._delays = delay_before or {}
         self._calls = 0
+        self._handle = threading.Lock()
         self.terminated = False
 
     def read(self, length: int) -> str:
-        delay = self._delays.get(self._calls)
-        self._calls += 1
-        if delay is not None:
-            time.sleep(delay)
-        return self._chunks.popleft() if self._chunks else ""
+        with self._handle:
+            delay = self._delays.get(self._calls)
+            self._calls += 1
+            if delay is not None:
+                time.sleep(delay)
+            return self._chunks.popleft() if self._chunks else ""
 
     def write(self, data: str) -> int:
         return len(data)
@@ -199,11 +209,32 @@ class TestCoalescedOutput:
             await stream.aclose()
 
     async def test_a_read_still_in_flight_when_the_window_expires_is_not_lost(self) -> None:
-        """Regression: a plain `wait_for` would cancel the read and drop its bytes."""
-        proc = ScriptedProc(["one", "two"], delay_before={1: COALESCE_WINDOW_S * 20})
-        frames = [frame async for frame in coalesced_output(scripted_session(proc))]
-        assert "".join(frames) == "onetwo"
-        assert frames[0] == "one"  # flushed by the timer, not held for "two"
+        """Regression: a plain `wait_for` would cancel the read and drop its bytes.
+
+        The scenario has to put a batch *and* a slow read in flight at the same
+        moment, or the timer branch is never reached and the test cannot tell
+        the two implementations apart. So: "a" arrives at an idle stream and
+        leaves at once; "b" arrives right behind it and therefore opens a busy
+        batch whose deadline is a whole window out; and the read for "c" is
+        dispatched while that batch is still open and blocks for far longer than
+        the window. The window expires with a read in flight — the case.
+
+        Both halves are asserted, because only the pair discriminates: "b" must
+        leave on the timer (before "c" could possibly have arrived), and "c"
+        must survive that expiry. A `wait_for` cancels the read to fire the
+        timer, and `ScriptedProc` then consumes "c" into a result nobody is
+        awaiting, so the stream ends "ab".
+        """
+        window = 0.1
+        blocked_for = window * 5
+        proc = ScriptedProc(["a", "b", "c"], delay_before={2: blocked_for})
+        stream = coalesced_output(scripted_session(proc), OutputCoalescer(window_s=window))
+        started = time.perf_counter()
+        frames = [(frame, time.perf_counter() - started) async for frame in stream]
+
+        assert [data for data, _ in frames] == ["a", "b", "c"]
+        assert frames[1][1] < blocked_for  # "b" left on the timer, not on "c" arriving
+        assert frames[2][1] >= blocked_for  # ...and "c" outlived the expiry that flushed it
 
 
 class FloodingManager:

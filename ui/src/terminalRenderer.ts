@@ -1,4 +1,4 @@
-import { WebglAddon } from "@xterm/addon-webgl";
+import type { WebglAddon } from "@xterm/addon-webgl";
 import type { Terminal as XTerm } from "@xterm/xterm";
 
 /**
@@ -11,28 +11,50 @@ import type { Terminal as XTerm } from "@xterm/xterm";
  * draws the same cells as textured quads instead, which is where the render
  * cost of a flood goes.
  *
- * It is not available everywhere, so neither failure may leave a dead terminal:
+ * **The addon is loaded on demand, never with the app.** It is 102 kB raw /
+ * 25.9 kB gzip, and measured against the entry chunk (built both ways) that is
+ * exactly what a static import adds to it — paid on first paint by every user,
+ * including the ones who never open a terminal. Panels are all statically
+ * imported today, so a dynamic `import()` *here* is what buys the split: the
+ * addon becomes its own chunk, fetched by the first terminal to open and by
+ * nothing else. The measured render win did not justify a bill charged to
+ * everyone; charged only to terminal users, it costs nothing to keep.
+ *
+ * The load makes attaching asynchronous, so callers get `ready` rather than an
+ * answer up front — and a terminal disposed while the chunk is still in flight
+ * must never have an addon hung on it afterwards.
+ *
+ * It is not available everywhere, so no failure may leave a dead terminal:
  *
  *  - **Attach can throw.** The context is created inside `activate`, i.e. inside
  *    `loadAddon`: no WebGL2 (a VM with no GPU, a blocklisted driver, software
  *    rasterization disabled), or the browser's per-page live-context budget
  *    already spent by other panels.
+ *  - **The chunk can fail to load** — offline, a cache miss against a dead
+ *    server, an integrity failure.
  *  - **The context can be lost at runtime** — driver reset, GPU sleep, the page
  *    backgrounded, another canvas evicting ours. xterm cannot revive the addon,
  *    so the only outcome that is not a blank panel is to drop it and let the DOM
- *    renderer take back over mid-session.
+ *    renderer take back over mid-session. `e2e/terminal.spec.ts` forces a real
+ *    context loss on the live canvas and asserts the handover.
  *
- * Both paths end at the same place: a slower terminal that still works. The
- * caller gets the `kind` that actually took effect rather than the one it asked
- * for.
+ * Every path ends at the same place: a slower terminal that still works. The
+ * caller learns the `kind` that actually took effect rather than the one it
+ * asked for.
  */
+export type RendererKind = "webgl" | "dom";
+
 export interface AttachedRenderer {
-  /** Which renderer is actually drawing — `dom` means WebGL was refused. */
-  kind: "webgl" | "dom";
+  /** Which renderer ended up drawing — `dom` means WebGL was never reached. */
+  ready: Promise<RendererKind>;
   dispose(): void;
 }
 
-const NOOP: AttachedRenderer = { kind: "dom", dispose: () => {} };
+/** The default loader, and the only reference to the package outside types. */
+async function importWebglAddon(): Promise<WebglAddon> {
+  const { WebglAddon } = await import("@xterm/addon-webgl");
+  return new WebglAddon();
+}
 
 /**
  * Attach the GPU renderer to an **already opened** terminal.
@@ -43,32 +65,46 @@ const NOOP: AttachedRenderer = { kind: "dom", dispose: () => {} };
  */
 export function attachRenderer(
   term: Pick<XTerm, "loadAddon">,
-  createAddon: () => WebglAddon = () => new WebglAddon(),
+  createAddon: () => Promise<WebglAddon> = importWebglAddon,
 ): AttachedRenderer {
-  let addon: WebglAddon | null = null;
-  try {
-    addon = createAddon();
-    term.loadAddon(addon);
-  } catch (err) {
-    console.warn("terminal: GPU renderer unavailable, using the DOM renderer", err);
-    // xterm registers an addon before activating it, so one that threw on the
-    // way up is still held by the terminal; drop it rather than leave it to be
-    // disposed later by a teardown that cannot know it never activated.
-    disposeQuietly(addon);
-    return NOOP;
-  }
-  const live = addon;
+  let live: WebglAddon | null = null;
   let disposed = false;
+
   const drop = (): void => {
     if (disposed) return;
     disposed = true;
     disposeQuietly(live);
+    live = null;
   };
-  live.onContextLoss(() => {
-    console.warn("terminal: WebGL context lost, falling back to the DOM renderer");
-    drop();
-  });
-  return { kind: "webgl", dispose: drop };
+
+  const ready = (async (): Promise<RendererKind> => {
+    let addon: WebglAddon | null = null;
+    try {
+      addon = await createAddon();
+      if (disposed) {
+        // The terminal was torn down while the chunk was loading. Attaching now
+        // would hang a GL context on a dead terminal that nothing will dispose.
+        disposeQuietly(addon);
+        return "dom";
+      }
+      term.loadAddon(addon);
+    } catch (err) {
+      console.warn("terminal: GPU renderer unavailable, using the DOM renderer", err);
+      // xterm registers an addon before activating it, so one that threw on the
+      // way up is still held by the terminal; drop it rather than leave it to be
+      // disposed later by a teardown that cannot know it never activated.
+      disposeQuietly(addon);
+      return "dom";
+    }
+    live = addon;
+    addon.onContextLoss(() => {
+      console.warn("terminal: WebGL context lost, falling back to the DOM renderer");
+      drop();
+    });
+    return "webgl";
+  })();
+
+  return { ready, dispose: drop };
 }
 
 function disposeQuietly(addon: WebglAddon | null): void {

@@ -4,7 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { attachRenderer } from "./terminalRenderer";
 
-/** A stand-in for the addon: the node test environment has no WebGL to lose. */
+/** A stand-in for the addon: the node test environment has no WebGL to lose.
+ *
+ * The *real* context-loss path cannot be proved here — a hand-written
+ * `onContextLoss` will always call back on cue, whatever xterm's addon does
+ * against a driver reset. That half is asserted against a live canvas in
+ * `e2e/terminal.spec.ts`, which kills the context for real; what these tests
+ * pin is this module's own bookkeeping around it. */
 function fakeAddon(overrides: Partial<{ dispose: () => void }> = {}) {
   const listeners: Array<() => void> = [];
   const addon = {
@@ -37,6 +43,8 @@ function fakeTerm(onLoad?: () => void) {
 type Addon = ReturnType<typeof fakeAddon>;
 const asAddon = (a: Addon) => a as unknown as WebglAddon;
 const asTerm = (t: ReturnType<typeof fakeTerm>) => t as unknown as Pick<XTerm, "loadAddon">;
+/** The loader is async in production (a dynamic `import()`); mirror that here. */
+const loads = (a: Addon) => () => Promise.resolve(asAddon(a));
 
 beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -47,16 +55,16 @@ afterEach(() => {
 });
 
 describe("attachRenderer", () => {
-  it("loads the GPU renderer when the driver cooperates", () => {
+  it("loads the GPU renderer when the driver cooperates", async () => {
     const addon = fakeAddon();
     const term = fakeTerm();
-    const renderer = attachRenderer(asTerm(term), () => asAddon(addon));
+    const renderer = attachRenderer(asTerm(term), loads(addon));
 
-    expect(renderer.kind).toBe("webgl");
+    expect(await renderer.ready).toBe("webgl");
     expect(term.loaded).toEqual([addon]);
   });
 
-  it("falls back to the DOM renderer when the context cannot be created", () => {
+  it("falls back to the DOM renderer when the context cannot be created", async () => {
     // `loadAddon` is where the GL context is made, so this is where a machine
     // without WebGL2 throws — not at construction.
     const term = fakeTerm(() => {
@@ -64,24 +72,46 @@ describe("attachRenderer", () => {
     });
     const addon = fakeAddon();
 
-    const renderer = attachRenderer(asTerm(term), () => asAddon(addon));
+    const renderer = attachRenderer(asTerm(term), loads(addon));
 
-    expect(renderer.kind).toBe("dom");
+    expect(await renderer.ready).toBe("dom");
     // The half-registered addon is dropped rather than left for a later teardown.
     expect(addon.disposed).toBe(1);
     expect(() => renderer.dispose()).not.toThrow();
   });
 
-  it("falls back when the addon itself cannot be constructed", () => {
+  it("falls back when the addon itself cannot be constructed", async () => {
     const renderer = attachRenderer(asTerm(fakeTerm()), () => {
       throw new Error("no such constructor");
     });
-    expect(renderer.kind).toBe("dom");
+    expect(await renderer.ready).toBe("dom");
   });
 
-  it("drops the addon when the context is lost mid-session", () => {
+  it("falls back when the addon's chunk never arrives", async () => {
+    // The cost of loading on demand: the network is now in this path.
+    const renderer = attachRenderer(asTerm(fakeTerm()), () =>
+      Promise.reject(new Error("failed to fetch dynamically imported module")),
+    );
+    expect(await renderer.ready).toBe("dom");
+  });
+
+  it("never attaches to a terminal disposed while the chunk was loading", async () => {
     const addon = fakeAddon();
-    const renderer = attachRenderer(asTerm(fakeTerm()), () => asAddon(addon));
+    const term = fakeTerm();
+    const renderer = attachRenderer(asTerm(term), loads(addon));
+
+    renderer.dispose(); // the panel unmounted before the import resolved
+
+    expect(await renderer.ready).toBe("dom");
+    // A GL context hung on a dead terminal would be leaked: nothing disposes it.
+    expect(term.loaded).toEqual([]);
+    expect(addon.disposed).toBe(1);
+  });
+
+  it("drops the addon when the context is lost mid-session", async () => {
+    const addon = fakeAddon();
+    const renderer = attachRenderer(asTerm(fakeTerm()), loads(addon));
+    await renderer.ready;
 
     addon.loseContext();
 
@@ -91,9 +121,10 @@ describe("attachRenderer", () => {
     expect(addon.disposed).toBe(1); // teardown must not double-dispose
   });
 
-  it("disposes exactly once however often it is asked", () => {
+  it("disposes exactly once however often it is asked", async () => {
     const addon = fakeAddon();
-    const renderer = attachRenderer(asTerm(fakeTerm()), () => asAddon(addon));
+    const renderer = attachRenderer(asTerm(fakeTerm()), loads(addon));
+    await renderer.ready;
 
     renderer.dispose();
     renderer.dispose();
@@ -101,13 +132,14 @@ describe("attachRenderer", () => {
     expect(addon.disposed).toBe(1);
   });
 
-  it("survives an addon that throws on dispose", () => {
+  it("survives an addon that throws on dispose", async () => {
     const addon = fakeAddon({
       dispose: () => {
         throw new Error("context already gone");
       },
     });
-    const renderer = attachRenderer(asTerm(fakeTerm()), () => asAddon(addon));
+    const renderer = attachRenderer(asTerm(fakeTerm()), loads(addon));
+    await renderer.ready;
 
     expect(() => renderer.dispose()).not.toThrow();
   });

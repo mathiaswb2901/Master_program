@@ -234,12 +234,25 @@ fire at random — and asyncio arms its own timers off it, so a wake-up is only 
 hint and `perf_counter` decides whether the frame is really due.
 
 On the client, `ui/src/terminalRenderer.ts` puts xterm on the GPU
-(`@xterm/addon-webgl`) with a fallback to the default DOM renderer on both
-failure paths — the context refusing to be created, and the context being lost
-mid-session. A dead canvas is worse than a slow one. Consequence for tests:
-under the GPU renderer there is no `.xterm-rows` to scrape, so the E2E suite
-reads xterm's buffer through a reader `panels/Terminal.tsx` hangs on the host
-element (wrapped lines rejoined — strictly better than the old `textContent`).
+(`@xterm/addon-webgl`) with a fallback to the default DOM renderer on every
+failure path — the context refusing to be created, the lazy chunk failing to
+arrive, and the context being lost mid-session. A dead canvas is worse than a
+slow one, so the last of those is forced for real in `e2e/terminal.spec.ts`
+(`WEBGL_lose_context` on the live canvas) and asserted on the rendered rows
+rather than on xterm's buffer, which keeps filling whether or not anything is
+drawing.
+
+The addon is **imported dynamically**, and that is a deliberate seam: panels are
+all statically imported, so a static addon import lands in the entry chunk and
+every user pays for it on first paint. Built both ways, that is +102 kB raw /
++25.9 kB gzip — a real bill, for a renderer this PR measured as neutral on the
+hardware available. Loading it on demand puts it in its own 26 kB gzip chunk
+that only the first terminal to open fetches, leaving the entry chunk within
+0.3 kB gzip of never having taken the dependency. Consequence for tests: under
+the GPU renderer there is no `.xterm-rows` to scrape, so the E2E suite reads
+xterm's buffer through a reader `panels/Terminal.tsx` hangs on the host element
+(wrapped lines rejoined — strictly better than the old `textContent`), and the
+renderer assertions poll, because the swap now happens a tick after open.
 
 ## Agent sessions
 

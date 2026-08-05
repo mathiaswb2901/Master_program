@@ -154,6 +154,9 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
     term.loadAddon(fit);
     term.open(host);
     // After `open`, never before: the GPU renderer needs the element to exist.
+    // Returns at once and finishes attaching later — the addon is a lazy chunk,
+    // so the terminal is usable (on the DOM renderer) before it lands, and a
+    // teardown that beats it leaves nothing attached.
     const renderer = attachRenderer(term);
     host.readTerminalText = () => bufferText(term);
     fitTerminal(fit);
