@@ -74,6 +74,18 @@ MAX_HOSTS = 32
 #: real bounds replace it; a window has to be given *some* rectangle.
 DEFAULT_RECT = PanelRect(x=0, y=0, width=800, height=600)
 
+#: Ceiling on one backend call. Launching Word is the slow one — about a second
+#: normally, far worse on a cold machine — so it gets its own; everything else
+#: is a window-manager call that either lands promptly or is not going to.
+#:
+#: A backstop, not the first line of defence: a backend is expected to time its
+#: own work out and raise (:class:`~...backend.LaunchTimeoutError`). It exists
+#: because a backend that forgets would otherwise hang the request coroutine
+#: forever — and, through it, the lifespan shutdown that would have reaped the
+#: window. Generous on purpose: this must never fire before the backend's own.
+LAUNCH_TIMEOUT_S = 120.0
+OPERATION_TIMEOUT_S = 30.0
+
 _WORD_EXE_GLOBS = (
     "Microsoft Office/root/Office*/WINWORD.EXE",
     "Microsoft Office/Office*/WINWORD.EXE",
@@ -153,10 +165,16 @@ class _Host:
     lifecycle: HostLifecycle
     #: Set once the launch returns, and only for a process we started.
     handle: HostHandle | None = None
+    #: Where the window belongs, and the single source of truth for it from the
+    #: moment the host exists. Bounds that arrive while the launch or the embed
+    #: is still in flight are written here rather than sent, and the embed reads
+    #: *this* — never the rectangle the original open call happened to carry,
+    #: which is a second, staler copy of the same answer.
     rect: PanelRect | None = None
-    #: ``backend.close`` has been called for this handle. Guards the two paths
-    #: that both want to reap it: an explicit close, and the drive coroutine
-    #: finding the host already terminal when its await returns.
+    #: A ``backend.close`` for this handle is in flight or has succeeded. Guards
+    #: the two paths that both want to reap it: an explicit close, and the drive
+    #: coroutine finding the host already terminal when its await returns. Given
+    #: back when a close *fails*, because a refused close reaped nothing.
     released: bool = False
     #: Reserved for the panel PR: the dockview panel currently showing it.
     panel_id: str | None = field(default=None)
@@ -176,6 +194,8 @@ class OfficeHostService:
         detector: Callable[[], bool] = detect_office,
         clock: Callable[[], float] = time.time,
         poll_interval_s: float = POLL_INTERVAL_S,
+        launch_timeout_s: float = LAUNCH_TIMEOUT_S,
+        operation_timeout_s: float = OPERATION_TIMEOUT_S,
     ) -> None:
         self._workspace = workspace
         self._bus = bus
@@ -186,6 +206,8 @@ class OfficeHostService:
         self._office_detected = detector()
         self._clock = clock
         self._poll_interval_s = poll_interval_s
+        self._launch_timeout_s = launch_timeout_s
+        self._operation_timeout_s = operation_timeout_s
         self._hosts: dict[str, _Host] = {}
         self._task: asyncio.Task[None] | None = None
 
@@ -258,17 +280,31 @@ class OfficeHostService:
             return await self._reuse(existing, backend, rect)
 
         host = _Host(HostLifecycle(f"host-{uuid.uuid4().hex[:8]}", path, kind, clock=self._clock))
+        # Written before anything is awaited, so a resize that lands during the
+        # launch has somewhere to go that the embed will actually read.
+        host.rect = rect
         self._hosts[host.lifecycle.host_id] = host
         self._prune()
         self._publish(host)
         log.info("office_host.opening", host=host.lifecycle.host_id, path=path, kind=kind)
-        return await self._drive(host, backend, file_path, rect)
+        return await self._drive(host, backend, file_path)
 
-    async def _drive(
-        self, host: _Host, backend: HostBackend, file_path: Path, rect: PanelRect | None
-    ) -> OfficeHostInfo:
+    async def _drive(self, host: _Host, backend: HostBackend, file_path: Path) -> OfficeHostInfo:
         try:
-            handle = await backend.launch(file_path, host.lifecycle.kind)
+            handle = await asyncio.wait_for(
+                backend.launch(file_path, host.lifecycle.kind), self._launch_timeout_s
+            )
+        except TimeoutError:
+            # The backend's own timeout should have fired long before ours. It
+            # did not, so nothing is coming back — and the launch is cancelled
+            # rather than left running against a host nobody will ever settle.
+            log.warning(
+                "office_host.launch_timed_out",
+                host=host.lifecycle.host_id,
+                path=host.lifecycle.path,
+                timeout_s=self._launch_timeout_s,
+            )
+            return self._settle(host, "failed", "launch_timeout")
         except HostBackendError as error:
             log.warning(
                 "office_host.launch_failed",
@@ -298,17 +334,28 @@ class OfficeHostService:
             return host.lifecycle.info()
         host.lifecycle.to("embedding")
         self._publish(host)
-        return await self._embed(host, backend, rect)
+        return await self._embed(host, backend)
 
-    async def _embed(
-        self, host: _Host, backend: HostBackend, rect: PanelRect | None
-    ) -> OfficeHostInfo:
-        host.rect = embedded_at = rect or host.rect or DEFAULT_RECT
+    async def _embed(self, host: _Host, backend: HostBackend) -> OfficeHostInfo:
+        # ``host.rect`` only — never the rectangle the open call carried. That
+        # one was written here before the launch started, and a resize arriving
+        # during the ~1s launch has overwritten it since; reading the parameter
+        # instead would put the window back where the panel no longer is.
+        host.rect = embedded_at = host.rect or DEFAULT_RECT
         try:
             handle = self._owned(host)
-            await backend.embed(handle, embedded_at)
+            await asyncio.wait_for(backend.embed(handle, embedded_at), self._operation_timeout_s)
         except ForeignProcessError:
             return self._settle(host, "failed", "document_open_elsewhere")
+        except TimeoutError:
+            log.warning(
+                "office_host.embed_timed_out",
+                host=host.lifecycle.host_id,
+                timeout_s=self._operation_timeout_s,
+            )
+            # Launched, never embedded: the process is ours and invisible.
+            await self._release(host, backend)
+            return self._settle(host, "failed", "backend_timeout")
         except HostBackendError as error:
             log.warning(
                 "office_host.embed_failed",
@@ -344,9 +391,11 @@ class OfficeHostService:
         self, host: _Host, backend: HostBackend, rect: PanelRect | None
     ) -> OfficeHostInfo:
         if host.lifecycle.state == "detached":
+            if rect is not None:
+                host.rect = rect
             host.lifecycle.to("embedding")
             self._publish(host)
-            return await self._embed(host, backend, rect)
+            return await self._embed(host, backend)
         if rect is not None:
             return await self.set_bounds(host.lifecycle.host_id, rect)
         return host.lifecycle.info()
@@ -413,10 +462,19 @@ class OfficeHostService:
         if backend is None:  # pragma: no cover - a live host implies a backend
             raise HostRefusedError("native_hosting_disabled", "native hosting is not available")
         try:
-            await call(backend, self._owned(host))
+            await asyncio.wait_for(call(backend, self._owned(host)), self._operation_timeout_s)
         except ForeignProcessError:
             log.warning("office_host.foreign_handle", host=host.lifecycle.host_id, action=action)
             return self._settle(host, "failed", "document_open_elsewhere")
+        except TimeoutError:
+            log.warning(
+                "office_host.backend_call_timed_out",
+                host=host.lifecycle.host_id,
+                action=action,
+                timeout_s=self._operation_timeout_s,
+            )
+            await self._release(host, backend)
+            return self._settle(host, "failed", "backend_timeout")
         except HostBackendError as error:
             log.warning(
                 "office_host.backend_call_failed",
@@ -429,14 +487,49 @@ class OfficeHostService:
         return host.lifecycle.info()
 
     async def _release(self, host: _Host, backend: HostBackend | None) -> None:
-        """Close the instance behind this host, at most once."""
+        """Close the instance behind this host: one attempt at a time, and a
+        *failed* attempt does not count as one.
+
+        ``released`` is set before the await because it guards the two paths
+        that both want to reap a host (an explicit close, and a drive coroutine
+        finding it already terminal). It is given back if the close comes back
+        an error, because a refused close reaped nothing: a "Save changes?"
+        modal eating ``WM_CLOSE`` leaves a real Word on the user's screen, and a
+        host that says ``closed`` while that is true would be lying. The record
+        carries ``close_failed`` until a later sweep gets through.
+        """
         if host.released or host.handle is None or backend is None:
             return
         host.released = True
         try:
-            await backend.close(self._owned(host))
-        except (HostBackendError, ForeignProcessError) as error:
-            log.warning("office_host.close_failed", host=host.lifecycle.host_id, detail=str(error))
+            handle = self._owned(host)
+        except ForeignProcessError as error:
+            # Never ours, so never ours to close, and nothing to retry.
+            log.warning(
+                "office_host.release_skipped", host=host.lifecycle.host_id, detail=str(error)
+            )
+            return
+        try:
+            await asyncio.wait_for(backend.close(handle), self._operation_timeout_s)
+        except (HostBackendError, TimeoutError) as error:
+            host.released = False
+            log.warning(
+                "office_host.close_failed",
+                host=host.lifecycle.host_id,
+                pid=host.lifecycle.pid,
+                detail=f"{type(error).__name__}: {error}",
+            )
+            self._mark_close_failed(host, failed=True)
+            return
+        self._mark_close_failed(host, failed=False)
+
+    def _mark_close_failed(self, host: _Host, *, failed: bool) -> None:
+        """Publish only when the answer changes: the sweep re-asks every couple
+        of seconds and a flag that has not moved is not news."""
+        if host.lifecycle.close_failed == failed:
+            return
+        host.lifecycle.close_failed = failed
+        self._publish(host)
 
     def _owned(self, host: _Host) -> HostHandle:
         """The handle for this host, or :class:`ForeignProcessError`.
@@ -460,6 +553,9 @@ class OfficeHostService:
         if backend is None:
             return
         for host in list(self._hosts.values()):
+            if host.lifecycle.terminal:
+                await self._retry_close(host, backend)
+                continue
             # Only hosts whose window is ours and idle: a launch or an embed in
             # flight owns its handle, and its own result is the better signal.
             if host.lifecycle.state not in ("embedded", "detached") or host.handle is None:
@@ -474,6 +570,22 @@ class OfficeHostService:
                     pid=host.lifecycle.pid,
                 )
                 self._settle(host, "crashed", "process_exited")
+
+    async def _retry_close(self, host: _Host, backend: HostBackend) -> None:
+        """Ask again for a close that was refused.
+
+        The host has settled and settling is final — but the instance behind it
+        is ours until it is actually gone, and the usual reason a close fails is
+        a modal the user dismisses a moment later. So every sweep re-asks, and
+        stops as soon as the process is gone, however it went.
+        """
+        if not host.lifecycle.close_failed or host.handle is None:
+            return
+        if await backend.poll(host.handle) == "gone":
+            host.released = True
+            self._mark_close_failed(host, failed=False)
+            return
+        await self._release(host, backend)
 
     # ---- reading ------------------------------------------------------------
 
@@ -546,12 +658,21 @@ class OfficeHostService:
 
     def _prune(self) -> None:
         """Keep the map bounded, dropping settled hosts oldest-first. A live
-        host is never pruned — it names a window somebody still has to close."""
+        host is never pruned — it names a window somebody still has to close —
+        and neither is one whose close was refused until there is nothing else
+        to drop, for the same reason: it is the only handle to that process."""
         while len(self._hosts) > MAX_HOSTS:
-            victim = next(
-                (host_id for host_id, host in self._hosts.items() if host.lifecycle.terminal),
-                None,
-            )
+            victim = self._prunable(owing_a_close=False) or self._prunable(owing_a_close=True)
             if victim is None:
                 return
             del self._hosts[victim]
+
+    def _prunable(self, *, owing_a_close: bool) -> str | None:
+        return next(
+            (
+                host_id
+                for host_id, host in self._hosts.items()
+                if host.lifecycle.terminal and host.lifecycle.close_failed is owing_a_close
+            ),
+            None,
+        )

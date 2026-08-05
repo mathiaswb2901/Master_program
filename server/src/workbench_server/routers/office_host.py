@@ -65,6 +65,11 @@ async def open_host(request: Request, body: OpenHostRequest) -> OfficeHostInfo:
         return await _hosts(request).open(body.path, body.rect)
     except HostRefusedError as e:
         raise HTTPException(_REFUSAL_STATUS.get(e.reason, 409), str(e)) from e
+    except HostStateError as e:
+        # Reuse lost a race: the live host for this path settled between being
+        # found and being re-embedded. A conflict, exactly as it is for the
+        # move and detach below — never a 500.
+        raise HTTPException(409, str(e)) from e
     except PathOutsideWorkspaceError as e:
         raise HTTPException(400, "path escapes workspace") from e
     except FileNotFoundError as e:

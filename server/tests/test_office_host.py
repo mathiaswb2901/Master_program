@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from workbench_server.config import Settings
@@ -31,7 +32,7 @@ from workbench_server.models.office_host import (
     host_app_kind,
 )
 from workbench_server.services.event_bus import EventBus
-from workbench_server.services.office_host.backend import HostHandle
+from workbench_server.services.office_host.backend import HostBackendError, HostHandle
 from workbench_server.services.office_host.fake_backend import (
     FIRST_FAKE_PID,
     FakeFailure,
@@ -40,7 +41,9 @@ from workbench_server.services.office_host.fake_backend import (
 )
 from workbench_server.services.office_host.service import (
     DEFAULT_RECT,
+    LAUNCH_TIMEOUT_S,
     MAX_HOSTS,
+    OPERATION_TIMEOUT_S,
     HostNotFoundError,
     HostRefusedError,
     HostStateError,
@@ -93,6 +96,8 @@ def make_service(
     fake: bool = True,
     office_installed: bool = False,
     poll_interval_s: float = 60.0,
+    launch_timeout_s: float = LAUNCH_TIMEOUT_S,
+    operation_timeout_s: float = OPERATION_TIMEOUT_S,
 ) -> tuple[OfficeHostService, RecordingBus]:
     """A service on a real workspace with a scripted backend.
 
@@ -109,17 +114,21 @@ def make_service(
         fake=fake,
         detector=lambda: office_installed,
         poll_interval_s=poll_interval_s,
+        launch_timeout_s=launch_timeout_s,
+        operation_timeout_s=operation_timeout_s,
     )
     return service, bus
 
 
-async def until(predicate: Callable[[], bool], tries: int = 500) -> None:
-    """Yield to the loop until ``predicate`` holds. No sleeps: everything the
-    fake backend does is in-process, so a scheduling turn is all it needs."""
+async def until(predicate: Callable[[], bool], tries: int = 500, delay: float = 0.0) -> None:
+    """Yield to the loop until ``predicate`` holds. ``delay`` stays 0 for the
+    service-level tests — everything the fake backend does is in-process, so a
+    scheduling turn is all it needs — and is raised only when a real HTTP round
+    trip is in the way."""
     for _ in range(tries):
         if predicate():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(delay)
     raise AssertionError("condition never became true")
 
 
@@ -132,6 +141,77 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+class SlowLaunch(FakeHostBackend):
+    """A launch held open until the test lets it finish.
+
+    The real one costs about a second of awaited work, which is long enough for
+    a panel to be laid out, resized and closed underneath it — so the tests that
+    care about that window need it to take as long as they say.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def launch(self, path: Path, kind: Any) -> HostHandle:
+        await self.gate.wait()
+        return await super().launch(path, kind)
+
+
+class HangingBackend(FakeHostBackend):
+    """A backend that forgets to time itself out.
+
+    The contract says every method comes back and the implementation bounds its
+    own work; this is the one that does not, which is the whole reason the
+    service keeps a ceiling of its own. Whatever it is told to hang on never
+    returns at all.
+    """
+
+    def __init__(self, hang: str) -> None:
+        super().__init__()
+        self.hang = hang
+        self.forever = asyncio.Event()  # never set, by design
+
+    async def _maybe_hang(self, method: str) -> None:
+        if self.hang == method:
+            await self.forever.wait()
+
+    async def launch(self, path: Path, kind: Any) -> HostHandle:
+        await self._maybe_hang("launch")
+        return await super().launch(path, kind)
+
+    async def embed(self, handle: HostHandle, rect: PanelRect) -> None:
+        await self._maybe_hang("embed")
+        await super().embed(handle, rect)
+
+    async def set_bounds(self, handle: HostHandle, rect: PanelRect) -> None:
+        await self._maybe_hang("set_bounds")
+        await super().set_bounds(handle, rect)
+
+    async def close(self, handle: HostHandle) -> None:
+        await self._maybe_hang("close")
+        await super().close(handle)
+
+
+class RefusingClose(FakeHostBackend):
+    """Word with a "Save changes?" modal in front of it: the close bounces.
+
+    The process stays alive and stays *ours* — which is exactly the case where
+    reporting the host as closed and forgetting it would strand a real window.
+    """
+
+    def __init__(self, refusals: int) -> None:
+        super().__init__()
+        self.refusals = refusals
+
+    async def close(self, handle: HostHandle) -> None:
+        if self.refusals > 0:
+            self.refusals -= 1
+            self.calls.append(("close_refused", str(handle.pid)))
+            raise HostBackendError("the document has unsaved changes")
+        await super().close(handle)
 
 
 # ---- the state machine -------------------------------------------------------
@@ -260,6 +340,31 @@ async def test_bounds_that_arrive_during_the_embed_are_applied_afterwards(tmp_pa
 
     assert info.state == "embedded"
     assert backend.calls[-1] == ("set_bounds", "0,0 1024x768")
+
+
+async def test_bounds_that_arrive_during_the_launch_are_where_the_window_lands(
+    tmp_path: Path,
+) -> None:
+    """A resize during the ~1s launch is not merely late — without care it is
+    *lost*. The open call carried a rectangle too, and re-reading that one when
+    the launch finally returns overwrites the newer answer with the older one.
+    There is no second event to correct it: the panel already told us once."""
+    backend = SlowLaunch()
+    service, bus = make_service(tmp_path, backend)
+    opening = asyncio.create_task(service.open(document(tmp_path), RECT))
+    await until(lambda: bus.states() == ["launching"])
+
+    host_id = bus.hosts()[-1].host_id
+    await service.set_bounds(host_id, MOVED)  # the panel moved while Word started
+    backend.gate.set()
+    info = await opening
+
+    assert info.state == "embedded"
+    # Embedded *at* the new rectangle — not embedded at the stale one, and not
+    # embedded at the stale one and quietly moved afterwards either.
+    assert ("embed", "1024x768") in backend.calls
+    assert ("embed", "640x480") not in backend.calls
+    assert ("set_bounds", "0,0 1024x768") not in backend.calls
 
 
 async def test_closing_settles_the_host_and_reaps_the_instance(tmp_path: Path) -> None:
@@ -441,16 +546,6 @@ async def test_closing_while_the_embed_is_in_flight_never_reaches_embedded(
 async def test_closing_while_the_launch_is_in_flight_still_reaps_it(tmp_path: Path) -> None:
     """The window did not exist when the user gave up on it, and existed a
     moment later. Nobody else is going to close that process."""
-
-    class SlowLaunch(FakeHostBackend):
-        def __init__(self) -> None:
-            super().__init__()
-            self.gate = asyncio.Event()
-
-        async def launch(self, path: Path, kind: Any) -> HostHandle:
-            await self.gate.wait()
-            return await super().launch(path, kind)
-
     backend = SlowLaunch()
     service, bus = make_service(tmp_path, backend)
     opening = asyncio.create_task(service.open(document(tmp_path), RECT))
@@ -464,6 +559,126 @@ async def test_closing_while_the_launch_is_in_flight_still_reaps_it(tmp_path: Pa
     assert settled.state == "closed"
     assert backend.calls.count(("close", str(FIRST_FAKE_PID))) == 1
     assert ("embed", "640x480") not in backend.calls
+
+
+# ---- a backend that never comes back -----------------------------------------
+# The Protocol asks every implementation to bound its own work and raise. The
+# service does not take that on trust: one backend that forgets would otherwise
+# hang the request that started it, and with it the shutdown that would have
+# reaped the window. The ceiling is a backstop, and these are the tests that say
+# it is really there.
+
+
+@pytest.mark.timeout(30)
+async def test_a_launch_that_never_returns_is_cut_off(tmp_path: Path) -> None:
+    backend = HangingBackend("launch")
+    service, bus = make_service(tmp_path, backend, launch_timeout_s=0.01)
+    info = await service.open(document(tmp_path), RECT)
+
+    assert (info.state, info.reason) == ("failed", "launch_timeout")
+    assert info.pid is None
+    assert bus.states() == ["launching", "failed"]
+
+
+@pytest.mark.timeout(30)
+async def test_an_embed_that_never_returns_is_cut_off_and_the_instance_reaped(
+    tmp_path: Path,
+) -> None:
+    """The launch worked, so there is a process; the embed never finished, so
+    nobody can see it. Same obligation as a refused embed: reap it."""
+    backend = HangingBackend("embed")
+    service, _ = make_service(tmp_path, backend, operation_timeout_s=0.01)
+    info = await service.open(document(tmp_path), RECT)
+
+    assert (info.state, info.reason) == ("failed", "backend_timeout")
+    assert ("close", str(FIRST_FAKE_PID)) in backend.calls
+
+
+@pytest.mark.timeout(30)
+async def test_a_move_that_never_returns_settles_the_host(tmp_path: Path) -> None:
+    backend = HangingBackend("set_bounds")
+    service, _ = make_service(tmp_path, backend, operation_timeout_s=0.01)
+    info = await service.open(document(tmp_path), RECT)
+    moved = await service.set_bounds(info.host_id, MOVED)
+
+    assert (moved.state, moved.reason) == ("failed", "backend_timeout")
+    assert ("close", str(FIRST_FAKE_PID)) in backend.calls
+
+
+@pytest.mark.timeout(30)
+async def test_a_close_that_never_returns_does_not_stall_the_shutdown(tmp_path: Path) -> None:
+    """The lifespan has to finish. A backend hanging on close must cost the
+    ceiling and no more — and must not be recorded as a close that happened."""
+    backend = HangingBackend("close")
+    service, _ = make_service(tmp_path, backend, operation_timeout_s=0.01)
+    info = await service.open(document(tmp_path), RECT)
+
+    await service.shutdown()
+
+    settled = service.get(info.host_id)
+    assert (settled.state, settled.reason) == ("closed", "server_shutdown")
+    assert settled.close_failed is True  # we asked, and never got an answer
+
+
+# ---- a close the instance refuses --------------------------------------------
+
+
+async def test_a_close_the_instance_refuses_is_not_reported_as_done(tmp_path: Path) -> None:
+    """A bounced close reaped nothing. The host settles either way — settling is
+    final — but the record must not claim the process went with it, and the
+    sweep has to be able to ask again."""
+    backend = RefusingClose(refusals=1)
+    service, bus = make_service(tmp_path, backend)
+    info = await service.open(document(tmp_path), RECT)
+
+    closed = await service.close(info.host_id)
+    assert (closed.state, closed.reason) == ("closed", "user_closed")
+    assert closed.close_failed is True
+    assert bus.hosts()[-1].close_failed is True  # and the UI is told
+
+    await service.poll_once()  # the modal was dismissed; ask again
+
+    settled = service.get(info.host_id)
+    assert settled.close_failed is False
+    assert ("close", str(FIRST_FAKE_PID)) in backend.calls
+    assert bus.hosts()[-1].close_failed is False
+
+
+async def test_a_refused_close_stops_being_chased_once_the_process_is_gone(
+    tmp_path: Path,
+) -> None:
+    """However it went — our close finally landing, or the user quitting Word
+    from its own File menu — a process that is gone is not chased again."""
+    backend = RefusingClose(refusals=99)
+    service, _ = make_service(tmp_path, backend)
+    info = await service.open(document(tmp_path), RECT)
+    assert (await service.close(info.host_id)).close_failed is True
+
+    backend.kill(FIRST_FAKE_PID)
+    await service.poll_once()
+    assert service.get(info.host_id).close_failed is False
+
+    calls = len(backend.calls)
+    await service.poll_once()
+    assert len(backend.calls) == calls  # nothing left to ask
+
+
+async def test_a_host_that_still_owes_a_close_is_pruned_last(tmp_path: Path) -> None:
+    """Its record is the only handle to a process still on the user's screen, so
+    it outlives every settled host that really did go away."""
+    backend = RefusingClose(refusals=1)
+    service, _ = make_service(tmp_path, backend)
+    stuck = await service.open(document(tmp_path, "stuck.docx"), RECT)
+    await service.close(stuck.host_id)
+    assert service.get(stuck.host_id).close_failed is True
+
+    for index in range(MAX_HOSTS + 4):
+        info = await service.open(document(tmp_path, f"doc-{index:03d}.docx"), RECT)
+        await service.close(info.host_id)
+
+    hosts = service.snapshot().hosts
+    assert len(hosts) <= MAX_HOSTS
+    assert stuck.host_id in {host.host_id for host in hosts}
 
 
 # ---- ownership: never adopt a process we did not launch ----------------------
@@ -758,6 +973,12 @@ def hosting_app(tmp_path: Path, **overrides: Any) -> Any:
     )
 
 
+def hosting_client(app: Any) -> AsyncClient:
+    """The app over HTTP, without a portal in the way, so a test can have two
+    requests genuinely in flight at once."""
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
 def read_host_frames(events: Any, until_state: str) -> list[dict[str, Any]]:
     frames: list[dict[str, Any]] = []
     while True:
@@ -856,6 +1077,63 @@ def test_http_errors_for_the_paths_a_client_can_get_wrong(tmp_path: Path) -> Non
             ).status_code
             == 404
         )
+
+
+@pytest.mark.timeout(60)
+async def test_a_resize_during_the_launch_reaches_the_window_over_http(tmp_path: Path) -> None:
+    """The same regression as the unit test above, driven the way the panel will
+    drive it: `POST /host` on mount, `POST /bounds` on the first layout pass,
+    the second landing while the first is still waiting on Word. Two real
+    requests, overlapping, through the real app."""
+    document(tmp_path)
+    app = hosting_app(tmp_path)
+    hosts: OfficeHostService = app.state.office_host
+    backend = SlowLaunch()
+    # The one seam a test has for this: the app picks its backend at build time.
+    hosts._backend = backend
+
+    async with hosting_client(app) as client:
+        opening = asyncio.create_task(
+            client.post("/api/office/host", json={"path": "report.docx", "rect": RECT.model_dump()})
+        )
+        await until(lambda: bool(hosts.snapshot().hosts), delay=0.005)
+        host_id = hosts.snapshot().hosts[0].host_id
+
+        moved = await client.post(
+            f"/api/office/host/{host_id}/bounds", json={"rect": MOVED.model_dump()}
+        )
+        assert moved.status_code == 200
+        assert moved.json()["state"] == "launching"  # nothing to move yet, only to remember
+
+        backend.gate.set()
+        opened = await opening
+
+    assert opened.status_code == 200
+    assert opened.json()["state"] == "embedded"
+    assert ("embed", "1024x768") in backend.calls
+    assert ("embed", "640x480") not in backend.calls
+
+
+async def test_an_open_that_loses_the_reuse_race_is_a_conflict_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`open` re-embeds a host that is already live, so it can find that host
+    settled under it and raise `HostStateError` — which every other host-state
+    conflict in this router reports as 409 and this one used to let through as a
+    bare 500. Raised at the service boundary: the reuse path has no await of its
+    own to lose the race in yet, and the router's job is the mapping."""
+    document(tmp_path)
+    app = hosting_app(tmp_path)
+
+    async def already_settled(*args: Any, **kwargs: Any) -> OfficeHostInfo:
+        raise HostStateError("host-1", "closed", "move")
+
+    monkeypatch.setattr(app.state.office_host, "open", already_settled)
+    async with hosting_client(app) as client:
+        response = await client.post("/api/office/host", json={"path": "report.docx"})
+
+    assert response.status_code == 409
+    assert "closed" in response.json()["detail"]
 
 
 @pytest.mark.timeout(60)

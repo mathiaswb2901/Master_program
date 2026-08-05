@@ -311,7 +311,21 @@ to the host for life, so no later handle can be substituted. "Already open
 elsewhere" is a first-class refusal with a reason the UI can show, never a
 silent takeover. An instance we launched is always reaped — including when the
 embed is refused, when the user closes the panel mid-launch, and on server
-shutdown.
+shutdown. A close that is *refused* (a "Save changes?" modal eating `WM_CLOSE`)
+does not count as one: the host still settles, but its record carries
+`close_failed` and the poll sweep re-asks until the process is really gone,
+because "closed" with a real Word still on screen is a claim the server cannot
+make.
+
+**Nothing waits forever.** A backend is asked to bound its own work and raise
+(`LaunchTimeoutError` is exactly that), and the service does not take it on
+trust: every backend call runs under a ceiling of its own and is cancelled when
+it runs out. Without it, one implementation that forgets would hang the request
+that started it — and, through it, the lifespan shutdown that would have reaped
+the window. Where the panel puts the window is `host.rect` and only that: bounds
+arriving while the launch or the embed is still in flight are written there and
+read back by the embed itself, so a panel resized during Word's ~1s startup is
+embedded where it *is*, not where it was when the request was sent.
 
 **Two owner decisions are encoded, not just documented** (2026-08-05).
 PowerPoint is **preview-only**: it is single-instance and exposes no

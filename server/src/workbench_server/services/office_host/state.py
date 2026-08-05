@@ -88,6 +88,11 @@ class HostLifecycle:
         self.reason: HostReason | None = None
         self.pid: int | None = None
         self.since: float = clock()
+        #: The last close we asked for was refused, so the instance may still be
+        #: running. Not a state: the host has settled, and settling is final —
+        #: this says only that the *process* has not confirmed it. The service
+        #: re-asks on every poll sweep and clears it when it gets through.
+        self.close_failed: bool = False
 
     @property
     def terminal(self) -> bool:
@@ -125,4 +130,5 @@ class HostLifecycle:
             reason=self.reason,
             pid=self.pid,
             since=self.since,
+            close_failed=self.close_failed,
         )

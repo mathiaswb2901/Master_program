@@ -470,6 +470,9 @@ export type HostReason =
   | "launch_timeout"
   | "launch_failed"
   | "embed_refused"
+  /** A backend call ran past the server's own ceiling and was cancelled: nobody
+   * refused anything, it simply never came back. */
+  | "backend_timeout"
   | "process_exited"
   | "document_open_elsewhere"
   | "powerpoint_preview_only"
@@ -497,6 +500,11 @@ export interface OfficeHostInfo {
   pid: number | null;
   /** Unix seconds at which the current state was entered. */
   since: number;
+  /** The instance was asked to quit and did not. The host is settled either
+   * way, but the real window may still be on screen — so "closed" alone would
+   * be a claim the server cannot make. Cleared when a later sweep gets the
+   * close through, or finds the process gone by itself. */
+  close_failed: boolean;
 }
 
 /** Broadcast on /ws/events on every host state change. */

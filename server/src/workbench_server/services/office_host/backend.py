@@ -19,6 +19,15 @@ Every method is ``async`` because none of it is cheap: launching Word takes
 about a second, and the real implementation will run the blocking Win32 calls in
 a worker thread. Making that explicit in the Protocol keeps the service written
 for the real cost from the start.
+
+**Every method must come back.** An implementation is expected to bound its own
+work and raise (:class:`LaunchTimeoutError` exists for exactly that), because it
+is the only layer that knows what "too long" means for the call it is making.
+The service does not trust that: it applies its own ceiling to every call and
+cancels the coroutine when it runs out — otherwise one backend that forgets
+hangs the request that started it, and with it the shutdown that would have
+reaped the window. A backend must therefore treat cancellation as a real
+outcome and leave nothing running behind it.
 """
 
 from dataclasses import dataclass

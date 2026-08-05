@@ -72,6 +72,11 @@ HostReason = Literal[
     "launch_timeout",
     "launch_failed",
     "embed_refused",
+    # A backend call ran past the service's own ceiling and was cancelled. Its
+    # own timeout is the first line of defence (``launch_timeout``); this is the
+    # backstop for an implementation that has none, and the difference matters
+    # when reading a log: nobody refused anything, it simply never came back.
+    "backend_timeout",
     "process_exited",
     "document_open_elsewhere",
     "powerpoint_preview_only",
@@ -113,6 +118,11 @@ class OfficeHostInfo(BaseModel):
     pid: int | None = None
     #: Unix seconds at which the current state was entered.
     since: float
+    #: We asked the instance to quit and it did not. The host is settled either
+    #: way — but the process behind it may well still be on screen, so "closed"
+    #: alone would be a claim we cannot make. Cleared when a later sweep gets
+    #: the close through, or finds the process gone by itself.
+    close_failed: bool = False
 
 
 class OfficeHostEvent(BaseModel):
