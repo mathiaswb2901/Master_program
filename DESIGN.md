@@ -298,6 +298,11 @@ dismissal arguing with the user.
 JavaScript-driven motion goes through `ui/src/motion.ts` and reads its numbers from
 these tokens at the moment it uses them. That is what makes §5.6 work without a second
 implementation of the rule. There is no other place in the app that may call `animate()`.
+It also samples the dock's live `opacity` and `transform` before it replaces a running
+animation, so §5.1.1 holds for the JS half too: a keyframed spring is not interruptible
+for free the way a CSS one is, and restarting it from the fixed dip would pop the dock
+backwards mid-gesture. `ui/e2e/motion.spec.ts` presses `Alt+M` twice inside one animation
+and asserts the second starts where the first had got to.
 
 ### 5.4 What moves, and what does not
 
@@ -305,7 +310,7 @@ Every row is a decision with a reason. Add to this table before adding motion.
 
 | Interaction | Moves? | How | Why |
 |---|---|---|---|
-| **Focus mode enter/exit** (`Alt+M`) | **Yes** | Whole dock: `--motion-zoom-in` → 1 with opacity 0.62 → 1, `--motion-move` | Every other panel disappears at once; without motion the window teleports and the user has to re-find where they are. Animating the dock, not the grid dockview just resized, keeps it one composited layer. |
+| **Focus mode enter/exit** (`Alt+M`) | **Yes** | Whole dock: `--motion-zoom-in` → 1 with opacity 0.62 → 1, `--motion-move`. A press that interrupts one starts from where the dock is, not from the dip | Every other panel disappears at once; without motion the window teleports and the user has to re-find where they are. Animating the dock, not the grid dockview just resized, keeps it one composited layer. |
 | **Layout switch** | **Yes** | Whole dock: opacity 0.45 → 1, `--motion-tint-slow`, **no zoom** | Panels are recreated, moved and resized — a zoom would claim they flew somewhere they did not, and animating their geometry would be animating layout. A short dip says "the window changed" and gets out of the way. |
 | **QuickBar open/close** | **Yes** | `wb-qb-in` (scale `--motion-scale-in` + fade, `--motion-enter`); exit `wb-fade-out` at `--motion-exit` | It owns the screen while it is up. It used to unmount on the frame it closed, which read as a glitch rather than a dismissal. |
 | **Toast enter/exit** | **Yes** | `wb-rise-in`; exit `wb-slide-out` | The one thing on screen the user did not ask for, so the one thing allowed to move to be noticed. |
@@ -378,8 +383,18 @@ the browser actually fires and requires zero.
 ### 5.8 Deprecated
 
 `--duration-1/2/3` and `--ease-standard` remain as aliases onto the channels so
-stylesheets written before this revision keep working and inherit the springs. New work
-uses §5.3. They will be removed once the last stylesheet has moved.
+stylesheets written before this revision keep working. New work uses §5.3. They will be
+removed once the last stylesheet has moved.
+
+Each aliases onto the channel its consumers actually use — a deprecated name is not a
+free pass past §5.1.3. `--duration-2/3` are travel durations, `--duration-1` a tint one,
+and **`--ease-standard` is the tint ease, not the spring**: every stylesheet still on it
+pairs it with a colour property, save the file tree's chevron, whose `--duration-1` had
+already put it on the tint channel. Pointing the name at the spring instead would
+re-curve other lanes' colour transitions without a character changing in their files.
+A legacy consumer that wants travel migrates to `--motion-move*` in its own file, where
+a reviewer can see it. `ui/e2e/perf/motion.test.ts` resolves every transition value
+through the token file and fails the build if a colour-only one lands on a spring.
 
 ---
 

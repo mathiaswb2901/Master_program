@@ -24,7 +24,7 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
-import { openApp, treeItem } from "./app";
+import { dockSettled, openApp, treeItem } from "./app";
 
 /** Where the recorded `Element.animate` calls land. */
 const ANIMS = "__wbAnimations";
@@ -35,6 +35,9 @@ interface AnimateCall {
   duration: number;
   easing: string;
   keyframes: Record<string, string>[];
+  /** `performance.now()` inside the page when the call was made. Two calls one
+   * animation apart are a different event from two calls that overlap. */
+  at: number;
 }
 
 /**
@@ -65,6 +68,7 @@ async function recordAnimations(page: Page): Promise<void> {
         duration: typeof timing.duration === "number" ? timing.duration : 0,
         easing: timing.easing ?? "",
         keyframes: frames,
+        at: performance.now(),
       });
       return original.call(this, keyframes, options);
     };
@@ -76,6 +80,14 @@ const animations = (page: Page): Promise<AnimateCall[]> =>
     (globalName: string) => (window as unknown as Record<string, AnimateCall[]>)[globalName],
     ANIMS,
   );
+
+/** One frame, then another: enough for a running animation to have advanced past
+ * its first keyframe, and far inside the 300 ms it has to run. */
+async function twoFrames(page: Page): Promise<void> {
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+}
 
 /** Run a QuickBar command by its row title. */
 async function runCommand(page: Page, title: string): Promise<void> {
@@ -187,6 +199,9 @@ test("Alt+M moves the dock instead of teleporting it", async ({ page }) => {
   );
 
   // A layout switch is a different event and says so: opacity only, no zoom.
+  // From a settled dock — a switch that interrupts a zoom continues it (the next
+  // test), which would make this assertion depend on driver timing.
+  await dockSettled(page);
   await runCommand(page, "Switch to the Review layout");
   const switched = (await animations(page)).filter((call) => call.className.includes("wb-dock"));
   expect(switched.length).toBe(3);
@@ -194,6 +209,49 @@ test("Alt+M moves the dock instead of teleporting it", async ({ page }) => {
   expect(switched[2].duration).toBeLessThan(entering[0].duration);
 
   await runCommand(page, "Switch to the Default layout");
+});
+
+test("a second Alt+M mid-flight carries on instead of snapping back", async ({ page }) => {
+  await recordAnimations(page);
+  await openApp(page);
+  await treeItem(page, "src").click();
+
+  // Focus mode, then focus mode again two frames later — a real double press, and
+  // 33 ms into an animation that has 300 ms to run. DESIGN.md §5.1.1: "a second
+  // input mid-flight resolves into the first instead of queueing behind it".
+  // Nothing is awaited on the app between the two presses but the frames
+  // themselves: an assertion in there is a driver round trip, and a round trip
+  // long enough to outlast the animation would make the test vacuous.
+  await page.keyboard.press("Alt+M");
+  await twoFrames(page);
+  await page.keyboard.press("Alt+M");
+  await expect(page.locator(".wb-layout-chip")).not.toHaveText("Focused");
+
+  const dock = (await animations(page)).filter((call) => call.className.includes("wb-dock"));
+  expect(dock.length, "each press animated the dock").toBe(2);
+  // Everything below is about an *interrupted* animation, so fail loudly rather
+  // than pass vacuously if the second press somehow arrived after the first had
+  // already settled.
+  expect(
+    dock[1].at - dock[0].at,
+    "the second press has to land inside the first animation for this to mean anything",
+  ).toBeLessThan(dock[0].duration);
+
+  // The regression: the second call replayed the *fixed* dip, so a dock already
+  // most of the way back to opacity 1 / scale 1 dropped to 0.62 / 0.985 and
+  // climbed again — a backward pop, mid-gesture. It must start from where the
+  // first animation had got to, which is strictly past that dip and short of the
+  // target it is still travelling towards.
+  const from = dock[1].keyframes[0];
+  const dip = dock[0].keyframes[0];
+  expect(Number(from.opacity), "it carried on from where the dock was").toBeGreaterThan(
+    Number(dip.opacity),
+  );
+  expect(Number(from.opacity), "and it had not arrived yet").toBeLessThan(1);
+  const scaleOf = (frame: Record<string, string>): number =>
+    Number(/scale\(([\d.]+)\)/.exec(frame.transform)?.[1]);
+  expect(scaleOf(from), "the zoom continued too").toBeGreaterThan(scaleOf(dip));
+  expect(scaleOf(from)).toBeLessThan(1);
 });
 
 test("the QuickBar leaves rather than vanishing", async ({ page }) => {

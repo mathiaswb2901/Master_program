@@ -51,6 +51,98 @@ function ownStylesheets(): { file: string; css: string }[] {
   }));
 }
 
+/**
+ * `:root`'s custom properties, so a test can ask what a token *resolves to*
+ * rather than what its name suggests.
+ *
+ * `rules()` reports blocks in source order and descends into at-rules
+ * afterwards, so the first `:root` is the top-level one — not the override
+ * inside the reduced-motion query.
+ */
+function rootTokens(): Map<string, string> {
+  const css = fs.readFileSync(path.join(STYLE_ROOT, "design", "tokens.css"), "utf-8");
+  const root = rules(css).find((rule) => rule.selector === ":root");
+  expect(root, "tokens.css must declare its tokens on :root").toBeDefined();
+  const out = new Map<string, string>();
+  for (const declaration of String(root?.body).split(";")) {
+    const colon = declaration.indexOf(":");
+    if (colon < 0) continue;
+    const name = declaration.slice(0, colon).trim();
+    if (name.startsWith("--")) out.set(name, declaration.slice(colon + 1).trim());
+  }
+  return out;
+}
+
+/** Substitute `var(--x)` until nothing is left to substitute. */
+function resolve(value: string, tokens: Map<string, string>): string {
+  let out = value;
+  for (let i = 0; i < 8 && out.includes("var("); i++) {
+    out = out.replace(/var\(\s*(--[\w-]+)\s*(?:,[^()]*)?\)/g, (whole, name: string) =>
+      tokens.get(name) ?? whole,
+    );
+  }
+  return out;
+}
+
+/** The tint channel's properties: paint, no geometry. `transform` is the other
+ * channel and `opacity` belongs to tint but is what an entrance shares with it,
+ * so neither is in here — this set is "colour and nothing else". */
+const COLOUR: ReadonlySet<string> = new Set([
+  "background-color",
+  "border-color",
+  "color",
+  "outline-color",
+]);
+
+interface ColourTransition {
+  file: string;
+  selector: string;
+  /** The declaration's value with every token substituted. */
+  resolved: string;
+}
+
+/** Every transition in `ui/src/` that animates colour and nothing else. */
+function colourTransitions(): ColourTransition[] {
+  const tokens = rootTokens();
+  const out: ColourTransition[] = [];
+  for (const { file, css } of ownStylesheets()) {
+    for (const declaration of motionDeclarations(css)) {
+      if (declaration.properties.length === 0) continue;
+      if (!declaration.properties.every((property) => COLOUR.has(property))) continue;
+      out.push({ file, selector: declaration.selector, resolved: resolve(declaration.raw, tokens) });
+    }
+  }
+  return out;
+}
+
+describe("the two channels stay separate (DESIGN.md §5.1.3)", () => {
+  /**
+   * A `linear()` polyline is a sampled spring and nothing else in this app is
+   * one, so "the value resolved to a `linear()`" is exactly "this is on the
+   * travel channel". Checking the resolved value rather than the token name is
+   * the whole point: `--ease-standard` moved two other lanes' stylesheets onto
+   * the spring without any of them changing a character, and a test that asked
+   * which *properties* were animated could not see it.
+   */
+  it("never eases a colour on a spring", () => {
+    const offenders = colourTransitions()
+      .filter((entry) => entry.resolved.includes("linear("))
+      .map((entry) => `${entry.file}  ${entry.selector}`);
+    expect(offenders).toEqual([]);
+  });
+
+  it("has colour transitions to check, or the rule above is vacuous", () => {
+    expect(colourTransitions().length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("keeps the deprecated aliases on the channel their consumers use", () => {
+    // Stated at the token, not only at its consumers: those live in other
+    // lanes' files and may move, and this alias must not follow them.
+    const tokens = rootTokens();
+    expect(resolve("var(--ease-standard)", tokens)).toBe(resolve("var(--ease-tint)", tokens));
+  });
+});
+
 describe("what Workbench animates", () => {
   it("finds the stylesheets at all", () => {
     // A glob that silently matched nothing would make every test below pass.

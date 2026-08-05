@@ -92,16 +92,56 @@ export type DockMotion = "focus" | "shift";
 const dockElement = (): HTMLElement | null => document.querySelector<HTMLElement>(".wb-dock");
 
 /**
+ * The uniform scale factor a computed `transform` carries.
+ *
+ * The browser serialises any transform as a matrix, and the only transform this
+ * module ever writes on the dock is a uniform `scale()`, so the first component
+ * is the scale. `none` — and any shape this module did not write — reads as 1,
+ * which is the resting value and therefore the safe answer.
+ */
+export function scaleOf(transform: string): number {
+  const match = /^matrix(?:3d)?\(([^)]*)\)$/.exec(transform.trim());
+  if (match === null) return 1;
+  const value = Number.parseFloat(match[1].split(",")[0]);
+  return Number.isFinite(value) ? value : 1;
+}
+
+/**
+ * Where the dock is *at this instant*, or `null` when nothing is moving it.
+ *
+ * Must be read before the running animation is cancelled. A `fill: none`
+ * animation contributes to computed style only while it is in its active
+ * interval, so cancelling first hands back the un-animated value — opacity 1,
+ * scale 1 — and the sample would report "settled" about an element half way
+ * through a spring.
+ */
+function dockInFlight(element: HTMLElement): { opacity: string; scale: number } | null {
+  if (element.getAnimations().length === 0) return null;
+  const style = getComputedStyle(element);
+  return { opacity: style.opacity, scale: scaleOf(style.transform) };
+}
+
+/**
  * Animate the dock through a state change it has already made.
  *
  * Deliberately *after* the fact: dockview has rearranged the grid and the new
  * layout is already correct, so this only re-plays its arrival. Nothing here
  * can leave the window in a wrong state — the animation has no fill, and if
  * the browser refuses it the window is simply the way it already was.
+ *
+ * **Interruptible (DESIGN.md §5.1.1).** A second `Alt+M` mid-flight resolves
+ * *into* the first rather than queueing behind it, and CSS springs get that for
+ * free while a keyframed one does not: replaying the fixed dip would drop the
+ * dock back to opacity 0.62 / scale 0.985 and climb again, a visible backward
+ * pop and exactly the "snap and restart" the doctrine rules out. So the live
+ * `opacity`/`transform` are sampled first and become the new starting frame.
+ * The target never changes — the dock always arrives at opacity 1, scale 1 — so
+ * continuing is only ever a question of where the curve starts.
  */
 export function playDockMotion(kind: DockMotion): void {
   const element = dockElement();
   if (element === null || typeof element.animate !== "function") return;
+  const live = dockInFlight(element);
   // Replace rather than stack: Alt+M twice in a row must not leave two
   // animations fighting over one transform.
   for (const running of element.getAnimations()) running.cancel();
@@ -114,7 +154,10 @@ export function playDockMotion(kind: DockMotion): void {
 
   element.animate(
     [
-      { opacity: String(fade), transform: `scale(${String(zoom)})` },
+      {
+        opacity: live === null ? String(fade) : live.opacity,
+        transform: `scale(${String(live === null ? zoom : live.scale)})`,
+      },
       { opacity: "1", transform: "scale(1)" },
     ],
     { duration, easing, fill: "none" },
