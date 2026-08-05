@@ -13,6 +13,13 @@ shell body is therefore required to be printable text only: in a live PTY the
 control bytes are key events, not characters — ``\n`` is Enter, ``\x0f`` is
 accept-line in readline and PSReadLine, ``\x03`` aborts, ``\x1b`` opens an
 editing escape sequence — so any of them would act the moment the body landed.
+
+The third kind, ``layout``, is the one entry that *acts* rather than inserts —
+and it stays inside the same doctrine because its whole vocabulary is the name of
+an arrangement the user themselves saved. It moves panels and nothing else: no
+text reaches a shell or an agent, no file is touched, and a name nobody saved is
+a no-op with a toast. Its body is constrained to a single printable line no
+longer than a layout name, so it cannot smuggle a payload for a future consumer.
 """
 
 import asyncio
@@ -25,6 +32,7 @@ import structlog
 from watchfiles import awatch
 
 from workbench_server.models.files import FileChangedEvent
+from workbench_server.models.layouts import MAX_NAME_CHARS as MAX_LAYOUT_NAME_CHARS
 from workbench_server.models.shortcuts import (
     MAX_BODY_CHARS,
     MAX_DETAIL_CHARS,
@@ -111,6 +119,7 @@ def _reserved() -> frozenset[str]:
         "Alt+W",
         "Ctrl+F4",
         "Alt+T",
+        "Alt+M",
         *[f"Ctrl+{n}" for n in range(1, 5)],
         *[f"Alt+{n}" for n in range(1, 10)],
     ]
@@ -127,7 +136,7 @@ _META_RE = re.compile(r"^(?:[-*]\s+)?(?P<key>[A-Za-z][A-Za-z0-9_-]*)\s*:\s*(?P<v
 _FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})\s*(?P<info>\S*)")
 
 _META_KEYS = frozenset({"type", "keys", "detail"})
-_KINDS: frozenset[str] = frozenset({"shell", "prompt"})
+_KINDS: frozenset[str] = frozenset({"shell", "prompt", "layout"})
 
 # C0 controls + DEL. Printable text is what a shell body may be, and nothing else.
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -215,11 +224,12 @@ def _split_blocks(text: str) -> tuple[list[_Raw], bool]:
 
 
 def _resolve_kind(raw: _Raw) -> str:
-    """Explicit ``type:`` wins; a ```prompt fence selects it; otherwise shell."""
+    """Explicit ``type:`` wins; a fence tagged with a kind selects it (```prompt,
+    ```layout); otherwise shell — so a ```powershell body stays what it looks like."""
     declared = raw.meta.get("type")
     if declared is not None:
         return declared.lower()
-    return "prompt" if raw.info == "prompt" else "shell"
+    return raw.info if raw.info in _KINDS else "shell"
 
 
 def _resolve_chord(
@@ -298,9 +308,11 @@ def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile
 
         declared = _resolve_kind(raw)
         if declared not in _KINDS:
-            reject(name, f"unknown type {declared!r} (expected shell or prompt) — skipped")
+            reject(name, f"unknown type {declared!r} (expected shell, prompt or layout) — skipped")
             continue
-        kind: ShortcutKind = "prompt" if declared == "prompt" else "shell"
+        kind: ShortcutKind = (
+            "prompt" if declared == "prompt" else "layout" if declared == "layout" else "shell"
+        )
         if kind == "shell" and (control := _CONTROL_RE.search(body)) is not None:
             # Control bytes are key events in a live PTY, not characters: \n and
             # \r are Enter, \x0f is accept-line (readline, and PSReadLine in
@@ -309,6 +321,18 @@ def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile
             # insertion — the one thing a shortcut may never do.
             reject(name, f"{_control_reason(control.group())} — skipped")
             continue
+        if kind == "layout":
+            # The body is a layout *name*, nothing else. Bounded and single-line
+            # so this kind can never carry a payload some later consumer reads.
+            if _CONTROL_RE.search(body) is not None:
+                reject(name, "layout body must be a single line naming a layout — skipped")
+                continue
+            if len(body) > MAX_LAYOUT_NAME_CHARS:
+                reject(
+                    name,
+                    f"layout name longer than {MAX_LAYOUT_NAME_CHARS} characters — skipped",
+                )
+                continue
 
         raw_keys = raw.meta.get("keys", "")
         keys = (

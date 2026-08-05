@@ -67,9 +67,22 @@ the moat.
   decisions are encoded there rather than left to reviewers: PowerPoint is
   preview-only in v1 (single-instance, no `Application.Hwnd` to prove ownership) and
   `WORKBENCH_OFFICE_NATIVE=auto` resolves to *not* hosting natively until hang
-  isolation is proven. Still open here: the Rust window hosting behind that Protocol,
-  the COM bridge (agents reading/writing the live document), the **host panel** — which
-  waits for the tool registry so it registers itself instead of editing `App.tsx` — and
+  isolation is proven. The **Rust window hosting landed** too (PR 3,
+  `desktop/src-tauri/src/host/`): a real child window from another process docked in a
+  panel rectangle — window class + WndProc, style-strip-then-`SetParent`, a clip child
+  that hides a guest's self-drawn caption, batched geometry through one DPI authority,
+  focus routing, job-object teardown, and the `embed`/`set_bounds`/`detach`/`close`/
+  `poll` commands that line up one-for-one with the Python Protocol. It is proven
+  against a **synthetic guest process** (`src/bin/workbench-guest.rs`, debug-only), so
+  the whole mechanism is exercised by `cargo test` with no Office installed, and four
+  documented Win32 behaviours turned out to be false in this configuration —
+  `WM_PARENTNOTIFY`, click routing, `AttachThreadInput`, `SWP_ASYNCWINDOWPOS` (see
+  ARCHITECTURE.md). **Hang isolation is now quantified rather than feared**: a wedged
+  guest leaves the host painting and pumping its own messages, but costs ~1 s per
+  resize frame — and the same move from a thread attached to no input queue takes
+  ~0.15 ms, which is the containment path. Still open here: that containment, the COM
+  bridge (agents reading/writing the live document), the **host panel** — which waits
+  for the tool registry so it registers itself instead of editing `App.tsx` — and
   packaging: the shell runs from source (`cd desktop && npm run tauri dev`); a bundled
   installer that carries its own Python needs `tauri build` work not done yet.
 - ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
@@ -163,8 +176,8 @@ Modular: the UI shell and registry), so both run at once. The milestone table st
 the record of scope; the tracks are how it gets built.
 
 - **Moat track** — the Office host sequence (M4): ~~domain layer with a fake backend~~
-  (**landed**) → Rust window hosting → Word docked → COM bridge + agent tools → Excel.
-  What no competitor can copy quickly.
+  → ~~Rust window hosting~~ (both **landed**) → Word docked → COM bridge + agent tools
+  → Excel. What no competitor can copy quickly.
 - **Modular track** — M5 below, reordered so the *seam* comes first. What the product
   feels like every day.
 
@@ -210,15 +223,43 @@ Ordered by what unblocks what.
    dynamic plugin loader — but every derivation takes a tools array rather than reading
    `TOOLS`, which is the seam one plugs into (`ARCHITECTURE.md` §Tool registry,
    `docs/tools.md`).
-2. **Layout system** — the "work full screen" gap. dockview already supports far more
+2. ~~**Layout system** — the "work full screen" gap. dockview already supports far more
    than we use: panel **maximize / focus mode**, floating and popped-out panels, and
    full serialization. Add named, savable layouts ("review", "writing", "three
    agents") switchable from the QuickBar and from `shortcuts.md`, plus **layout
    persistence across restarts** — today every reload throws your arrangement away,
-   which is the single most anti-premium behaviour left in the app.
-3. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: bind a
-   layout, a registered tool, a workspace jump, or a saved agent objective to a chord.
-   The file becomes the user's own control surface over everything the registry knows.
+   which is the single most anti-premium behaviour left in the app.~~ **done** — and
+   built as a registered capability with **no panel** (`ui/src/panels/Layouts.tsx`),
+   which is the point: focus mode, persistence and named layouts arrive as commands, a
+   status chip, a `shortcuts.md` kind and one `onDockReady` hook, and `App.tsx` names
+   nothing. `Alt+M` fills the window with the focused panel and gives the arrangement
+   back exactly (dockview's own hidden-view bookkeeping). The arrangement is debounced
+   into `<workspace>/.workbench/layouts.json` — *in* the workspace, so different
+   projects keep different windows, next to `shortcuts.md` and already gitignored;
+   the server stores it verbatim because its shape belongs to a UI library and its
+   validity is a registry fact. Presets (`Review`, `Focus`, `Agents`) name **tool ids**
+   rather than geometry, so one naming a tool that is gone builds without it. The part
+   that would actually have broken in the field is handled explicitly: dockview
+   restores a panel whose component is unregistered and kills the render, so every
+   persisted layout is pruned against `panelComponents(TOOLS)` first — unknown panels
+   dropped, empty groups collapsed, the rest kept, one toast — and a corrupt file, an
+   unusable layout or a throwing `fromJSON` all resolve to the default arrangement.
+   `shortcuts.md` gains a third kind, `layout`, the first that *acts* rather than
+   inserts; it stays inside the never-execute doctrine because its whole vocabulary is
+   the name of an arrangement the user saved. Deliberately deferred: floating and
+   popped-out panels (dockview supports both; nothing asks for them yet), a saved
+   layout does not gain a panel that was added to the default *after* it was saved
+   (switch to Default, or open it from the QuickBar), and switching to a preset rebuilds
+   the dock — so the terminals in it restart, while switching to a *saved* layout reuses
+   the panels that are already there.
+3. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: ~~bind a
+   layout~~ (**done** with item 2: `type: layout`), a registered tool, a workspace jump,
+   or a saved agent objective to a chord. The file becomes the user's own control
+   surface over everything the registry knows. The seam is in place —
+   `shortcutActions` on the descriptor routes a kind to the tool that carries it out —
+   so each further kind is a parser case plus a handler, not a new mechanism. The bar
+   every one of them has to clear is the one `layout` cleared: it may not run a command,
+   send a prompt, or reach a file, because a workspace file is untrusted input.
 4. **Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history. Supersedes the
@@ -259,9 +300,10 @@ without forking — the difference between a fixed app and an instrument.
 
 - The logged "frontend is too plain" change request executed in full: aggressive
   ui-ux-pro-max design overhaul on top of the now-complete structural layer —
-  distinctive welcome surface, branded empty states, micro-interactions, layout
-  persistence, dockview floating/maximize, Monaco enrichment, content search
-  (Ctrl+Shift+F), settings UI.
+  distinctive welcome surface, branded empty states, micro-interactions, Monaco
+  enrichment, content search (Ctrl+Shift+F), settings UI. (Layout persistence and
+  dockview maximize moved to M5 item 2 and **landed** there; floating and popped-out
+  panels are still unclaimed — dockview supports both and nothing has asked yet.)
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
 - Remaining OSS product bar: first-run experience (workspace picker, Claude-login and
@@ -348,6 +390,21 @@ without forking — the difference between a fixed app and an instrument.
   resolves to *not* hosting** until hang isolation is proven — with
   `GET /api/office/capabilities` reporting that plainly, so the UI degrades to the
   OnlyOffice path from a fact rather than a guess. Browser mode remains fully supported.
+
+- 2026-08-05 — **Native hosting: four documented Win32 behaviours measured false**, and
+  one product risk quantified (PR 3, `desktop/src-tauri/src/host/`). For a window
+  reparented in from another process: `WM_PARENTNOTIFY` never arrives (so destruction is
+  found by polling — the Protocol's `poll` is the *only* crash signal, not a backstop);
+  click-to-focus needs no code because the guest focuses itself; `SetFocus` across the
+  process boundary needs no `AttachThreadInput`, because being a child already attached
+  the input queues; and `SWP_ASYNCWINDOWPOS` does **not** protect against a hung guest,
+  for that same reason — it only posts across *different* input queues, and
+  `DeferWindowPos` rejects the flag outright. Consequence for the product: a wedged
+  guest leaves the host window painting, pumping and not judged hung by Windows, but
+  makes each resize frame cost ~1 s. The fix is measured, not guessed — the same move
+  from a thread that owns no window in the parent chain takes ~0.15 ms — and is
+  deliberately left to its own PR. `WORKBENCH_OFFICE_NATIVE=auto` stays off until then,
+  as decided.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

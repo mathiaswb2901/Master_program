@@ -127,6 +127,44 @@ def test_prompt_bodies_keep_their_line_breaks() -> None:
     assert parsed.entries[0].body == "One.\nTwo."
 
 
+def test_layout_entry_carries_the_layout_name() -> None:
+    """The one kind that acts. Its body is a name, and only a name."""
+    parsed = parse_shortcuts(
+        _file(_block("Review layout", "type: layout\nkeys: Alt+R", "Review")), "workspace", "f.md"
+    )
+    assert parsed.problems == []
+    assert [(e.name, e.kind, e.body, e.keys) for e in parsed.entries] == [
+        ("Review layout", "layout", "Review", "Alt+R")
+    ]
+
+
+def test_layout_fence_language_selects_the_layout_kind() -> None:
+    parsed = parse_shortcuts(_file("## Focus\n\n```layout\nFocus\n```"), "workspace", "f.md")
+    assert parsed.problems == []
+    assert parsed.entries[0].kind == "layout"
+
+
+def test_a_fenced_shell_language_is_still_a_shell_entry() -> None:
+    """Widening the fence rule to every kind must not reclassify ```powershell."""
+    text = _file("## Build\n\n```powershell\nuv run pytest\n```")
+    parsed = parse_shortcuts(text, "workspace", "f.md")
+    assert parsed.entries[0].kind == "shell"
+
+
+@pytest.mark.parametrize("body", ["Review\nFocus", "Rev\tiew"])
+def test_multi_line_layout_body_is_refused(body: str) -> None:
+    """A layout entry names one arrangement; anything else is not a layout name."""
+    parsed = parse_shortcuts(_file(_block("Sneaky", "type: layout", body)), "workspace", "f.md")
+    assert parsed.entries == []
+    assert "single line" in parsed.problems[0].message
+
+
+def test_overlong_layout_name_is_refused() -> None:
+    parsed = parse_shortcuts(_file(_block("Long", "type: layout", "x" * 200)), "workspace", "f.md")
+    assert parsed.entries == []
+    assert "longer than" in parsed.problems[0].message
+
+
 def test_a_fenced_example_never_registers_a_command() -> None:
     """Markdown inside a fence is example text, wherever the fence is.
 

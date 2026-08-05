@@ -4,9 +4,11 @@ One markdown file per scope — ``<workspace>/.workbench/shortcuts.md`` merged o
 ``~/.workbench/shortcuts.md`` — drives QuickBar entries, terminal snippets, chat
 prompt templates and custom keybindings.
 
-Security: an entry is *inserted* into a surface, never executed. There is no
-"run" field by design, so opening an untrusted workspace can never make a
-shortcut do anything on its own (see ``services/shortcuts.py`` and
+Security: an entry never executes anything. ``shell`` and ``prompt`` entries are
+*inserted* into a surface; ``layout`` names one of the user's own saved
+arrangements and can do nothing but rearrange panels. There is no "run" field by
+design, so opening an untrusted workspace can never make a shortcut run a
+command, send a prompt or reach a file (see ``services/shortcuts.py`` and
 ``docs/shortcuts.md``).
 """
 
@@ -21,13 +23,14 @@ MAX_DETAIL_CHARS = 80
 MAX_BODY_CHARS = 4000
 MAX_FILE_BYTES = 256 * 1024
 
-ShortcutKind = Literal["shell", "prompt"]
+ShortcutKind = Literal["shell", "prompt", "layout"]
 ShortcutSource = Literal["workspace", "global"]
 
 
 class ShortcutEntry(BaseModel):
     name: str
     kind: ShortcutKind
+    # shell/prompt: the text that is inserted. layout: the name of the layout.
     body: str
     # A single chord ("Alt+G"); None = reachable from the QuickBar only.
     keys: str | None = None

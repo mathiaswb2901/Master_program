@@ -11,7 +11,9 @@
  *     plus every command a registered tool owns (`registry.ts`, `tools.ts`).
  *     Saving is the Editor tool's, `Alt+T` is the Terminal tool's, the session
  *     jumps are the Agent tool's — each declared next to the panel it belongs
- *     to, not here;
+ *     to, not here. A tool whose command *set* changes while the app runs (one
+ *     row per saved layout) declares `dynamicCommands` instead; those carry no
+ *     chords, so they can shadow nothing;
  *  3. the dynamic commands the user's `shortcuts.md` contributes (see
  *     `mergeCommands`). Everything above wins every collision, so nothing a
  *     workspace file says can shadow `Ctrl+S`.
@@ -33,7 +35,14 @@
 
 import { focusPanel } from "./dock";
 import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
-import { panelFocusCommands, shortcutHost, toolCommands } from "./registry";
+import {
+  dynamicCommandsKey,
+  panelFocusCommands,
+  shortcutAction,
+  shortcutHost,
+  toolCommands,
+  toolDynamicCommands,
+} from "./registry";
 import { shortcutCommands } from "./shortcuts";
 import { useStore } from "./store";
 import { TOOLS } from "./tools";
@@ -157,26 +166,45 @@ export function mergeCommands(
   return merged;
 }
 
-/** Inserting is the only thing a shortcut may do — the surface it lands in
- * gets focus so the user's next keystroke (Enter, or more typing) goes there.
- * Which panel that is, is a registry question (`shortcutKinds` on the tool that
- * hosts the kind), not a pair of panel ids written down here. */
+/**
+ * Carry out one `shortcuts.md` entry. Which panel a kind is *inserted* into,
+ * and which tool *carries a kind out* instead, are both registry questions
+ * (`shortcutKinds` / `shortcutActions`) — this file names no panel and no kind.
+ *
+ * Insertion is still the rule: the surface an entry lands in gets focus so the
+ * user's next keystroke (Enter, or more typing) goes there. The one kind that
+ * acts, `layout`, can do nothing but move panels — see `docs/shortcuts.md`.
+ */
 function runShortcut(entry: ShortcutEntry): void {
+  const action = shortcutAction(TOOLS, entry.kind);
+  if (action !== null) {
+    action(entry.body);
+    return;
+  }
   const host = shortcutHost(TOOLS, entry.kind);
   if (host !== null) focusPanel(host);
   useStore.getState().runShortcut(entry);
 }
 
-/** The live registry: built-ins + one command per shortcuts.md entry.
- * Memoized on the entries array (replaced only by a reload) — this runs on
- * every keystroke in the app. */
-let merged: { entries: readonly ShortcutEntry[]; commands: Command[] } | null = null;
+/**
+ * The live registry: built-ins + the registry's dynamic commands + one command
+ * per shortcuts.md entry. Memoized on the entries array (replaced only by a
+ * reload) and on the dynamic set's key — this runs on every keystroke in the
+ * app, so both checks are identity/string comparisons, never a rebuild.
+ */
+let merged: {
+  entries: readonly ShortcutEntry[];
+  dynamicKey: string;
+  commands: Command[];
+} | null = null;
 
 export function allCommands(): Command[] {
   const entries = useStore.getState().shortcuts;
-  if (merged === null || merged.entries !== entries) {
+  const dynamicKey = dynamicCommandsKey(TOOLS);
+  if (merged === null || merged.entries !== entries || merged.dynamicKey !== dynamicKey) {
     const extra = shortcutCommands(entries, runShortcut);
-    merged = { entries, commands: mergeCommands(builtinCommands(), extra) };
+    const registered = [...builtinCommands(), ...toolDynamicCommands(TOOLS)];
+    merged = { entries, dynamicKey, commands: mergeCommands(registered, extra) };
   }
   return merged.commands;
 }

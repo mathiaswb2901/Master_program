@@ -122,14 +122,16 @@ contribute any of:
 | `panel` | A dockview panel: component, where it docks, whether it opens with the app, whether it is a singleton, and the one badge its tab may carry. `App.tsx` names no panel — it renders `panelComponents(TOOLS)`, applies `defaultLayout(TOOLS)` and draws its tabs from `panelTabInfo(TOOLS, …)` |
 | `documentView` | A renderer for one `OpenFile` kind inside the editor area. Office claims `office`; the native Office host will claim it back through the same field |
 | `commands` + `shortcuts` | QuickBar rows and keymap entries. Commands are the same `Command` shape `commands.ts` already used, so the QuickBar, the pass-through policy and the `shortcuts.md` merge are unchanged; the chords live in one table per tool, which is the layer a user keymap file overrides later |
+| `dynamicCommands` | Rows whose *set* changes while the app runs — one per saved layout today. Re-derived only when the tool's `key()` changes, since the merged list is read on every keystroke, and never chord-bearing: a chord must be static to be pinned by a test and to win a `shortcuts.md` collision deterministically |
 | `statusContributions` | Items in the status bar's left/centre/right regions. The bar owns the regions and nothing that goes in them |
-| `shortcutKinds` | Which `shortcuts.md` kinds this panel hosts — the Terminal claims `shell`, the Agent `prompt` — so insertion is routed by capability rather than by a pair of panel ids in `commands.ts` |
+| `shortcutKinds` / `shortcutActions` | Which `shortcuts.md` kinds this panel *hosts an insertion for* (the Terminal claims `shell`, the Agent `prompt`) and which it *carries out* (Layouts claims `layout`) — so `commands.ts` names neither a panel nor a kind |
+| `onDockReady` | The live `DockviewApi`, for a tool that operates on the dock rather than living in it. Exactly one does |
 | `when` | A predicate that takes the whole tool out — panel, commands and status items together. **Boot-time**: it is asked once per tool and remembered, because the things it feeds are derived at different moments and a tool that enabled itself later would be half present |
 
 A panel's tab is closable exactly when it is *not* in the startup layout: one
 that a command opened must be dismissible by the tab it arrived on, while
-closing a startup panel would strand the app until a reload (layout persistence
-is M5 item 2).
+closing a startup panel is not how you rearrange the window — the layout system
+below is.
 
 Agent-facing tools are **not** in this descriptor — `services/agent_tools.py` is
 their single registry (below).
@@ -186,13 +188,14 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts, provenance, office host |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts, provenance, layouts, office host |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
+| `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
 | `services/workspace.py` | path jail, atomic writes, hashing, tree |
 | `services/watcher.py` | watchfiles -> bus |
@@ -206,6 +209,7 @@ in-process calls where the model and the user dominate.
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
+| `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
@@ -463,10 +467,73 @@ programmatically or by the *name of the document* (`…-refuse-embed.docx`,
 `…-crash-after-embed.docx`, `…-already-open.docx`, …), so every branch is
 reachable from a test and, later, from the UI.
 
-**Deliberately deferred:** the Rust window hosting itself, the pywin32 COM
-bridge (and with it the agent-facing document tools), and the panel — which
-lands after the tool registry, so it can register itself instead of editing
-`App.tsx`. Nothing here changes the OnlyOffice path below.
+**Deliberately deferred:** the pywin32 COM bridge (and with it the agent-facing
+document tools) and the panel — which lands after the tool registry, so it can
+register itself instead of editing `App.tsx`. Nothing here changes the
+OnlyOffice path below.
+
+### Native window hosting (`desktop/src-tauri/src/host/`)
+
+The mechanism that puts a real child window inside a panel rectangle, built and
+proven against a **synthetic guest** (`src/bin/workbench-guest.rs`) rather than
+against Word. Every hard part — class registration, style stripping,
+`SetParent`, geometry, focus, teardown — is independent of who owns the guest
+window, so proving it against a window we wrote makes the whole thing runnable
+in `cargo test` on any machine, with no Office installed. The guest is a
+separate **process** on purpose: reaping, input-queue attachment and hanging are
+all cross-process problems, and a second window on one of our own threads would
+prove none of them. It is debug-only — its body is behind `debug_assertions` and
+`lib.rs` keeps three explicit command lists so a release build cannot reach it.
+
+```
+Tauri window (main thread, owns the message loop)
+└── panel window     WS_CHILD, one per hosted document, our class
+    └── clip child   WS_CHILD, the viewport
+        └── guest    another process's top-level window, restyled WS_CHILD and
+                     offset up by its own caption height
+```
+
+Styles are stripped **before** `SetParent` (as the `SetParent` docs ask) and
+`SWP_FRAMECHANGED` applied after, which is what makes the guest's client
+rectangle match the panel exactly rather than approximately. Teardown restores
+the original styles, parent and desktop position — an un-parented window still
+wearing child styles has no caption, no border and no way to be closed. Guests
+are launched into a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and
+reaped by closing it, for the reason `backend.rs` documents: a graceful quit was
+measured not to be enough. Because a guest is a *child* of the Tauri window and
+children die with their parent, every path that closes the window releases the
+guests first — otherwise closing Workbench would take a real Word down with it.
+
+CSS pixels become physical pixels through **one** DPI authority, the window's own
+`scale_factor()`; edges are rounded and sizes derived from the rounded edges, so
+two adjacent panels cannot leave a one-pixel seam. Nothing scaled is ever cached —
+the caption inset a panel hides is *stored* in CSS pixels and re-derived on every
+layout, because dragging the window to a monitor at another scale arrives as a
+plain resize and has to come back with different physical numbers for the same
+rectangle. Mind the unit boundary at the seam: these Rust commands take **CSS**
+pixels, while the Python `PanelRect` is documented in **physical** pixels. A
+bridge between the two must convert, or the rectangle is scaled twice.
+
+**Four things were measured that the documentation does not tell you**, each one
+now a test in `host/hosting_tests.rs`:
+
+| Claim | What actually happens |
+|---|---|
+| `WM_PARENTNOTIFY` tells a parent its child was destroyed or clicked | **It never arrives** for a window reparented in from another process — not on a graceful `WM_CLOSE`, not on a killed process, not on a real `SendInput` click. Destruction is therefore found by asking (`host/watchdog.rs`), which is exactly what the Python `HostBackend::poll` models |
+| Click-to-focus needs the host to route the click | It does not. The guest's own window procedure focuses itself, and the keyboard follows. What is lost is only the *notification* to the webview |
+| `SetFocus` across processes needs `AttachThreadInput` | It does not, for a parent/child pair: that relationship already attaches the input queues. No `AttachThreadInput` call exists in this crate |
+| `SWP_ASYNCWINDOWPOS` keeps a hung guest from stalling the host | **It does not**, for the same reason: the flag only posts when the two threads are on *different* input queues, and being our child put them on the same one. `DeferWindowPos` also rejects the flag outright (`ERROR_INVALID_PARAMETER`), so our own two windows are batched and the guest is moved separately |
+
+**Hang isolation is the open risk, and it is now quantified.** With the guest
+deliberately wedged (`hosting_tests::hang_isolation_measurement`): the host
+window keeps its own message loop (50/50 posted messages dispatched), keeps
+painting, and Windows does not judge it hung — but a resize costs **~1 s per
+frame** because the guest's `SetWindowPos` waits. Moving *our* two windows alone
+stays at ~0.02 ms, and the same guest move issued from a thread that owns no
+window in the parent chain — and so is attached to no input queue — takes
+**~0.15 ms**. That is the containment path, measured rather than assumed, and it
+is deliberately not implemented here: `WORKBENCH_OFFICE_NATIVE=auto` stays off
+until it is.
 
 ### OnlyOffice (preview/diff/fallback)
 
@@ -478,6 +545,67 @@ content hash so external changes (e.g. agent edits) force a reopen instead of se
 a stale cached copy. Absent OnlyOffice, documents degrade to read-only preview +
 "Open in Word".
 
+## Layouts
+
+The window remembers its arrangement, per workspace, and one panel can take all
+of it. Both are one registered capability (`ui/src/panels/Layouts.tsx`) that
+contributes **no panel**: commands, a status chip, a `shortcuts.md` kind and an
+`onDockReady` hook. `App.tsx` gained one reordered line for it and names nothing.
+
+- **Focus mode** is dockview's `maximizeGroup` / `exitMaximizedGroup` on the
+  active panel, bound to `Alt+M`. Restoring is dockview's own hidden-view
+  bookkeeping, so the arrangement comes back exactly — including the sizes.
+- **Persistence** is `dockview.toJSON()`, debounced onto
+  `<workspace>/.workbench/layouts.json` through `PUT /api/layouts`. The file is
+  *in* the workspace, which is what makes an arrangement a property of the
+  project rather than of a browser origin — the same convention `shortcuts.md`
+  and `scratch.md` already follow, and already gitignored. The server stores the
+  document verbatim (`JsonValue`): its shape belongs to a UI library this
+  process does not import, and every rule about which panels may be in it is a
+  *client* fact, so a server-side schema would be a second authority going stale
+  the moment a tool is added.
+- **Named layouts** are presets built from the registry (`Review`, `Focus`,
+  `Agents`) plus whatever the user saved. A preset names **tool ids**, not
+  geometry, so one naming a tool that is gone simply builds without it.
+- **Restore is vetted, always.** `ui/src/layouts.ts` prunes a persisted layout
+  against `panelComponents(TOOLS)` before dockview sees it, because dockview
+  restores a panel whose component is unregistered and hands React `undefined`
+  as the element type — one stale entry would take the window down. Unknown
+  panels are dropped, empty groups and branches collapse, a dropped active view
+  is forgotten, and `grid.maximizedNode` (a *path*, not an id) is carried over
+  only when nothing was dropped. Nothing usable left, a file that is not a
+  layout, a `fromJSON` that throws: all three resolve to the default arrangement
+  plus one toast. The floor is a working window, never a blank one.
+- **A failed apply reports which failure it was.** Pruning vets panel ids, not
+  dockview's grid algebra, so a file whose every panel is registered can still
+  make dockview's deserializer throw — and dockview calls `clear()` before it
+  validates, so the fallback rebuilds the *default* arrangement. That is a
+  different outcome from "nothing usable, window left alone", and
+  `applySerialized` returns `applied` / `unchanged` / `default` rather than a
+  boolean so a caller cannot label the window with a layout it is not showing.
+  The default arrangement is nobody's named layout: the chip goes unnamed, and
+  that is what gets persisted.
+- **Writes are serialized.** `PUT /api/layouts` replaces the whole document and
+  the server persists whatever arrives last, so two requests in flight at once
+  land in delivery order rather than in the order the user acted. Every write
+  goes through one chain and reads the document at the moment it is sent, which
+  makes a queued write send the *current* arrangement and makes a second queued
+  write redundant. The debounce coalesces a drag; this is what covers two
+  deliberate actions a moment apart.
+- **The atomic write retries a Windows lock.** `os.replace` onto a path another
+  process has open fails on Windows rather than waiting, and serialized writes
+  land ~20 ms apart — close enough that the watcher, Defender or the indexer
+  reacting to the *previous* write was losing the second one about half the
+  time, leaving the file holding the arrangement the user had moved away from.
+  `services/layouts.py` retries past it on a short bounded budget; a lock that
+  outlasts the budget is a real one and still surfaces as a 500 and a toast.
+- **Two conservative choices** worth knowing: the autosave is armed only after a
+  successful read, so a backend that did not answer cannot let this session's
+  default arrangement overwrite the user's file; and switching to a *preset*
+  rebuilds the dock (`clear()` + placements) while switching to a *saved* layout
+  uses `fromJSON(…, { reuseExistingPanels: true })`, which moves the panels that
+  exist in both rather than recreating them.
+
 ## Shortcuts
 
 `<workspace>/.workbench/shortcuts.md` merged over `~/.workbench/shortcuts.md` (workspace
@@ -488,9 +616,12 @@ its own small `watchfiles` watch; a reload that changes the merged state publish
 (`ui/src/commands.ts`) dynamically, and everything the tool registry contributes wins
 every id/chord collision — a file cannot shadow `Ctrl+S` or `Alt+T`. Parsing is
 total: a bad entry becomes a `problem` in the payload, never an exception; markdown
-inside any fence is example text, so a `##` line there registers nothing. **Entries are
-inserted, never executed** — a shell body is typed into the active terminal with no
-trailing newline, a prompt lands in the chat draft. Two invariants carry that, each
+inside any fence is example text, so a `##` line there registers nothing. **Nothing an
+entry can do executes** — a shell body is typed into the active terminal with no
+trailing newline, a prompt lands in the chat draft, and a `layout` body names one of the
+user's own saved arrangements and moves panels (the one kind that acts, and the reason it
+may is that moving panels is all it *can* do; its body is one line no longer than a
+layout name, so it cannot carry a payload). Two invariants carry the rest, each
 enforced on both sides of the wire: a shell body is a single line of *printable* text
 (in a PTY the control bytes are key events — `\n` is Enter, `\x0f` is accept-line), and
 a file-supplied chord must carry `Alt` (outside Monaco/xterm the app intercepts every

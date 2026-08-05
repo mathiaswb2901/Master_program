@@ -18,16 +18,26 @@
 //! double-click that shows nothing at all for that long reads as a failed
 //! launch. The UI waits for `workbench://backend-ready` before it opens any
 //! socket, which is the half of the problem that actually mattered.
+//!
+//! The third thing only a native window can do arrives in [`host`]: docking a
+//! *real* child window — Word, eventually — inside a dockview panel rectangle.
+//! It is proven here against a synthetic guest process; see that module.
 
 mod backend;
 mod close_guard;
+/// Public only so the synthetic guest binary (`src/bin/workbench-guest.rs`) can
+/// share the handful of constants it and the host must agree on. Nothing
+/// outside this crate is expected to call it, and the mechanism itself stays
+/// `pub(super)` — its tests live inside the module.
+#[cfg(windows)]
+pub mod host;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use tauri::webview::PageLoadEvent;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 use close_guard::{CloseGuard, Decision};
 
@@ -82,9 +92,14 @@ fn set_attention(window: tauri::Window, on: bool) -> tauri::Result<()> {
 }
 
 /// The user answered the dirty-close prompt with "close" — close for real.
+///
+/// Hosted windows are given back *before* the window goes: a guest is a child
+/// of this window, and children die with their parent. Letting that happen
+/// would take a real Word down with us, unsaved buffers and all.
 #[tauri::command]
-fn confirm_close(window: tauri::Window) -> tauri::Result<()> {
+fn confirm_close(app: tauri::AppHandle, window: tauri::Window) -> tauri::Result<()> {
     GUARD.confirm();
+    release_hosted_windows(&app);
     window.close()
 }
 
@@ -94,12 +109,34 @@ fn cancel_close() {
     GUARD.cancel();
 }
 
+/// Give every hosted guest back to the desktop and reap what we launched.
+///
+/// Idempotent, and a no-op on a build or platform with no hosting. Called from
+/// every path that ends with this window going away, because the one thing that
+/// must never happen is a guest still parented into a window being destroyed.
+fn release_hosted_windows(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    host::shutdown(app);
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .setup(|app| {
             // Before anything worth logging happens: a release build is a GUI
             // subsystem app with no stderr, so the file is the only copy.
             backend::open_log(app.path().app_log_dir().ok());
+            #[cfg(windows)]
+            {
+                // `setup` runs on the main thread, which is the only thread
+                // allowed to own a hosted panel's windows.
+                host::remember_main_thread();
+                app.manage(host::HostRegistry::new());
+                // Nothing tells us when a hosted window goes away — measured,
+                // see `host::class` — so something has to ask.
+                host::spawn_watchdog(app.handle().clone());
+            }
             let handle = app.handle().clone();
             // Off the main thread on purpose. Probing, spawning and waiting for
             // health is up to `READY_TIMEOUT` of work, and Tauri creates the
@@ -117,14 +154,6 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            shell_ready,
-            close_ack,
-            backend_ready,
-            set_attention,
-            confirm_close,
-            cancel_close
-        ])
         .on_page_load(|_webview, payload| {
             if payload.event() == PageLoadEvent::Started {
                 // The document that armed the guard is gone. The UI re-arms
@@ -139,6 +168,9 @@ pub fn run() {
                 return;
             };
             let Decision::AskUi { ticket } = GUARD.on_close_requested() else {
+                // Closing for real, and this is the last moment at which a
+                // hosted guest is still a child of a window that exists.
+                release_hosted_windows(window.app_handle());
                 return;
             };
             api.prevent_close();
@@ -158,12 +190,72 @@ pub fn run() {
                          {CLOSE_ACK_TIMEOUT:?}; closing anyway"
                     ));
                     GUARD.confirm();
+                    release_hosted_windows(window.app_handle());
                     if let Err(err) = window.close() {
                         backend::log(&format!("forced close failed: {err}"));
                     }
                 }
             });
-        })
-        .run(tauri::generate_context!())
-        .expect("failed to start the Workbench shell");
+        });
+
+    // Three explicit lists rather than one with holes in it. The synthetic
+    // guest is a test fixture that can start a process and wedge its message
+    // loop, so the way to be sure it is not reachable from a shipped build is
+    // for its commands not to be *registered* in one.
+    #[cfg(all(windows, debug_assertions))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        shell_ready,
+        close_ack,
+        backend_ready,
+        set_attention,
+        confirm_close,
+        cancel_close,
+        host::commands::host_embed,
+        host::commands::host_set_bounds,
+        host::commands::host_detach,
+        host::commands::host_close,
+        host::commands::host_poll,
+        host::commands::host_focus,
+        host::commands::host_list,
+        host::commands::host_open_guest,
+        host::commands::host_hang_guest
+    ]);
+    #[cfg(all(windows, not(debug_assertions)))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        shell_ready,
+        close_ack,
+        backend_ready,
+        set_attention,
+        confirm_close,
+        cancel_close,
+        host::commands::host_embed,
+        host::commands::host_set_bounds,
+        host::commands::host_detach,
+        host::commands::host_close,
+        host::commands::host_poll,
+        host::commands::host_focus,
+        host::commands::host_list
+    ]);
+    #[cfg(not(windows))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        shell_ready,
+        close_ack,
+        backend_ready,
+        set_attention,
+        confirm_close,
+        cancel_close
+    ]);
+
+    builder
+        .build(tauri::generate_context!())
+        .expect("failed to start the Workbench shell")
+        .run(|app, event| match event {
+            // The window is up. Everything that needs one starts here.
+            #[cfg(all(windows, debug_assertions))]
+            RunEvent::Ready => host::start_demo_if_asked(app),
+            // Last line of defence: every close path above already released,
+            // but a path nobody thought of must not leave an orphan either.
+            RunEvent::Exit => release_hosted_windows(app),
+            _ => {}
+        });
 }

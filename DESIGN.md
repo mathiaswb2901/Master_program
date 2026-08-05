@@ -302,6 +302,11 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Result rows: height **40px**, 13px title + 12px `--text-tertiary` detail right-aligned;
   selected row `--surface-selected` with 2px `--accent` left edge; category headers 11px
   uppercase `--text-tertiary`.
+- Categories are sections, in this order: the window's own commands (uncategorized, no
+  header), then **Layouts**, then **Shortcuts**. Uncategorized always leads; the
+  registry's categorized rows precede the file's, so a header is always a header and
+  never appears mid-list. A capability adds a section by putting a `category` on its
+  commands — the QuickBar knows no section names.
 - Keycap hints: 11px mono on `--surface-elevated`, 1px `--border-default`,
   `--radius-xs`, padding 1px 5px.
 - Motion: fade + scale 0.98→1 in 140ms `--ease-standard`; exit 100ms fade.
@@ -344,6 +349,7 @@ commands and their default chords on its tool descriptor (`docs/tools.md`), and
 | `Ctrl+1..4` | Focus Files / Editor / Agent / Terminal |
 | `Alt+1..9` | Jump to the n-th most recent session |
 | `Alt+T` | New terminal |
+| `Alt+M` | Toggle focus mode (§6.9) |
 
 **Pass-through:** inside xterm and Monaco — both full keyboard applications — only
 chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the
@@ -370,7 +376,40 @@ advertises and the only one that also works with focus inside Monaco or xterm.
 browser tab but arrive normally in the Tauri shell; they are listed as secondaries, not
 as the advertised binding.
 
-### 6.9 Empty states
+### 6.9 Focus mode and the layout chip
+
+The window remembers its arrangement, and one panel can take the whole of it. Both are
+one capability (`ui/src/panels/Layouts.tsx`) and both are stated in one place: the
+**layout chip**, at the right end of the status bar.
+
+- **Focus mode** is a *keyboard* affordance: `Alt+M` fills the window with the focused
+  panel, `Alt+M` gives the arrangement back. The tab strip gains nothing — panel tabs
+  stay chrome (§6.1), and a maximize button on every tab would spend permanent pixels on
+  an occasional action. What the user gets instead is unmistakable: every other panel is
+  gone, and the chip says so.
+- **Chip:** the session-chip anatomy of §6.4 — 18px pill, `--radius-full`, 11px label —
+  with a 12px outline glyph before it, max 140px, truncating. Its label is the layout you
+  are in (`Review`, a name you saved), or `Layout` when it is nobody's in particular.
+- **In focus mode** the chip reads `Focused` and fills: `--accent-muted` background, 1px
+  `--accent` border, `--text-primary` label. This is the one place chrome states a
+  *state of the window* rather than of a document, and the only status item that ever
+  carries accent — spend it here and nowhere else in the bar (§1.3). Its tooltip names
+  the way out (`Alt+M`), because a filled window has no other visible exit.
+- **Layout menu:** clicking the chip opens a 260px popover above the bar —
+  `--surface-overlay`, 1px `--border-default`, `--radius-md`, `--shadow-2`, the menu
+  language of §4 at elevation 2. `position: fixed`, because the status bar clips its
+  overflow. Contents, top to bottom: an 11px uppercase `Layouts` label, one 28px row per
+  built-in layout, a `Saved` label and one row per saved layout with a 24px `×` that
+  turns `--error` on hover, and a hairline-separated footer holding a 26px name field and
+  one outline **Save** button.
+- The chip is a mouse path to everything the QuickBar's **Layouts** section already
+  reaches (§6.5), and `shortcuts.md` can bind any layout by name
+  (`docs/shortcuts.md`). Nothing here is reachable only one way.
+- A layout that could not be restored — a stale entry, a corrupt file — resolves to the
+  default arrangement plus **one** warning toast (§6 toasts). Never a blank window, and
+  never a modal: losing an arrangement is not worth interrupting for.
+
+### 6.10 Empty states
 - Centered, max-width 260px. Icon 32px, 1.5px stroke, `--text-tertiary`. Title 14px/600
   `--text-secondary`; hint 12px `--text-tertiary`; optional single action as `--accent`
   link or one outline button — never a filled button in an empty state.

@@ -1,0 +1,113 @@
+/* Layout chip + layout menu (DESIGN.md §6.9). Reuses the status-chip anatomy
+   from §6.4 and the menu surface from §4 — no new colours, no new elevation. */
+
+.wb-layout-status {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.wb-layout-chip {
+  gap: var(--space-2);
+  max-width: 140px;
+  border: 1px solid transparent;
+}
+
+.wb-layout-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Focus mode is a *state of the window*, so the chip states it in the one place
+   chrome is allowed to spend accent: filled, not a dot beside a neutral label. */
+.wb-layout-chip.is-focused {
+  background: var(--accent-muted);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.wb-layout-chip-label {
+  min-width: 0;
+}
+
+/* Fixed, not absolute: `.wb-statusbar` clips its overflow, so a popover
+   anchored inside it would be cut off at the bar's 24px. */
+.wb-layout-menu {
+  position: fixed;
+  right: var(--space-4);
+  bottom: 28px;
+  width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--space-2) 0 var(--space-4);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  z-index: 151;
+  animation: wb-menu-in var(--duration-2) var(--ease-standard);
+}
+
+.wb-layout-menu-label {
+  padding: var(--space-3) var(--space-5) var(--space-2);
+  color: var(--text-tertiary);
+}
+
+.wb-layout-row {
+  display: flex;
+  align-items: center;
+}
+
+.wb-layout-row .wb-menu-item {
+  min-width: 0;
+}
+
+.wb-layout-delete {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-right: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.wb-layout-delete:hover {
+  background: var(--surface-hover);
+  color: var(--error);
+}
+
+.wb-layout-save {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) 0;
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-layout-save-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-3);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--type-sm-size);
+}
+
+.wb-layout-save-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.wb-layout-save-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}

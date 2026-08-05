@@ -58,10 +58,13 @@ command is one a user would reach for without looking.
 |---|---|
 | `panel` | A dockview panel. `defaultLocation.area` is `center` \| `left` \| `right` \| `bottom` (`size` = initial width, or height for `bottom`). `openByDefault: false` keeps it out of the startup layout until a command opens it — and gives its tab a close button, since that tab is its only way back. `singleton: false` allows more than one instance. `badge` is one component rendered after the tab title (dot-only, DESIGN.md §6.4). |
 | `documentView` | Renders one `OpenFile` kind inside the editor area (`kind`, `component`, `hostClassName`, `keepMounted`). This is how Office panels attach — the editor area asks the registry, not a list of extensions. |
-| `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row. |
+| `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row; `category` puts it in its own QuickBar section. |
+| `dynamicCommands` | `{ key, build }` for commands whose *set* changes while the app runs — one row per saved layout, and one per recent workspace later. `build` is called only when `key()` changes, because the merged command list is read on every keystroke. **Dynamic commands never carry a chord**: a chord has to be static to be pinned by a test and to lose a `shortcuts.md` collision deterministically. |
 | `shortcuts` | `{ commandId: ["Alt+X", …] }` — the tool's whole keymap in one block. A key that names no command of that tool fails `registry.test.ts` rather than silently binding nothing. Take an `Alt` chord only if the command earns it (see above). |
 | `statusContributions` | `{ region: "left" \| "center" \| "right", component }`. Rendered in registry order inside the region. |
 | `shortcutKinds` | `["shell"]` or `["prompt"]` — the `shortcuts.md` kinds this panel hosts. An entry of that kind brings this panel forward before it is inserted. |
+| `shortcutActions` | `{ layout: (body) => … }` — a `shortcuts.md` kind this tool *carries out* instead of inserting. Only one kind uses it today (`layout`), and only because moving panels is all it can do; if you are adding a kind that touches a file, a shell or an agent, you are breaking the rule that a workspace file may add rows and never actions (`docs/shortcuts.md`). |
+| `onDockReady` | The live `DockviewApi`, once, when the dock exists (and `null` when it goes away) — for a tool that operates on the dock rather than living in it. The layout system is the one; anything else should be reaching for `openPanel`. |
 | `when` | Takes the whole tool out: no panel, no commands, no status items. **Asked once**, when the registry is first derived, and remembered — gate on build- or boot-time facts (a flag, `isTauri()`). Anything that changes while the app runs belongs on a command's own `when` or inside the panel. |
 | `icon` | Optional glyph in the panel tab. |
 
@@ -85,6 +88,11 @@ Agent-facing tools are *not* here — see below.
 - **Every shipped chord is pinned to the command it runs** (`registry.test.ts`). Moving
   one means editing that table — which is the deliberate act it should be, since the
   alternative is a reflex that quietly starts doing something else.
+- **A panel your tool contributes may be missing when a saved layout names it.** Layouts
+  persist per workspace, so a tool removed (or renamed, or `when`-gated) leaves its panel
+  id behind in `.workbench/layouts.json`. The layout system drops it and keeps the rest
+  (`ui/src/layouts.ts`); what you owe it is a **stable `id`** — renaming one is a rename
+  of the user's saved arrangement too.
 
 ## Agent-facing tools
 
@@ -100,6 +108,23 @@ request) and your tool's own ceiling on the serialized size of a representative 
 Size that one from the measured payload plus a margin you can state — a number with room
 for anything is a test that cannot fail. Prefer compact JSON or plain text over
 pretty-printed JSON; prefer a thin call over a wrapped API.
+
+## State
+
+zustand, always — it is the only state library, and adding a second one is not a call a
+tool gets to make. **Where** the store lives is the call you do get to make, and it has
+one rule: state nothing outside your module reads may live in a `create()` instance in
+your own module; state another tool reads is app-wide and belongs in `ui/src/store.ts`.
+
+This is the registration rule again, not an exception to it. A tool that puts its own
+state in `store.ts` has put a capability back into a shared file — the same collision
+between parallel lanes that keeping `App.tsx` and `commands.ts` capability-free exists to
+prevent, arriving by a different door. The layout system (`ui/src/panels/Layouts.tsx`)
+is the first tool to own one; `useStore` is still what it reaches for to raise a toast,
+because toasts genuinely are app-wide.
+
+If your tool's state starts being read from outside, that is the signal to move it to
+`store.ts` — not to export a getter from your module.
 
 ## Styling
 

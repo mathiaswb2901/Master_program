@@ -16,7 +16,13 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
   (both: the shell's `beforeDevCommand` starts Vite from `ui/`), then
   `npm run tauri dev` — native window; starts Vite itself and either attaches to
   a backend already on 8787 or spawns one.
-  Gates: `cd desktop/src-tauri && cargo fmt --check && cargo build && cargo test`
+  Gates: `cd desktop/src-tauri && cargo fmt --check && cargo build && cargo test`.
+  `cargo test` includes the Office-host window tests: they create real windows and
+  start the synthetic guest process, so they need a desktop session (any normal
+  Windows login). The two that additionally need the *foreground* — the real-click
+  and hang-isolation measurements — are `#[ignore]`d; run them with
+  `cargo test -- --ignored --nocapture`. `WORKBENCH_HOST_DEMO=1 cargo run` docks a
+  synthetic guest in the running shell, and `=hang` wedges it a few seconds later.
 
 ## Think big (standing directive)
 
@@ -33,13 +39,24 @@ ruling it out.
   `mypy --strict` and ruff must pass; new behavior ships with tests (unit + integration; Playwright E2E per milestone).
 - Routers stay thin; logic lives in `services/`. structlog only — never `print`.
 - Disk is the single source of truth for files; all change notifications flow through the watcher bus.
-- UI: follow `DESIGN.md` tokens; zustand is the only state store; no new dependencies without justification.
+- UI: follow `DESIGN.md` tokens; no new dependencies without justification.
+- **zustand is the only state library, and `ui/src/store.ts` is the default home for
+  state.** A capability may own a second `create()` instance *in its own module* on one
+  condition: nothing outside that module reads it. That is not a loophole — it is the
+  same rule as the one above. State only one tool uses, living in a shared file, is
+  exactly the coupling that makes parallel lanes collide, and `store.ts` naming a
+  capability is `App.tsx` naming a capability by another route. State two tools share is
+  app-wide by definition and belongs in `store.ts`; a tool that starts sharing moves
+  there. Never a second state *library*, and never a store outside the module that owns
+  it. The layout system (`ui/src/panels/Layouts.tsx`) is the first of these.
 - A new capability **registers itself** — a `WorkbenchTool` descriptor in its own module
   (panel, commands, default chords, status items) plus one line in `ui/src/tools.ts`.
   Never add a panel or a panel-specific command by editing `App.tsx`, `commands.ts` or
   `StatusBar.tsx`: those files name no capability, and keeping it that way is what lets
   parallel lanes land panels without colliding. A tool takes an `Alt` chord only if the
   command earns it — registered chords beat `shortcuts.md`, which may bind nothing else.
+  A tool's `id` is a **stable contract**: saved layouts (`.workbench/layouts.json`)
+  reference panels by it, so renaming one renames the user's saved arrangement too.
   See `docs/tools.md`.
 - Windows-first: paths via `pathlib`, PTYs via pywinpty, test on PowerShell.
 - The shell (`desktop/src-tauri/`) owns only what a browser tab cannot do: the
