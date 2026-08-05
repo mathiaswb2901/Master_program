@@ -2,7 +2,7 @@ import type { WebglAddon } from "@xterm/addon-webgl";
 import type { Terminal as XTerm } from "@xterm/xterm";
 
 /**
- * Put a terminal on the GPU, and survive the two ways that fails.
+ * Put a terminal on the GPU, and survive every way that fails.
  *
  * xterm's default is the **DOM renderer** — one styled `<span>` per run of
  * cells, re-laid-out by the browser on every frame. It is xterm's slowest path
@@ -39,8 +39,8 @@ import type { Terminal as XTerm } from "@xterm/xterm";
  *    context loss on the live canvas and asserts the handover.
  *
  * Every path ends at the same place: a slower terminal that still works. The
- * caller learns the `kind` that actually took effect rather than the one it
- * asked for.
+ * caller learns from `ready` which renderer actually took effect, rather than
+ * the one it asked for.
  */
 export type RendererKind = "webgl" | "dom";
 
