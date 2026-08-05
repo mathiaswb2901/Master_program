@@ -7,8 +7,7 @@ import tempfile
 from pathlib import Path
 
 from workbench_server.models.files import MAX_TEXT_FILE_BYTES, TreeNode
-
-IGNORED_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".ruff_cache"}
+from workbench_server.services.ignore import is_ignored_dir
 
 
 class PathOutsideWorkspaceError(Exception):
@@ -49,7 +48,7 @@ class Workspace:
                 (
                     self._node(child)
                     for child in path.iterdir()
-                    if not (child.is_dir() and child.name in IGNORED_DIRS)
+                    if not (child.is_dir() and is_ignored_dir(child))
                 ),
                 key=lambda n: (n.kind == "file", n.name.lower()),
             )

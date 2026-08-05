@@ -48,6 +48,7 @@ One Python process, one webview window, one optional local Office engine.
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `services/workspace.py` | path jail, atomic writes, hashing, tree |
 | `services/watcher.py` | watchfiles -> bus |
+| `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |

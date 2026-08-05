@@ -3,8 +3,10 @@
  *
  * Created once per `playwright test` run and seeded with everything the
  * journeys need: a folder to create files in, a text file the fake agent can
- * Read, an office document (for degraded mode) and a `.workbench/shortcuts.md`
- * carrying one working shortcut and one malformed entry.
+ * Read, an office document (for degraded mode), a `.workbench/shortcuts.md`
+ * carrying one working shortcut and one malformed entry, and the two folders
+ * named `target` that journey 3 uses to prove build caches are skipped by their
+ * `CACHEDIR.TAG` rather than by their name.
  *
  * Why two env vars: `playwright.config.ts` is loaded by the runner *and* by
  * every worker process, so creating the directory unconditionally would give
@@ -59,6 +61,20 @@ export const SHORTCUT_BODY = "echo e2e-shortcut-marker";
 /** Name of the deliberately malformed entry, echoed in the problems toast. */
 export const BROKEN_SHORTCUT_NAME = "Broken entry";
 
+/**
+ * Two folders called `target`, seeded to be told apart only by `CACHEDIR.TAG`.
+ *
+ * `BUILD_CACHE_DIR` is a cargo build tree, down to the path that put this here:
+ * a Tauri build left `popup.toml` twelve levels deep and the QuickBar offered it
+ * as a file to open. `OWN_TARGET_FILE` is the other half — an analyst's folder
+ * of target data, same name, no tag, and its files must stay reachable.
+ */
+export const BUILD_CACHE_DIR = "desktop/src-tauri/target";
+export const BUILD_ARTIFACT = "debug/build/tauri-7b7005a/out/permissions/menu/commands/popup.toml";
+export const OWN_TARGET_FILE = "analysis/target/se3-targets-2026.csv";
+/** Cache Directory Tagging Specification — https://bford.info/cachedir/ */
+const CACHEDIR_TAG = "Signature: 8a477f597d28d172789f06886806bc55\n";
+
 const SHORTCUTS_FILE = `# E2E shortcuts
 
 ## ${SHORTCUT_NAME}
@@ -86,6 +102,20 @@ function seed(root: string): void {
   fs.writeFileSync(path.join(root, DOCX_FILE), "not a real document\n", "utf-8");
   fs.mkdirSync(path.join(root, ".workbench"));
   fs.writeFileSync(path.join(root, ".workbench", "shortcuts.md"), SHORTCUTS_FILE, "utf-8");
+  seedTargetFolders(root);
+}
+
+/** The build cache that must vanish, and the folder of the same name that must not. */
+function seedTargetFolders(root: string): void {
+  const cache = path.join(root, ...BUILD_CACHE_DIR.split("/"));
+  const artifact = path.join(cache, ...BUILD_ARTIFACT.split("/"));
+  fs.mkdirSync(path.dirname(artifact), { recursive: true });
+  fs.writeFileSync(path.join(cache, "CACHEDIR.TAG"), CACHEDIR_TAG, "utf-8");
+  fs.writeFileSync(artifact, '[[permission]]\nidentifier = "allow-popup"\n', "utf-8");
+
+  const own = path.join(root, ...OWN_TARGET_FILE.split("/"));
+  fs.mkdirSync(path.dirname(own), { recursive: true });
+  fs.writeFileSync(own, "hour,mw\n2026-01-01T00:00,4.2\n", "utf-8");
 }
 
 /** Validate a requested workspace: it must be an empty or nonexistent directory. */
