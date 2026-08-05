@@ -23,16 +23,20 @@ import { FIXTURE } from "./fixture";
 import { installTelemetry, readTelemetry, record, round, sampleFrames } from "./instrument";
 
 /**
- * Measured 2026-08-05 on the author's machine, on the 5,005-file fixture, with
- * four agent panes and two terminal panes already on screen:
+ * Measured 2026-08-05 on the author's machine, on the 5,005-file fixture, in a
+ * window of **10 panes** (4 agent sessions, 2 terminals, plus the four defaults):
  *
- * * split (dockview rebuilds the grid, React mounts a chat): see the recorded
- *   line — the number this file exists to publish;
- * * pane navigation (eight directional moves): likewise.
+ * * building the fleet — six splits, four of them a round trip that creates a
+ *   server session: **1,711 ms**;
+ * * the measured **split** (dockview rebuilds the grid, React mounts a chat):
+ *   p95 frame **33.3 ms**, longest **33.3 ms** — one dropped frame at 60 Hz;
+ * * **pane navigation**, eight directional moves: p95 **16.7 ms**, longest
+ *   **16.8 ms**, **0 of 24** frames over 50 ms — the frame rhythm is untouched;
+ * * slowest input event over the whole run: **64 ms** (the split itself).
  *
- * Both constants are sized well above those as "the window looked frozen"
- * guards, not as the budget. The budget is the recorded line, and the next lane
- * that touches the dock is expected to compare against it.
+ * The two constants below are sized well above those as "the window looked
+ * frozen" guards, not as the budget. The budget is the recorded line, and the
+ * next lane that touches the dock is expected to compare against it.
  */
 const FROZEN_FRAME_MS = 1_000;
 /** Building the fleet is six splits, four of which create a server session. */
