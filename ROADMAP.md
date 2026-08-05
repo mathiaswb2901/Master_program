@@ -203,10 +203,30 @@ milliseconds report**. First fix landed against it: the agent-session folder lis
 the whole workspace to read three names, concurrently with the real tree request — one
 `os.scandir` now, and the tree is clickable ~490 ms sooner.
 
+**Monaco off the entry chunk** (landed, PR 2 of this track): the eager entry chunk was
+**88% Monaco**, reached through the `monaco-editor` barrel that `main.tsx` imported
+statically — 1,030 kB gzipped that a cold start had to download, parse and evaluate before
+it could paint, whether or not a file was ever opened. It is now a hand-picked build
+(`ui/src/monacoBundle.ts` — `edcore.main` plus the 22 basic-language grammars the
+extension table can actually name, and JSON as the only language *service*) behind one
+dynamic import, mounted through `React.lazy` inside the editor panel rather than as the
+panel, and warmed on `requestIdleCallback` once the workspace tree has landed. `main.tsx`
+also stopped awaiting `window.load` — first paint no longer waits for the last webfont.
+Measured on the pinned fixture, four runs each, medians: entry chunk **1,030 → 191 kB**
+gzipped, cold **FCP 618 → 160 ms**, **DCL 434 → 89 ms**, tree rows **1,566 → 903 ms**,
+warm FCP 158 → 84 ms — and first file open **unchanged at ~150 ms**, which is the whole
+point of the prefetch (without it the same click costs ~700 ms). Layout shift stayed 0.003,
+so the font gate was buying nothing. Two side effects worth knowing: the eager stylesheet
+went 225 → 92 kB with Monaco's CSS following its chunk, and dropping the standalone
+TypeScript service removed 10 false "cannot find module" squiggles from this repo's own
+`store.ts`. The line is held by `ui/e2e/perf/bundle.spec.ts`, which reads rollup's module
+attribution and fails if any `node_modules/monaco-editor` module is back in the entry chunk.
+
 **Queued**: the watcher protocol (twenty file changes cost twenty full walks and 9.4 MB of
 JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptance
-criterion), Monaco off the entry chunk, the terminal's renderer and frame coalescing, and
-a virtualised file tree.
+criterion), the terminal's renderer and frame coalescing, and a virtualised file tree —
+the last two now the largest things left in the entry chunk (xterm 285 kB, dockview-core
+423 kB attributed) as well as the reason a *row* still costs ~900 ms.
 
 **Motion, and a hard interlock.** The track is not only speed: an instrument that moves
 *well* reads as fast even when it is not. The **motion vocabulary** — the durations,

@@ -1,19 +1,32 @@
-import Editor, { type OnMount } from "@monaco-editor/react";
 import type { IDockviewPanelProps } from "dockview";
-import { Fragment, useEffect } from "react";
+import { Fragment, lazy, Suspense, useEffect } from "react";
 
 import { focusPanel } from "../dock";
-import {
-  editorPathProp,
-  languageForPath,
-  MONO_FONT,
-  monacoThemeName,
-  setActiveEditor,
-} from "../monaco";
+import { loadMonaco, prefetchMonaco } from "../monaco";
 import { documentViewFor, documentViews, type WorkbenchTool } from "../registry";
 import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
 import { TOOLS } from "../tools";
+
+/**
+ * Monaco arrives on the first text file, not at startup.
+ *
+ * `React.lazy` rather than a mechanism of our own — and at *this* level rather
+ * than on the tool's registered `panel.component`, deliberately. The editor
+ * panel is in the startup layout, so dockview asks for its component during the
+ * first render either way; lazy-loading the panel would defer nothing and would
+ * hand dockview a component that suspends with no boundary around it. The split
+ * that pays is inside the panel, between the chrome (instant) and the editor
+ * (expensive), which is why the registry needed no change to allow this.
+ *
+ * The factory awaits `loadMonaco` before importing the surface so that
+ * `MonacoEnvironment`, the `@monaco-editor/react` loader and the workbench
+ * theme are all configured before the first `<Editor>` mounts.
+ */
+const CodeEditor = lazy(async () => {
+  await loadMonaco(useStore.getState().theme);
+  return import("./CodeEditor");
+});
 
 /** Same marker as the tree row, for a tab the user has not looked at yet: an
  * agent can change a file that is open behind the active one. */
@@ -133,7 +146,6 @@ function ConflictBar({ file }: { file: OpenFile }) {
 export function EditorAreaPanel(_props: IDockviewPanelProps) {
   const openFiles = useStore((s) => s.openFiles);
   const activePath = useStore((s) => s.activePath);
-  const theme = useStore((s) => s.theme);
   const active = openFiles.find((f) => f.path === activePath) ?? null;
   // What renders a non-text buffer is a registry question, not a list of file
   // kinds here: the Office tool claims `office`, and the native Office host
@@ -141,15 +153,20 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
   const views = documentViews(TOOLS);
   const activeView = active === null ? null : documentViewFor(TOOLS, active.kind);
 
-  useEffect(() => () => setActiveEditor(null), []);
-
-  const onMount: OnMount = (editor, monaco) => {
-    setActiveEditor(editor);
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      const s = useStore.getState();
-      if (s.activePath) void s.saveFile(s.activePath);
-    });
-  };
+  // Warm the editor chunk, but not until the window has finished starting.
+  //
+  // Mounting is the wrong moment, and it was measured to be: between first
+  // paint and the workspace listing arriving the main thread is *idle*, so
+  // `requestIdleCallback` fires immediately and a 3.3 MB parse lands on top of
+  // the tree render — a warm launch went from 662 ms to a clickable tree to
+  // 1,052 ms. The tree is the last thing the launch path waits for, so its
+  // arrival is the signal that the editor's bytes are now free to fetch. Two
+  // conditions, both necessary: this panel exists (a saved layout without an
+  // editor warms nothing) and the launch is over.
+  const workspaceLoaded = useStore((s) => s.tree !== null);
+  useEffect(() => {
+    if (workspaceLoaded) prefetchMonaco(useStore.getState().theme);
+  }, [workspaceLoaded]);
 
   if (openFiles.length === 0) {
     return (
@@ -206,29 +223,12 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
         {active === null || activeView !== null ? null : active.loadError !== null ? (
           <div className="wb-editor-message">Cannot open {active.name}: {active.loadError}</div>
         ) : (
-          <Editor
-            path={editorPathProp(active.path)}
-            defaultValue={active.buffer}
-            defaultLanguage={languageForPath(active.path)}
-            theme={monacoThemeName(theme)}
-            onMount={onMount}
-            onChange={(value) => {
-              if (value !== undefined) useStore.getState().updateBuffer(active.path, value);
-            }}
-            loading={<div className="wb-editor-message">Loading editor…</div>}
-            options={{
-              fontSize: 13,
-              lineHeight: 20,
-              fontFamily: MONO_FONT,
-              fontLigatures: false,
-              minimap: { enabled: false },
-              automaticLayout: true,
-              scrollBeyondLastLine: false,
-              fixedOverflowWidgets: true,
-              padding: { top: 8, bottom: 8 },
-              renderLineHighlight: "line",
-            }}
-          />
+          // Same message the `<Editor>`'s own `loading` prop shows, so the two
+          // waits a first open can involve — fetching the chunk, then creating
+          // the editor — read as one.
+          <Suspense fallback={<div className="wb-editor-message">Loading editor…</div>}>
+            <CodeEditor file={active} />
+          </Suspense>
         )}
       </div>
     </div>
