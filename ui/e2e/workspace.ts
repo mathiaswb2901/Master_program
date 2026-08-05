@@ -22,6 +22,17 @@ import path from "node:path";
 
 export const WORKSPACE_ENV = "WB_E2E_WORKSPACE";
 
+/**
+ * Prefix of the temp directory, and a constraint on every terminal marker in
+ * the suite: a PowerShell prompt prints its CWD, so this string plus a random
+ * suffix is on screen during terminal assertions. A marker that starts with
+ * `e2e-` can therefore be matched by the directory name itself — which is
+ * exactly how `e2e-5` failed CI against `workbench-e2e-54ic0X`. Markers use
+ * their own prefix (`term1-`, `term2-`); the random suffix has no hyphen, so
+ * it can never manufacture one.
+ */
+const WORKSPACE_PREFIX = "workbench-e2e-";
+
 /** Seeded file the fake agent's scripted `Read` targets (first file by name). */
 export const NOTES_FILE = "notes.md";
 export const NOTES_MARKER = "SE3 battery notes";
@@ -68,7 +79,7 @@ function seed(root: string): void {
 function ensureWorkspace(): string {
   const existing = process.env[WORKSPACE_ENV];
   if (existing !== undefined && existing !== "") return existing;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "workbench-e2e-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), WORKSPACE_PREFIX));
   seed(root);
   process.env[WORKSPACE_ENV] = root;
   return root;
