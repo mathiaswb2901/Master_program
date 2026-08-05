@@ -55,7 +55,7 @@ export function terminal(page: Page): Locator {
 
 /** Wait for a live PowerShell prompt, then type — no sleeps, no lost input. */
 export async function typeInTerminal(page: Page, text: string): Promise<void> {
-  await expect(terminal(page).locator(".xterm-rows")).toContainText("PS ", { timeout: 60_000 });
+  await expectTerminal(page, "PS ", 60_000);
   await terminal(page).locator(".xterm-screen").click();
   await page.keyboard.type(text);
 }
@@ -69,14 +69,24 @@ export async function runInTerminal(page: Page, command: string): Promise<void> 
 /**
  * Terminal contents as one flat string.
  *
- * `textContent`, not `innerText`: xterm wraps one shell line across several row
- * elements, and innerText would put a newline inside a word the shell considers
- * unbroken \u2014 enough to hide a marker from a substring search. Non-breaking
- * spaces are xterm's cell padding.
+ * Read from xterm's *buffer*, not from the DOM: the terminal draws to a canvas
+ * on the GPU renderer, so `.xterm-rows` (the element this used to scrape) only
+ * exists when WebGL was refused and the DOM renderer took over. The reader
+ * is hung on the host element by `panels/Terminal.tsx`, so the "which terminal"
+ * question is still answered by the same `:not(.is-hidden)` selector as before.
+ * Wrapped lines come back rejoined, which the old scrape could not do.
  */
 export async function terminalText(page: Page): Promise<string> {
-  const text = (await terminal(page).locator(".xterm-rows").textContent()) ?? "";
-  return text.replace(/\u00a0/g, " ");
+  return terminal(page)
+    .locator(".wb-terminal-host")
+    .evaluate((el: HTMLElement & { readTerminalText?: () => string }) =>
+      el.readTerminalText === undefined ? "" : el.readTerminalText(),
+    );
+}
+
+/** Wait until the visible terminal holds `text`. Polls the buffer, never sleeps. */
+export async function expectTerminal(page: Page, text: string, timeout = 30_000): Promise<void> {
+  await expect.poll(() => terminalText(page), { timeout }).toContain(text);
 }
 
 /** Start a fresh live agent session (fake mode) and return its chat box.
