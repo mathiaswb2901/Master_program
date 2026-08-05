@@ -168,11 +168,12 @@ the moat.
   calls, permission prompts and plan artifacts through the real factory/bridge seams —
   no Claude login, no tokens, deterministic frames.
 
-## Two tracks from here (2026-08-05)
+## Three tracks from here (2026-08-05)
 
-M4's Office work and the modularity work below are **parallel tracks, not a sequence**.
-They touch different parts of the codebase (Office: Rust host + Python COM bridge;
-Modular: the UI shell and registry), so both run at once. The milestone table stays as
+M4's Office work, the modularity work below and the performance work are **parallel
+tracks, not a sequence**. They touch different parts of the codebase (Office: Rust host +
+Python COM bridge; Modular: the UI shell and registry; Feel: the startup path, the
+watcher protocol and the motion layer), so they run at once. The milestone table stays as
 the record of scope; the tracks are how it gets built.
 
 - **Moat track** — the Office host sequence (M4): ~~domain layer with a fake backend~~
@@ -180,6 +181,46 @@ the record of scope; the tracks are how it gets built.
   → Excel. What no competitor can copy quickly.
 - **Modular track** — M5 below, reordered so the *seam* comes first. What the product
   feels like every day.
+- **Feel track** — performance and motion. What the product feels like every *second*.
+
+### Feel — performance and motion
+
+Opened 2026-08-05 on the owner's change request below. A productivity tool that hesitates
+breaks the user's flow, and no amount of capability buys that back.
+
+**Baseline, measured** (2026-08-05, author's machine, 5,005-file workspace — recorded so
+nobody has to measure it again): launch **2.7–2.9 s**; file tree with rows at **1.6 s**;
+the entry chunk is **88% Monaco**; the terminal runs on xterm's **DOM renderer**; a 1.5 MB
+terminal burst arrives as **21,785 WebSocket frames**. The lane's own reproducible
+numbers, on the generated fixture, are in `ui/e2e/perf/*.spec.ts` next to each budget.
+
+**The lane** (landed, PR 1 of this track): a generated 5,005-file fixture
+(`server/tests/perf_fixture.py`), work-shaped budgets in `server/tests/test_perf_budgets.py`,
+a separate Playwright config (`ui/playwright.perf.config.ts`, `npm run perf`) collecting
+navigation/paint timing, event timing at `durationThreshold: 0`, long tasks, long
+animation frames and rAF intervals, and a CI job where the **counts block and the
+milliseconds report**. First fix landed against it: the agent-session folder list walked
+the whole workspace to read three names, concurrently with the real tree request — one
+`os.scandir` now, and the tree is clickable ~490 ms sooner.
+
+**Queued**: the watcher protocol (twenty file changes cost twenty full walks and 9.4 MB of
+JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptance
+criterion), Monaco off the entry chunk, the terminal's renderer and frame coalescing, and
+a virtualised file tree.
+
+**Motion, and a hard interlock.** The track is not only speed: an instrument that moves
+*well* reads as fast even when it is not. The **motion vocabulary** — the durations,
+easings and transition primitives, as `DESIGN.md` tokens — must land **before** M5 item 2
+(the layout system). Panel transitions written first and animated later are panel
+transitions that never get animated; born with the vocabulary, every later panel inherits
+it for free. This is a sequencing constraint between two tracks, so it is stated here
+rather than inside either.
+
+**Exit criterion**, in the budgets' own terms: on the 5,005-file fixture, cold launch
+reaches a clickable file tree **under 800 ms**; twenty watcher events cost **zero** full
+tree walks; expanding the 2,000-file directory costs **no frame over 100 ms**; and every
+`@wallclock` ceiling in the perf lane has been ratcheted down to ~1.5x its measured value
+rather than the ~2.5x they start at.
 
 **Why the registry goes first, before any other panel.** Every capability still queued —
 the Office host panel, the Mission Control board, the validation review panel, the
@@ -455,6 +496,12 @@ Build for real external users, not just the author. Consequences, tracked as wor
   bar for the bundle → `CLAUDE.md` standard + M4 carryover. See Decisions log for the
   measurements behind (1) and (4).
 
+- 2026-08-05 — **It has to feel instant** (user): the app has "an old sluggish feel"; it
+  must feel like a MacBook or an iPhone — "insanely fast and smooth" — because this is a
+  productivity tool and latency breaks flow. Speed is therefore a gate, not a polish
+  item: budgets that fail a build, not a benchmark someone runs. → **Feel track** above,
+  opened with the perf lane and the double-walk fix; motion vocabulary interlocked ahead
+  of M5's layout system.
 - 2026-08-05 — **Modularity is the plan, not a polish item** (user): after using the
   app, the gaps named as "we don't have it" — fixed layout with no full-screen/focus
   mode, no layout persistence, panels hardcoded in `App.tsx`, no workspace switching —

@@ -12,6 +12,12 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
   `npm run lint` — eslint; `npm run test` — vitest; `npm run build` — type-check + bundle
 - `cd ui && npm run e2e` — Playwright: builds the UI, then drives it against a real
   server in a temp workspace with `WORKBENCH_FAKE_AGENT=1` (`ui/e2e/`, chromium only)
+- `cd ui && npm run perf` — the Feel perf lane: same production build against a
+  **generated 5,005-file workspace** (`ui/playwright.perf.config.ts`, `ui/e2e/perf/`).
+  A bare run builds its fixture in a temp directory and removes it (with the
+  `-projects` sibling) on the way out; `WB_PERF_WORKSPACE=<dir>` reuses a fixture
+  instead of rebuilding it, and a directory you named is never one the lane deletes.
+  The server-side budgets are plain pytest (`server/tests/test_perf_budgets.py`)
 - Desktop shell: `cd desktop && npm install && npm --prefix ../ui install` once
   (both: the shell's `beforeDevCommand` starts Vite from `ui/`), then
   `npm run tauri dev` — native window; starts Vite itself and either attaches to

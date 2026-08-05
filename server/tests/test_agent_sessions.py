@@ -640,6 +640,59 @@ class TestSessionIndex:
             index.read_transcript(tmp_path, "../../etc/passwd")
 
 
+# ---- which folders the session list looks in --------------------------------
+
+
+class TestSessionFolders:
+    """`GET /api/agents/sessions` reports history per first-level folder.
+
+    Which folders it looks in used to come from a full recursive walk of the
+    workspace (`workspace.tree()`), and now comes from one `os.scandir`
+    (`Workspace.top_level_dirs`). These are the behaviours that must not have
+    changed with it — the perf side of the same change is in
+    `test_perf_budgets.py`.
+    """
+
+    def _transcript(self, projects: Path, folder: Path, session_id: str, text: str) -> None:
+        project = projects / encode_project_dir(folder.resolve())
+        project.mkdir(parents=True, exist_ok=True)
+        (project / f"{session_id}.jsonl").write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": text}}),
+            encoding="utf-8",
+        )
+
+    def test_history_in_a_first_level_folder_is_grouped_under_it(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "ws"
+        folder = workspace / "se3"
+        folder.mkdir(parents=True)
+        projects = tmp_path / "projects"
+        self._transcript(projects, workspace, "root-1", "at the root")
+        self._transcript(projects, folder, "se3-1", "improve the forecast")
+
+        settings = Settings(workspace_root=workspace, claude_projects_dir=projects)
+        with TestClient(create_app(settings)) as client:
+            groups = client.get("/api/agents/sessions").json()
+
+        by_folder = {g["folder"]: [s["session_id"] for s in g["sessions"]] for g in groups}
+        assert by_folder == {"": ["root-1"], "se3": ["se3-1"]}
+
+    def test_a_build_cache_is_not_a_folder_the_list_looks_in(self, tmp_path: Path) -> None:
+        """A tagged cache is invisible to the tree, so it is invisible here too —
+        otherwise `target/` would appear in the session list of every Rust repo."""
+        workspace = tmp_path / "ws"
+        cache = workspace / "target"
+        cache.mkdir(parents=True)
+        (cache / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+        projects = tmp_path / "projects"
+        self._transcript(projects, cache, "cached-1", "should not be listed")
+
+        settings = Settings(workspace_root=workspace, claude_projects_dir=projects)
+        with TestClient(create_app(settings)) as client:
+            groups = client.get("/api/agents/sessions").json()
+
+        assert groups == []
+
+
 # ---- full WS pipeline -------------------------------------------------------
 
 

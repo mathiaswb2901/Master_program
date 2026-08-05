@@ -197,7 +197,7 @@ in-process calls where the model and the user dominate.
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
-| `services/workspace.py` | path jail, atomic writes, hashing, tree |
+| `services/workspace.py` | path jail, atomic writes, hashing, tree, `top_level_dirs` (one listing, no walk) |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
@@ -614,3 +614,32 @@ Format spec: `docs/shortcuts.md`.
    write followed by the user's own change, and the user's own saves, mark nothing).
    Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.
+5. **Perf lane** (`cd ui && npm run perf` — `ui/playwright.perf.config.ts`, its own
+   config so it can run the backend in its own workspace and keep its own report).
+   The same production build against a **generated 5,005-file workspace**
+   (`server/tests/perf_fixture.py`: a 12-level deep tree, one flat 2,000-file
+   directory, a 5,000-line source file, and a `CACHEDIR.TAG` build cache that must
+   stay invisible). Collects `PerformanceNavigationTiming`, paint entries,
+   `PerformanceObserver` on `event` (`durationThreshold: 0`), `longtask` and
+   `long-animation-frame`, plus a rAF frame sampler for continuous interactions
+   (`ui/e2e/perf/instrument.ts`).
+
+   Budgets are **work-shaped wherever possible**: how many directories a request
+   lists, how many full tree fetches twenty file changes cost — counts that are the
+   same number on a laptop and on a throttled runner, so they can gate a merge. The
+   server-side half of that is ordinary pytest (`server/tests/test_perf_budgets.py`,
+   which patches `os.scandir`/`Path.iterdir` and counts). Wall-clock budgets exist
+   too — cold launch, frame timing — but they carry the `@wallclock` tag and CI
+   records them instead of blocking on them. A budget that fails for reasons other
+   than the code gets switched off, and a switched-off budget defends nothing.
+
+   The lane is **disk-neutral**, which is not free when the fixture is 5,105 files:
+   a bare run builds it in a `mkdtemp` directory and removes it — along with the
+   `-projects` sibling the backend puts next to it — from a `process.on("exit")`
+   hook in `ui/e2e/perf/fixture.ts`. Not a Playwright `globalTeardown`: those run
+   *before* the `webServer` processes are stopped, and on Windows a directory that
+   is a live process's CWD, with a watcher handle on every folder inside it, cannot
+   be deleted. Ownership is the other half of the rule and lives in
+   `ui/e2e/perf/workspace.ts` — a `WB_PERF_WORKSPACE` a developer named is kept, a
+   temp directory this run created is not, and leftovers from a run killed before
+   its hook are swept by the next bare run once they are a day old.

@@ -133,3 +133,48 @@ class TestTree:
                 "children": None,
             }
         ]
+
+
+class TestTopLevelDirs:
+    """`Workspace.top_level_dirs` — one directory listing, the tree's own rules.
+
+    The agent-session folder list used to come from `tree()`: a full recursive
+    walk of the workspace to read the names sitting directly under the root.
+    This is the replacement, so what it owes is *parity* — the same names, in
+    the same order, with the same things hidden — for one `os.scandir`. The
+    count itself is budgeted in `test_perf_budgets.py`.
+    """
+
+    def test_names_the_visible_first_level_dirs_only(self, tmp_path: Path) -> None:
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "deeper").mkdir()  # second level: never listed
+        (tmp_path / "analysis").mkdir()
+        (tmp_path / "notes.md").write_text("x")  # a file is not a folder
+        assert Workspace(tmp_path).top_level_dirs() == ["analysis", "src"]
+
+    def test_order_matches_the_tree_the_user_is_looking_at(self, tmp_path: Path) -> None:
+        for name in ("Zeta", "alpha", "Beta"):
+            (tmp_path / name).mkdir()
+        ws = Workspace(tmp_path)
+        walked = [n.path for n in (ws.tree().children or []) if n.kind == "dir"]
+        assert ws.top_level_dirs() == walked == ["alpha", "Beta", "Zeta"]
+
+    def test_skips_noise_names_and_tagged_build_caches(self, tmp_path: Path) -> None:
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / ".git").mkdir()
+        cache = tmp_path / "target"
+        cache.mkdir()
+        (cache / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+        (tmp_path / "analysis").mkdir()
+        assert Workspace(tmp_path).top_level_dirs() == ["analysis"]
+
+    def test_a_folder_named_target_without_the_tag_is_kept(self, tmp_path: Path) -> None:
+        """The tag hides a directory; the name never does — same as the tree."""
+        (tmp_path / "target").mkdir()
+        assert Workspace(tmp_path).top_level_dirs() == ["target"]
+
+    def test_a_root_that_is_not_there_yields_no_folders_rather_than_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """The session list is not where a user should learn the workspace moved."""
+        assert Workspace(tmp_path / "not-there").top_level_dirs() == []

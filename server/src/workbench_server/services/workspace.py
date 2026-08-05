@@ -42,6 +42,32 @@ class Workspace:
     def tree(self) -> TreeNode:
         return self._node(self.root)
 
+    def top_level_dirs(self) -> list[str]:
+        """Names of the visible directories directly under the root.
+
+        One `os.scandir` of one directory — deliberately *not* `tree()`. Callers
+        that only need the first level (the agent-session folder list) were
+        walking the entire workspace to read it: on the 5,005-file perf fixture
+        that is 16 directory listings and 5,005 `is_dir` calls to learn three
+        names, and it ran concurrently with the real tree request on startup, so
+        the two contended for the same disk and the tree arrived roughly twice as
+        late. Budget: `server/tests/test_perf_budgets.py`.
+
+        Same visibility rules as `tree()` — noise names and `CACHEDIR.TAG` build
+        caches are skipped — and the same order, so the folder list reads as the
+        top of the tree the user is looking at.
+        """
+        try:
+            with os.scandir(self.root) as entries:
+                names = [
+                    entry.name
+                    for entry in entries
+                    if entry.is_dir(follow_symlinks=False) and not is_ignored_dir(Path(entry.path))
+                ]
+        except OSError:  # root vanished or is unreadable — no folders, not a crash
+            return []
+        return sorted(names, key=str.lower)
+
     def _node(self, path: Path) -> TreeNode:
         if path.is_dir():
             children = sorted(
