@@ -51,6 +51,17 @@ input {
   flex-direction: column;
 }
 
+/* Shell boot gate. The native window opens before the backend answers, so this
+   is what the first second or two looks like — instead of nothing at all. */
+.wb-boot {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: var(--type-sm-size);
+}
+
 .wb-dock {
   flex: 1;
   min-height: 0;

@@ -52,8 +52,13 @@ the moat.
 
 - **Office host panels**: real Word/Excel/PowerPoint docked into dockview via native
   window hosting; COM bridge so agents read/write the *live* open document; OnlyOffice
-  demoted to preview/diff/fallback. Requires the **Tauri shell** (a browser tab cannot
-  host native windows) — pulled forward from packaging into M4 core.
+  demoted to preview/diff/fallback. Required the **Tauri shell** (a browser tab cannot
+  host native windows) — pulled forward from packaging into M4 core; the shell
+  **landed** (`desktop/`, PR 1 of this track): native window, supervised backend
+  (attach-or-spawn, Job-Object reaping), and the two browser-only gaps below re-wired
+  natively. Still open here: the host panel itself, the COM bridge, and packaging —
+  the shell runs from source (`cd desktop && npm run tauri dev`); a bundled
+  installer that carries its own Python needs `tauri build` work not done yet.
 - ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
   Pydantic `PlanArtifact` → native clickable plan cards in chat (options, steps, file
   refs); decisions return to the agent as typed JSON; pending-plan replay on reconnect
@@ -74,10 +79,12 @@ the moat.
   settle + expand (`ToolSettled` frames), terminal tabs (N PTYs, kill the
   single-instance remount), file-tree CRUD wiring the endpoints that already exist,
   dirty-close confirmation + beforeunload guard, real session titles + live/disk dedupe.
-  *Known gap*: the beforeunload guard and the `document.title` attention badge are
+  ~~*Known gap*: the beforeunload guard and the `document.title` attention badge are
   browser-only — WebView2 honors neither on native window close/title, so the Tauri
-  shell task above must re-wire both natively (`onCloseRequested` → dirty-close modal;
-  window `setTitle` for the badge).
+  shell task above must re-wire both natively~~ — **resolved** with the shell:
+  `CloseRequested` is held and answered by the same confirm modal (across every dirty
+  buffer at once), and the badge sets the native window title. Both are reached through
+  `ui/src/shell.ts`, so the browser build keeps `beforeunload` and `document.title`.
 - ~~**shortcuts.md**: workspace `.workbench/shortcuts.md` + global file, merged, watched
   live; entries drive QuickBar commands, terminal snippets, chat prompt templates, and
   custom keybindings~~ **done** — format spec in `docs/shortcuts.md`. Entries *insert*

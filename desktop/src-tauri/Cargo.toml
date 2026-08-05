@@ -1,0 +1,30 @@
+[package]
+name = "workbench-desktop"
+version = "0.1.0"
+description = "Workbench desktop shell"
+authors = ["Workbench contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "workbench_desktop_lib"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# Pinned to Tauri 2.x's own `windows` major on purpose. A mismatch gives us a
+# *different* `HANDLE` type than the one Tauri hands out: it compiles, and then
+# handles silently stop referring to the same objects.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    # CreateJobObjectW takes SECURITY_ATTRIBUTES, which lives behind this one.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

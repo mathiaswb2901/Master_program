@@ -12,6 +12,9 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
   `npm run test` — vitest; `npm run build` — type-check + bundle
 - `cd ui && npm run e2e` — Playwright: builds the UI, then drives it against a real
   server in a temp workspace with `WORKBENCH_FAKE_AGENT=1` (`ui/e2e/`, chromium only)
+- Desktop shell: `cd desktop && npm run tauri dev` — native window; starts Vite
+  itself and either attaches to a backend already on 8787 or spawns one.
+  Gates: `cd desktop/src-tauri && cargo fmt --check && cargo build && cargo test`
 
 ## Think big (standing directive)
 
@@ -30,6 +33,10 @@ ruling it out.
 - Disk is the single source of truth for files; all change notifications flow through the watcher bus.
 - UI: follow `DESIGN.md` tokens; zustand is the only state store; no new dependencies without justification.
 - Windows-first: paths via `pathlib`, PTYs via pywinpty, test on PowerShell.
+- The shell (`desktop/src-tauri/`) owns only what a browser tab cannot do: the
+  native window, backend supervision, close guard, window title. Anything the UI
+  can do in a browser stays in `ui/`, behind `ui/src/shell.ts` — the app must run
+  unchanged in both hosts, and every shell call is a no-op in a browser tab.
 - Bug fixes start by reproducing the bug end-to-end, as close to how a user hits it as
   possible — then the fix. A unit test that fails is not a reproduction; it is a guess
   about where the bug lives. The E2E repro becomes the regression test.

@@ -82,3 +82,31 @@ export function DirtyCloseModal() {
     />
   );
 }
+
+/** The native window close, held while buffers are unsaved. A browser tab gets
+ * this from `beforeunload`; WebView2 ignores that, so the Tauri shell routes
+ * its `CloseRequested` through the same prompt (see `shell.ts`). One decision
+ * covers every dirty buffer — closing the window is not a per-tab act. */
+export function ShellCloseModal() {
+  const pending = useStore((s) => s.pendingShellClose);
+  const openFiles = useStore((s) => s.openFiles);
+  if (!pending) return null;
+  const dirty = openFiles.filter((f) => f.dirty);
+  const noun = dirty.length === 1 ? "file has" : "files have";
+  const resolve = (action: "save" | "discard" | "cancel"): void =>
+    void useStore.getState().resolveShellClose(action);
+  return (
+    <ConfirmModal
+      title="Close Workbench?"
+      message={`${dirty.length} ${noun} unsaved changes: ${dirty
+        .map((f) => f.name)
+        .join(", ")}.`}
+      actions={[
+        { label: "Save and close", kind: "primary", onClick: () => resolve("save") },
+        { label: "Discard changes", kind: "outline", onClick: () => resolve("discard") },
+        { label: "Cancel", kind: "ghost", onClick: () => resolve("cancel") },
+      ]}
+      onDismiss={() => resolve("cancel")}
+    />
+  );
+}
