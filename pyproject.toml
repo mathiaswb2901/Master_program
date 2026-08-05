@@ -44,7 +44,7 @@ package = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["server/src", "server/tests"]
+src = ["server/src", "server/tests", "scripts/dev"]
 
 [tool.ruff.lint]
 select = [
@@ -64,8 +64,8 @@ select = [
 
 [tool.mypy]
 strict = true
-files = ["server/src", "server/tests"]
-mypy_path = "server/src"
+files = ["server/src", "server/tests", "scripts"]
+mypy_path = ["server/src", "scripts/dev"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 
@@ -75,5 +75,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["server/tests"]
+# scripts/dev holds standalone dev tooling (no venv needed to run it), but its
+# tests live with every other test; this is what makes `import warm_worktree` work.
+pythonpath = ["scripts/dev"]
 asyncio_mode = "auto"
 addopts = "-q"

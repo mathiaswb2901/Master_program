@@ -12,9 +12,24 @@ primary target today; macOS/Linux support is tracked in ROADMAP.md.
 ```bash
 uv sync --dev
 cd ui && npm install && cd ..
+cd desktop && npm install && cd ..   # only for the native shell; `npm run tauri dev`
+                                     # fails with "tauri is not recognized" without it
 uv run workbench-server        # backend on :8787
 cd ui && npm run dev           # UI on :5173 (proxies to backend)
 ```
+
+Re-run `npm install` in a package after pulling a branch that adds a dependency there.
+A stale `ui/node_modules` does not report itself as stale — it surfaces as a Vite
+`Failed to resolve import ...` error that reads like a broken import path.
+
+Working in a `git worktree`? Run `python scripts/dev/warm_worktree.py` inside the new
+worktree instead of installing from scratch: when its lockfiles are byte-identical to
+the main checkout's it links `node_modules` across (a Windows directory junction — no
+admin rights needed) and syncs Python, turning a ~10 minute setup into a few seconds.
+The linked tree is **shared with the main checkout**, so never run `npm ci`/`npm install`
+inside a warmed worktree — unlink first (`cmd /c rmdir ui\node_modules`). The script's
+module docstring has the full rationale, and it records what it linked in
+`.warm-worktree.json`.
 
 Optional: agent features need a Claude subscription login (`claude login` /
 `claude setup-token`) or `ANTHROPIC_API_KEY`. Office editing needs a local

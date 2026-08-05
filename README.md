@@ -44,6 +44,9 @@ uv run workbench-server        # backend on 8787; the workspace is its CWD
 ```
 
 Frontend in a browser tab: `cd ui && npm install && npm run dev` (Vite, port 5173).
+`ui/` and `desktop/` have separate dependency trees — install in both, and re-run
+`npm install` after pulling a branch that adds one. A stale `node_modules` announces
+itself as a Vite `Failed to resolve import` error rather than as a missing dependency.
 
 The real thing — a native window:
 

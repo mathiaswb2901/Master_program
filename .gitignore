@@ -11,6 +11,9 @@ build/
 # Node / UI
 node_modules/
 ui/dist/
+# Written by scripts/dev/warm_worktree.py: which node_modules dirs in this
+# worktree are links to the main checkout (per-worktree, never committed)
+.warm-worktree.json
 
 # Playwright E2E output (reports, traces, per-run artifacts)
 ui/playwright-report/

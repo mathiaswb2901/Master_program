@@ -10,6 +10,17 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
 - `uv run workbench-server` — run backend (port 8787)
 - UI: `cd ui && npm install` once, then `npm run dev` (Vite, port 5173);
   `npm run lint` — eslint; `npm run test` — vitest; `npm run build` — type-check + bundle
+- Re-run `npm install` in a package after pulling a branch that adds a dependency
+  there: a stale `ui/node_modules` surfaces as a Vite `Failed to resolve import`
+  error, not as a dependency error.
+- **Fresh worktree: `python scripts/dev/warm_worktree.py`** (seconds, not minutes).
+  Junctions `ui/`+`desktop/` `node_modules` to the main checkout when the lockfiles
+  are byte-identical, else runs `npm ci` there; then `uv sync --dev`. Stdlib only, so
+  it runs before any venv exists; records what it linked in `.warm-worktree.json`.
+  That tree is **shared with the main checkout, not copied** — reading it (test, lint,
+  build) is safe, and two things are not: `npm ci|install|update` rewrites the main
+  checkout's `node_modules`, and **`git worktree remove` deletes it** by recursing
+  through the link. Run `python scripts/dev/warm_worktree.py --unlink` before either.
 - `cd ui && npm run e2e` — Playwright: builds the UI, then drives it against a real
   server in a temp workspace with `WORKBENCH_FAKE_AGENT=1` (`ui/e2e/`, chromium only)
 - Desktop shell: `cd desktop && npm install && npm --prefix ../ui install` once
