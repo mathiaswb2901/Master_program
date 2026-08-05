@@ -448,7 +448,25 @@ export function FileTreePanel(_props: IDockviewPanelProps) {
     total,
     Math.ceil((scrollTop + viewportHeight - LIST_PAD) / ROW_HEIGHT) + OVERSCAN,
   );
-  const visible = display.slice(first, last);
+  /**
+   * The rows to mount: the window, plus the inline name box wherever it is.
+   *
+   * Scrolling must never unmount a rename or a create. The typed text lives in
+   * `NameInput`'s own state, so React dropping the row discards it — and
+   * silently: removing a node from the DOM does not reliably fire `onBlur`, so
+   * `renamingPath`/`creating` would survive, and scrolling back would remount a
+   * fresh box seeded from the original name as if nothing had been typed.
+   * Rows are positioned by index, so one extra mounted outside the window
+   * simply sits off-screen; it costs one row and it is the row that holds
+   * something only the user has.
+   */
+  const editAt = display.findIndex((d) => d.display === "input");
+  const visible: { item: DisplayRow; index: number }[] = display
+    .slice(first, last)
+    .map((item, offset) => ({ item, index: first + offset }));
+  if (editAt >= 0 && (editAt < first || editAt >= last)) {
+    visible.push({ item: display[editAt], index: editAt });
+  }
 
   const scrollRowIntoView = useCallback((index: number) => {
     const el = scrollRef.current;
@@ -629,8 +647,7 @@ export function FileTreePanel(_props: IDockviewPanelProps) {
           role="presentation"
           style={{ height: total * ROW_HEIGHT }}
         >
-          {visible.map((item, offset) => {
-            const index = first + offset;
+          {visible.map(({ item, index }) => {
             const top = index * ROW_HEIGHT;
             if (item.display === "input") {
               return (

@@ -23,6 +23,12 @@ import { readWorkspaceFile, writeWorkspaceFile } from "./workspace";
 const FILE = "src/bid.py";
 /** Cache Directory Tagging Specification — https://bford.info/cachedir/ */
 const CACHEDIR_TAG = "Signature: 8a477f597d28d172789f06886806bc55\n";
+/** Folder seeded with enough rows to make the panel actually overflow — the
+ * premise of the scroll-during-rename step, and asserted rather than assumed. */
+const SCROLL_DIR = "deep";
+const SCROLL_ROWS = 60;
+/** Sorts before every `fNN.txt`, so the committed row lands back at the top. */
+const RENAMED = "aaa-renamed.txt";
 const TYPED = "PRICE = 42";
 const EXTERNAL = "# edited on disk\n";
 const EXTERNAL_AGAIN = "# edited on disk again\n";
@@ -147,5 +153,49 @@ test("create, save, watcher reload, conflict and dirty close", async ({ page }) 
     await page.keyboard.press("Home");
     expect(await position()).toBe(`1/${size}`);
     expect(await focused()).toBe(".workbench");
+  });
+
+  await test.step("scrolling never discards a name being typed", async () => {
+    // The regression virtualisation invites. The inline name box holds text
+    // that exists nowhere else — not on disk, not in the store — so a window
+    // that unmounts it loses what the user wrote. Silently, too: removing a
+    // node from the DOM does not fire `blur`, so the panel would still believe
+    // a rename was in progress and re-mount the box seeded from the original
+    // name, as if nothing had been typed.
+    for (let i = 0; i < SCROLL_ROWS; i++) {
+      writeWorkspaceFile(`${SCROLL_DIR}/f${String(i).padStart(2, "0")}.txt`, "x\n");
+    }
+    await expect(treeItem(page, SCROLL_DIR)).toBeVisible();
+    await treeItem(page, SCROLL_DIR).click();
+    await expect(treeItem(page, "f00.txt")).toBeVisible();
+
+    const tree = page.locator(".wb-filetree");
+    // The premise, asserted: there is somewhere to scroll to.
+    await expect
+      .poll(() => tree.evaluate((el) => el.scrollHeight - el.clientHeight))
+      .toBeGreaterThan(400);
+
+    await treeMenu(page, "f00.txt", "Rename…");
+    const name = page.getByRole("textbox", { name: "New name" });
+    await name.fill(RENAMED);
+
+    // The row being renamed is near the top; this puts it far outside the
+    // rendered window, which is the whole failure mode.
+    await tree.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await expect(name).toHaveValue(RENAMED);
+
+    // And it is still the live box, not a leftover: Enter commits it to disk.
+    await name.press("Enter");
+    await expect(treeItem(page, "f00.txt")).toHaveCount(0);
+    // The new name sorts first, so the row is back at the top — which the
+    // scroller has to be returned to, because a row outside the window is not
+    // in the DOM at all. That is the feature, asserted in passing.
+    await tree.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect(treeItem(page, RENAMED)).toBeVisible();
+    expect(readWorkspaceFile(`${SCROLL_DIR}/${RENAMED}`)).toContain("x");
   });
 });

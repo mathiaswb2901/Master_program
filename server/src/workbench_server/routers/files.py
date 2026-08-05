@@ -66,6 +66,10 @@ def read(request: Request, path: str = Query(min_length=1)) -> FileContent:
         raise HTTPException(400, "path escapes workspace") from e
     except FileNotFoundError as e:
         raise HTTPException(404, "file not found") from e
+    except IsADirectoryError as e:
+        # Reachable from the tree: a symlinked folder is a row like any other,
+        # and clicking it used to surface as an uncaught 500.
+        raise HTTPException(400, "not a file") from e
     except NotTextError as e:
         raise HTTPException(415, "not an editable text file") from e
     return FileContent(path=path, content=content, hash=digest)

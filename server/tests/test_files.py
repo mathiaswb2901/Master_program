@@ -219,6 +219,120 @@ class TestDirListing:
         escape = await client.get("/api/files/dir", params={"path": "../.."})
         assert escape.status_code == 400
 
+    async def test_a_hidden_directory_asked_for_by_name_is_not_there(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The rule applies to the directory *asked for*, not only its children.
+
+        Filtering children is all a walk needs — `tree()` can never be handed a
+        hidden directory, because the parent-level filter runs before it
+        recurses. This endpoint takes a path from the wire, so it can be, and
+        answering it would make `/dir` the one reader that disagrees with the
+        tree, the watcher and the search index about what exists.
+        """
+        (tmp_path / "node_modules" / "vite").mkdir(parents=True)
+        (tmp_path / "node_modules" / "vite" / "index.js").write_text("x")
+
+        assert (
+            await client.get("/api/files/dir", params={"path": "node_modules"})
+        ).status_code == 404
+        assert (
+            await client.get("/api/files/dir", params={"path": "node_modules/vite"})
+        ).status_code == 404
+
+    async def test_a_directory_tagged_while_it_is_open_stops_listing(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The reconcile path, end to end.
+
+        A folder is expanded, a build drops `CACHEDIR.TAG` into it while it is
+        still open, the watcher publishes `tree_invalidated`, and the client
+        re-lists everything it has open — that folder included, because nothing
+        has told it the folder is gone. It has to hear 404 (which its `loadDir`
+        already turns into a `deleted` row) rather than a listing of a directory
+        every other reader now hides.
+        """
+        build = tmp_path / "build"
+        build.mkdir()
+        (build / "app.exe").write_bytes(b"MZ")
+        assert (await client.get("/api/files/dir", params={"path": "build"})).status_code == 200
+
+        (build / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+
+        assert (await client.get("/api/files/dir", params={"path": "build"})).status_code == 404
+        # ...and its children go with it, however they are reached.
+        (build / "debug").mkdir()
+        assert (
+            await client.get("/api/files/dir", params={"path": "build/debug"})
+        ).status_code == 404
+
+    async def test_the_root_is_listable_even_inside_a_tagged_directory(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """A workspace opened inside a cache is still the user's workspace."""
+        (tmp_path / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+        (tmp_path / "notes.md").write_text("x")
+
+        resp = await client.get("/api/files/dir")
+        assert resp.status_code == 200
+        assert [e["name"] for e in resp.json()["entries"]] == ["CACHEDIR.TAG", "notes.md"]
+
+
+def _symlink_dir(link: Path, target: Path) -> None:
+    """Create a directory symlink, or skip — Windows needs privilege for it."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError) as e:  # no developer mode, no admin
+        pytest.skip(f"symlinks unavailable here: {e}")
+
+
+class TestSymlinkedDirectories:
+    """One answer to "is this a directory", in every reader.
+
+    The tree renders from `list_dir` and the QuickBar's index from `tree()`. A
+    linked folder that is a directory in one and a file in the other is a row
+    the user can see but not open — and the click used to reach `read_text` on
+    a directory, which is not an error any router catches.
+    """
+
+    def test_a_linked_folder_is_a_directory_in_both_readers(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "prices.csv").write_text("hour,eur\n")
+        _symlink_dir(tmp_path / "shared", real)
+
+        ws = Workspace(tmp_path)
+        listed = {e.name: e.kind for e in ws.list_dir("").entries}
+        walked = {n.name: n.kind for n in ws.tree().children or []}
+        assert listed["shared"] == walked["shared"] == "dir"
+
+    def test_a_link_into_a_build_cache_is_hidden_by_both(self, tmp_path: Path) -> None:
+        """`is_ignored_dir` runs on the same notion of "is a directory".
+
+        It is only reached `if is_dir`, so a link classified as a file skipped
+        the ignore rule entirely — the linked build cache came back as a row.
+        """
+        cache = tmp_path / "target"
+        cache.mkdir()
+        (cache / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+        _symlink_dir(tmp_path / "vendor", cache)
+
+        ws = Workspace(tmp_path)
+        assert [e.name for e in ws.list_dir("").entries] == []
+        assert [n.name for n in ws.tree().children or []] == []
+
+    async def test_reading_a_directory_as_a_file_is_a_4xx_not_a_crash(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Opening a directory row must not surface as an uncaught 500.
+
+        Windows raises `PermissionError` where POSIX raises `IsADirectoryError`,
+        so this is asked before the read rather than caught after it.
+        """
+        (tmp_path / "reports").mkdir()
+        resp = await client.get("/api/files/content", params={"path": "reports"})
+        assert resp.status_code == 400
+
 
 class TestTopLevelDirs:
     """`Workspace.top_level_dirs` — one directory listing, the tree's own rules.

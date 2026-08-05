@@ -12,7 +12,7 @@ from workbench_server.models.files import (
     DirListing,
     TreeNode,
 )
-from workbench_server.services.ignore import is_ignored_dir
+from workbench_server.services.ignore import is_hidden_dir, is_ignored_dir
 
 
 class PathOutsideWorkspaceError(Exception):
@@ -59,22 +59,38 @@ class Workspace:
         the same thing, and a tree read one level at a time is one that costs
         the user nothing for the 4,995 rows they are not looking at.
 
-        Visibility is `is_ignored_dir` and nothing else, so this agrees with
+        Visibility is the ignore rule and nothing else, so this agrees with
         `tree()`, with the watcher and with the QuickBar's index by
         construction — two panels disagreeing about what exists is the failure
         mode a second copy of the rule would buy.
 
-        Raises `FileNotFoundError` if the directory is gone and
-        `NotADirectoryError` if it is a file; both come straight from
-        `os.scandir`, which is also the stat this method would otherwise pay for.
+        Agreement has to cover the *requested* directory too, not only its
+        children. `tree()` can never be asked for a hidden directory — the
+        parent-level filter runs before it recurses — but this takes a path
+        from the wire, so it is reachable by name. The case that reaches a real
+        user: a folder is expanded, a build drops a `CACHEDIR.TAG` into it, the
+        watcher publishes `tree_invalidated`, and the client re-lists every
+        folder it has open — including that one. `is_hidden_dir` is the same
+        answer `tree()` gives by construction.
+
+        Raises `FileNotFoundError` if the directory is gone or hidden (the row a
+        fresh listing of its parent would not have) and `NotADirectoryError` if
+        it is a file; the last two come straight from `os.scandir`, which is
+        also the stat this method would otherwise pay for.
         """
         path = self.safe_path(relative)
         rel = "" if path == self.root else self.relative(path)
+        if rel != "" and is_hidden_dir(self.root, path):
+            raise FileNotFoundError(relative)
         prefix = f"{rel}/" if rel else ""
         entries: list[DirEntry] = []
         with os.scandir(path) as scan:
             for entry in scan:
-                is_dir = entry.is_dir(follow_symlinks=False)
+                # Symlinks are followed, because `_node` follows them: the tree
+                # renders from here and the QuickBar's index from there, and a
+                # linked folder that is a directory in one and a file in the
+                # other is a row that cannot be opened.
+                is_dir = entry.is_dir()
                 if is_dir and is_ignored_dir(Path(entry.path)):
                     continue
                 entries.append(
@@ -129,6 +145,11 @@ class Workspace:
     def read_text(self, relative: str) -> tuple[str, str]:
         """Return (content, hash). Rejects binary and oversized files."""
         path = self.safe_path(relative)
+        # Asked before reading rather than caught after: opening a directory
+        # raises `IsADirectoryError` on POSIX but `PermissionError` on Windows,
+        # and this is a Windows-first app. One question, one answer, everywhere.
+        if path.is_dir():
+            raise IsADirectoryError(relative)
         data = path.read_bytes()
         if len(data) > MAX_TEXT_FILE_BYTES or b"\x00" in data[:8192]:
             raise NotTextError(relative)
