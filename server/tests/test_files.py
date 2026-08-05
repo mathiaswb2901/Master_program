@@ -135,6 +135,91 @@ class TestTree:
         ]
 
 
+class TestDirListing:
+    """`GET /api/files/dir` — the tree, one level at a time.
+
+    What it owes the tree it replaced is *parity*: the same rows, in the same
+    order, with the same things hidden. The cost is budgeted separately
+    (`test_perf_budgets.py`: exactly one directory listing per request).
+    """
+
+    async def test_root_listing_names_the_workspace_and_sorts_dirs_first(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        (tmp_path / "notes.md").write_text("x")
+        (tmp_path / "Zeta").mkdir()
+        (tmp_path / "alpha").mkdir()
+        (tmp_path / "README.md").write_text("y")
+
+        resp = await client.get("/api/files/dir")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["path"] == ""
+        assert body["name"] == tmp_path.name
+        assert [(e["name"], e["kind"]) for e in body["entries"]] == [
+            ("alpha", "dir"),
+            ("Zeta", "dir"),
+            ("notes.md", "file"),
+            ("README.md", "file"),
+        ]
+
+    async def test_a_directory_entry_carries_no_children(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The whole point: asking for one directory reads exactly that one."""
+        (tmp_path / "src" / "deep").mkdir(parents=True)
+        (tmp_path / "src" / "app.py").write_text("x = 1")
+
+        entries = (await client.get("/api/files/dir", params={"path": "src"})).json()["entries"]
+        assert entries == [
+            {"name": "deep", "path": "src/deep", "kind": "dir"},
+            {"name": "app.py", "path": "src/app.py", "kind": "file"},
+        ]
+
+    async def test_same_visibility_rules_as_the_walk(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Noise names and tagged caches, hidden by the one shared rule — two
+        panels disagreeing about what exists is the failure this prevents."""
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "node_modules").mkdir()
+        cache = tmp_path / "target"
+        cache.mkdir()
+        (cache / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+        own = tmp_path / "analysis"
+        own.mkdir()
+        (own / "target").mkdir()  # same name, no tag: the analyst's own folder
+
+        root = (await client.get("/api/files/dir")).json()["entries"]
+        assert [e["name"] for e in root] == ["analysis"]
+        nested = (await client.get("/api/files/dir", params={"path": "analysis"})).json()
+        assert [e["name"] for e in nested["entries"]] == ["target"]
+
+    async def test_a_tag_dropped_mid_session_hides_the_directory_next_listing(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """No memo here either (the watcher has one; this is walked on demand)."""
+        build = tmp_path / "target"
+        build.mkdir()
+        (build / "app.exe").write_bytes(b"MZ")
+        assert [e["name"] for e in (await client.get("/api/files/dir")).json()["entries"]] == [
+            "target"
+        ]
+
+        (build / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+
+        assert (await client.get("/api/files/dir")).json()["entries"] == []
+
+    async def test_missing_and_non_directory_paths_are_told_apart(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        (tmp_path / "notes.md").write_text("x")
+        assert (await client.get("/api/files/dir", params={"path": "nope"})).status_code == 404
+        assert (await client.get("/api/files/dir", params={"path": "notes.md"})).status_code == 400
+        escape = await client.get("/api/files/dir", params={"path": "../.."})
+        assert escape.status_code == 400
+
+
 class TestTopLevelDirs:
     """`Workspace.top_level_dirs` — one directory listing, the tree's own rules.
 

@@ -213,10 +213,21 @@ milliseconds report**. First fix landed against it: the agent-session folder lis
 the whole workspace to read three names, concurrently with the real tree request — one
 `os.scandir` now, and the tree is clickable ~490 ms sooner.
 
-**Queued**: the watcher protocol (twenty file changes cost twenty full walks and 9.4 MB of
-JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptance
-criterion), Monaco off the entry chunk, the terminal's renderer and frame coalescing, and
-a virtualised file tree.
+**Landed since**: the terminal's renderer and frame coalescing (PR #36); and **the file
+tree** — the two largest measured pieces of waste left in the app, both of them here. It
+now reads **one directory at a time** (`GET /api/files/dir`, one `os.scandir`), **patches
+itself** from the `file_changed` events it already receives instead of refetching the
+workspace, and **renders only what is on screen**. Twenty file changes went from 20 full
+walks and 9.4 MB of JSON to **zero requests**; expanding the 2,000-file directory went
+from 2,010 mounted rows and a single 500 ms task to ~40 rows and no long task. The xfail
+in `ui/e2e/perf/watcher.spec.ts` is now an ordinary passing budget, joined by a
+mounted-row count and a long-task ceiling for the expand. Convergence with disk is three
+rules, not trust: expanding re-lists, reconnect re-lists, and a `tree_invalidated` frame
+covers the one change no file event can describe (see ARCHITECTURE.md, *The file tree*).
+
+**Queued**: Monaco off the entry chunk (the entry bundle is still 4.1 MB raw / 1.06 MB
+gzip, ~88% Monaco — the largest single number left in the launch path), and the motion
+vocabulary below.
 
 **Motion, and a hard interlock.** The track is not only speed: an instrument that moves
 *well* reads as fast even when it is not. The **motion vocabulary** — the durations,

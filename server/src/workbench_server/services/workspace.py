@@ -6,7 +6,12 @@ import os
 import tempfile
 from pathlib import Path
 
-from workbench_server.models.files import MAX_TEXT_FILE_BYTES, TreeNode
+from workbench_server.models.files import (
+    MAX_TEXT_FILE_BYTES,
+    DirEntry,
+    DirListing,
+    TreeNode,
+)
 from workbench_server.services.ignore import is_ignored_dir
 
 
@@ -40,7 +45,47 @@ class Workspace:
         return path.relative_to(self.root).as_posix()
 
     def tree(self) -> TreeNode:
+        """The whole workspace, recursively. The *search index* — see `TreeNode`.
+
+        Nothing that renders a directory calls this any more; `list_dir` does.
+        """
         return self._node(self.root)
+
+    def list_dir(self, relative: str) -> DirListing:
+        """One directory's visible children — exactly one `os.scandir`, no walk.
+
+        This is the shape the whole tree is now read in. `top_level_dirs()`
+        (PR #35) was the first caller to need it; every expanded folder needs
+        the same thing, and a tree read one level at a time is one that costs
+        the user nothing for the 4,995 rows they are not looking at.
+
+        Visibility is `is_ignored_dir` and nothing else, so this agrees with
+        `tree()`, with the watcher and with the QuickBar's index by
+        construction — two panels disagreeing about what exists is the failure
+        mode a second copy of the rule would buy.
+
+        Raises `FileNotFoundError` if the directory is gone and
+        `NotADirectoryError` if it is a file; both come straight from
+        `os.scandir`, which is also the stat this method would otherwise pay for.
+        """
+        path = self.safe_path(relative)
+        rel = "" if path == self.root else self.relative(path)
+        prefix = f"{rel}/" if rel else ""
+        entries: list[DirEntry] = []
+        with os.scandir(path) as scan:
+            for entry in scan:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                if is_dir and is_ignored_dir(Path(entry.path)):
+                    continue
+                entries.append(
+                    DirEntry(
+                        name=entry.name,
+                        path=prefix + entry.name,
+                        kind="dir" if is_dir else "file",
+                    )
+                )
+        entries.sort(key=lambda e: (e.kind == "file", e.name.lower()))
+        return DirListing(path=rel, name=path.name or str(path), entries=entries)
 
     def top_level_dirs(self) -> list[str]:
         """Names of the visible directories directly under the root.
@@ -53,20 +98,15 @@ class Workspace:
         the two contended for the same disk and the tree arrived roughly twice as
         late. Budget: `server/tests/test_perf_budgets.py`.
 
-        Same visibility rules as `tree()` — noise names and `CACHEDIR.TAG` build
-        caches are skipped — and the same order, so the folder list reads as the
-        top of the tree the user is looking at.
+        Derived from `list_dir` rather than repeating its scan, so the folder
+        list reads as the top of the tree the user is looking at — same rules,
+        same order.
         """
         try:
-            with os.scandir(self.root) as entries:
-                names = [
-                    entry.name
-                    for entry in entries
-                    if entry.is_dir(follow_symlinks=False) and not is_ignored_dir(Path(entry.path))
-                ]
+            listing = self.list_dir("")
         except OSError:  # root vanished or is unreadable — no folders, not a crash
             return []
-        return sorted(names, key=str.lower)
+        return [entry.name for entry in listing.entries if entry.kind == "dir"]
 
     def _node(self, path: Path) -> TreeNode:
         if path.is_dir():

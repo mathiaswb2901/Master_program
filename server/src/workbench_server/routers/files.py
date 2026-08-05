@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from workbench_server.models.files import (
     CreateRequest,
+    DirListing,
     FileContent,
     OkResponse,
     RenameRequest,
@@ -32,8 +33,28 @@ def _provenance(request: Request) -> ProvenanceService:
     return service
 
 
+@router.get("/dir")
+def list_dir(request: Request, path: str = Query("")) -> DirListing:
+    """One directory's children. What the file tree is built from, one expansion
+    at a time; `""` is the workspace root."""
+    try:
+        return _ws(request).list_dir(path)
+    except PathOutsideWorkspaceError as e:
+        raise HTTPException(400, "path escapes workspace") from e
+    except NotADirectoryError as e:
+        raise HTTPException(400, "not a directory") from e
+    except FileNotFoundError as e:
+        raise HTTPException(404, "directory not found") from e
+
+
 @router.get("/tree")
 def tree(request: Request) -> TreeNode:
+    """The whole workspace in one walk — the QuickBar's search index.
+
+    Not what the file tree renders from (that is `/dir`), and not fetched on a
+    watcher event: on the perf fixture this is 16 directory listings and 471 KB
+    of JSON, which is a price worth paying once, when a user asks to search.
+    """
     return _ws(request).tree()
 
 
