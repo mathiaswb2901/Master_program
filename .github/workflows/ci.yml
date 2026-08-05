@@ -108,12 +108,14 @@ jobs:
   # green tick, are what the next Feel PR is measured against. Note that the
   # server-side budgets (directory-listing counts) also run in the `server` job
   # as ordinary pytest — this job is the browser half.
+  #
+  # `WB_PERF_WORKSPACE` points both runs at one fixture: the generator's stamp
+  # check makes the second reuse it instead of writing 5,105 files again. It is
+  # set per step rather than on the job, because the `runner` context is not
+  # available in a job-level `env:` — GitHub rejects the whole workflow file for
+  # it, with no job ever starting.
   perf:
     runs-on: windows-latest
-    env:
-      # One fixture for both steps: the generator's stamp check makes the second
-      # run reuse it instead of writing 5,105 files again.
-      WB_PERF_WORKSPACE: ${{ runner.temp }}\perf-fixture
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -135,6 +137,8 @@ jobs:
         run: npm run build
       - name: Budgets (blocking)
         working-directory: ui
+        env:
+          WB_PERF_WORKSPACE: ${{ runner.temp }}\perf-fixture
         run: npx playwright test --config playwright.perf.config.ts --grep-invert "@wallclock"
       - name: Upload budget report
         if: always()
@@ -148,6 +152,8 @@ jobs:
       - name: Timings (reported, never blocking)
         working-directory: ui
         continue-on-error: true
+        env:
+          WB_PERF_WORKSPACE: ${{ runner.temp }}\perf-fixture
         run: npx playwright test --config playwright.perf.config.ts --grep "@wallclock"
       - name: Upload timing report
         if: always()
