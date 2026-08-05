@@ -23,6 +23,7 @@ from workbench_server.routers import (
     provenance,
     shortcuts,
     terminal,
+    usage,
     worktrees,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
@@ -37,6 +38,7 @@ from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.shortcuts import ShortcutsService
+from workbench_server.services.usage import UsageService
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
 from workbench_server.services.worktrees import WorktreeService
@@ -72,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         capacity=settings.worktree_pool_size,
         lease_seconds=settings.worktree_lease_seconds,
     )
+    # The account's plan limits, as far as a live session's stream reports them.
+    # In-memory by design: live state about an account, not workspace data.
+    usage_service = UsageService(event_bus)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
     # Fake mode replaces the SDK client and nothing else: same SessionManager,
@@ -96,6 +101,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Every announced tool call is offered to the correlator, which keeps
         # the ones that write a file inside the workspace.
         tool_observer=provenance_service,
+        # Rate-limit transitions and per-turn cost: an account-wide figure that
+        # only ever arrives on a session's stream.
+        usage_observer=usage_service,
     )
     office_service = OfficeService(
         workspace,
@@ -175,6 +183,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.provenance = provenance_service
     app.state.layouts = layouts_service
     app.state.worktrees = worktree_service
+    app.state.usage = usage_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -195,6 +204,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(provenance.router)
     app.include_router(layouts.router)
     app.include_router(worktrees.router)
+    app.include_router(usage.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
