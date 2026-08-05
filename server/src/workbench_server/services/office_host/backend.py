@@ -107,8 +107,24 @@ class DocumentOpenElsewhereError(HostBackendError):
 class HostBackend(Protocol):
     """What the native implementation must provide, and nothing more."""
 
-    async def launch(self, path: Path, kind: HostAppKind) -> HostHandle:
+    def ready(self) -> bool:
+        """Can this backend host *right now*?
+
+        Not the same question as "does this backend exist". The real one needs
+        the desktop shell attached to have a window to host into, and a browser
+        tab is not one — so "can I dock a document" has an answer that changes
+        while the server runs, and the capabilities endpoint has to be able to
+        ask it rather than infer it from a user agent.
+        """
+        ...
+
+    async def launch(self, path: Path, kind: HostAppKind, host_id: str) -> HostHandle:
         """Start ``kind`` on ``path`` and return a handle to *our* instance.
+
+        ``host_id`` is the service's id for this host, passed so the backend can
+        name the same window the same way everywhere — in its own logs, and in
+        whatever registry the native side keeps. It is not an ownership token:
+        that is the pid in the returned handle.
 
         Raises :class:`LaunchFailedError`, :class:`LaunchTimeoutError`, or
         :class:`DocumentOpenElsewhereError`.
@@ -124,6 +140,16 @@ class HostBackend(Protocol):
 
     async def set_bounds(self, handle: HostHandle, rect: PanelRect) -> None:
         """Move/resize an embedded window. Cheap, and called on every drag."""
+        ...
+
+    async def set_visible(self, handle: HostHandle, visible: bool) -> None:
+        """Show or hide the hosted window without giving it back.
+
+        A hosted window is a real window: it does not stop existing because the
+        element describing it went ``display: none``. Switching to another
+        editor tab has to say so, or a real Word stays painted over the panel
+        that replaced it.
+        """
         ...
 
     async def detach(self, handle: HostHandle) -> None:

@@ -113,6 +113,81 @@
   border-color: var(--text-on-paper);
 }
 
+/* ---- Native host: a real Word/Excel window in the panel ------------------- */
+
+/* The docked surface is a deliberate hole in the page — a rectangle for a
+   native window to sit in front of. It paints the paper surround so the moment
+   before the window arrives (and any moment the window is gone) is the same
+   calm surface as every other document state, not a flash of app chrome. */
+.wb-office-native {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-paper-surround);
+}
+
+/* Native hosting falls back to the OnlyOffice panel in place; the wrapper is
+   what keeps a note above it without either one knowing about the other. */
+.wb-office-fallback {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.wb-office-fallback > .wb-office {
+  flex: 1;
+  min-height: 0;
+}
+
+/* A statement about the document, not a warning about a failure: the calm
+   surround rather than --warn-bg, which the reopen bar below keeps. */
+.wb-office-note {
+  display: flex;
+  align-items: center;
+  flex: none;
+  padding: var(--space-3) var(--space-5);
+  background: var(--surface-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-office-note-msg {
+  min-width: 0;
+}
+
+/* "This really is Word" — badge anatomy per §6.4, same as the save chip. */
+.wb-office-hosted {
+  position: absolute;
+  left: var(--space-5);
+  bottom: var(--space-5);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 20px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--surface-overlay);
+  color: var(--text-secondary);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  box-shadow: var(--shadow-1);
+  pointer-events: none;
+}
+
+.wb-office-hosted-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  flex: none;
+}
+
 /* ---- Non-modal reopen bar (same pattern as the editor conflict bar) ------- */
 
 .wb-office-bar {

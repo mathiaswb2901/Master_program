@@ -11,9 +11,14 @@ import type {
   FolderSessions,
   LayoutsResponse,
   LayoutsState,
+  OfficeCapabilities,
+  OfficeHostInfo,
+  OfficeHostList,
   OfficeLastSave,
   OfficeStatus,
   OkResponse,
+  OpenHostRequest,
+  PanelRect,
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
@@ -105,6 +110,30 @@ export const getOfficeConfig = (path: string, theme: Theme): Promise<DocEditorCo
 
 export const postOfficeForcesave = (path: string): Promise<CallbackResponse> =>
   request("/api/office/forcesave", jsonInit("POST", { path }));
+
+// ---- native Office host (M4) -------------------------------------------------
+// The panel degrades from `capabilities` and never from a guess: it is the one
+// answer to "can a real document be docked in this window right now".
+
+export const getOfficeCapabilities = (): Promise<OfficeCapabilities> =>
+  request("/api/office/capabilities");
+
+export const openOfficeHost = (body: OpenHostRequest): Promise<OfficeHostInfo> =>
+  request("/api/office/host", jsonInit("POST", body));
+
+export const getOfficeHosts = (): Promise<OfficeHostList> => request("/api/office/hosts");
+
+export const setOfficeHostBounds = (hostId: string, rect: PanelRect): Promise<OfficeHostInfo> =>
+  request(`/api/office/host/${encodeURIComponent(hostId)}/bounds`, jsonInit("POST", { rect }));
+
+export const setOfficeHostVisible = (hostId: string, visible: boolean): Promise<OfficeHostInfo> =>
+  request(`/api/office/host/${encodeURIComponent(hostId)}/visible`, jsonInit("POST", { visible }));
+
+export const detachOfficeHost = (hostId: string): Promise<OfficeHostInfo> =>
+  request(`/api/office/host/${encodeURIComponent(hostId)}/detach`, { method: "POST" });
+
+export const closeOfficeHost = (hostId: string): Promise<OfficeHostInfo> =>
+  request(`/api/office/host/${encodeURIComponent(hostId)}/close`, { method: "POST" });
 
 /** Defensive: the endpoint may not exist yet — 404 means "never saved" (null). */
 export const getOfficeLastSave = async (path: string): Promise<OfficeLastSave> => {
