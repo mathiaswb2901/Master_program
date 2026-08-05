@@ -48,11 +48,17 @@ const METAFILE = path.join(DIST, "bundle-metafile.json");
  * is on the launch path. (The eager *stylesheet* went the same way as a side
  * effect: 225 KiB to 92 KiB, with Monaco's 133 KiB following its chunk.)
  *
+ * Both rows are the same commit with and without the change, so the difference
+ * is this change's. Rebased onto master an hour later — with the terminal and
+ * visual-artifacts lanes underneath — the entry chunk reads **738.9 KiB raw,
+ * 195.4 KiB gzipped, still 0 Monaco modules**, which is the number the ceiling
+ * below has to live with.
+ *
  * What is left is dockview-core (423 KiB attributed), xterm (285 KiB), our own
- * `src` (172 KiB) and react-dom (132 KiB) — the next things anyone shrinking
+ * `src` (199 KiB) and react-dom (132 KiB) — the next things anyone shrinking
  * this number has to argue with.
  *
- * The ceiling is ~1.35x the measured number: enough headroom for a panel or two
+ * The ceiling is ~1.33x the measured number: enough headroom for a panel or two
  * without a ratchet fight, tight enough that another editor-sized dependency
  * cannot arrive unnoticed. Lower it when a PR earns it.
  */

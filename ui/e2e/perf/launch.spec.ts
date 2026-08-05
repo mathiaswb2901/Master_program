@@ -56,6 +56,14 @@ import {
  * could draw anything is now Monaco parsing on an idle callback while the user
  * looks at their file tree.
  *
+ * Both rows are the same commit with and without the change, which is what
+ * makes the difference attributable. Rebased onto master with the terminal and
+ * visual-artifacts lanes underneath, the same three runs read: cold FCP 172 ms,
+ * DCL 99 ms, tree rows 1,019 ms; warm FCP 116 ms, DCL 56 ms. Machine noise on
+ * this box is worth ±50 ms on a paint and ±200 ms on a row, so compare medians
+ * of several runs against a *pinned* `WB_PERF_WORKSPACE`, never single runs
+ * against a fixture each run rebuilt.
+ *
  * The ceiling comes down to ~2.2x the measured number. It is not 2.2x of
  * something that got 4x faster: what a *row* costs is still dominated by
  * `GET /api/files/tree` walking 5,005 files and by rendering them
