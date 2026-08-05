@@ -33,9 +33,53 @@
 }
 
 /* Focused panel group: 1px accent top edge on its tab strip only (§6.1) —
- * the one place chrome uses accent structurally. */
+ * the one place chrome uses accent structurally. Not animated: it is a
+ * `box-shadow`, which is off the allowlist (DESIGN.md §5), and a focus
+ * indicator that arrives late is a focus indicator that lies. */
 .dockview-theme-workbench .dv-active-group > .dv-tabs-and-actions-container {
   box-shadow: inset 0 1px 0 0 var(--accent);
+}
+
+/* Tab activation (DESIGN.md §5, reversed from "never animates"). The tab's own
+ * colours cross-fade; the *content* swap underneath stays instant, because a
+ * panel that fades in is a panel you cannot read yet. Colour only — the active
+ * tab's background merging into the panel body is the whole indicator, and
+ * animating that merge is what makes a tab strip feel like a physical control
+ * rather than a set of radio buttons. */
+.dockview-theme-workbench .dv-tab {
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+.dockview-theme-workbench .dv-tab:hover {
+  transition-duration: 0s;
+}
+
+.wb-panel-tab-close {
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+/* Vendor override. dockview's drag preview transitions `top`, `left`, `width`
+ * and `height` — four layout properties, on the one interaction where the user
+ * is already dragging and the compositor is already busy. Same read, none of
+ * the layout: the box is positioned by dockview as before and only its opacity
+ * is eased. The original rule is still in the bundle (a later rule cannot
+ * delete an earlier line), so it is pinned in `ui/e2e/perf/motion.spec.ts`. */
+.dv-drop-target > .dv-drop-target-dropzone > .dv-drop-target-selection {
+  transition: opacity var(--motion-tint);
+}
+
+/* The tab-strip scrollbars fade their background over **one second** upstream,
+ * and dockview shows them on resize and on scroll as well as on hover — so the
+ * window has four overlay hairlines quietly fading in and out whenever anything
+ * changes size. A scrollbar is a hover affordance: it is there or it is not
+ * (DESIGN.md §5, "a quiet window"). No transition at all. */
+.dv-scrollable .dv-scrollbar-horizontal,
+.dv-scrollable .dv-scrollbar-vertical {
+  transition: none;
 }
 
 /* Panel chrome tab: 12px/500. A startup panel is title-only — closing it would
@@ -74,6 +118,7 @@
 .wb-panel-tab-close:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+  transition-duration: 0s;
 }
 
 /* Aggregate "a session needs attention" dot on the Agent tab (§6.4 dot-only). */

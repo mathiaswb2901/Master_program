@@ -274,6 +274,11 @@
   font-family: var(--font-mono);
   font-size: var(--type-sm-size);
   color: var(--text-secondary);
+  /* Settling is the one moment a tool row changes on its own (DESIGN.md §5):
+     the status edge cross-fades working -> success/error on the tint channel.
+     Colour only — a row that moved when it finished would shove every row
+     below it, in the densest list in the app. */
+  transition: border-color var(--motion-tint-slow);
 }
 
 .wb-tool-row.is-settled {

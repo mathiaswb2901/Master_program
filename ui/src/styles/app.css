@@ -62,6 +62,11 @@ input {
   font-size: var(--type-sm-size);
 }
 
+/* The one element `src/motion.ts` animates: focus mode and a layout switch are
+   dockview rearranging the grid, so there is no class to hang a transition on.
+   Deliberately no `contain` and no static `will-change` — either would make
+   this a containing block for the `position: fixed` menus panels render, for
+   the sake of an animation that lasts 300 ms and promotes its own layer. */
 .wb-dock {
   flex: 1;
   min-height: 0;
@@ -86,9 +91,19 @@ input {
   font-weight: var(--weight-medium);
   white-space: nowrap;
   transition:
-    background-color var(--duration-1) var(--ease-standard),
-    border-color var(--duration-1) var(--ease-standard),
-    color var(--duration-1) var(--ease-standard);
+    background-color var(--motion-tint),
+    border-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+/* Instant in, eased out (DESIGN.md §5). The pointer arriving is answered on the
+   frame it arrives — a control that fades *up* under the cursor feels laggy no
+   matter how short the fade. Only the decay is animated. Every hoverable
+   control in the app repeats this pair; `ui/e2e/perf/motion.spec.ts` fails any
+   `:hover` rule that eases its way in. */
+.wb-btn:hover,
+.wb-btn:active {
+  transition-duration: 0s;
 }
 
 .wb-btn:disabled {

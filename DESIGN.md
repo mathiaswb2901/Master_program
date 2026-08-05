@@ -27,8 +27,10 @@ blue-navy bases (clash with white document paper).
    surface steps. Shadows exist only on things that float (menus, QuickBar, tooltips).
 5. **Density is respect.** 13px base UI, 26px rows, 34px bars. Analysts want more on
    screen, not bigger buttons. Minimum hit target 24×24px (desktop, WCAG 2.2).
-6. **Motion is confirmation, never entertainment.** 80–200ms, opacity/transform only.
-   Anything tracking the pointer (sash drag, resize) moves 1:1 with zero animation.
+6. **Motion is continuous, and it is restrained by damping rather than by absence.**
+   Chrome moves on critically damped springs — crisp arrival, no overshoot — and only on
+   `transform`/`opacity`/colour. Anything tracking a pointer or a key moves 1:1 with zero
+   animation, and content never fades. §5 is binding and states every case.
 7. **Numbers are data.** Anything numeric (prices, sizes, times, line numbers) renders
    in tabular figures (`font-variant-numeric: tabular-nums`) or the mono font.
 8. **Keyboard-first.** Every interactive element has a visible 2px focus ring; every
@@ -199,26 +201,200 @@ don't separate surfaces).
 
 ## 5. Motion
 
-| Token | Value | Use |
-|---|---|---|
-| `--duration-1` | 80ms | Hover/active washes, color changes |
-| `--duration-2` | 140ms | Tooltips, dropdowns, QuickBar in, badge changes |
-| `--duration-3` | 200ms | Modals, panel-level fades, toasts |
-| `--ease-standard` | `cubic-bezier(0.2, 0, 0, 1)` | Everything entering/changing |
-| `--ease-exit` | `cubic-bezier(0.4, 0, 1, 1)` | Exits — always ≤ the entry duration |
+> Revised 2026-08-05. The previous version capped motion at 80–200ms, called motion
+> "confirmation, never entertainment", and forbade animating tab activation, panel
+> resize, tree expand/collapse and the theme switch. Half of that was right and is kept
+> — a workbench full of dense data must not wobble. The other half is what made the app
+> read as *static and cheap*: a window where nothing ever moves does not read as fast, it
+> reads as a screenshot. What follows replaces it and is binding.
 
-**Animate only** `opacity` and `transform` (plus `background-color`/`border-color` at
-`--duration-1`). GPU-cheap by construction.
+### 5.1 Doctrine
 
-**Never animates:** dockview sash drag and panel resize (1:1 with pointer), terminal
-output, editor scrolling/content, tab activation (content swap is instant), chat
-autoscroll during streaming, file-tree expand/collapse (instant), theme switch.
+1. **Motion is continuous, not scheduled.** Chrome moves on a **spring**, not on a fixed
+   duration with an eased curve. A spring is interruptible by construction: it has a
+   position and a velocity at every instant, so a second input mid-flight resolves into
+   the first instead of queueing behind it. This is the single thing that separates
+   "alive" from "animated".
+2. **Restraint is in the damping, not in the duration.** Every chrome spring is
+   **critically damped** (`bounce = 0`): the fastest arrival that never crosses its
+   target. No wobble, no settle, no overshoot on anything a professional reads numbers
+   off. Exactly one spring in the app overshoots, and §5.4 says where it is spent.
+3. **Two channels, and only two.** *Travel* is `transform`. *Tint* is `opacity` and
+   colour. Nothing else is ever animated — see §5.5. A third channel would be layout,
+   and animating layout is how an app becomes janky.
+4. **The pointer is never animated.** Anything tracking a pointer — sash drag, panel
+   resize, scroll, drag-and-drop — moves 1:1 with zero interpolation. So does anything
+   tracking a key: list selection, tree navigation, tab cycling. A highlight that eases
+   behind the arrow key *is* the feeling of lag.
+5. **Instant in, eased out.** Hover and press respond on the frame the input arrives
+   (`transition-duration: 0s` on `:hover`/`:active`); only the decay is animated. A
+   control that fades *up* under the cursor feels slow no matter how short the fade.
+6. **A quiet window.** Nothing animates on its own except one 2s pulse (§5.4). If
+   something is fading and the user did not cause it and no agent changed state, it is a
+   bug — the dockview tab-strip scrollbars, which fade over a full second on every
+   resize upstream, are overridden to nothing for exactly this reason.
+7. **Content never fades.** The chrome around a buffer may move; the buffer may not.
+   Editor content, terminal output, a tab's content swap and file-tree rows appear at
+   once, because motion on them is time added before the user can read.
 
-**Signature motion:** `--agent-working` dot pulses opacity 1 → 0.35 → 1 over 2s,
-`ease-in-out`, infinite. This is the only looping animation in the app.
+### 5.2 The springs, and where they come from
 
-**Reduced motion:** under `prefers-reduced-motion: reduce`, all durations drop to 1ms
-and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
+A spring is a second-order system, so its tokens are **derived**, not drawn. The
+derivation lives in `ui/src/design/springs.ts`; `ui/e2e/perf/motion.test.ts` fails the
+build if `tokens.css` and the derivation disagree. To retune: change a spec there, run
+`npm run test` in `ui/`, paste the block it prints. Never hand-edit a curve point.
+
+Parameterised the way SwiftUI's `Spring(duration:bounce:)` is, because stiffness and
+damping are not numbers a designer holds in their head — with mass 1:
+
+```
+omega0 = 2*pi / duration      k = omega0^2      zeta = 1 - bounce      c = 2*zeta*omega0
+```
+
+CSS has no spring easing, so the response is sampled into a `linear()` polyline. For a
+fixed damping ratio the response is the **same curve in normalised time** whatever the
+duration — so there are two easing tokens and four durations, not four easings.
+
+| Token | What it is |
+|---|---|
+| `--ease-spring` | `bounce 0` → ζ = 1, critical damping. Every piece of chrome. |
+| `--ease-spring-bounce` | `bounce 0.3` → ζ = 0.7. Overshoots ~4.5%. One use (§5.4). |
+| `--spring-snap-ms` | 190ms — `duration 0.14s`. Chip, badge, glyph, tool row. |
+| `--spring-base-ms` | 300ms — `duration 0.22s`. The default: overlays, menus, focus mode. |
+| `--spring-bounce-ms` | 590ms — `duration 0.4s`. The celebratory spring. |
+
+Three durations, because three is how many distances the chrome currently travels. A
+fourth is one line in `springs.ts` plus a row here, the day something needs it — a token
+nothing uses is a token nobody has tuned.
+
+A duration token is the **settling** time (1.35× the `duration` parameter), not the
+perceived one: a critically damped spring is past 90% of its travel at under half of it.
+That is why 300ms here does not feel like the old 200ms cubic-bezier — it feels quicker.
+
+### 5.3 The channels
+
+Compose these; never write a bare duration or easing in a component stylesheet.
+
+| Token | Value | Channel | Use |
+|---|---|---|---|
+| `--motion-tint` | 110ms `--ease-tint` | tint | Hover decay, chip colour, wash |
+| `--motion-tint-slow` | 180ms `--ease-tint` | tint | Panel-level fades, a tool row settling |
+| `--motion-exit` | 120ms `--ease-exit` `both` | tint | Every dismissal |
+| `--motion-move-snap` | `--spring-snap-ms` `--ease-spring` | travel | Small transforms |
+| `--motion-move` | `--spring-base-ms` `--ease-spring` | travel | The default transform |
+| `--motion-enter` | `--spring-base-ms` `--ease-spring` `both` | travel | Entrance keyframes |
+| `--motion-celebrate` | `--spring-bounce-ms` `--ease-spring-bounce` `both` | travel | §5.4 |
+
+**Travel distances are tokens too** — `--motion-rise` (6px), `--motion-lift` (10px),
+`--motion-scale-in` (0.98), `--motion-zoom-in` (0.985). Nothing may hard-code a
+translate or a scale, because §5.6 works by setting these to zero.
+
+Entrances and exits are shared keyframes in `tokens.css`: `wb-rise-in` in, `wb-slide-out`
+and `wb-fade-out` out. (An overlay centred with `translateX(-50%)` needs its own keyframe
+so the entrance carries the centring — the QuickBar and the modal each have one.) An exit
+is always shorter than its entrance and never springs: a dismissal that springs back is a
+dismissal arguing with the user.
+
+JavaScript-driven motion goes through `ui/src/motion.ts` and reads its numbers from
+these tokens at the moment it uses them. That is what makes §5.6 work without a second
+implementation of the rule. There is no other place in the app that may call `animate()`.
+It also samples the dock's live `opacity` and `transform` before it replaces a running
+animation, so §5.1.1 holds for the JS half too: a keyframed spring is not interruptible
+for free the way a CSS one is, and restarting it from the fixed dip would pop the dock
+backwards mid-gesture. `ui/e2e/motion.spec.ts` presses `Alt+M` twice inside one animation
+and asserts the second starts where the first had got to.
+
+### 5.4 What moves, and what does not
+
+Every row is a decision with a reason. Add to this table before adding motion.
+
+| Interaction | Moves? | How | Why |
+|---|---|---|---|
+| **Focus mode enter/exit** (`Alt+M`) | **Yes** | Whole dock: `--motion-zoom-in` → 1 with opacity 0.62 → 1, `--motion-move`. A press that interrupts one starts from where the dock is, not from the dip | Every other panel disappears at once; without motion the window teleports and the user has to re-find where they are. Animating the dock, not the grid dockview just resized, keeps it one composited layer. |
+| **Layout switch** | **Yes** | Whole dock: opacity 0.45 → 1, `--motion-tint-slow`, **no zoom** | Panels are recreated, moved and resized — a zoom would claim they flew somewhere they did not, and animating their geometry would be animating layout. A short dip says "the window changed" and gets out of the way. |
+| **QuickBar open/close** | **Yes** | `wb-qb-in` (scale `--motion-scale-in` + fade, `--motion-enter`); exit `wb-fade-out` at `--motion-exit` | It owns the screen while it is up. It used to unmount on the frame it closed, which read as a glitch rather than a dismissal. |
+| **Toast enter/exit** | **Yes** | `wb-rise-in`; exit `wb-slide-out` | The one thing on screen the user did not ask for, so the one thing allowed to move to be noticed. |
+| **A success toast** | **Yes**, and it is the only bounce | `--motion-celebrate` | The single celebratory moment the app has. An error that bounced would be flippant. |
+| **Tool-row settle** | **Yes**, tint only | `border-color` at `--motion-tint-slow` | Working → succeeded is a colour change. A row that *moved* when it settled would shove every row below it, in the densest list in the app. |
+| **Status chip / status dot changes** | **Yes**, tint only | `background-color`, `border-color`, `color` at `--motion-tint` | These change because a session did, not because the user did. Cross-fading is what makes the bar read as live instead of as numbers being overwritten. |
+| **Tab activation** | **Yes**, tint only — *reversed from the old rule* | `.dv-tab` background + colour at `--motion-tint` | The tab merging into the panel body is the whole active indicator (§6.1); a merge that happens in zero frames is the "cheap" tell. The **content swap underneath stays instant** — a panel you cannot read yet is worse than no animation. |
+| **Tree expand/collapse** | **Partly** | Chevron rotates on the travel channel; rows appear at once | Animating row insertion means animating height on up to 2,000 rows — the exact layout thrash §5.5 forbids, on the exact surface the perf lane already measures. |
+| **Menus and popovers** | **Yes** | `wb-rise-in` from the edge they belong to | They arrive from the control that summoned them. |
+| **Sash drag, panel resize** | **No** | 1:1 | §5.1.4. |
+| **Terminal output, editor content and scrolling** | **No** | — | §5.1.7. |
+| **List/tree selection, QuickBar row selection** | **No** | — | It tracks a key. See §5.1.4. |
+| **Chat autoscroll** | **No** | — | Not restraint — mechanism. The chat pins to the bottom by comparing `scrollHeight − scrollTop − clientHeight`; a smooth scroll makes that gap large while it catches up, so the pin releases and the view stops following the stream. A smooth *jump to bottom* is fine, and belongs with the jump-to-bottom control that does not exist yet. |
+| **Theme switch** | **No**, and it is suppressed on purpose | §5.7 | — |
+| **Agent "working" dot** | **Yes** | opacity 1 → 0.35 → 1 over 2s `ease-in-out`, infinite | The only looping animation in the app. |
+
+### 5.5 What may be animated
+
+**Only** `transform`, `opacity`, `background-color`, `border-color`, `color`,
+`outline-color`. Never `width`, `height`, `top`, `left`, `margin`, `padding`,
+`box-shadow`, `filter` — the first four trigger layout, which is the most common way an
+app becomes janky, and the rest force paint on surfaces this app makes large.
+
+Never `transition: all`: it animates whatever a later edit adds to the rule.
+
+Never a static `will-change`. Motion here promotes a layer for the length of one
+animation and hands it back; a permanent layer is memory paid on every frame.
+
+`ui/e2e/perf/motion.test.ts` and `ui/e2e/perf/motion.spec.ts` enforce all of the above
+against every stylesheet in `ui/src/` and against the production bundle, and pin the
+third-party rules that break it in a ledger that must match exactly.
+
+### 5.6 Reduced motion: zero the travel, keep the tint
+
+`prefers-reduced-motion: reduce` is a **vestibular** setting, not a "no animation"
+setting. Movement across the screen is the trigger. A colour settling or a panel fading
+is not, and removing those costs the user the feedback the motion was carrying.
+
+The rule, in full:
+
+1. Every **travel distance** goes to zero (`--motion-rise`, `--motion-lift`,
+   `--motion-scale-in`, `--motion-zoom-in`). Every shared entrance keyframe therefore
+   degrades to a pure fade with no code path of its own.
+2. Every **transform transition** goes to `0s` (`--motion-move*`).
+3. Entrances **keep their duration**, at the tint channel's pace, as fades.
+4. The **tint channel is untouched**. `--motion-tint`, `--motion-tint-slow` and
+   `--motion-exit` are the same numbers as always.
+5. The **working-dot pulse stops** (steady dot). It is the one tint animation that is
+   also motion: it never resolves.
+6. **Rotation in place of a ≤16px glyph is not travel** and may stay — but only when it
+   is driven by the travel channel, which zeroes it anyway. Nothing gets an exemption by
+   being small; the chevron's legacy duration token is zeroed by name in `tokens.css`
+   until its stylesheet moves to the channels.
+
+### 5.7 The theme switch never animates
+
+Flipping `data-theme` changes the computed value of a colour on nearly every element in
+the window. With colour transitions in the chrome — and §5.4 puts them on tabs, chips,
+buttons, menu items and tool rows — that starts a transition on *each* of them: hundreds
+of concurrent animations and a style recalculation with all of them live. Measured on
+this app, an unguarded flip started 17 transitions from four visible panels.
+
+So the flip is bracketed: `ui/src/motion.ts` sets `data-theme-switching` on `<html>`,
+which carries `transition: none !important`, flips the attribute in the same task so the
+browser folds both into **one** style recalculation, forces that recalculation with a
+single computed-style read, and clears the bracket. Nothing has a value change left to
+transition from afterwards. `ui/e2e/motion.spec.ts` counts the `transitionrun` events
+the browser actually fires and requires zero.
+
+### 5.8 Deprecated
+
+`--duration-1/2/3` and `--ease-standard` remain as aliases onto the channels so
+stylesheets written before this revision keep working. New work uses §5.3. They will be
+removed once the last stylesheet has moved.
+
+Each aliases onto the channel its consumers actually use — a deprecated name is not a
+free pass past §5.1.3. `--duration-2/3` are travel durations, `--duration-1` a tint one,
+and **`--ease-standard` is the tint ease, not the spring**: every stylesheet still on it
+pairs it with a colour property, save the file tree's chevron, whose `--duration-1` had
+already put it on the tint channel. Pointing the name at the spring instead would
+re-curve other lanes' colour transitions without a character changing in their files.
+A legacy consumer that wants travel migrates to `--motion-move*` in its own file, where
+a reviewer can see it. `ui/e2e/perf/motion.test.ts` resolves every transition value
+through the token file and fails the build if a colour-only one lands on a spring.
 
 ---
 
@@ -261,9 +437,10 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Row height **26px**, full-row hit target, 12px/400 text, indent 16px/level.
 - Default `--text-secondary`; hover `--surface-hover`; selected `--surface-selected` +
   `--text-primary`; focus ring inset when keyboard-navigating.
-- Chevron 12px, `--text-tertiary`, rotates 90° in 80ms (the one tolerated tree motion —
-  transform, not layout). File-type icons 16px, single-color `--text-tertiary` (Lucide
-  strokes; no colored icon soup).
+- Chevron 12px, `--text-tertiary`, rotates 90° on the travel channel — the one tree
+  motion (§5.4): rows themselves appear at once, because animating row insertion is
+  animating height on up to 2,000 of them. File-type icons 16px, single-color
+  `--text-tertiary` (Lucide strokes; no colored icon soup).
 - Agent-modified marker: 6px dot right-aligned, `--agent-done` (§2.6) — "an agent
   changed this and you have not looked yet". Carries an `aria-label`/tooltip naming
   the session, never colour alone (§6.4); it clears when the file is opened or its
@@ -318,7 +495,9 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
   commands — the QuickBar knows no section names.
 - Keycap hints: 11px mono on `--surface-elevated`, 1px `--border-default`,
   `--radius-xs`, padding 1px 5px.
-- Motion: fade + scale 0.98→1 in 140ms `--ease-standard`; exit 100ms fade.
+- Motion (§5.4): fade + scale `--motion-scale-in`→1 on `--motion-enter`; exit is a
+  `--motion-exit` fade, during which the bar is on screen but `pointer-events: none`.
+  Row selection is **not** animated — it tracks the arrow key.
 
 ### 6.6 Terminal panel
 - Bg `--surface-terminal` (deepest surface — the terminal reads as a "well"), no padding

@@ -9,6 +9,7 @@ import {
 
 import { visibleCommands } from "../commands";
 import { chordKeycaps } from "../keys";
+import { usePresence } from "../motion";
 import { useStore } from "../store";
 import type { TreeNode } from "../types";
 
@@ -53,6 +54,9 @@ export function QuickBar() {
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const selRef = useRef<HTMLButtonElement>(null);
+  // Held on screen for `--motion-exit-ms` after it closes, so dismissing it is
+  // a movement rather than a disappearance (DESIGN.md §5).
+  const [present, leaving] = usePresence(open);
 
   useEffect(() => {
     if (open) {
@@ -79,8 +83,9 @@ export function QuickBar() {
     return out;
   }, [tree]);
 
-  if (!open) return null;
+  if (!present) return null;
   const close = (): void => useStore.getState().setQuickBarOpen(false);
+  const exiting = leaving ? " is-leaving" : "";
 
   const actionsMode = query.startsWith(">");
   let rows: Row[];
@@ -144,8 +149,12 @@ export function QuickBar() {
 
   return (
     <>
-      <div className="wb-qb-backdrop" onClick={close} />
-      <div className="wb-qb" role="dialog" aria-label="Quick open">
+      <div className={"wb-qb-backdrop" + exiting} onClick={close} />
+      {/* No `aria-hidden` while it leaves: the input inside still holds focus
+          for those few frames, and hiding a focused subtree from the
+          accessibility tree is worse than describing a dialog that is fading.
+          `pointer-events: none` in the stylesheet is what makes it inert. */}
+      <div className={"wb-qb" + exiting} role="dialog" aria-label="Quick open">
         <input
           autoFocus
           className="wb-qb-input"

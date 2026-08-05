@@ -13,6 +13,18 @@
   border: 1px solid transparent;
 }
 
+/* Entering focus mode fills the chip with accent while the dock zooms up under
+   it (`src/motion.ts`). The two are the same event, so they run on the same
+   channel timing — the chip inherits `--motion-tint` from `.wb-status-chip`
+   and the glyph turns with it, on the travel channel. */
+.wb-layout-chip svg {
+  transition: transform var(--motion-move-snap);
+}
+
+.wb-layout-chip.is-focused svg {
+  transform: scale(1.08);
+}
+
 .wb-layout-chip:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
@@ -45,7 +57,9 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   z-index: 151;
-  animation: wb-menu-in var(--duration-2) var(--ease-standard);
+  /* Anchored to the bar it grew out of, so it rises from the bottom edge. */
+  animation: wb-rise-in var(--motion-enter);
+  transform-origin: bottom right;
 }
 
 .wb-layout-menu-label {
@@ -74,11 +88,15 @@
   color: var(--text-tertiary);
   font-size: 14px;
   line-height: 1;
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
 }
 
 .wb-layout-delete:hover {
   background: var(--surface-hover);
   color: var(--error);
+  transition-duration: 0s;
 }
 
 .wb-layout-save {

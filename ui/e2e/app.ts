@@ -31,6 +31,24 @@ export function treeItem(page: Page, name: string): Locator {
   return page.getByRole("treeitem", { name, exact: true });
 }
 
+/**
+ * Wait until the dock has finished moving (DESIGN.md §5.4).
+ *
+ * Focus mode and layout switches animate `.wb-dock` on a transform, and a
+ * transform is *in* `getBoundingClientRect()` — so any journey that reads panel
+ * geometry right after one of them measures the animation rather than the
+ * arrangement. Nothing the app itself measures is affected (dockview sizes from
+ * its own model; xterm and Monaco read used layout sizes, which transforms do
+ * not touch) — this is only for tests that read screen geometry.
+ */
+export async function dockSettled(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const dock = document.querySelector(".wb-dock");
+    if (dock === null) return;
+    await Promise.all(dock.getAnimations().map((a) => a.finished.catch(() => undefined)));
+  });
+}
+
 /** Right-click a tree row and pick a context-menu entry. */
 export async function treeMenu(page: Page, name: string, item: string): Promise<void> {
   await treeItem(page, name).click({ button: "right" });
