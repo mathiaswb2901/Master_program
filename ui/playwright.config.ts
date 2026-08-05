@@ -68,6 +68,12 @@ const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
+  // `e2e/perf/` is the Feel perf lane and belongs to `playwright.perf.config.ts`
+  // — a different workspace (the generated 5,005-file fixture), different ports
+  // and a different report. Without this it is picked up here too, and its
+  // budgets are asserted against the small seeded journey workspace, where they
+  // measure nothing and fail on a missing directory.
+  testIgnore: "perf/**",
   fullyParallel: false,
   workers: 1,
   forbidOnly: process.env.CI !== undefined,
