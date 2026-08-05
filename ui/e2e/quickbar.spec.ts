@@ -14,14 +14,18 @@
  *  - running a shell shortcut *types* the snippet into the terminal and stops
  *    there: the text sits on the prompt line, and the shell produced no output
  *    for it (the snippet appears exactly once — an executed `echo` would print
- *    its argument a second time).
+ *    its argument a second time);
+ *  - a **registered tool** reaches the user through the registry alone: the
+ *    Scratchpad's command is in the QuickBar with its own chord, running it
+ *    opens a panel that is not in the default layout, and what is typed there
+ *    lands in a real workspace file.
  */
 
 import path from "node:path/posix";
 
 import { expect, test } from "@playwright/test";
 
-import type { ShortcutsState } from "../src/types";
+import type { FileContent, ShortcutsState } from "../src/types";
 import { gotoApp, runInTerminal, terminal, terminalText, treeItem, workspaceReady } from "./app";
 import {
   BROKEN_SHORTCUT_NAME,
@@ -31,6 +35,9 @@ import {
 } from "./workspace";
 
 const MARKER = "e2e-shortcut-marker";
+/** The demo tool's own file, and a note to prove it really lands there. */
+const SCRATCH_FILE = ".workbench/scratch.md";
+const SCRATCH_NOTE = "SE3 spread looked odd on the 25-hour day.";
 /** Sync command for the never-run step. Its output differs from its input, and
  * shares no prefix with `workbench-e2e-<random>` on the prompt line. */
 const SYNC_COMMAND = 'echo "sync-$(4+5)"';
@@ -135,5 +142,31 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
     const text = await terminalText(page);
     const occurrences = text.split(MARKER).length - 1;
     expect(occurrences, "the snippet was typed and never run").toBe(1);
+  });
+
+  await test.step("a registered tool brings its own command, chord and panel", async () => {
+    // The exit criterion of the tool registry, end to end. Scratchpad is one
+    // module plus one line in `ui/src/tools.ts` — no App.tsx, no commands.ts,
+    // no CSS bundle — and this is what that buys: a QuickBar row with its own
+    // keycaps, a panel that is not in the default layout until the command
+    // opens it, and a real file on disk behind it.
+    await page.keyboard.press("Control+Shift+P");
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    const row = quickbar.locator(".wb-qb-row", { hasText: "Open Scratchpad" }).first();
+    await expect(row.locator(".wb-keycap")).toHaveText(["Alt", "S"]);
+
+    await expect(page.getByRole("textbox", { name: "Scratchpad" })).toHaveCount(0);
+    await row.click();
+    const pad = page.getByRole("textbox", { name: "Scratchpad" });
+    await expect(pad).toBeVisible();
+
+    await pad.fill(SCRATCH_NOTE);
+    await pad.blur();
+    await expect(page.locator(".wb-scratchpad-status")).toHaveText("Saved");
+    const saved = await page.request.get(
+      `/api/files/content?path=${encodeURIComponent(SCRATCH_FILE)}`,
+    );
+    expect(saved.ok()).toBe(true);
+    expect(((await saved.json()) as FileContent).content).toBe(SCRATCH_NOTE);
   });
 });

@@ -111,6 +111,59 @@ backend too:
 `@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
 build never fetches the chunk and every call is inert in a tab.
 
+## Tool registry
+
+A **tool** is one capability, declared in one descriptor next to its own code
+(`ui/src/registry.ts` for the type, `ui/src/tools.ts` for the list). It may
+contribute any of:
+
+| Field | What registering gets you |
+|---|---|
+| `panel` | A dockview panel: component, where it docks, whether it opens with the app, whether it is a singleton. `App.tsx` names no panel — it renders `panelComponents(TOOLS)` and applies `defaultLayout(TOOLS)` |
+| `documentView` | A renderer for one `OpenFile` kind inside the editor area. Office claims `office`; the native Office host will claim it back through the same field |
+| `commands` + `shortcuts` | QuickBar rows and keymap entries. Commands are the same `Command` shape `commands.ts` already used, so the QuickBar, the pass-through policy and the `shortcuts.md` merge are unchanged; the chords live in one table per tool, which is the layer a user keymap file overrides later |
+| `statusContributions` | Items in the status bar's left/centre/right regions. The bar owns the regions and nothing that goes in them |
+| `agentTools` | The MCP tools this capability puts in a session's context, with the required output-format field (see below) |
+| `when` | A predicate that takes the whole tool out — panel, commands and status items together |
+
+Derivation is what makes it a registry rather than a list: `Ctrl+1..N` focus
+commands are generated from the panels *in the default layout*, in registry
+order, so the four familiar chords are simply the first four registered panels
+and a fifth would get `Ctrl+5` by existing. Every derivation in `registry.ts` is
+a pure function of a tools array — never of `TOOLS` itself — which is what makes
+them unit-testable with fixtures and what makes a second, differently-sourced
+array possible.
+
+**Registration is static**: `TOOLS` is an array assembled from per-tool modules
+at build time, so the bundler sees every import and `tsc` type-checks every
+descriptor. That is the deliberate stopping point for now. **The plugin seam**
+is the shape, not a loader: because nothing reads `TOOLS` except the four call
+sites that pass it in, a later loader can concatenate descriptors from
+`.workbench/` (or an installed package) onto the same array and the shell will
+host them unchanged. That is the M7+ endgame in `ROADMAP.md` — the difference
+between a fixed app and an instrument.
+
+**The exit criterion, demonstrated.** `ui/src/panels/Scratchpad.tsx` is a whole
+capability — panel, command, chord, tab icon, a file on disk — added in one new
+module plus one line in `tools.ts`. It touches no file another work lane is
+likely to touch. `docs/tools.md` is the walkthrough.
+
+**Agent-facing tools** carry the ergonomics budget on both sides.
+`services/agent_tools.py` is the server registry the SDK actually reads: name,
+model-facing description, input schema, and a **required** `output_format`, so
+`mypy --strict` fails an omission. `sdk_factory.py` builds the MCP server *and*
+the session's allow-list from that list, so a tool is added in one place. The
+budget is enforced where it can fail — `server/tests/test_agent_tools.py`
+asserts a ceiling on every description (loaded into every session's context, so
+paid for on every request) and on the serialized size of a representative
+result, and that results are compact JSON rather than pretty-printed. The UI
+descriptor's `agentTools` field is the capability's own declaration of what it
+adds, with the same description ceiling in `registry.test.ts`; the two are
+deliberately not wired together over the network, since a second copy of the
+model-facing text on the wire would be another authority to keep honest for no
+gain. Latency is not budgeted: these are in-process calls where the model and
+the user dominate.
+
 ## Module map (server/src/workbench_server/)
 
 | Module | Owns |
@@ -131,6 +184,7 @@ build never fetches the chunk and every call is inert in a tab.
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage |
+| `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
@@ -368,7 +422,8 @@ wins per name). The workspace file rides the existing watcher — its `FileChang
 the bus is the reload trigger — while the global one, living outside the workspace, gets
 its own small `watchfiles` watch; a reload that changes the merged state publishes
 `ShortcutsChangedEvent` and the UI refetches. Entries extend the command registry
-(`ui/src/commands.ts`) dynamically, and built-ins win every id/chord collision. Parsing is
+(`ui/src/commands.ts`) dynamically, and everything the tool registry contributes wins
+every id/chord collision — a file cannot shadow `Ctrl+S` or `Alt+T`. Parsing is
 total: a bad entry becomes a `problem` in the payload, never an exception; markdown
 inside any fence is example text, so a `##` line there registers nothing. **Entries are
 inserted, never executed** — a shell body is typed into the active terminal with no
@@ -403,7 +458,8 @@ Format spec: `docs/shortcuts.md`.
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
    launched in a per-run temp workspace with fake-agent mode on. Eight journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
-   ConPTY, QuickBar/shortcuts (including the never-executed rule), chat streaming and
+   ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
+   tool reaching the user through the registry alone), chat streaming and
    tool settling, plan cards, status chips and the attention badge, office degraded
    mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
    and links back to its session — *and* the negative half: an announced-but-failed

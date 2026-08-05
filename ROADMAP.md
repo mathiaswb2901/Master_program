@@ -104,7 +104,7 @@ the moat.
   and never execute (no `run:` option, shell bodies single-line, no trailing newline),
   so a hostile workspace file can add QuickBar rows but not actions. Still open: agents
   get a skill to add entries on request (ships with the skills bundle).
-- **Tool registry** — *the foundation of the Modular track below; build it before any
+- ~~**Tool registry** — *the foundation of the Modular track below; build it before any
   further panel lands*: panels/commands/skills register in one place instead of
   hardwiring in `App.tsx` (product principle 1). Registration carries an
   **agent-ergonomics budget**, enforced through machinery that already exists rather
@@ -114,8 +114,9 @@ the moat.
   serialized size of a representative result (so the quality gate fails bloat). Thin
   calls over wrapped APIs, compact text over pretty JSON, short descriptions — every
   description is loaded into every session's context. Latency is deliberately *not*
-  budgeted: these are in-process local calls where the model and the user dominate.
-  Revisit with a real aggregate measurement if the tool surface passes ~20.
+  budgeted: these are in-process local calls where the model and the user dominate.~~
+  **done** — built as M5 item 1; see there for what landed. Standing note: revisit the
+  budget with a real aggregate measurement if the tool surface passes ~20.
 - ~~**Provenance badges**~~ **done**: `services/provenance.py` attributes a file
   change to the session whose `Write`/`Edit`/`MultiEdit`/`NotebookEdit` named exactly
   that path within a 10 s window (`FileProvenanceEvent` on `/ws/events`, `GET
@@ -180,10 +181,29 @@ seam a user-authored plugin later plugs into. One PR now, paid back six times.
 
 Ordered by what unblocks what.
 
-1. **Tool registry** (listed in M4, built first here): a typed registry where a
+1. ~~**Tool registry** (listed in M4, built first here): a typed registry where a
    capability declares its panel, its commands, its default shortcuts and its
    agent-facing tools in one place. `App.tsx` stops naming panels. Exit criterion: a
-   new panel can be added without editing any file that another lane is likely to touch.
+   new panel can be added without editing any file that another lane is likely to
+   touch.~~ **done** — `ui/src/registry.ts` (the `WorkbenchTool` type + pure
+   derivations) and `ui/src/tools.ts` (the array). All five existing panels register
+   themselves, including their own commands: saving and tab cycling are the Editor's,
+   `Alt+T` the Terminal's, `New agent session` and the `Alt+1..9` jumps the Agent's,
+   and Office contributes a *document view* rather than a panel — the same field the
+   native Office host will claim. `App.tsx`, `commands.ts` and `StatusBar.tsx` name no
+   capability any more; `Ctrl+1..4` is derived from the panels in the default layout,
+   in registry order, rather than from four fixed ids. **Exit criterion demonstrated**,
+   not claimed: the Scratchpad tool (`ui/src/panels/Scratchpad.tsx`) is a panel, a
+   command, a chord, a tab icon and a file on disk, added in one new module plus one
+   line in `tools.ts` — asserted end-to-end in the QuickBar journey. Server side,
+   `services/agent_tools.py` is the matching registry the SDK reads (name, description,
+   input schema, required `output_format`), and `test_agent_tools.py` binds the
+   ergonomics budget: a ceiling on every description and on the serialized size of a
+   representative result, plus compact JSON instead of the pretty-printed
+   `get_workspace_state` payload we were paying for on every call. Deliberately
+   deferred: registration is static — no dynamic plugin loader — but every derivation
+   takes a tools array rather than reading `TOOLS`, which is the seam one plugs into
+   (`ARCHITECTURE.md` §Tool registry, `docs/tools.md`).
 2. **Layout system** — the "work full screen" gap. dockview already supports far more
    than we use: panel **maximize / focus mode**, floating and popped-out panels, and
    full serialization. Add named, savable layouts ("review", "writing", "three

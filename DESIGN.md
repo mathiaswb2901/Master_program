@@ -321,8 +321,11 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Every dot-only element carries an `aria-label` (§6.4).
 
 ### 6.8 Keymap and pass-through policy
-Every binding lives in the command registry (`ui/src/commands.ts`); the QuickBar lists
-the same registry, so nothing is reachable only by chord and nothing only by mouse.
+Every binding lives in the command registry; the QuickBar lists the same registry, so
+nothing is reachable only by chord and nothing only by mouse. `ui/src/commands.ts` holds
+only the window-level commands and assembles the rest — a capability declares its own
+commands and their default chords on its tool descriptor (`docs/tools.md`), and
+`Ctrl+1..N` is derived from the registered panels in order, not from fixed ids.
 
 | Chord | Command |
 |---|---|

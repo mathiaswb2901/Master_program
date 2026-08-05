@@ -6,15 +6,16 @@ Isolated here so nothing else imports the SDK — sessions stay testable with fa
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
-from workbench_server.models.plans import PlanArtifact, plan_input_schema
-from workbench_server.services.agent_sessions import (
-    PlanAlreadyPendingError,
-    SdkClient,
-    SessionBridge,
+from workbench_server.services.agent_sessions import SdkClient, SessionBridge
+from workbench_server.services.agent_tools import (
+    GET_WORKSPACE_STATE,
+    MCP_SERVER_NAME,
+    PRESENT_PLAN,
+    allowed_tool_names,
+    handle_present_plan,
+    workspace_state_result,
 )
 from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
 
@@ -33,19 +34,6 @@ _AUTO_ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep"]
 # own included, and our own workbench-dev — still reaches the UI prompt.
 _AUTO_ALLOWED_SKILLS = [f"Skill({PLUGIN_NAME}:plan-visual)", f"Skill({PLUGIN_NAME}:remember)"]
 
-_PRESENT_PLAN_DESCRIPTION = (
-    "Show the user an interactive plan card in Workbench and wait for their "
-    "decision. Use this instead of writing a plan as chat prose whenever you "
-    "propose multi-step work or ask the user to choose between alternatives. "
-    "Nodes render natively: option_group (the user picks one option), step_list "
-    "(ordered steps, file_refs open real editor tabs), question, markdown. "
-    "Returns JSON {plan_id, verdict, choices, annotations, comment}. verdict "
-    "'approve' means proceed with the chosen options; 'revise' means rework the "
-    "plan using their comments and present it again; 'reject' means drop this "
-    "approach; 'no_decision' means the user never answered (timeout or "
-    "interrupt) — stop and ask in chat, never treat it as approval."
-)
-
 
 class UiStateStore:
     """Latest UI state pushed by the frontend; read by agents via MCP."""
@@ -54,59 +42,29 @@ class UiStateStore:
         self.state = UiState()
 
 
-async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> dict[str, Any]:
-    """The present_plan tool body, free of SDK imports so it is directly testable.
-
-    ``plan_id`` is dropped before validation, not merely omitted from the tool's
-    input schema: the schema is advisory, and ``PlanArtifact``'s default factory
-    would keep any id the model sent. Since the tool result the agent reads
-    *contains* the id, an agent that echoes it back when re-presenting a revised
-    plan would collide with the settled card — the UI dedupes by ``plan_id`` and
-    the user would be left with nothing to answer while the tool blocked for the
-    full timeout. Minting here makes every presentation a fresh card.
-
-    Validation errors come back as tool errors rather than exceptions: the agent
-    reads them and fixes its own arguments on the next call.
-    """
-    try:
-        artifact = PlanArtifact.model_validate(
-            {key: value for key, value in args.items() if key != "plan_id"}
-        )
-    except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-            for error in exc.errors()[:10]
-        )
-        return {
-            "content": [{"type": "text", "text": f"Invalid plan — fix and retry: {problems}"}],
-            "is_error": True,
-        }
-    try:
-        response = await bridge.present_plan(artifact)
-    except PlanAlreadyPendingError as exc:
-        return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
-    return {"content": [{"type": "text", "text": response.model_dump_json()}]}
-
-
 def build_context_bridge(store: UiStateStore, bridge: SessionBridge) -> Any:
-    """In-process MCP server exposing the workbench tools to one session."""
+    """In-process MCP server exposing the workbench tools to one session.
+
+    Names, descriptions, input schemas and bodies all come from the tool
+    registry (``services/agent_tools.py``); this function is only the SDK
+    wiring, so adding a tool never means editing an allow-list here as well.
+    """
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     @tool(
-        "get_workspace_state",
-        "Current workbench UI state: the file the user is looking at, open tabs, "
-        "and files with unsaved changes (do NOT edit those).",
-        {},
+        GET_WORKSPACE_STATE.name,
+        GET_WORKSPACE_STATE.description,
+        GET_WORKSPACE_STATE.input_schema,
     )
     async def get_workspace_state(args: dict[str, Any]) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": store.state.model_dump_json(indent=2)}]}
+        return workspace_state_result(store.state)
 
-    @tool("present_plan", _PRESENT_PLAN_DESCRIPTION, plan_input_schema())
+    @tool(PRESENT_PLAN.name, PRESENT_PLAN.description, PRESENT_PLAN.input_schema)
     async def present_plan(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_present_plan(bridge, args)
 
     return create_sdk_mcp_server(
-        name="workbench", version="1.0.0", tools=[get_workspace_state, present_plan]
+        name=MCP_SERVER_NAME, version="1.0.0", tools=[get_workspace_state, present_plan]
     )
 
 
@@ -169,13 +127,12 @@ def build_agent_options(
         allowed_tools=[
             *_AUTO_ALLOWED,
             *(_AUTO_ALLOWED_SKILLS if plugins else []),
-            "mcp__workbench__get_workspace_state",
-            "mcp__workbench__present_plan",
+            *allowed_tool_names(),
         ],
         permission_mode="acceptEdits",
         include_partial_messages=True,
         can_use_tool=can_use_tool,
-        mcp_servers={"workbench": build_context_bridge(store, bridge)},
+        mcp_servers={MCP_SERVER_NAME: build_context_bridge(store, bridge)},
         plugins=plugins,
         setting_sources=setting_sources,
         system_prompt={

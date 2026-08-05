@@ -2,28 +2,23 @@ import {
   DockviewReact,
   type DockviewReadyEvent,
   type IDockviewPanelHeaderProps,
-  type IDockviewPanelProps,
 } from "dockview";
-import { useEffect, useState, type FunctionComponent } from "react";
+import { useEffect, useState } from "react";
 
-import { installCommandKeys, setDockApi } from "./commands";
-import { AgentPanel } from "./panels/AgentPanel";
-import { EditorAreaPanel } from "./panels/EditorArea";
-import { FileTreePanel } from "./panels/FileTree";
+import { installCommandKeys } from "./commands";
+import { layoutDefaultPanels, setDockApi } from "./dock";
 import { DirtyCloseModal, ShellCloseModal } from "./panels/Modal";
 import { QuickBar } from "./panels/QuickBar";
 import { StatusBar } from "./panels/StatusBar";
-import { TerminalPanel } from "./panels/Terminal";
 import { Toasts } from "./panels/Toasts";
+import { panelComponents } from "./registry";
 import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
+import { TOOLS } from "./tools";
 
-const components: Record<string, FunctionComponent<IDockviewPanelProps>> = {
-  files: FileTreePanel,
-  editors: EditorAreaPanel,
-  agent: AgentPanel,
-  terminal: TerminalPanel,
-};
+// Which panels exist, what they are called and where they dock are properties
+// of the registered tools (`tools.ts`) — this file names none of them.
+const components = panelComponents(TOOLS);
 
 const BASE_TITLE = "Workbench";
 
@@ -36,8 +31,10 @@ function PanelTab(props: IDockviewPanelHeaderProps) {
   const attention = useStore(
     (s) => props.api.id === "agent" && anyNeedsAttention(s.sessionStates),
   );
+  const Icon = TOOLS.find((tool) => tool.id === props.api.component)?.icon;
   return (
     <div className="wb-panel-tab u-truncate">
+      {Icon !== undefined && <Icon />}
       {props.api.title ?? props.api.id}
       {attention && (
         <span
@@ -55,31 +52,10 @@ const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbenc
 
 function onReady(event: DockviewReadyEvent): void {
   const { api } = event;
-  // The registry needs the dock handle for the panel-focus commands (Ctrl+1..4).
+  // The registry needs the dock handle: panel focus (Ctrl+1..N), and opening a
+  // panel that is not in the startup layout.
   setDockApi(api);
-  api.addPanel({ id: "editors", component: "editors", title: "Editor" });
-  api.addPanel({
-    id: "files",
-    component: "files",
-    title: "Files",
-    position: { referencePanel: "editors", direction: "left" },
-    initialWidth: 240,
-  });
-  api.addPanel({
-    id: "agent",
-    component: "agent",
-    title: "Agent",
-    position: { referencePanel: "editors", direction: "right" },
-    initialWidth: 380,
-  });
-  api.addPanel({
-    id: "terminal",
-    component: "terminal",
-    title: "Terminal",
-    position: { referencePanel: "editors", direction: "below" },
-    initialHeight: 260,
-  });
-  api.getPanel("editors")?.api.setActive();
+  layoutDefaultPanels(api);
 }
 
 export default function App() {

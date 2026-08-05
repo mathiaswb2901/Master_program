@@ -25,7 +25,7 @@ from workbench_server.models.plans import (
     plan_input_schema,
 )
 from workbench_server.services.agent_sessions import PlanAlreadyPendingError, SessionBridge
-from workbench_server.services.sdk_factory import handle_present_plan
+from workbench_server.services.agent_tools import handle_present_plan
 
 
 def plan_payload(**overrides: Any) -> dict[str, Any]:

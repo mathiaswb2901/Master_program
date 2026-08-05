@@ -1,8 +1,9 @@
 import type { IDockviewPanelProps } from "dockview";
 
+import type { WorkbenchTool } from "../registry";
 import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
-import type { SessionInfo } from "../types";
+import type { SessionInfo, SessionState } from "../types";
 import { Chat, statusVisual, TranscriptView } from "./Chat";
 
 function SessionRow({ session }: { session: SessionInfo }) {
@@ -37,18 +38,27 @@ function SessionRow({ session }: { session: SessionInfo }) {
   );
 }
 
+/** Folder a new session binds to: the active file's directory, else the root. */
+function activeFolder(): string {
+  const path = useStore.getState().activePath;
+  return path !== null && path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+}
+
+/** Every session, newest first — live ones and resumable transcripts alike. */
+function recentSessions(): SessionInfo[] {
+  return useStore
+    .getState()
+    .folders.flatMap((group) => group.sessions)
+    .sort((a, b) => b.updated_at - a.updated_at);
+}
+
 export function AgentPanel(_props: IDockviewPanelProps) {
   const folders = useStore((s) => s.folders);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const hasTranscript = useStore((s) => s.transcriptView !== null);
 
   const newSession = (): void => {
-    const s = useStore.getState();
-    const folder =
-      s.activePath !== null && s.activePath.includes("/")
-        ? s.activePath.slice(0, s.activePath.lastIndexOf("/"))
-        : "";
-    void s.createSessionIn(folder);
+    void useStore.getState().createSessionIn(activeFolder());
   };
 
   return (
@@ -92,3 +102,151 @@ export function AgentPanel(_props: IDockviewPanelProps) {
     </div>
   );
 }
+
+// ---- status bar -------------------------------------------------------------
+
+/** Chips beyond this collapse into a count, so a fleet never eats the bar. */
+const MAX_CHIPS = 4;
+
+function SessionChip({ session }: { session: SessionInfo }) {
+  const state = useStore((s) => s.sessionStates[session.session_id] ?? session.state);
+  const flags = useStore((s) => s.sessionFlags[session.session_id]);
+  const active = useStore((s) => s.activeSessionId === session.session_id);
+  const v = statusVisual(state, flags);
+  return (
+    <button
+      type="button"
+      className={"wb-status-chip" + (active ? " is-active" : "")}
+      title={`${session.title} — ${v.label}`}
+      onClick={() => useStore.getState().openSession(session)}
+    >
+      <span
+        className={"wb-dot" + (v.pulse ? " u-agent-pulse" : "")}
+        style={{ background: v.color }}
+        role="img"
+        aria-label={v.label}
+      />
+      <span className="wb-status-chip-title u-truncate">{session.title}</span>
+    </button>
+  );
+}
+
+/** Centre of the status bar: one chip per live session, overflow as a count. */
+function SessionChips() {
+  const folders = useStore((s) => s.folders);
+  const live = folders.flatMap((group) => group.sessions).filter((session) => session.live);
+  const shown = live.slice(0, MAX_CHIPS);
+  const overflow = live.length - shown.length;
+  return (
+    <>
+      {shown.map((session) => (
+        <SessionChip key={session.session_id} session={session} />
+      ))}
+      {overflow > 0 && (
+        <span className="wb-status-more u-tabular" title={`${overflow} more live sessions`}>
+          +{overflow}
+        </span>
+      )}
+    </>
+  );
+}
+
+function countStates(states: Record<string, SessionState>, want: SessionState): number {
+  return Object.values(states).filter((state) => state === want).length;
+}
+
+/** Right end of the status bar: the fleet at a glance, and what it cost. */
+function SessionCounts() {
+  const states = useStore((s) => s.sessionStates);
+  const lastCostUsd = useStore((s) => s.lastCostUsd);
+  const attention = countStates(states, "needs_attention");
+  const working = countStates(states, "working");
+  return (
+    <>
+      {attention > 0 && (
+        <span className="wb-status-count" title={`${attention} sessions need attention`}>
+          <span
+            className="wb-dot"
+            style={{ background: "var(--agent-attention)" }}
+            role="img"
+            aria-label="Needs attention"
+          />
+          <span className="u-tabular">{attention}</span>
+        </span>
+      )}
+      {working > 0 && (
+        <span className="wb-status-count" title={`${working} sessions working`}>
+          <span
+            className="wb-dot u-agent-pulse"
+            style={{ background: "var(--agent-working)" }}
+            role="img"
+            aria-label="Working"
+          />
+          <span className="u-tabular">{working}</span>
+        </span>
+      )}
+      {lastCostUsd !== null && (
+        <span className="wb-status-cost u-tabular" title="Cost of the last finished turn">
+          ${lastCostUsd.toFixed(4)}
+        </span>
+      )}
+    </>
+  );
+}
+
+// ---- registration -----------------------------------------------------------
+
+/** Alt+1..9 — the n-th most recent session, live or resumable. */
+const sessionJumps = Array.from({ length: 9 }, (_, i) => ({
+  id: `session.jump.${String(i + 1)}`,
+  title: `Jump to session ${String(i + 1)}`,
+  when: () => recentSessions().length > i,
+  detail: () => recentSessions()[i]?.title ?? "",
+  run: () => {
+    const session = recentSessions()[i];
+    if (session !== undefined) useStore.getState().openSession(session);
+  },
+}));
+
+const jumpChords = Object.fromEntries(
+  sessionJumps.map((command, i) => [command.id, [`Alt+${String(i + 1)}`]]),
+);
+
+export const agentTool: WorkbenchTool = {
+  id: "agent",
+  title: "Agent",
+  panel: {
+    component: AgentPanel,
+    defaultLocation: { area: "right", size: 380 },
+  },
+  commands: [
+    {
+      id: "session.new",
+      title: "New agent session here",
+      detail: () => activeFolder() || "workspace root",
+      run: () => void useStore.getState().createSessionIn(activeFolder()),
+    },
+    ...sessionJumps,
+  ],
+  shortcuts: jumpChords,
+  statusContributions: [
+    { region: "center", component: SessionChips },
+    { region: "right", component: SessionCounts },
+  ],
+  // The context-bridge MCP tools this capability puts in every session's
+  // context. The server registry (services/agent_tools.py) is what the SDK
+  // reads; this is the capability's own declaration of what it costs, and
+  // carries the same description budget (registry.test.ts).
+  agentTools: [
+    {
+      name: "get_workspace_state",
+      description: "The file the user is looking at, open tabs, unsaved buffers.",
+      outputFormat: "compact-json",
+    },
+    {
+      name: "present_plan",
+      description: "Show an interactive plan card and block on the user's decision.",
+      outputFormat: "compact-json",
+    },
+  ],
+};

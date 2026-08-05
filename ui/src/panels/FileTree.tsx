@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { FileTypeIcon } from "../fileIcons";
+import type { WorkbenchTool } from "../registry";
 import { useStore } from "../store";
 import type { TreeNode } from "../types";
 
@@ -464,3 +465,19 @@ export function FileTreePanel(_props: IDockviewPanelProps) {
     </div>
   );
 }
+
+/** Left end of the status bar: which workspace this window is looking at. */
+function WorkspaceStatus() {
+  const workspace = useStore((s) => s.tree?.name ?? "workspace");
+  return <span className="wb-status-workspace u-truncate">{workspace}</span>;
+}
+
+export const filesTool: WorkbenchTool = {
+  id: "files",
+  title: "Files",
+  panel: {
+    component: FileTreePanel,
+    defaultLocation: { area: "left", size: 240 },
+  },
+  statusContributions: [{ region: "left", component: WorkspaceStatus }],
+};

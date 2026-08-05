@@ -1,8 +1,8 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { IDockviewPanelProps } from "dockview";
-import { useEffect } from "react";
+import { Fragment, useEffect } from "react";
 
-import { focusPanel } from "../commands";
+import { focusPanel } from "../dock";
 import {
   editorPathProp,
   languageForPath,
@@ -10,10 +10,10 @@ import {
   monacoThemeName,
   setActiveEditor,
 } from "../monaco";
+import { documentViews, type WorkbenchTool } from "../registry";
 import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
-
-import { OfficePanel } from "./OfficePanel";
+import { TOOLS } from "../tools";
 
 /** Same marker as the tree row, for a tab the user has not looked at yet: an
  * agent can change a file that is open behind the active one. */
@@ -135,6 +135,11 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
   const activePath = useStore((s) => s.activePath);
   const theme = useStore((s) => s.theme);
   const active = openFiles.find((f) => f.path === activePath) ?? null;
+  // What renders a non-text buffer is a registry question, not a list of file
+  // kinds here: the Office tool claims `office`, and the native Office host
+  // will claim it back the same way.
+  const views = documentViews(TOOLS);
+  const activeView = active === null ? null : (views.find((v) => v.kind === active.kind) ?? null);
 
   useEffect(() => () => setActiveEditor(null), []);
 
@@ -168,24 +173,37 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
         ))}
       </div>
       {active !== null && <ProvenanceBar path={active.path} />}
-      {active?.kind === "text" && active.conflict !== null && <ConflictBar file={active} />}
+      {active !== null && activeView === null && active.conflict !== null && (
+        <ConflictBar file={active} />
+      )}
       <div className="wb-editor-body">
-        {/* Every open office file keeps its editor mounted for the tab's whole
-            lifetime — creating an OnlyOffice instance is expensive, so tab
-            switches only toggle CSS visibility. display:none keeps hidden
-            iframes out of focus/tab order and unable to steal keystrokes.
-            Unmount (destroyEditor) happens only on close or generation bump. */}
-        {openFiles
-          .filter((f) => f.kind === "office")
-          .map((f) => (
-            <div
-              key={f.path}
-              className={"wb-office-host" + (f.path === activePath ? "" : " is-hidden")}
-            >
-              <OfficePanel file={f} />
-            </div>
+        {/* A `keepMounted` view keeps every open file of its kind mounted for
+            the tab's whole lifetime — creating an OnlyOffice instance is
+            expensive, so tab switches only toggle CSS visibility. display:none
+            keeps hidden iframes out of focus/tab order and unable to steal
+            keystrokes. Unmount happens only on close or generation bump. */}
+        {views
+          .filter((view) => view.keepMounted === true)
+          .map((view) => (
+            <Fragment key={view.kind}>
+              {openFiles
+                .filter((f) => f.kind === view.kind)
+                .map((f) => (
+                  <div
+                    key={f.path}
+                    className={view.hostClassName + (f.path === activePath ? "" : " is-hidden")}
+                  >
+                    <view.component file={f} />
+                  </div>
+                ))}
+            </Fragment>
           ))}
-        {active === null || active.kind === "office" ? null : active.loadError !== null ? (
+        {active !== null && activeView !== null && activeView.keepMounted !== true && (
+          <div className={activeView.hostClassName}>
+            <activeView.component file={active} />
+          </div>
+        )}
+        {active === null || activeView !== null ? null : active.loadError !== null ? (
           <div className="wb-editor-message">Cannot open {active.name}: {active.loadError}</div>
         ) : (
           <Editor
@@ -216,3 +234,90 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
     </div>
   );
 }
+
+// ---- registration -----------------------------------------------------------
+
+/** Middle of the status bar's left group: the file you are looking at. */
+function ActiveFileStatus() {
+  const activePath = useStore((s) => s.activePath);
+  const dirty = useStore((s) => s.openFiles.find((f) => f.path === s.activePath)?.dirty ?? false);
+  if (activePath === null) return null;
+  return (
+    <>
+      <span className="wb-status-sep" aria-hidden="true">
+        /
+      </span>
+      <span className="wb-status-file u-truncate" title={activePath}>
+        {activePath}
+      </span>
+      {dirty && (
+        <span
+          className="wb-status-dirty"
+          role="img"
+          aria-label="Unsaved changes"
+          title="Unsaved changes"
+        />
+      )}
+    </>
+  );
+}
+
+function cycleEditorTab(step: number): void {
+  const s = useStore.getState();
+  if (s.openFiles.length === 0) return;
+  const current = s.openFiles.findIndex((f) => f.path === s.activePath);
+  const index = (Math.max(current, 0) + step + s.openFiles.length) % s.openFiles.length;
+  const next = s.openFiles[index];
+  if (next !== undefined) s.setActiveFile(next.path);
+}
+
+const hasOpenFile = (): boolean => useStore.getState().openFiles.length > 0;
+const hasActiveFile = (): boolean => useStore.getState().activePath !== null;
+
+export const editorTool: WorkbenchTool = {
+  id: "editors",
+  title: "Editor",
+  panel: {
+    component: EditorAreaPanel,
+    defaultLocation: { area: "center" },
+  },
+  commands: [
+    {
+      id: "file.save",
+      title: "Save file",
+      when: hasActiveFile,
+      run: () => {
+        const s = useStore.getState();
+        if (s.activePath !== null) void s.saveFile(s.activePath);
+      },
+    },
+    {
+      id: "editor.nextTab",
+      title: "Next editor tab",
+      when: hasOpenFile,
+      run: () => cycleEditorTab(1),
+    },
+    {
+      id: "editor.prevTab",
+      title: "Previous editor tab",
+      when: hasOpenFile,
+      run: () => cycleEditorTab(-1),
+    },
+    {
+      id: "editor.close",
+      title: "Close editor tab",
+      when: hasActiveFile,
+      run: () => {
+        const path = useStore.getState().activePath;
+        if (path !== null) useStore.getState().requestCloseFile(path);
+      },
+    },
+  ],
+  shortcuts: {
+    "file.save": ["Ctrl+S"],
+    "editor.nextTab": ["Ctrl+PageDown", "Alt+PageDown"],
+    "editor.prevTab": ["Ctrl+PageUp", "Alt+PageUp"],
+    "editor.close": ["Alt+W", "Ctrl+F4"],
+  },
+  statusContributions: [{ region: "left", component: ActiveFileStatus }],
+};
