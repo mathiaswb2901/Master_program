@@ -56,8 +56,21 @@ the moat.
   host native windows) — pulled forward from packaging into M4 core; the shell
   **landed** (`desktop/`, PR 1 of this track): native window, supervised backend
   (attach-or-spawn, Job-Object reaping), and the two browser-only gaps below re-wired
-  natively. Still open here: the host panel itself, the COM bridge, and packaging —
-  the shell runs from source (`cd desktop && npm run tauri dev`); a bundled
+  natively. The **host domain layer landed** too (PR 2, `services/office_host/` +
+  `models/office_host.py` + `routers/office_host.py`): the full lifecycle
+  (`launching → embedding → embedded`, `detached`, and the terminal
+  `closed`/`crashed`/`failed`), the `HostBackend` Protocol the native implementation
+  must satisfy, an in-process **fake backend** (`WORKBENCH_OFFICE_FAKE=1`) that makes
+  every branch reachable in CI with no Office and no Rust, `OfficeHostEvent` on the
+  existing `/ws/events` bus, `GET /api/office/capabilities` for honest degradation, and
+  the ownership rule that **never adopts a process we did not launch**. Two owner
+  decisions are encoded there rather than left to reviewers: PowerPoint is
+  preview-only in v1 (single-instance, no `Application.Hwnd` to prove ownership) and
+  `WORKBENCH_OFFICE_NATIVE=auto` resolves to *not* hosting natively until hang
+  isolation is proven. Still open here: the Rust window hosting behind that Protocol,
+  the COM bridge (agents reading/writing the live document), the **host panel** — which
+  waits for the tool registry so it registers itself instead of editing `App.tsx` — and
+  packaging: the shell runs from source (`cd desktop && npm run tauri dev`); a bundled
   installer that carries its own Python needs `tauri build` work not done yet.
 - ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
   Pydantic `PlanArtifact` → native clickable plan cards in chat (options, steps, file
@@ -148,9 +161,9 @@ They touch different parts of the codebase (Office: Rust host + Python COM bridg
 Modular: the UI shell and registry), so both run at once. The milestone table stays as
 the record of scope; the tracks are how it gets built.
 
-- **Moat track** — the Office host sequence (M4): domain layer with a fake backend →
-  Rust window hosting → Word docked → COM bridge + agent tools → Excel. What no
-  competitor can copy quickly.
+- **Moat track** — the Office host sequence (M4): ~~domain layer with a fake backend~~
+  (**landed**) → Rust window hosting → Word docked → COM bridge + agent tools → Excel.
+  What no competitor can copy quickly.
 - **Modular track** — M5 below, reordered so the *seam* comes first. What the product
   feels like every day.
 
@@ -296,6 +309,19 @@ without forking — the difference between a fixed app and an instrument.
   is dropped. `WORKBENCH_INHERIT_USER_SETTINGS=1` restores that global scope in
   full (hooks and permission rules, not just skills), which is why it is not named
   after skills.
+
+- 2026-08-05 — **Office host: three decisions taken before any native code** (owner),
+  encoded in the domain layer that landed with them. (1) **Never adopt a process we did
+  not launch**: reparenting is destructive, so a document already open in an instance we
+  did not start is a first-class refusal with a reason
+  (`document_open_elsewhere`), never a silent takeover — the pid is bound at launch and
+  every later operation is checked against it. (2) **PowerPoint is preview-only in v1**:
+  it is single-instance and exposes no `Application.Hwnd` to prove a window is ours, so
+  hosting it risks reparenting the user's own open presentation; the service refuses it
+  outright. (3) **Native hosting stays behind `WORKBENCH_OFFICE_NATIVE`, and `auto`
+  resolves to *not* hosting** until hang isolation is proven — with
+  `GET /api/office/capabilities` reporting that plainly, so the UI degrades to the
+  OnlyOffice path from a fact rather than a guess. Browser mode remains fully supported.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

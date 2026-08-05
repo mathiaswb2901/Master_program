@@ -61,7 +61,8 @@ export type WorkspaceEvent =
   | FileChangedEvent
   | SessionStatusEvent
   | ShortcutsChangedEvent
-  | FileProvenanceEvent;
+  | FileProvenanceEvent
+  | OfficeHostEvent;
 
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
@@ -439,3 +440,109 @@ export type AgentServerMessage =
   | StatusChange
   | TurnDone
   | AgentError;
+
+// ---- office_host.py ---------------------------------------------------------
+// A *real* Word/Excel window docked into a panel. Types only for now: the panel
+// lands once the tool registry exists and it can register itself.
+
+/** The program that hosts a document. `powerpoint` is a real kind the UI must be
+ * able to name, but it is not hostable in v1: PowerPoint is single-instance and
+ * offers no way to prove a window is one Workbench launched, so it stays
+ * preview-only. The server's `hostable_kinds` (below) is the authority. */
+export type HostAppKind = "word" | "excel" | "powerpoint";
+
+/** launching -> embedding -> embedded is the happy path; `detached` is live (the
+ * document is open, the window is back on the desktop); closed/crashed/failed
+ * are terminal and never move again. */
+export type HostState =
+  | "closed"
+  | "launching"
+  | "embedding"
+  | "embedded"
+  | "detached"
+  | "crashed"
+  | "failed";
+
+/** Why a host ended up where it is. Only terminal states carry one. */
+export type HostReason =
+  | "user_closed"
+  | "server_shutdown"
+  | "launch_timeout"
+  | "launch_failed"
+  | "embed_refused"
+  /** A backend call ran past the server's own ceiling and was cancelled: nobody
+   * refused anything, it simply never came back. */
+  | "backend_timeout"
+  | "process_exited"
+  | "document_open_elsewhere"
+  | "powerpoint_preview_only"
+  | "unsupported_file"
+  | "native_hosting_disabled";
+
+/** Physical pixels, relative to the host window. */
+export interface PanelRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface OfficeHostInfo {
+  host_id: string;
+  /** Workspace-relative, forward slashes. */
+  path: string;
+  kind: HostAppKind;
+  state: HostState;
+  /** null while the host is live. */
+  reason: HostReason | null;
+  /** The process Workbench launched; null until the launch returns, and never a
+   * process it merely found. */
+  pid: number | null;
+  /** Unix seconds at which the current state was entered. */
+  since: number;
+  /** The instance was asked to quit and did not. The host is settled either
+   * way, but the real window may still be on screen — so "closed" alone would
+   * be a claim the server cannot make. Cleared when a later sweep gets the
+   * close through, or finds the process gone by itself. */
+  close_failed: boolean;
+}
+
+/** Broadcast on /ws/events on every host state change. */
+export interface OfficeHostEvent {
+  type: "office_host";
+  host: OfficeHostInfo;
+}
+
+/** GET /api/office/hosts — also the reconnect/replay path. In-memory
+ * server-side: a restart returns it empty, having reaped every window. */
+export interface OfficeHostList {
+  hosts: OfficeHostInfo[];
+}
+
+/** POST /api/office/host. The application is derived from the extension, so an
+ * .xlsx can never be launched into Word. */
+export interface OpenHostRequest {
+  path: string;
+  rect?: PanelRect | null;
+}
+
+/** POST /api/office/host/{host_id}/bounds. */
+export interface SetBoundsRequest {
+  rect: PanelRect;
+}
+
+/** GET /api/office/capabilities — what this machine can actually do. The UI
+ * degrades from this, never from a guess. */
+export interface OfficeCapabilities {
+  /** The configured policy. `auto` currently resolves to no native hosting. */
+  office_native: "auto" | "on" | "off";
+  /** The only field that answers "can I dock a real document right now". */
+  native_hosting: boolean;
+  office_detected: boolean;
+  /** The in-process fake backend is answering: nothing is really hosted. */
+  fake_backend: boolean;
+  hostable_kinds: HostAppKind[];
+  onlyoffice: boolean;
+  fallback: "native" | "onlyoffice" | "preview";
+  detail: string;
+}

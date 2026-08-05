@@ -29,6 +29,20 @@ class Settings(BaseSettings):
     # Keep a .bak of every office file before an editor save overwrites it.
     office_backup: bool = True
 
+    # Native Office hosting (M4): open documents in the *real* installed
+    # Word/Excel, reparented into a panel. "auto" currently resolves to NOT
+    # hosting natively — the window-hosting backend does not ship yet and only
+    # becomes the default once hang isolation is proven (owner decision,
+    # 2026-08-05). "off" disables it outright, whatever else is configured.
+    office_native: Literal["auto", "on", "off"] = "auto"
+    # Replace the host backend with the in-process fake in
+    # services/office_host/fake_backend.py: the whole lifecycle, deterministic
+    # failures, and no Office, no windows, no real process anywhere. Same
+    # precedent as fake_agent — off by default and loudly logged when on, since
+    # a panel claiming to hold a document that is not really open would be a
+    # worse lie than a panel that fails.
+    office_fake: bool = False
+
     def resolved_public_base_url(self) -> str:
         return self.public_base_url or f"http://{self.host}:{self.port}"
 

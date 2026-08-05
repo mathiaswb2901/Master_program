@@ -30,3 +30,16 @@ def test_fake_agent_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Settings().fake_agent is False
     monkeypatch.setenv("WORKBENCH_FAKE_AGENT", "1")
     assert Settings().fake_agent is True
+
+
+def test_office_hosting_defaults_to_auto_and_the_fake_backend_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`auto` currently resolves to *not* hosting natively (owner decision), and
+    a simulated host must never be the default — same bar as the fake agent."""
+    assert Settings().office_native == "auto"
+    assert Settings().office_fake is False
+    monkeypatch.setenv("WORKBENCH_OFFICE_NATIVE", "on")
+    monkeypatch.setenv("WORKBENCH_OFFICE_FAKE", "1")
+    assert Settings().office_native == "on"
+    assert Settings().office_fake is True
