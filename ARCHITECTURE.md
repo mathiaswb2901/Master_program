@@ -492,6 +492,15 @@ emits. Non-finite figures are dropped on the way in (NaN is not JSON, and one
 would fail the whole `/ws/events` fan-out), and the per-model cost map is
 bounded (`MAX_MODELS`).
 
+**The log counts as disk.** Writing no file of our own is only half of "in
+memory only": the desktop shell runs the backend as a child process and copies
+its stdout into `shell.log`, appended across restarts (`pump()` and `open_log()`
+in `desktop/src-tauri/src/backend.rs`), and structlog's default factory prints to
+stdout. Anything logged at or above `Settings.log_level` — `info` by default — is
+therefore on a packaged user's disk. Utilization and reset times are logged at
+`debug` only; the regression test asserts that at fd 1, which is the stream the
+shell actually reads.
+
 ## Office editing
 
 **Direction (M4, decided 2026-08-04):** documents open in *real* installed

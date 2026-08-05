@@ -538,7 +538,11 @@ because other sections and five running lanes reference these numbers.
     `ResultMessage`, labelled **"Session cost — not plan usage"** — and the status bar
     shows *nothing* rather than a zero; (4) exactly the SDK's own weekly types, no
     synthesized per-model breakdown, and a missing `utilization` renders as an em dash.
-    Nothing leaves the machine; the zero-telemetry stance holds.
+    Nothing leaves the machine; the zero-telemetry stance holds — including the log,
+    which is the half that is easy to miss: the desktop shell copies the backend's
+    stdout into `shell.log` and keeps it across restarts, so utilization and reset
+    times are `debug`-only and the regression test asserts that at fd 1 rather than
+    only asserting that no file lands in `.workbench/`.
     **Deferred, and why:** the between-turns read path. The SDK buffers messages in its
     own receive channel, so an event that fires between turns is delivered at the start
     of the next turn rather than lost — which is caveat 2 doing its job. Draining that

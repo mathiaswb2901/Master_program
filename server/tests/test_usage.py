@@ -16,9 +16,12 @@ that nothing in this module can ask for a value.
 """
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
+import structlog
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -26,6 +29,7 @@ from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.usage import UsageBucketKind, UsageEvent, UsageStatus
 from workbench_server.services import fake_agent
+from workbench_server.services import usage as usage_module
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.usage import (
     BUCKET_ORDER,
@@ -337,6 +341,9 @@ def test_bucket_order_covers_every_kind_exactly_once() -> None:
 
 
 def _app(tmp_path: Path) -> Any:
+    # ``log_level`` is deliberately left out: ``create_app`` configures logging
+    # from these settings, and the logging test below has to run against whatever
+    # level the app really ships with rather than one restated here.
     return create_app(
         Settings(
             workspace_root=tmp_path,
@@ -432,3 +439,117 @@ def test_nothing_is_written_to_disk(tmp_path: Path) -> None:
     assert "usage.json" not in written
     with TestClient(_app(tmp_path)) as fresh:
         assert fresh.get("/api/usage").json()["buckets"] == []
+
+
+# ---- the other half of "nothing is persisted" -------------------------------
+
+
+@pytest.fixture
+def restore_logging() -> Iterator[None]:
+    """``create_app`` configures structlog from its ``Settings``, and nothing
+    else in this suite does. Put the defaults back afterwards rather than leaking
+    a level and a renderer into every test that happens to run later."""
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()
+
+
+def _drive_usage_turn(client: TestClient) -> None:
+    """One real turn through the fake client: three ``RateLimitEvent`` messages
+    arrive at the SDK seam exactly as they do in production."""
+    local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+    with client.websocket_connect(f"/ws/agent/{local_id}") as agent:
+        agent.send_text(json.dumps({"type": "user_message", "text": fake_agent.USAGE_TRIGGER}))
+        while json.loads(agent.receive_text())["type"] != "turn_done":
+            pass
+
+
+def test_no_usage_figure_is_logged_at_the_default_level(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], restore_logging: None
+) -> None:
+    """The disk ``test_nothing_is_written_to_disk`` does not look at — and the
+    only one an end user actually has.
+
+    We write no file of our own, but we do not have to in order to persist this.
+    The packaged desktop shell runs this server as a child process and copies
+    every line of its **stdout** into ``shell.log``, appended across restarts
+    (``desktop/src-tauri/src/backend.rs``: ``pump()`` and ``open_log()``).
+    structlog's default logger factory prints to stdout and ``configure_logging``
+    never replaces it, so anything logged at or above ``Settings.log_level``
+    lands in that file. That level defaults to ``info`` and the packaged shell is
+    the mode a real user runs — so an account's true utilization and reset times
+    logged at ``info`` are exactly the persisted plan-usage telemetry this
+    module's docstring, ``models/usage.py``, ARCHITECTURE.md and ROADMAP item 11
+    all promise does not exist.
+
+    ``capfd`` rather than ``capsys``: fd 1 is precisely what ``pump()`` reads.
+    """
+    assert Settings().log_level == "info", "the shipped default this test is about"
+
+    with TestClient(_app(tmp_path)) as client:
+        _drive_usage_turn(client)
+        buckets = client.get("/api/usage").json()["buckets"]
+
+    # The figures did reach the snapshot — in memory, which is where they belong.
+    # Without this the silence below would also be satisfied by a run in which
+    # nothing was ever observed.
+    assert [bucket["utilization"] for bucket in buckets] == [
+        utilization for _, _, utilization, _ in fake_agent.FAKE_RATE_LIMITS
+    ]
+
+    out = capfd.readouterr().out
+
+    # Capture really is watching the stream structlog prints to: the app's own
+    # info-level shutdown line is in here. Silence only means something if noise
+    # would have shown up, and this is what stops a capture that quietly stopped
+    # working from reading as a pass.
+    assert "workbench.stopped" in out
+
+    assert "usage.rate_limit" not in out
+    for field in ("utilization", "resets_at"):
+        assert field not in out, f"{field} was logged at the default level"
+    for _kind, _status, utilization, _resets in fake_agent.FAKE_RATE_LIMITS:
+        assert str(utilization) not in out, "a usage figure was logged under another name"
+
+
+def test_the_rate_limit_diagnostic_is_debug_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where the figures *are* allowed to go — and the reason the line survives.
+
+    The test above proves nothing reaches stdout at the shipped level. This one
+    pins why that is stable: the line is a ``debug`` diagnostic, the same gate
+    ``_log_unmodeled`` already sits behind, so a wrong meter stays diagnosable by
+    whoever explicitly asks — and the way back to ``info`` is a deliberate edit
+    that fails here.
+
+    Asserted against the module's logger rather than by reconfiguring structlog
+    mid-process, because that does not work: ``configure_logging`` sets
+    ``cache_logger_on_first_use``, so a logger already bound at ``info`` by an
+    earlier test ignores a later ``configure()`` and the check would pass or fail
+    on test ordering.
+    """
+    logged: list[tuple[str, dict[str, Any]]] = []
+
+    class Recorder:
+        """Records the level a call was made at, not just its fields."""
+
+        def __getattr__(self, level: str) -> Any:
+            def record(event: str, **fields: Any) -> None:
+                logged.append((f"{level} {event}", fields))
+
+            return record
+
+    monkeypatch.setattr(usage_module, "log", Recorder())
+    usage, _, _ = service()
+    usage.note_rate_limit(
+        Info(
+            status="allowed_warning",
+            rate_limit_type="seven_day",
+            utilization=0.86,
+            resets_at=1_700_007_200,
+        )
+    )
+
+    # Exactly one line, at debug — nothing about this event is logged higher.
+    assert [entry for entry, _ in logged] == ["debug usage.rate_limit"]
+    assert logged[0][1]["utilization"] == 0.86

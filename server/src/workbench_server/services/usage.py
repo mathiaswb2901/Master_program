@@ -46,9 +46,16 @@ nothing in the SDK exposes a "read current utilization" call. The transition
 event is the whole of the supply, which is why every figure here carries the
 moment it arrived and why the UI must show its age.
 
-**Nothing is persisted.** This is live state about an *account*, not workspace
-data: a restart starts empty, which reads as "not known yet" — the same honest
-state as an account that never emits at all.
+**Nothing is persisted** — and that includes the log. This is live state about
+an *account*, not workspace data: a restart starts empty, which reads as "not
+known yet", the same honest state as an account that never emits at all. Writing
+no file of our own is only half of it, though: the packaged desktop shell runs
+this server as a child process and copies its **stdout** into ``shell.log``,
+kept across restarts (``desktop/src-tauri/src/backend.rs``), and structlog
+prints to stdout. So a figure logged at the default level is a figure on a real
+user's disk. Utilization and reset times are therefore ``debug`` only, and
+``test_no_usage_figure_is_logged_at_the_default_level`` holds that at the file
+descriptor the shell actually reads.
 """
 
 import math
@@ -193,7 +200,18 @@ class UsageService:
                 observed_at=now,
             )
         self._log_unmodeled(getattr(info, "raw", None))
-        log.info(
+        # Debug, not info, and this is a privacy rule rather than a noise one.
+        # "Nothing is persisted" is only true of *our* files: the packaged
+        # desktop shell copies this process's stdout into ``shell.log`` and keeps
+        # it across restarts, and structlog prints to stdout by default. Logging
+        # the account's real utilization and reset time at the default level
+        # would therefore write plan usage to a user's disk on the default path —
+        # which is the promise this module opens by making. Same gate
+        # ``_log_unmodeled`` sits behind, and the same rule the rest of the
+        # codebase follows (``agent_sessions.py`` logs identifiers, never
+        # values). ``test_no_usage_figure_is_logged_at_the_default_level`` holds
+        # it at the file descriptor the shell actually reads.
+        log.debug(
             "usage.rate_limit",
             kind=kind,
             status=status,
