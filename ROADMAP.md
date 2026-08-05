@@ -34,6 +34,28 @@ the moat.
    not weight development cost heavily; pick the ambitious, correct, premium option.
    When a capability seems out of reach, spike it before ruling it out. (Standing user
    directive, 2026-08-04.)
+4. **Composable surfaces — no fixed panels.** Every capability is an *instantiable
+   surface*, not a place in the window. A pane is a `(tool, instance)` pair: the
+   instance id is the dockview panel id, and "what am I pointed at" is a small
+   serializable `params` record (`{sessionId}`, `{ptyId}`, `{path}`, `{folder,query}`)
+   carried in the saved layout. A tool declares whether it is singular or plural, and
+   **plural is the default for anything a user could plausibly want twice** — twice is
+   the baseline, not a feature request. Three rules a contributor applies without
+   asking: **(a) nothing assumes it is the only one of itself** — not in its component,
+   not in `store.ts`, not in a CSS selector, not in a test; an `activeX: X | null` field
+   in the app store *is* the shape of a singleton assumption and needs a comment saying
+   why the window really has only one. **(b) A pane is a view onto a resource it does
+   not own** — the PTY, the SDK session, the Office window and the Monaco model live
+   server-side or in one module-level registry keyed by their own id; `params` merely
+   names one. Closing a pane closes a view; whether the resource dies with it is the
+   tool's written decision, never an accident of unmount. **(c) A restored pane is
+   vetted before it is believed** — layouts persist, resources do not, so every plural
+   tool implements `adopt(params)` and a pane whose resource is gone renders a *named
+   tombstone* with the one action that recovers it (Reconnect, Resume, Reopen, Open in
+   Word), and a cap that is hit shows the cap and the setting that raises it, never a
+   dead button. The test of the principle: if the user can imagine the arrangement, the
+   app expresses it — we do not ship arrangements one at a time. (Owner directive
+   2026-08-05; binding standard in `CLAUDE.md`; enforcement in M5 item 9.)
 
 ## Milestones
 
@@ -95,6 +117,31 @@ the moat.
   Office skills), Excel beyond the launch path, and packaging — the shell runs from
   source (`cd desktop && npm run tauri dev`); a bundled installer that carries its own
   Python needs `tauri build` work not done yet.
+  **Composition is now part of this sequence's definition of done** (owner, 2026-08-05:
+  "a tab where I work on Word and Excel side by side in full screen"). Under product
+  principle 4 this needs no second Office registration and no new panel: Word already
+  lands as a `documentView` claiming kind `office`, so *Word beside Excel* is editor
+  plurality (two `editors#<path>` panes) plus two concurrent hosts, and "full screen" is
+  the `Alt+M` that already ships. (That same `Alt+M` — focus mode, M5 item 2, **done** —
+  is the whole answer to the owner's separate ask, *"if I want only code over my full
+  screen I should have that"*: it maximizes **any** pane, code or otherwise, and needs
+  nothing from Office or from panes.) The server is already instance-shaped for it —
+  `OfficeHostInfo.host_id`, one host per document, a `rect: PanelRect` per host,
+  `POST /api/office/host/{id}/bounds`, `OfficeHostEvent` on the shared bus,
+  `GET /api/office/hosts` replaying to a reconnecting client. What is genuinely new is
+  only what appears at N>1: per-pane geometry driven from each pane's own dockview
+  `onDidDimensionsChange` across split/drag/maximize (watch the unit boundary — the Rust
+  commands take CSS pixels, `PanelRect` is physical, and at N panes a missed conversion
+  is N wrong rectangles instead of one obvious one), focus routing between two guests,
+  the second pane naming an already-hosted document rendering the existing
+  `document_open_elsewhere` refusal as a "open in another pane — go there" card, and
+  hang containment, which landed with Word (#38) and was a **prerequisite** rather than
+  an improvement: unconstrained, one wedged guest costs ~1 s per resize frame, so with
+  two docked it would be every layout interaction in the window. Sequenced as its own PR
+  after the COM bridge and Excel — it is the acceptance demo for the whole Office sequence.
+  Exit criterion: two real documents docked in two panes, each keeping its own rectangle
+  through split, drag and maximize, with one guest deliberately wedged and the window
+  still usable.
 - ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
   Pydantic `PlanArtifact` → native clickable plan cards in chat (options, steps, file
   refs); decisions return to the agent as typed JSON; pending-plan replay on reconnect
@@ -187,8 +234,11 @@ watcher protocol and the motion layer), so they run at once. The milestone table
 the record of scope; the tracks are how it gets built.
 
 - **Moat track** — the Office host sequence (M4): ~~domain layer with a fake backend~~
-  → ~~Rust window hosting~~ (both **landed**) → Word docked → COM bridge + agent tools
-  → Excel. What no competitor can copy quickly.
+  → ~~Rust window hosting~~ (both **landed**) → Word docked (*in flight*, PR #38) →
+  hang containment (the window-less mover thread, WIP on the same branch — it is what
+  flips `WORKBENCH_OFFICE_NATIVE=auto` on, and a hard prerequisite once two guests are
+  docked) → COM bridge + agent tools → Excel → **the side-by-side proof**: Word and
+  Excel docked in two panes at once. What no competitor can copy quickly.
 - **Modular track** — M5 below, reordered so the *seam* comes first. What the product
   feels like every day.
 - **Feel track** — performance and motion. What the product feels like every *second*.
@@ -220,11 +270,16 @@ a virtualised file tree.
 
 **Motion, and a hard interlock.** The track is not only speed: an instrument that moves
 *well* reads as fast even when it is not. The **motion vocabulary** — the durations,
-easings and transition primitives, as `DESIGN.md` tokens — must land **before** M5 item 2
-(the layout system). Panel transitions written first and animated later are panel
+easings and transition primitives, as `DESIGN.md` tokens — must land **before** the
+transitions it governs. Panel transitions written first and animated later are panel
 transitions that never get animated; born with the vocabulary, every later panel inherits
 it for free. This is a sequencing constraint between two tracks, so it is stated here
-rather than inside either.
+rather than inside either. **Re-pointed 2026-08-05**: the interlock originally named M5
+item 2 (the layout system), which shipped in #34 without it — so the constraint expired
+unmet once. Its live target is **M5 item 9 (panes)**, because pane split, swap, close and
+the picker are the transitions that would otherwise be written un-animated forever, and
+because both lanes edit `Layouts.tsx` and `styles/dockview.css`. `feel/motion-foundation`
+lands first; panes rebases onto it, never the reverse.
 
 **Exit criterion**, in the budgets' own terms: on the 5,005-file fixture, cold launch
 reaches a clickable file tree **under 800 ms**; twenty watcher events cost **zero** full
@@ -243,7 +298,10 @@ seam a user-authored plugin later plugs into. One PR now, paid back six times.
 
 ### M5 — Modular & Parallel (the instrument feel, then the fleet)
 
-Ordered by what unblocks what.
+Ordered by what unblocks what. Item numbers are **stable ids**, not build order: items
+9–13 were added 2026-08-05 (composable surfaces) and several of them are sequenced ahead
+of items 4–8 — see **Sequencing** at the end of this section. Nothing was renumbered,
+because other sections and five running lanes reference these numbers.
 
 1. ~~**Tool registry** (listed in M4, built first here): a typed registry where a
    capability declares its panel, its commands, its default shortcuts and its
@@ -297,13 +355,21 @@ Ordered by what unblocks what.
    unusable layout or a throwing `fromJSON` all resolve to the default arrangement.
    `shortcuts.md` gains a third kind, `layout`, the first that *acts* rather than
    inserts; it stays inside the never-execute doctrine because its whole vocabulary is
-   the name of an arrangement the user saved. Deliberately deferred: floating and
-   popped-out panels (dockview supports both; nothing asks for them yet), a saved
-   layout does not gain a panel that was added to the default *after* it was saved
-   (switch to Default, or open it from the QuickBar), and switching to a preset rebuilds
-   the dock — so the terminals in it restart, while switching to a *saved* layout reuses
-   the panels that are already there.
-2b. ~~**The pane system — tmux, not a four-panel IDE.**~~ **done.** The owner's central
+   the name of an arrangement the user saved. Deliberately deferred: ~~floating and
+   popped-out panels (dockview supports both; nothing asks for them yet)~~ — **claimed
+   2026-08-05, now item 13**; a saved layout does not gain a panel that was added to the
+   default *after* it was saved (switch to Default, or open it from the QuickBar), and
+   switching to a preset rebuilds the dock — so the terminals in it restart, while
+   switching to a *saved* layout reuses the panels that are already there. That last
+   line becomes a **bug** the moment panes land: rebuilding the dock over instances is
+   not a restart, it is data loss, so item 9 must make preset switching reconcile
+   against the panes that already exist. Two other facts from that file carry into item
+   9, one good and one not: `pruneLayout()` already vets by `contentComponent` and
+   treats the panel key as opaque, so **the persisted layout format needs no change and
+   every saved layout keeps working**; but `LAYOUT_PRESETS` name tool ids *as* panel ids,
+   so no preset can currently express two of anything.
+2b. ~~**The pane system — tmux, not a four-panel IDE.**~~ **first PR landed** (item 9 is
+   the plan of record and stays open for the rest of it). The owner's central
    complaint after item 2 was that it "still feels like a cheap VS Code editor… I want
    something super modular like TMUX", and the registry (item 1) was the prerequisite
    that made it buildable. What tmux actually gives its users, translated: **any pane
@@ -330,7 +396,10 @@ Ordered by what unblocks what.
    the pane says where to open it instead); a live session's on-screen transcript is
    still not replayed after a reload, which is the pre-existing agent-socket behaviour
    and not something a pane id can fix; and swapping two panes resizes nothing but does
-   not preserve a *tab group's* internal order when a pane holds several tabs.
+   not preserve a *tab group's* internal order when a pane holds several tabs. Left to
+   item 9, not done here: hibernation, idle session reaping, `adopt(params)` tombstones,
+   a raised `max_concurrent_sessions`, and preset switching that reconciles against the
+   panes that already exist rather than rebuilding the dock over them.
 3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
    (PRs 1–2 landed: the schema and its renderer). Asked for after watching an
    agentic-workflow video where the agent renders an interactive artifact instead of
@@ -367,7 +436,9 @@ Ordered by what unblocks what.
 5. **Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history. Supersedes the
-   first-run picker in the OSS bar item 3.
+   first-run picker in the OSS bar item 3. Also unlocks **half B of item 12**: opening a
+   session whose folder is outside the current workspace needs this (or the multi-root
+   jail from item 6), which is why the session browser ships its read half first.
 6. **Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
    dirty-slot `needs_review` protection, per-slot watchers), multi-root file/terminal
    access through a root registry (path jail preserved per root), worktree-bound agent
@@ -376,11 +447,175 @@ Ordered by what unblocks what.
    (status, current activity, cost), inline permission chips answerable from the board;
    orchestrator session kind with a mission-control MCP toolset
    (spawn/list/read/send/wait/stop workers), worker budget + cost ceiling,
-   escalate-to-board permission policy (never auto-allow shell).
+   escalate-to-board permission policy (never auto-allow shell). **Re-scoped
+   2026-08-05**: it is *the board over the activity feed*, not a board that grows its own
+   feed — it renders item 10's `SessionActivityEvent` and reads item 11's usage service
+   for its per-worker ceiling rather than deriving numbers a second time. Two live-fleet
+   views is the duplication the composability principle exists to prevent.
 8. **Security hardening pulled forward** (OSS bar item 1): per-launch auth token
    injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
    access and a workspace switcher all widen the unauthenticated localhost surface
    unacceptably.
+9. **Panes — split anything, and the principle it carries** — *first PR landed*
+   (`m5/split-anything`, item 2b): splitting, the pane id, the plural seam, the picker
+   and the keyboard are in. Still open here: hibernation, idle session reaping,
+   `adopt(params)` tombstones, the raised cap, preset reconciliation, and the
+   instance-count perf budget — the exit criterion below is not met yet.
+   This is the owner's "super modular like TMUX" ask and the
+   implementation of product principle 4: `paneId := toolId | toolId#instanceKey`, so
+   `agent#<session_id>`, `editors#<path>` and `terminal#<n>` are panes that survive a
+   restart because the pane id *is* the persistence. The registry gains the plural seam
+   (instance options + titles, `pluralPanelIds`, `paneVocabulary`, `paneTitle`,
+   `groupActions` — the split affordance on every tab strip); commands gain a **scope**,
+   so `Ctrl+S` stops meaning "save `store.activePath`" and starts meaning "save what
+   *this* editor pane shows", and `Ctrl+1..N` binds positions rather than tool ids. A
+   Panes tool (split, navigate, swap, move, close, pick-target) contributes no panel and
+   drives the dock through `onDockReady` — the `Layouts.tsx` precedent exactly, one
+   module plus one line in `tools.ts`. **Do not propose a second pane system: finish
+   this one.** What it has to unpick is written down so it is not rediscovered:
+   `placementOf()` setting `id: tool.id` is the singleton in one line; `focusPanel()` is
+   called with *tool* ids from two places; `store.ts` keeps `activeSessionId`,
+   `activeTerminalId` and `activePath` as app-global singletons that no longer have a
+   justification; `AgentPanel` is simultaneously the session list and the chat, so ten
+   agents in a grid cannot be expressed; `Terminal` and `EditorArea` each own a tab strip
+   that should be panes; `monaco.disposeModel(path)` pulls a model out from under a
+   second pane on the same file; `registry.test.ts` pins the singleton as truth and gets
+   rewritten, not deleted; and the E2E helpers use unscoped selectors that would pass
+   against a broken plural app. `docs/tools.md` and `ARCHITECTURE.md` write the singleton
+   down as a *rule* ("exactly Editor / Files / Agent / Terminal", "`id` equal to
+   `component` for every singleton panel") and must change in the same PR, or the next
+   contributor re-adds the assumption. **Resource reality, measured rather than assumed**
+   (2026-08-05, author's machine): eight live `claude` CLI processes held 130–674 MB
+   working set each, so ten *talking* agents is 1.5–5 GB — but the SDK client is created
+   lazily on first message, so ten agent *panes* cost nothing until they are used. Five
+   mechanisms answer that, none of them "it scales": stated per-tool caps that render the
+   cap and the setting that raises it *in the pane*; lazy acquisition made universal (a
+   pane mounts chrome immediately and takes its resource on first interaction, which is
+   what makes restoring a saved ten-agent layout instant); **hibernation** of off-screen
+   panes that releases the *renderer* and keeps the *resource* (xterm disposed, PTY
+   running; Monaco view disposed, model kept; an Office host `detach`ed) — **a working
+   agent is never hibernated, because an agent working off-screen is the product**;
+   tombstones over lies via `adopt(params)`; and **idle session reaping** on the server,
+   which is not optional — sessions are never reaped today (`close_all()` runs only at
+   shutdown), so without it "ten agents in a grid" is a memory leak with a UI. Reaping is
+   visible: "session slept — Resume", never a silently dead chat. Also raise
+   `max_concurrent_sessions` from 4 to 8 and keep it configurable, noting what it really
+   caps: sessions *working*, not sessions open. **Not promised**: several Monaco panes
+   plus several xterm panes plus two native Office windows in one WebView2 is a heavy
+   window; the perf lane gains an instance-count budget (panes opened vs. long animation
+   frames) that gates the grid layouts, or "modular" becomes "hesitates". Exit criterion:
+   two agent panes, two terminals and two editors coexist in one window, each independent
+   through a save/restore round trip, and every pane whose resource is gone shows a named
+   tombstone with its one recovery action.
+10. **Live agent activity — "see everywhere Claude is editing"** (registers as a tool;
+    panel + command + status contribution). Provenance answers *who wrote this file I am
+    looking at*, after the fact; nothing answers *show me everywhere the fleet is working
+    right now*. One row per live session ordered by most-recently-active — status dot,
+    title, folder, and the current tool line **replaced in place** rather than appended,
+    fading to the last-completed line when a call settles. Retention is one line per
+    session, so the surface is O(sessions), not O(tool calls), and with four agents
+    working you see four rows changing at four different rhythms: fleet legibility
+    without opening four chats. The signal already exists and is already summarised —
+    `ToolUseNote`/`ToolSettled` carry a computed one-line description — but they are
+    emitted only to *that session's* socket, so a client sees activity only for
+    conversations it has opened. The change is one new bus event
+    (`SessionActivityEvent(session_id, folder, tool, summary, phase, ok)`) published from
+    the two call sites that already build those frames. **It is a firehose and must be
+    treated as one**: batched server-side with the policy `services/terminal_stream.py`
+    already proves (first frame after a quiet stream goes immediately, then at most one
+    frame per window, coalescing per session so only the latest line survives), no result
+    excerpts on the shared bus, and the same workspace jail — a fleet-wide feed discloses
+    paths and commands from every session at once, which is wider than the per-session
+    socket. Built on `SessionStatusEvent` + the new event only, so it neither waits for
+    nor collides with the watcher-protocol rewrite in the Feel track. Exit criterion:
+    four sessions working at once are legible from one pane, updating in place, with no
+    measurable cost to the shared `/ws/events` socket under a Grep-heavy turn.
+11. **Native plan usage meters** (5-hour window, weekly per model) — the owner's ask to
+    see in the app what Claude Code shows in the terminal. **There is an honest source
+    and we checked before promising**: the installed `claude_agent_sdk` 0.2.129 defines
+    `RateLimitEvent`/`RateLimitInfo` with exactly the needed fields — `rate_limit_type`
+    (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `overage`),
+    `utilization` (0.0–1.0), `resets_at`, `status` (`allowed` / `allowed_warning` /
+    `rejected`) — and its parser already handles the frame. So this is a thin read, not
+    an integration: a fifth branch in `AgentSession._handle_sdk_message()` (which today
+    dispatches on four type names with no `else` and therefore **silently discards this
+    event**), a `UsageService` holding the last info per window, one Pydantic event on the
+    existing bus, `GET /api/usage` for load and reconnect, a fake frame in
+    `services/fake_agent.py` for E2E, and a no-panel registered tool contributing a status
+    chip plus an optional breakdown panel — the `Layouts.tsx` shape exactly. **Four
+    constraints that must be visible in the UI rather than papered over**, because a meter
+    that guesses is worse than no meter (the same discipline provenance committed to):
+    (1) there is **no query API** — no `claude usage` subcommand, `/usage` exists only as
+    an in-session slash command, and `~/.claude.json` caches no utilization; (2) it is
+    emitted on *transition* and only on a live session's message stream, so the meters are
+    **last known, labelled "as of HH:MM"** — a cold app or a fresh workspace reads "not
+    reported yet", never "0%"; (3) events arriving *between* turns are not read at all
+    today, so a between-turns read path is part of the work; (4) "weekly per model" is
+    only as granular as the SDK's three weekly types — we show exactly those and
+    **synthesize no per-model breakdown the source does not have**. If the CLI turns out
+    never to emit for an account, the surface degrades to what we can honestly show: the
+    per-turn `total_cost_usd` and `model_usage` already on `ResultMessage`, labelled as
+    session cost rather than plan usage — and it says so in the panel. Nothing leaves the
+    machine: this reads the local CLI's own frames, and the zero-telemetry stance holds.
+    Exit criterion: after one real turn the status chip shows a named window, its
+    utilization and its reset time; before any turn it shows "not reported yet" and
+    explains why.
+12. **Session browser — every conversation, grouped by folder** (registers as a tool,
+    plural: one browser can be scoped to a project while another watches everything). The
+    Claude Code resume list, natively: folder groups → session rows (title, relative time,
+    live/disk dot), searchable. Opening a row does **not** open a chat inside the browser
+    — it opens an agent *instance* beside or in place of the focused pane, which is the
+    composability principle paying rent: one browser drives ten agent panes. The read half
+    exists (`services/session_index.py` reads `~/.claude/projects/<encoded-cwd>/*.jsonl`,
+    derives titles, dedupes live against on-disk by SDK id, and `GET
+    /api/agents/sessions` already returns `FolderSessions` groups) — this is a
+    presentation gap, not a capability gap, so **the AgentPanel's folder list becomes this
+    browser's compact form rather than a parallel implementation**. Two real risks:
+    `list_sessions()` takes one folder at a time, so browsing means walking
+    `projects_root` itself, and `encode_project_dir()` is **lossy and not reversible**
+    (`C:\a\b` and `C:/a-b` collide) — so a display path is resolved by matching candidates
+    against real directories and the raw encoded key is shown when it cannot be, never a
+    guessed path; and a `projects` dir with hundreds of folders means hundreds of
+    glob+stat+first-line reads per refresh, so it needs an mtime-gated cache and
+    pagination or it becomes the thing that makes startup slow. **Split on an honest
+    dependency**: half A — browse, search and resume anything readable, including projects
+    outside this workspace — ships alone and is complete; half B — *opening* a session
+    whose folder is outside the workspace jail — waits for item 5. Exit criterion: every
+    project under `~/.claude/projects/` is listed with a resolved-or-honestly-encoded
+    folder name, and a row opens as its own agent pane next to the focused one.
+13. **Pop-out — panes on a second monitor** (was item 2's deferral note and M7's
+    "unclaimed" line; the owner's "full screen sharing mode" and "no limits" claims it).
+    dockview supports floating groups and popped-out windows; with panes in place this is
+    an arrangement rather than a feature. It carries one engineering fact nobody had
+    written down: **a popped-out panel is a separate WebView2 window with no HWND in the
+    main window's parent chain**, so a native Office pane cannot simply pop out — it needs
+    a second native host window or an explicit, reasoned refusal. Decide that before
+    shipping, or the first user who pops out a docked Word gets an orphaned invisible
+    window, which is exactly the class of bug the host ownership rules were written to
+    prevent. Exit criterion: any pane pops out to a second monitor and restores to its
+    group, and a native Office pane either follows or refuses with a reason on screen.
+
+**Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
+infrastructure read as nothing produced, so the order below front-loads visible shape
+change without cutting a gate. **0.** Land the two shape-changing lanes first:
+`feel/motion-foundation` (small, complete, owns `dockview.css` + `Layouts.tsx`), then
+**item 9 panes** rebased onto it — the single most visible change on this list, and it
+costs zero new scope because it is already in flight. **1.** Product principle 4 and the
+`CLAUDE.md` "Panes are instances" standard **landed with this plan revision**, ahead of
+item 9's code, so the panes PR inherits them and must not re-touch those sections — five
+lanes hold these files and a second edit is pure conflict. **2.** **Item 11 usage meters** — shortest path from
+nothing to visible, and independent of panes, the watcher rewrite and Office, so it can
+run in parallel with step 1. **3.** **Item 10 activity** — the first new panel that panes
+makes worth having (you want to split it beside your editor and maximize it), and the feed
+Mission Control should render. **4.** **Item 12 session browser, half A** — after item 10
+because they share a row shape and building the live one first means the browser reuses it.
+**5.** Moat track in parallel throughout, in its existing order, ending in the
+side-by-side Office proof. **6.** **Item 13 pop-out**, after panes and after the Office
+composition PR, which is what makes its native-window decision necessary. **7.** Then
+the existing order, unchanged and better founded: item 4 → item 5 (which unlocks item
+12's half B) → item 6 → item 7 → item 8. **8.** M6 and M7 untouched — and every surface
+added above ships in current `DESIGN.md` tokens and gets restyled with everything else
+in M7. No lane invents a look.
 
 **The endgame this points at** (M7+, stated here so the seam is built for it): once
 capabilities register themselves, a *user* can add one. A documented tool contract plus
@@ -406,8 +641,13 @@ without forking — the difference between a fixed app and an instrument.
   ui-ux-pro-max design overhaul on top of the now-complete structural layer —
   distinctive welcome surface, branded empty states, micro-interactions, Monaco
   enrichment, content search (Ctrl+Shift+F), settings UI. (Layout persistence and
-  dockview maximize moved to M5 item 2 and **landed** there; floating and popped-out
-  panels are still unclaimed — dockview supports both and nothing has asked yet.)
+  dockview maximize moved to M5 item 2 and **landed** there; ~~floating and popped-out
+  panels are still unclaimed — dockview supports both and nothing has asked yet~~ —
+  claimed 2026-08-05, now M5 item 13.) The redesign now has substantially more structure
+  to dress than when it was logged: panes, an activity feed, a usage meter and a session
+  browser are exactly the surfaces that stop the app reading as a code editor — which is
+  what the change request was actually about. Nothing above smuggles the redesign
+  forward; it all ships in current tokens and gets restyled here.
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
 - Remaining OSS product bar: first-run experience (workspace picker, Claude-login and
@@ -551,6 +791,57 @@ without forking — the difference between a fixed app and an instrument.
   and the process is identified and put in its Job Object **before**
   `Documents.Open` is called, so a launch that never returns can be ended from
   another thread instead of leaking a Word and a worker.
+- 2026-08-05 — **Instances are first-class surfaces** (owner change request below;
+  product principle 4). The window is not a set of panels with a layout on top; it is a
+  set of *instances* of registered tools. A pane is `(toolId, instanceId)` where the
+  instance id **is** the dockview panel id, and the tool id stays the stable contract it
+  already was, because dockview resolves a panel through `contentComponent` — so the
+  registry is re-keyed in exactly one place (`placementOf()` setting `id: tool.id`) and
+  nowhere else. **State lives in three tiers, and the tier rule is the whole design**:
+  (1) pane-local view state (scroll, focus, xterm viewport) lives in the component,
+  keyed by instance, and dies with the pane — never persisted; (2) *instance params*, the
+  small serializable "what am I pointed at", ride dockview's own `params`, which
+  `toJSON()`/`fromJSON()` already serialize — so they inherit the existing layout
+  debounce with **zero new plumbing**, and are capped as a flat record of primitives
+  under a stated byte budget because they are written on every drag; (3) the backing
+  resource — PTY, SDK session, Office HWND, Monaco model — is owned by the server or by
+  one module-level registry keyed by its own id, and `params` merely *names* it. Tier 3
+  is what makes "ten agents in a grid", "close the pane and keep the agent working" and
+  "hibernate an off-screen pane" expressible instead of individually built. **The
+  load-bearing discovery that made this cheap**: `.workbench/layouts.json` already stores
+  `panels: { <panelId>: { contentComponent, params } }` and `pruneLayout()` already vets
+  by `contentComponent` while treating the panel key as opaque — so the persisted format
+  needs no change and every saved layout keeps working; only the presets, which name tool
+  ids as panel ids, must change. Rejected alternatives: a second registry for "multi
+  panels" (two authorities over one window); a per-tool ad-hoc tab strip, which is what
+  Terminal and EditorArea do today and is exactly why a terminal cannot be split beside a
+  code pane; and unbounded plurality with no caps, hibernation or reaping, which measures
+  out at 1.5–5 GB for ten talking agents and would ship a memory leak with a UI.
+  **Enforcement, because a standard that cannot fail does not bind**: `registry.test.ts`
+  asserts no derivation keys on a tool id where an instance id belongs; every plural tool
+  ships a test opening two instances and asserting independence through a save/restore
+  round trip; the perf lane gains an instance-count budget gating the grid layouts; and
+  an unscoped `page.locator` on a pane-internal class fails review. "It works with one" is
+  not evidence.
+
+- 2026-08-05 — **Plan usage meters have an honest source — with four caveats we show
+  rather than hide.** Investigated before promising the feature, because the alternative
+  was inventing numbers. The installed `claude_agent_sdk` (0.2.129) defines
+  `RateLimitEvent`/`RateLimitInfo` in `types.py` and parses it in
+  `_internal/message_parser.py`, carrying `rate_limit_type` (`five_hour`, `seven_day`,
+  `seven_day_opus`, `seven_day_sonnet`, `overage`), `utilization`, `resets_at` and
+  `status` — the 5-hour and weekly windows are named by the SDK itself, so M5 item 11 is a
+  read, not an integration. What does **not** exist: any query API. `claude --help` lists
+  no `usage` subcommand, `/usage` is an interactive-TUI slash command only, and
+  `~/.claude.json` caches no utilization. Consequences encoded in the item: the event
+  fires on *transition* and only on a live session's stream, so meters are last-known and
+  labelled "as of"; a cold app reads "not reported yet", never "0%"; Workbench discards
+  the event today (`_handle_sdk_message()` dispatches on four type names with no `else`)
+  and reads messages only inside a turn, so a between-turns path is part of the work; and
+  weekly granularity is the SDK's three types, with **no synthesized per-model
+  breakdown**. If it turns out an account never emits, the surface degrades to per-turn
+  `total_cost_usd`/`model_usage` labelled as session cost — and says so. A meter that
+  guesses is worse than no meter.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 
@@ -626,3 +917,28 @@ Build for real external users, not just the author. Consequences, tracked as wor
   because a generic renderer lies about a 23- or 25-hour day and about a dispatch
   schedule), **live workspace artifacts yes**, and **persistence to `.workbench/`
   yes** — the last two are later PRs. → M5 item 3.
+
+- 2026-08-05 — **"No limits to the imagination"** (user), in their own words because the
+  plan has to answer them rather than approximate them: *"All of this and also having the
+  possibility to have a tab where I work on Word and Excel side by side in full screen
+  sharing mode - not just the small code editor. Think that I want to have no limits to
+  the imagination of what I need when working. If I want only code over my full screen I
+  should have that. If I want a code where I can live see everywhere Claude is editing, I
+  need to be able to have that. If I want to have a 'browser' with 10 Claude agents, I
+  need to be able to have that. For Claude I also need to have an overview like we do in
+  Claude Code with which chats belong to which folder. You see the big picture, it should
+  be so much more modular than what it is. It is also good you say many functionalities
+  are waiting, but I am afraid we are not thinking grand enough and not modular enough."*
+  On the same theme, earlier: *"I want something super modular like TMUX"* and *"it still
+  feels like a cheap VS Code editor. This is not what I wanted."* Also asked: the Claude
+  plan's usage meters (5-hour, weekly per model) shown natively, the way Claude Code
+  shows them. → **Product principle 4** (composable surfaces) as the general answer, and
+  five specific ones: panes (M5 item 9, in flight), live agent activity (item 10), usage
+  meters (item 11), session browser by folder (item 12), pop-out to a second monitor
+  (item 13), and Office as ordinary composable panes — Word beside Excel, full screen —
+  folded into the M4 Office sequence as its acceptance demo. Read honestly, only two of
+  those are new *capabilities*; the rest were planned but stated one arrangement at a
+  time, which is the actual complaint. What is deliberately **not** promised in response:
+  a per-model weekly breakdown finer than the SDK reports, an unbounded fleet with no
+  caps or reaping, native Office in a popped-out window before the parent-chain question
+  is decided, and any part of the visual redesign moving out of M7.
