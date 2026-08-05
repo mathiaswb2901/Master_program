@@ -196,7 +196,10 @@ export function readWorkspaceFile(relative: string): string {
 }
 
 /** Write a file from outside the app — the "someone else changed it" half of
- * every watcher assertion. */
+ * every watcher assertion. Missing parents are created, so one call can stand
+ * for a build starting: a new directory and a file inside it. */
 export function writeWorkspaceFile(relative: string, content: string): void {
-  fs.writeFileSync(workspacePath(relative), content, "utf-8");
+  const target = workspacePath(relative);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, content, "utf-8");
 }

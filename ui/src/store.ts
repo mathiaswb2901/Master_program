@@ -3,6 +3,12 @@
 import { create } from "zustand";
 
 import * as api from "./api";
+import {
+  type DirMap,
+  applyFileChange,
+  parentPath,
+  reconcileTargets,
+} from "./filetree";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { withoutTransitions } from "./motion";
 import { isOfficePath, preloadDocsApi } from "./office";
@@ -140,6 +146,18 @@ export interface SessionFlags {
 
 interface WorkbenchStore {
   theme: Theme;
+  /** Directory listings the tree has loaded, keyed by path ("" = root). The
+   * file tree renders from this and nothing else; it grows one `scandir` at a
+   * time as folders are expanded. */
+  dirs: DirMap;
+  /** Paths of the expanded folders. Kept across a collapse so re-expanding
+   * restores the shape the user had. */
+  expandedDirs: ReadonlySet<string>;
+  /** The workspace folder's own name, from the root listing. */
+  workspaceName: string;
+  /** The *search index*: the whole workspace in one walk, for the QuickBar's
+   * fuzzy file search and the chat's tool-row file links. Null until something
+   * asks for it — the file tree never does, and no watcher event fetches it. */
   tree: TreeNode | null;
   openFiles: OpenFile[];
   activePath: string | null;
@@ -195,7 +213,18 @@ interface WorkbenchStore {
   pushToast: (kind: ToastKind, message: string) => void;
   dismissToast: (id: number) => void;
 
-  refreshTree: () => Promise<void>;
+  /** Read one directory from disk into `dirs`. One `scandir` server-side. */
+  loadDir: (path: string) => Promise<void>;
+  /** Expand or collapse a folder. Expanding always re-reads it: it is one
+   * listing, and it is what makes an incremental tree self-healing — every
+   * folder the user opens is verified against disk at the moment they open it. */
+  toggleDir: (path: string) => void;
+  /** Re-read the root and every expanded folder. The reconciliation path:
+   * called on every (re)connect of /ws/events, and whenever the server says the
+   * visibility rules moved under us. */
+  reconcileTree: () => Promise<void>;
+  /** Fetch the search index if it is missing or stale. On demand only. */
+  ensureFileIndex: () => Promise<void>;
   openFile: (path: string) => Promise<void>;
   /** Guarded close: dirty buffers get a confirm modal instead of silent discard. */
   requestCloseFile: (path: string) => void;
@@ -260,7 +289,12 @@ const initialTheme: Theme =
 
 let initialized = false;
 const loadingPaths = new Set<string>();
-let treeRefreshTimer: number | undefined;
+
+/** The search index is a full workspace walk, so it is fetched when something
+ * needs it and marked stale when a path appears or disappears — never refetched
+ * on a timer and never on a watcher event. */
+let fileIndexStale = true;
+let fileIndexPending: Promise<void> | null = null;
 
 const TOAST_AUTO_DISMISS_MS = 6000;
 let toastSeq = 0;
@@ -372,6 +406,9 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
   return {
     theme: initialTheme,
+    dirs: {},
+    expandedDirs: new Set<string>(),
+    workspaceName: "workspace",
     tree: null,
     openFiles: [],
     activePath: null,
@@ -404,13 +441,16 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         onMessage: (data) => {
           const event = data as WorkspaceEvent;
           if (event.type === "file_changed") get().handleFileChanged(event);
+          // The visibility rules moved (a CACHEDIR.TAG appeared or went), and
+          // no per-file event can describe that — re-read what is on screen.
+          else if (event.type === "tree_invalidated") void get().reconcileTree();
           else if (event.type === "session_status") get().handleSessionStatus(event);
           else if (event.type === "shortcuts_changed") void get().refreshShortcuts();
           else if (event.type === "file_provenance") get().handleFileProvenance(event);
         },
         // Re-sync on every (re)connect — covers events missed while offline.
         onOpen: () => {
-          void get().refreshTree();
+          void get().reconcileTree();
           void get().refreshSessions();
           void get().refreshShortcuts();
           void get().refreshProvenance();
@@ -492,13 +532,67 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       );
     },
 
-    refreshTree: async () => {
+    loadDir: async (path) => {
       try {
-        set({ tree: await api.getTree() });
+        const listing = await api.getDir(path);
+        set((s) => ({
+          dirs: { ...s.dirs, [listing.path]: listing.entries },
+          ...(listing.path === "" ? { workspaceName: listing.name } : {}),
+        }));
       } catch (err) {
-        console.error("tree refresh failed", err);
-        get().pushToast("error", `File tree refresh failed: ${errorDetail(err)}`);
+        // Gone on disk (a folder deleted under an open tree): drop the row and
+        // the listing rather than keep showing a directory that is not there.
+        if (err instanceof api.ApiError && (err.status === 404 || err.status === 400)) {
+          if (path === "") return;
+          get().handleFileChanged({
+            type: "file_changed",
+            path,
+            change: "deleted",
+            hash: null,
+            is_dir: true,
+            origin: "watcher",
+          });
+          return;
+        }
+        console.error("directory listing failed", path, err);
+        get().pushToast("error", `Could not read ${path === "" ? "the workspace" : path}: ${errorDetail(err)}`);
       }
+    },
+
+    toggleDir: (path) => {
+      const expanding = !get().expandedDirs.has(path);
+      set((s) => {
+        const next = new Set(s.expandedDirs);
+        if (expanding) next.add(path);
+        else next.delete(path);
+        return { expandedDirs: next };
+      });
+      // Always on expand, never on collapse. One `scandir` is cheap enough that
+      // the folder the user just opened is worth verifying against disk, and
+      // that is what keeps an incrementally-patched tree honest.
+      if (expanding) void get().loadDir(path);
+    },
+
+    reconcileTree: async () => {
+      await Promise.all(reconcileTargets(get().expandedDirs).map((path) => get().loadDir(path)));
+    },
+
+    ensureFileIndex: async () => {
+      if (get().tree !== null && !fileIndexStale) return;
+      // One walk at a time: the QuickBar opening twice in a second must not
+      // start two 471 KB requests.
+      fileIndexPending ??= (async () => {
+        try {
+          const tree = await api.getTree();
+          fileIndexStale = false;
+          set({ tree });
+        } catch (err) {
+          console.error("file index refresh failed", err);
+        } finally {
+          fileIndexPending = null;
+        }
+      })();
+      await fileIndexPending;
     },
 
     openFile: async (path) => {
@@ -622,7 +716,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         get().pushToast("error", `Create failed: ${errorDetail(err)}`);
         return;
       }
-      await get().refreshTree();
+      // The one directory that changed, not the workspace. The watcher event is
+      // on its way too, and lands on the same row — but a user who just typed a
+      // name should not wait a debounce window to see it.
+      await get().loadDir(parentPath(path));
       if (kind === "file") void get().openFile(path);
     },
 
@@ -645,7 +742,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }
       const activeWas = get().activePath;
       for (const f of affected) get().closeFile(f.path);
-      await get().refreshTree();
+      const parents = new Set([parentPath(path), parentPath(newPath)]);
+      await Promise.all([...parents].map((parent) => get().loadDir(parent)));
       const remap = (p: string): string =>
         p === path ? newPath : p.startsWith(prefix) ? newPath + p.slice(path.length) : p;
       for (const f of affected) await get().openFile(remap(f.path));
@@ -663,7 +761,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }
       // The user confirmed the delete — dirty state no longer guards anything.
       if (get().openFiles.some((f) => f.path === path)) get().closeFile(path);
-      void get().refreshTree();
+      void get().loadDir(parentPath(path));
     },
 
     setActiveFile: (path) => {
@@ -738,10 +836,29 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     },
 
     handleFileChanged: (event) => {
-      window.clearTimeout(treeRefreshTimer);
-      treeRefreshTimer = window.setTimeout(() => {
-        void get().refreshTree();
-      }, 500);
+      // The tree updates *from the event*, in place. This used to schedule a
+      // full `GET /api/files/tree` — on the 5,005-file perf fixture, twenty
+      // single-file changes cost twenty complete workspace walks and 9.4 MB of
+      // JSON to move twenty rows. Budget: `ui/e2e/perf/watcher.spec.ts`.
+      set((s) => {
+        const dirs = applyFileChange(s.dirs, event);
+        if (dirs === s.dirs) return {};
+        if (event.change !== "deleted") return { dirs };
+        // A folder that is gone stops being expanded, or every later reconnect
+        // would keep asking the server about a directory nobody can see.
+        const prefix = event.path + "/";
+        const gone = [...s.expandedDirs].filter(
+          (path) => path === event.path || path.startsWith(prefix),
+        );
+        if (gone.length === 0) return { dirs };
+        const expandedDirs = new Set(s.expandedDirs);
+        for (const path of gone) expandedDirs.delete(path);
+        return { dirs, expandedDirs };
+      });
+      // The search index is a *set of paths*; only an appearance or a
+      // disappearance can invalidate it, and it is refetched when something
+      // asks — not here.
+      if (event.change !== "modified") fileIndexStale = true;
 
       const file = get().openFiles.find((f) => f.path === event.path);
       if (!file || file.loadError !== null) return;
@@ -1223,6 +1340,11 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           });
           break;
         case "tool_use":
+          // A tool row resolves its path against the search index (see
+          // `toolTarget.ts`), so this is one of the two moments that index is
+          // actually wanted — the QuickBar opening is the other. Asking here
+          // keeps the file links working without a walk at launch.
+          void get().ensureFileIndex();
           appendChat(sessionId, {
             kind: "tool",
             id: message.id,

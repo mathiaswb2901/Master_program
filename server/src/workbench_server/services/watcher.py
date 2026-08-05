@@ -12,9 +12,13 @@ from typing import Literal
 import structlog
 from watchfiles import Change, awatch
 
-from workbench_server.models.files import MAX_TEXT_FILE_BYTES, FileChangedEvent
+from workbench_server.models.files import (
+    MAX_TEXT_FILE_BYTES,
+    FileChangedEvent,
+    TreeInvalidatedEvent,
+)
 from workbench_server.services.event_bus import EventBus
-from workbench_server.services.ignore import CACHEDIR_TAG, IgnoreIndex
+from workbench_server.services.ignore import CACHEDIR_TAG, IgnoreIndex, is_ignored_dir
 from workbench_server.services.workspace import content_hash
 
 log = structlog.get_logger()
@@ -24,6 +28,19 @@ _CHANGE_NAMES: dict[Change, Literal["added", "modified", "deleted"]] = {
     Change.modified: "modified",
     Change.deleted: "deleted",
 }
+
+
+def _is_dir(path: Path) -> bool:
+    """``Path.is_dir`` behind a plain function.
+
+    The watcher loop is async and the lint rule banning blocking pathlib calls
+    inside one is right in general; a single ``stat`` on a path the OS has just
+    named is the exception, and keeping it here says so once.
+    """
+    try:
+        return path.is_dir()
+    except OSError:  # vanished between the event and the question
+        return False
 
 
 def _hash_of(path: Path) -> str | None:
@@ -43,13 +60,28 @@ class Watcher:
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
-    def _skip(self, path: Path) -> bool:
+    def _skip(self, path: Path, kind: str) -> bool:
         if self._ignore.ignored(path):
             return True
         # our own atomic-write temp files (".name.random.tmp") must never surface as events
         if path.name.startswith(".") and path.name.endswith(".tmp"):
             return True
-        return path.is_dir()
+        # A directory is reported when it *appears* — the tree has a row for it,
+        # and a folder created by `mkdir`, an agent or a build used to stay
+        # invisible until something forced a full refetch (as did every file
+        # created inside it, since the client had no row to hang them on).
+        # `modified` on a directory is Windows narrating its children, which
+        # arrive as their own events; suppressing it is what keeps a patched
+        # tree quiet. A *deleted* path is no longer a directory to ask about
+        # (`is_dir()` is False the moment it is gone), so it falls through here
+        # and the row goes by path.
+        if not _is_dir(path):
+            return False
+        if kind != "added":
+            return True
+        # `IgnoreIndex.ignored` tests a path's *ancestors* — right for a file,
+        # one short for a directory that is itself the build cache.
+        return is_ignored_dir(path)
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name="workspace-watcher")
@@ -71,17 +103,26 @@ class Watcher:
             # as visible — before the tag in the same batch was ever noticed.
             if any(Path(raw_path).name == CACHEDIR_TAG for _, raw_path in changes):
                 self._ignore.invalidate()
+                # And say so on the wire. A tag appearing takes a whole subtree
+                # out of the tree's answer, and the events that would have
+                # described it are exactly the ones now being suppressed — so a
+                # client patching its own tree from these events has no other
+                # way to learn. Rare enough to be free, and it is what lets the
+                # tree be incremental without ever drifting from a fresh listing.
+                self._bus.publish(TreeInvalidatedEvent())
             for change, raw_path in changes:
                 path = Path(raw_path)
-                if self._skip(path):
-                    continue
                 kind = _CHANGE_NAMES.get(change)
                 if kind is None:
                     continue
+                if self._skip(path, kind):
+                    continue
+                is_dir = kind == "added" and _is_dir(path)
                 event = FileChangedEvent(
                     path=path.relative_to(self._root).as_posix(),
                     change=kind,
-                    hash=None if kind == "deleted" else _hash_of(path),
+                    hash=None if kind == "deleted" or is_dir else _hash_of(path),
+                    is_dir=is_dir,
                 )
                 self._bus.publish(event)
         log.info("watcher.stopped")
