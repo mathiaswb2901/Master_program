@@ -13,6 +13,7 @@ from workbench_server.models.agents import (
     Interrupt,
     PermissionDecision,
     SessionInfo,
+    SessionLimits,
     TranscriptResponse,
     UiState,
     UserMessage,
@@ -62,6 +63,13 @@ def list_sessions(request: Request) -> list[FolderSessions]:
         for folder, infos in sorted(grouped.items())
         if infos
     ]
+
+
+@router.get("/limits")
+def limits(request: Request) -> SessionLimits:
+    """What a new session would cost against the ceiling, before asking for one."""
+    manager: SessionManager = request.app.state.session_manager
+    return SessionLimits(max_concurrent=manager.max_concurrent, active=manager.active_count())
 
 
 @router.post("/sessions")

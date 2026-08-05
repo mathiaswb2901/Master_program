@@ -1,9 +1,10 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm } from "@xterm/xterm";
-import type { IDockviewPanelProps } from "dockview";
+import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
 import { useEffect, useRef, useState } from "react";
 
 import { MONO_FONT } from "../monaco";
+import { paneInstance } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import { useStore } from "../store";
 import { registerTerminal } from "../terminalInput";
@@ -13,13 +14,77 @@ import type { TerminalClientMessage, TerminalServerMessage } from "../types";
 import { wsUrl } from "../ws";
 
 /**
+ * The Terminal tool renders two ways, decided by the pane's id (`../panes.ts`).
+ *
+ *  - `terminal` — the default pane: a tab strip over every terminal that is not
+ *    in a pane of its own. This is the panel Workbench has always had;
+ *  - `terminal#<n>` — a pane bound to one terminal. No tab strip: the pane *is*
+ *    the terminal, which is what a split is for.
+ *
+ * What `terminal#2` gets back after a reload is the pane and its number, with a
+ * fresh shell — the PTY dies with the WebSocket and the server releases it, so
+ * no arrangement on disk can promise the process.
+ */
+export function TerminalPanel(props: IDockviewPanelProps) {
+  const paneKey = paneInstance(props.api.id);
+  return paneKey === null ? (
+    <TerminalTabs />
+  ) : (
+    <TerminalPane paneKey={paneKey} api={props.api} />
+  );
+}
+
+/** One terminal, filling its pane. */
+function TerminalPane({ paneKey, api }: { paneKey: string; api: DockviewPanelApi }) {
+  const terminal = useStore((s) => s.terminals.find((t) => t.paneKey === paneKey));
+
+  // Created on first sight of the pane — including a pane restored from a saved
+  // layout, which is how "two terminals" comes back as two terminals.
+  useEffect(() => {
+    useStore.getState().ensureTerminalPane(paneKey);
+  }, [paneKey]);
+
+  // The focused terminal pane is the one a `shell` shortcut types into. Without
+  // this the insert would go to whatever the tab strip last had active — text
+  // delivered to a shell the user is not looking at.
+  const id = terminal?.id ?? null;
+  useEffect(() => {
+    if (id === null) return;
+    if (api.isActive) useStore.getState().setActiveTerminal(id);
+    const subscription = api.onDidActiveChange((event) => {
+      if (event.isActive) useStore.getState().setActiveTerminal(id);
+    });
+    return () => subscription.dispose();
+  }, [api, id]);
+
+  if (terminal === undefined) return null;
+  return (
+    <div className="wb-terminals">
+      <div className="wb-terminals-body">
+        <div className="wb-terminal" key={`${String(terminal.id)}:${String(terminal.generation)}`}>
+          <TerminalInstance id={terminal.id} visible />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * N terminals, each with its own /ws/terminal socket and PTY. Every instance
  * stays mounted for the life of its tab — switching tabs only toggles CSS, so
  * scrollback, shell state and running processes survive. Closing a tab unmounts
  * it, which closes the socket and releases the PTY server-side.
  */
-export function TerminalPanel(_props: IDockviewPanelProps) {
-  const terminals = useStore((s) => s.terminals);
+function TerminalTabs() {
+  // Filtered *outside* the selector, not inside it: a selector that builds a
+  // new array every call never compares equal, and zustand's
+  // `useSyncExternalStore` re-renders forever on it (caught by running the app,
+  // not by a type).
+  const all = useStore((s) => s.terminals);
+  // Terminals that live in a pane of their own are that pane's, not this
+  // strip's: listing them here would show one shell in two places, each with
+  // its own close button.
+  const terminals = all.filter((t) => t.paneKey === null);
   const activeId = useStore((s) => s.activeTerminalId);
 
   return (
@@ -254,6 +319,24 @@ export const terminalTool: WorkbenchTool = {
   panel: {
     component: TerminalPanel,
     defaultLocation: { area: "bottom", size: 260 },
+    // Plural: a terminal belongs in a pane as readily as in a tab.
+    singleton: false,
+    instances: {
+      // One row, and it always makes a new shell: unlike a session or a file, a
+      // terminal is not something that exists before you ask for it. The key is
+      // the lowest free pane number rather than a counter, so it survives the
+      // reload that resets every counter in the app (`store.ts`).
+      options: () => [
+        {
+          id: "terminal.new",
+          title: "New terminal",
+          detail: "a shell in its own pane",
+          category: "Terminal",
+          key: () => useStore.getState().nextTerminalPaneKey(),
+        },
+      ],
+      titleFor: (key) => `Terminal ${key}`,
+    },
   },
   // A `shell` shortcut is typed into the active terminal, so this panel comes
   // forward first — declared here so `commands.ts` routes by capability.

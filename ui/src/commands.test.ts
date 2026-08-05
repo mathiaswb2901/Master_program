@@ -137,6 +137,21 @@ describe("command registry", () => {
       "office.detachHost",
       "scratchpad.open",
       "usage.open",
+      // The two tools that arrange panels rather than being one, in the order
+      // `tools.ts` lists them: Panes splits the window, Layouts remembers it.
+      "pane.split.right",
+      "pane.split.down",
+      "pane.focus.left",
+      "pane.focus.right",
+      "pane.focus.up",
+      "pane.focus.down",
+      "pane.swap.left",
+      "pane.swap.right",
+      "pane.swap.up",
+      "pane.swap.down",
+      "pane.cycle",
+      "pane.cycleBack",
+      "pane.close",
       // The Layouts tool's *static* commands. Its per-layout rows are dynamic
       // (the saved set changes while the app runs) and so are not in here —
       // they join in `allCommands`, after everything static.
@@ -204,7 +219,7 @@ describe("shortcuts.md extension", () => {
     const categories = allCommands()
       .map((command) => command.category)
       .filter((category): category is string => category !== undefined);
-    expect([...new Set(categories)]).toEqual(["Layouts", "Shortcuts"]);
+    expect([...new Set(categories)]).toEqual(["Panes", "Layouts", "Shortcuts"]);
   });
 
   it("never gives a dynamic command a chord", () => {

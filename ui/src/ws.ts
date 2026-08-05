@@ -10,15 +10,35 @@ export function wsUrl(path: string): string {
   return `${proto}//${location.host}${path}`;
 }
 
+/**
+ * Close codes in this band mean the server **refused** the connection and
+ * always will: the thing behind that path does not exist. Retrying then is not
+ * optimism about a flaky network, it is one request every ten seconds for as
+ * long as the tab is open, invisible to the user.
+ *
+ * `/ws/agent/{id}` answers 4404 for a session id the server does not have
+ * (`routers/agents.py`) — which is exactly what a saved layout asks for after
+ * the server restarts, because `SessionManager` holds its sessions in memory.
+ *
+ * Everything outside the band — a dropped network, a backend restarting, the
+ * 1006 a killed process produces — is transient and still retried forever,
+ * which is the whole reason this class exists.
+ */
+const GONE_CODE_MIN = 4400;
+const GONE_CODE_MAX = 4499;
+
 export interface ReconnectingSocketOptions {
   onMessage: (data: unknown) => void;
   /** Fires on every (re)connect — use to re-sync state missed while offline. */
   onOpen?: () => void;
+  /** The server refused this path for good; the socket has stopped retrying. */
+  onGone?: (code: number) => void;
 }
 
 export class ReconnectingSocket {
-  private ws: WebSocket | null = null;
+  /** No further connection will ever be made: closed by us, or refused for good. */
   private disposed = false;
+  private ws: WebSocket | null = null;
   private attempts = 0;
   private queue: string[] = [];
 
@@ -46,8 +66,14 @@ export class ReconnectingSocket {
       }
       this.opts.onMessage(parsed);
     };
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       if (this.disposed) return;
+      if (ev.code >= GONE_CODE_MIN && ev.code <= GONE_CODE_MAX) {
+        this.disposed = true;
+        this.queue.length = 0;
+        this.opts.onGone?.(ev.code);
+        return;
+      }
       const delay = Math.min(10_000, 500 * 2 ** this.attempts);
       this.attempts += 1;
       window.setTimeout(() => {
@@ -57,6 +83,8 @@ export class ReconnectingSocket {
   }
 
   send(message: unknown): void {
+    // Queueing for a socket that will never open again is a leak, not patience.
+    if (this.disposed) return;
     const frame = JSON.stringify(message);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(frame);
     else this.queue.push(frame);

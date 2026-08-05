@@ -37,6 +37,7 @@ import {
   MAX_LAYOUT_NAME_CHARS,
   MAX_SAVED_LAYOUTS,
   droppedPanelsMessage,
+  droppedPanesMessage,
   presetPlacements,
   pruneLayout,
   type LayoutPreset,
@@ -45,7 +46,8 @@ import { playDockMotion } from "../motion";
 import {
   applyPlacements,
   defaultLayout,
-  panelComponents,
+  paneVocabulary,
+  type PaneVocabulary,
   type ToolCommand,
   type WorkbenchTool,
 } from "../registry";
@@ -109,9 +111,10 @@ const toast = (kind: "error" | "warn" | "info" | "success", message: string): vo
 const detailOf = (err: unknown): string =>
   err instanceof api.ApiError ? err.detail : err instanceof Error ? err.message : String(err);
 
-/** Panel components the app can actually render right now. The set a restored
- * layout is vetted against — a registry fact, read fresh each time. */
-const knownComponents = (): Set<string> => new Set(Object.keys(panelComponents(TOOLS)));
+/** What a pane id may say right now: the components the app can render, and
+ * which of them may carry an instance key. A registry fact, read fresh each
+ * time, and the set a restored layout is vetted against (`../panes.ts`). */
+const knownPanes = (): PaneVocabulary => paneVocabulary(TOOLS);
 
 // ---- persistence ------------------------------------------------------------
 
@@ -204,7 +207,7 @@ type ApplyOutcome = "applied" | "unchanged" | "default";
 /** Apply a serialized arrangement, having vetted it. See `ApplyOutcome`. */
 function applySerialized(dock: DockviewApi, state: unknown, source: string): ApplyOutcome {
   if (state === null || state === undefined) return "unchanged";
-  const pruned = pruneLayout(state, knownComponents());
+  const pruned = pruneLayout(state, knownPanes());
   if (pruned === null) {
     // Nothing was touched, so say so: on startup the window this leaves behind
     // is the default arrangement, but mid-session it is whatever the user was
@@ -230,6 +233,7 @@ function applySerialized(dock: DockviewApi, state: unknown, source: string): App
     return "default";
   }
   if (pruned.dropped.length > 0) toast("warn", droppedPanelsMessage(pruned.dropped));
+  if (pruned.droppedPanes.length > 0) toast("warn", droppedPanesMessage(pruned.droppedPanes));
   return "applied";
 }
 
