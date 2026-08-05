@@ -23,6 +23,15 @@ What one user message produces, in order:
   when the turn ended;
 * ``use tool``       — a ``Read`` of a real file in the session folder: a
   tool-use note and, separately, its result;
+* ``write file``     — a ``Write`` of a real file in the session folder: the
+  note first, *then* the bytes hit disk, exactly as a real tool call orders
+  them, so the provenance correlator sees the claim before the watcher event
+  it has to explain;
+* ``refuse write``   — the same ``Write`` announcement for a *different* path,
+  settled as a tool **error** with nothing written. The shape of a denied
+  permission card or an ``Edit`` whose old string was not found: a claim exists
+  for a write that never happened, and whatever changes that path next must
+  still come back unattributed;
 * ``ask permission`` — a permission prompt through the bridge, then the
   outcome echoed as text;
 * ``plan please``    — a fixed :class:`PlanArtifact` through the bridge, then
@@ -57,6 +66,8 @@ log = structlog.get_logger()
 #: Triggers, matched case-insensitively anywhere in the user's message.
 BUSY_TRIGGER = "stay busy"
 TOOL_TRIGGER = "use tool"
+WRITE_TRIGGER = "write file"
+REFUSED_WRITE_TRIGGER = "refuse write"
 PERMISSION_TRIGGER = "ask permission"
 PLAN_TRIGGER = "plan please"
 
@@ -74,6 +85,23 @@ READ_EXCERPT_CHARS = 400
 #: The command the scripted permission prompt asks about. Never executed —
 #: nothing in this module runs anything.
 PERMISSION_COMMAND = "echo scripted-permission"
+
+#: File the scripted ``Write`` creates, relative to the session folder. Named so
+#: it sorts *after* the file a fake ``Read`` picks (see ``first_workspace_file``)
+#: — the two triggers share a workspace in the E2E suite, and a write that stole
+#: the "alphabetically first file" slot would silently retarget every Read.
+WRITE_TARGET_NAME = "written-by-agent.md"
+
+#: What the scripted ``Write`` puts in that file. Changes on every call so a
+#: second write is a real change on disk, not a no-op the watcher never reports.
+WRITE_BODY = "# Written by the fake agent\n\nRevision {revision}.\n"
+
+#: Path the *refused* ``Write`` names and never creates. Must sort after the
+#: file a fake ``Read`` picks, for the same reason ``WRITE_TARGET_NAME`` does.
+REFUSED_WRITE_TARGET_NAME = "refused-by-agent.md"
+
+#: What that refused call comes back with — an error result, no bytes on disk.
+REFUSED_WRITE_ERROR = "String to replace not found in file"
 
 
 # ---- SDK-shaped messages ----------------------------------------------------
@@ -210,6 +238,7 @@ class FakeAgentClient:
         self._bridge = bridge
         self._session_id = f"fake-{uuid.uuid4().hex[:8]}"
         self._prompt = ""
+        self._writes = 0
         #: Every prompt this client was asked, for tests.
         self.prompts: list[str] = []
         self.disconnected = False
@@ -239,6 +268,25 @@ class FakeAgentClient:
                 yield message
             if busy:
                 await asyncio.sleep(BUSY_HOLD_S)
+        if WRITE_TRIGGER in lowered:
+            call_id = f"fake-tool-{uuid.uuid4().hex[:8]}"
+            # The note goes out first and the bytes land after it, which is the
+            # order a real tool call has — and the order the provenance
+            # correlator needs, since it claims a path before the watcher
+            # reports the change that claim explains.
+            yield AssistantMessage(
+                [ToolUseBlock("Write", {"file_path": WRITE_TARGET_NAME}, call_id)]
+            )
+            result, failed = self._write_a_file()
+            yield UserMessage([ToolResultBlock(call_id, result, is_error=failed)])
+        if REFUSED_WRITE_TRIGGER in lowered:
+            # Announced exactly like the real thing, settled as an error, and
+            # nothing touches disk: the claim must not survive its own failure.
+            call_id = f"fake-tool-{uuid.uuid4().hex[:8]}"
+            yield AssistantMessage(
+                [ToolUseBlock("Write", {"file_path": REFUSED_WRITE_TARGET_NAME}, call_id)]
+            )
+            yield UserMessage([ToolResultBlock(call_id, REFUSED_WRITE_ERROR, is_error=True)])
         if PERMISSION_TRIGGER in lowered:
             allowed = await self._bridge.ask_permission("Bash", {"command": PERMISSION_COMMAND})
             yield _delta(f"\n\npermission: {'allowed' if allowed else 'denied'}\n")
@@ -267,6 +315,18 @@ class FakeAgentClient:
             AssistantMessage([ToolUseBlock("Read", {"file_path": target.name}, call_id)]),
             UserMessage([ToolResultBlock(call_id, excerpt, is_error=failed)]),
         ]
+
+    def _write_a_file(self) -> tuple[str, bool]:
+        """Really write to disk — the whole point of the trigger is that the
+        watcher sees a change nobody asked the *editor* for. Returns the tool
+        result text and whether it failed."""
+        self._writes += 1
+        target = self._folder / WRITE_TARGET_NAME
+        try:
+            target.write_text(WRITE_BODY.format(revision=self._writes), encoding="utf-8")
+        except OSError as err:
+            return f"cannot write: {err.strerror or err}", True
+        return f"wrote {WRITE_TARGET_NAME}", False
 
     async def interrupt(self) -> None:
         return None

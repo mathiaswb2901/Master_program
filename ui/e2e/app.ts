@@ -79,9 +79,14 @@ export async function terminalText(page: Page): Promise<string> {
   return text.replace(/\u00a0/g, " ");
 }
 
-/** Start a fresh live agent session (fake mode) and return its chat box. */
+/** Start a fresh live agent session (fake mode) and return its chat box.
+ *
+ * `exact`: an unmessaged session is titled "new session", so its row and its
+ * status chip both contain this button's name as a substring — the default
+ * (substring) match would resolve to three elements the moment any journey
+ * leaves one behind. */
 export async function newSession(page: Page): Promise<Locator> {
-  await page.getByRole("button", { name: "New session" }).click();
+  await page.getByRole("button", { name: "New session", exact: true }).click();
   const input = page.locator(".wb-chat-input textarea");
   await expect(input).toBeVisible();
   return input;

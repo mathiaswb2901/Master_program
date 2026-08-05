@@ -1,16 +1,9 @@
 import type { IDockviewPanelProps } from "dockview";
 
+import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
 import type { SessionInfo } from "../types";
 import { Chat, statusVisual, TranscriptView } from "./Chat";
-
-function relTime(unixSeconds: number): string {
-  const delta = Date.now() / 1000 - unixSeconds;
-  if (delta < 60) return "now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h`;
-  return `${Math.floor(delta / 86400)}d`;
-}
 
 function SessionRow({ session }: { session: SessionInfo }) {
   const state = useStore((s) => s.sessionStates[session.session_id] ?? session.state);
@@ -39,7 +32,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
         <span className="wb-dot wb-dot-disk" aria-hidden="true" />
       )}
       <span className="wb-session-title u-truncate">{session.title}</span>
-      <span className="wb-session-time u-tabular">{relTime(session.updated_at)}</span>
+      <span className="wb-session-time u-tabular">{relativeTime(session.updated_at)}</span>
     </button>
   );
 }

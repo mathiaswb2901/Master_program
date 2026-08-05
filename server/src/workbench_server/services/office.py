@@ -12,7 +12,7 @@ reopen instead of OnlyOffice serving its stale cached copy.
 import hashlib
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 import jwt
@@ -52,6 +52,14 @@ class NotAnOfficeFileError(Exception):
     pass
 
 
+class UserWriteObserver(Protocol):
+    """The one thing this service tells the provenance correlator: a save that
+    landed here is the *user's* keystrokes, flushed by the Document Server —
+    never the agent's, even when an agent wrote the same document seconds ago."""
+
+    def note_user_write(self, relative_path: str) -> None: ...
+
+
 class OfficeService:
     def __init__(
         self,
@@ -60,8 +68,10 @@ class OfficeService:
         jwt_secret: str | None,
         public_base_url: str,
         backup_originals: bool = True,
+        provenance: UserWriteObserver | None = None,
     ) -> None:
         self._workspace = workspace
+        self._provenance = provenance
         self.server_url = server_url.rstrip("/") if server_url else None
         self._secret = jwt_secret
         self._public_base = public_base_url.rstrip("/")
@@ -179,6 +189,11 @@ class OfficeService:
         response.raise_for_status()
         self._workspace.write_bytes(path, response.content, backup=self._backup)
         self._last_saves[path] = content_hash(response.content)
+        # These bytes are the user's own edits. Without this the watcher event
+        # would be matched against any agent claim still open on the document —
+        # and a .docx is the one file the user cannot diff for themselves.
+        if self._provenance is not None:
+            self._provenance.note_user_write(path)
         log.info("office.saved", path=path, status=status, size=len(response.content))
 
     def last_save_hash(self, path: str) -> str | None:

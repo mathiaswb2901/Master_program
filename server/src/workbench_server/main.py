@@ -12,11 +12,21 @@ from fastapi.staticfiles import StaticFiles
 
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
-from workbench_server.routers import agents, events, files, health, office, shortcuts, terminal
+from workbench_server.routers import (
+    agents,
+    events,
+    files,
+    health,
+    office,
+    provenance,
+    shortcuts,
+    terminal,
+)
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.office import OfficeService
+from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.session_index import SessionIndex
@@ -40,6 +50,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     watcher = Watcher(workspace.root, event_bus)
     # Rides the watcher's bus for the workspace file; watches the global one itself.
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
+    # Correlates agent tool calls with the watcher's file events; in-memory only.
+    provenance_service = ProvenanceService(workspace.root, event_bus)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
     # Fake mode replaces the SDK client and nothing else: same SessionManager,
@@ -61,6 +73,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Session state changes ride the same bus as watcher events, so the UI
         # tracks sessions it has no agent socket open for.
         event_publisher=event_bus,
+        # Every announced tool call is offered to the correlator, which keeps
+        # the ones that write a file inside the workspace.
+        tool_observer=provenance_service,
     )
     office_service = OfficeService(
         workspace,
@@ -68,6 +83,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jwt_secret=settings.onlyoffice_jwt_secret,
         public_base_url=settings.resolved_public_base_url(),
         backup_originals=settings.office_backup,
+        # A Document Server save is the user typing, flushed — the correlator
+        # has to hear about it or an open agent claim would take the credit.
+        provenance=provenance_service,
     )
 
     @asynccontextmanager
@@ -76,8 +94,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.http = httpx.AsyncClient(timeout=30)
         watcher.start()
         shortcuts_service.start()
+        provenance_service.start()
         yield
         await session_manager.close_all()
+        await provenance_service.stop()
         await shortcuts_service.stop()
         await watcher.stop()
         pty_manager.shutdown()
@@ -94,6 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_index = session_index
     app.state.office = office_service
     app.state.shortcuts = shortcuts_service
+    app.state.provenance = provenance_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -109,6 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.ws_router)
     app.include_router(office.router)
     app.include_router(shortcuts.router)
+    app.include_router(provenance.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

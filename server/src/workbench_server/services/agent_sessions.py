@@ -78,6 +78,45 @@ class SessionBridge(Protocol):
     async def present_plan(self, artifact: PlanArtifact) -> PlanResponse: ...
 
 
+class ToolUseObserver(Protocol):
+    """Told about every tool call, synchronously, through its whole life.
+
+    The provenance correlator is the only implementor: it needs the *path* a
+    write tool named, which the ``ToolUseNote`` frame deliberately does not
+    carry (that frame is a chat row, not a machine-readable claim). A direct
+    call rather than a bus event because this is an internal signal — every
+    payload on ``/ws/events`` is something a client must act on.
+
+    Announcement alone is not enough. A tool is announced *before* it runs, so
+    the observer also has to hear how it ended: a declined permission card or an
+    error result means nothing was written, and a claim left standing for a
+    write that never happened would be credited with whatever changed that path
+    next — usually the user's own edit.
+    """
+
+    def note_tool_use(
+        self,
+        *,
+        session_id: str,
+        session_title: str,
+        folder: Path,
+        tool: str,
+        tool_input: dict[str, Any],
+        call_id: str | None = None,
+    ) -> None: ...
+
+    def note_tool_result(self, *, call_id: str, ok: bool) -> None: ...
+
+    def note_tool_denied(
+        self,
+        *,
+        session_id: str,
+        folder: Path,
+        tool: str,
+        tool_input: dict[str, Any],
+    ) -> None: ...
+
+
 ClientFactory = Callable[[Path, str | None, SessionBridge], SdkClient]
 
 
@@ -119,6 +158,7 @@ class AgentSession:
         factory: ClientFactory,
         resume_session_id: str | None = None,
         event_publisher: EventPublisher | None = None,
+        tool_observer: ToolUseObserver | None = None,
     ) -> None:
         self.local_id = local_id
         self.folder = folder
@@ -134,6 +174,7 @@ class AgentSession:
         self.title: str | None = None  # derived from the first user message
         self._factory = factory
         self._publisher = event_publisher
+        self._tool_observer = tool_observer
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
@@ -215,14 +256,22 @@ class AgentSession:
         self._set_state("needs_attention")
         self._emit(request)
         try:
-            return await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
+            allowed = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
         except TimeoutError:
             log.info("agent.permission_timed_out", session=self.local_id, request=request_id)
-            return False
+            allowed = False
         finally:
             self._pending_permissions.pop(request_id, None)
             self._pending_permission_events.pop(request_id, None)
             self._restore_state_after_prompt()
+        if not allowed and self._tool_observer is not None:
+            # The tool will not run, so the claim its announcement made is not
+            # true. Withdraw it now: a user who just refused a write is exactly
+            # the person about to make that change themselves.
+            self._tool_observer.note_tool_denied(
+                session_id=self.local_id, folder=self.folder, tool=tool, tool_input=tool_input
+            )
+        return allowed
 
     def resolve_permission(self, request_id: str, allow: bool) -> None:
         fut = self._pending_permissions.get(request_id)
@@ -377,6 +426,17 @@ class AgentSession:
                             id=call_id, tool=tool, summary=_describe_tool_call(tool, tool_input)
                         )
                     )
+                    # Announced before the tool runs, which is what lets the
+                    # provenance correlator claim the file change that follows.
+                    if self._tool_observer is not None:
+                        self._tool_observer.note_tool_use(
+                            session_id=self.local_id,
+                            session_title=self.title or FALLBACK_TITLE,
+                            folder=self.folder,
+                            tool=tool,
+                            tool_input=tool_input,
+                            call_id=call_id,
+                        )
         elif kind == "UserMessage":
             # Tool results arrive as a synthetic user turn (SDK naming — not a
             # message the human typed); each block settles exactly one row.
@@ -386,13 +446,18 @@ class AgentSession:
                 raw_id = getattr(block, "tool_use_id", None)
                 if not isinstance(raw_id, str) or not raw_id:
                     continue
+                ok = not bool(getattr(block, "is_error", False))
                 self._emit(
                     ToolSettled(
                         id=raw_id,
-                        ok=not bool(getattr(block, "is_error", False)),
+                        ok=ok,
                         output_excerpt=_result_excerpt(getattr(block, "content", None)),
                     )
                 )
+                # A failed tool wrote nothing; the correlator drops its claim so
+                # it cannot be credited with the next change to that path.
+                if self._tool_observer is not None:
+                    self._tool_observer.note_tool_result(call_id=raw_id, ok=ok)
         elif kind == "ResultMessage":
             sdk_id = getattr(message, "session_id", None)
             if isinstance(sdk_id, str):
@@ -478,12 +543,14 @@ class SessionManager:
         max_sessions: int,
         session_index: SessionIndex | None = None,
         event_publisher: EventPublisher | None = None,
+        tool_observer: ToolUseObserver | None = None,
     ) -> None:
         self._root = workspace_root
         self._factory = factory
         self._max = max_sessions
         self._index = session_index
         self._publisher = event_publisher
+        self._tool_observer = tool_observer
         self._sessions: dict[str, AgentSession] = {}
 
     @property
@@ -505,6 +572,7 @@ class SessionManager:
             factory=self._factory,
             resume_session_id=resume_session_id,
             event_publisher=self._publisher,
+            tool_observer=self._tool_observer,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.

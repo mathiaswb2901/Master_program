@@ -2,6 +2,7 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import type { IDockviewPanelProps } from "dockview";
 import { useEffect } from "react";
 
+import { focusPanel } from "../commands";
 import {
   editorPathProp,
   languageForPath,
@@ -9,9 +10,19 @@ import {
   monacoThemeName,
   setActiveEditor,
 } from "../monaco";
+import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
 
 import { OfficePanel } from "./OfficePanel";
+
+/** Same marker as the tree row, for a tab the user has not looked at yet: an
+ * agent can change a file that is open behind the active one. */
+function TabAgentMark({ path }: { path: string }) {
+  const entry = useStore((s) => s.provenance[path]);
+  if (entry === undefined || entry.agent === null || entry.acknowledged) return null;
+  const label = `Changed by ${entry.agent.session_title}`;
+  return <span className="wb-tab-agent-dot" role="img" aria-label={label} title={label} />;
+}
 
 function EditorTab({ file, active }: { file: OpenFile; active: boolean }) {
   return (
@@ -30,6 +41,7 @@ function EditorTab({ file, active }: { file: OpenFile; active: boolean }) {
       >
         {file.name}
       </button>
+      <TabAgentMark path={file.path} />
       <span className="wb-editor-tab-trailing">
         {file.dirty && <span className="wb-dirty-dot" title="Unsaved changes" />}
         <button
@@ -41,6 +53,57 @@ function EditorTab({ file, active }: { file: OpenFile; active: boolean }) {
           ×
         </button>
       </span>
+    </div>
+  );
+}
+
+/**
+ * One line above the buffer for a file an agent changed: who, with what tool,
+ * how long ago — and a link back to that exact conversation, which is the other
+ * half of the loop the chat's file links start (a tool row opens the file; this
+ * opens the session).
+ *
+ * Deliberately *not* gated on `acknowledged`, unlike the two dots. The dots
+ * mean "you have not looked at this yet" and opening the file answers them; the
+ * bar answers a different question — "who wrote what I am reading?" — which
+ * stays worth answering every time the file is opened, and is the only place
+ * the link back to that conversation lives. It ends by itself when the claim
+ * does: any later change from anywhere else clears the entry and the bar with
+ * it. Dismiss closes it for good (persisted, see the store), for a file the
+ * user has decided about. Documented in DESIGN.md §6.1.
+ */
+function ProvenanceBar({ path }: { path: string }) {
+  const entry = useStore((s) => s.provenance[path]);
+  const dismissed = useStore((s) => s.provenanceDismissed[path] === true);
+  const agent = entry?.agent ?? null;
+  if (entry === undefined || agent === null || dismissed) return null;
+  return (
+    <div className="wb-provenance-bar">
+      <span className="wb-provenance-dot" aria-hidden="true" />
+      <span className="wb-provenance-msg u-truncate">
+        Changed by{" "}
+        <button
+          type="button"
+          className="wb-provenance-link"
+          aria-label={`Open session ${agent.session_title}`}
+          title={`Open session ${agent.session_title}`}
+          onClick={() => {
+            useStore.getState().openSessionById(agent.session_id);
+            focusPanel("agent");
+          }}
+        >
+          {agent.session_title}
+        </button>{" "}
+        · {agent.tool} ·{" "}
+        <span className="u-tabular">{relativeTimePhrase(entry.changed_at)}</span>
+      </span>
+      <button
+        type="button"
+        className="wb-btn wb-btn-sm wb-btn-ghost"
+        onClick={() => useStore.getState().dismissProvenance(path)}
+      >
+        Dismiss
+      </button>
     </div>
   );
 }
@@ -104,6 +167,7 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
           <EditorTab key={f.path} file={f} active={f.path === activePath} />
         ))}
       </div>
+      {active !== null && <ProvenanceBar path={active.path} />}
       {active?.kind === "text" && active.conflict !== null && <ConflictBar file={active} />}
       <div className="wb-editor-body">
         {/* Every open office file keeps its editor mounted for the tab's whole

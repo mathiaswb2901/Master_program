@@ -100,6 +100,55 @@
   color: var(--text-primary);
 }
 
+/* Agent-changed marker on a tab whose file the user has not looked at yet.
+   Same 6px language as the dirty dot, agent palette (DESIGN.md §2.6). */
+.wb-tab-agent-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin-right: var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--agent-done);
+}
+
+/* One-line provenance bar: who changed this file, and a link to that session.
+   Same anatomy as the conflict bar below, agent-status wash instead of warn. */
+.wb-provenance-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: none;
+  padding: var(--space-3) var(--space-5);
+  background: var(--agent-done-bg);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+}
+
+.wb-provenance-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--agent-done);
+}
+
+.wb-provenance-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+.wb-provenance-link {
+  color: var(--accent);
+  font-size: inherit;
+  font-weight: var(--weight-medium);
+}
+
+.wb-provenance-link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
 /* Non-modal conflict bar ("Changed on disk — Reload / Keep mine"). */
 .wb-conflict-bar {
   display: flex;

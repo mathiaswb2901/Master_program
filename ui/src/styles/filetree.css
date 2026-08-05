@@ -70,6 +70,22 @@
   outline-offset: -2px;
 }
 
+.wb-tree-name {
+  min-width: 0;
+}
+
+/* Agent-changed marker: 6px dot, right-aligned (DESIGN.md §6.2), in the agent
+   status palette (§2.6). Paired with an aria-label + tooltip — never colour
+   alone. */
+.wb-tree-agent-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin-left: auto;
+  border-radius: var(--radius-full);
+  background: var(--agent-done);
+}
+
 .wb-tree-icon-slot {
   width: 16px;
   height: 16px;

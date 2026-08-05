@@ -27,6 +27,19 @@ function joinPath(parent: string, name: string): string {
   return parent === "" ? name : `${parent}/${name}`;
 }
 
+/**
+ * Right-aligned marker on a file an agent changed and the user has not yet
+ * opened or dismissed (DESIGN.md §6.2 reserves the dot; §2.6 owns the colour).
+ * Never colour alone: the tooltip and the accessible name say who changed it,
+ * so the row reads the same to a screen reader as it looks.
+ */
+function AgentMark({ path }: { path: string }) {
+  const entry = useStore((s) => s.provenance[path]);
+  if (entry === undefined || entry.agent === null || entry.acknowledged) return null;
+  const label = `Changed by ${entry.agent.session_title} (${entry.agent.tool})`;
+  return <span className="wb-tree-agent-dot" role="img" aria-label={label} title={label} />;
+}
+
 function ChevronIcon({ open }: { open: boolean }) {
   return (
     <span className="wb-tree-icon-slot">
@@ -268,7 +281,8 @@ function TreeRow({ node, depth, expanded, cb }: RowProps) {
             <FileTypeIcon name={node.name} />
           </span>
         )}
-        <span className="u-truncate">{node.name}</span>
+        <span className="wb-tree-name u-truncate">{node.name}</span>
+        {!isDir && <AgentMark path={node.path} />}
       </button>
       {isDir && isOpen && cb.creating !== null && cb.creating.parent === node.path && (
         <NameInput

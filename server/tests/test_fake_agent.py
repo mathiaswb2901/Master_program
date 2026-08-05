@@ -93,6 +93,53 @@ async def test_read_targets_a_real_file_and_degrades_when_there_is_none(tmp_path
     assert settled.ok is False  # still a settled row, never a hung one
 
 
+async def test_write_file_really_writes_and_announces_itself_first(tmp_path: Path) -> None:
+    """The provenance journey's contract: the note is emitted *before* the bytes
+    land, because the correlator claims a path and then waits for the watcher
+    event that claim explains. A fake that wrote first would make the whole
+    feature look broken in the E2E suite and nowhere else."""
+    folder = workspace_with_notes(tmp_path)
+    session = manager_for(folder).create("")
+    queue = session.subscribe()
+    session.send_user_message("write file please")
+    events = await drain(queue, TurnDoneEvent)
+
+    note = next(e for e in events if isinstance(e, ToolUseNote))
+    settled = next(e for e in events if isinstance(e, ToolSettled))
+    assert note.tool == "Write"
+    assert fake_agent.WRITE_TARGET_NAME in note.summary
+    assert settled.id == note.id and settled.ok is True
+    written = folder / fake_agent.WRITE_TARGET_NAME
+    assert written.is_file()
+    assert "Revision 1" in written.read_text(encoding="utf-8")
+    # Sorting after the Read target keeps `use tool` aimed at the same file.
+    assert fake_agent.WRITE_TARGET_NAME > "notes.md"
+
+
+async def test_refuse_write_announces_a_write_then_fails_without_touching_disk(
+    tmp_path: Path,
+) -> None:
+    """The negative half of the provenance journey: a claim exists for a write
+    that never happened. Nothing may land on disk, and the row must settle as an
+    error — the signal the correlator withdraws the claim on."""
+    folder = workspace_with_notes(tmp_path)
+    session = manager_for(folder).create("")
+    queue = session.subscribe()
+    session.send_user_message("refuse write please")
+    events = await drain(queue, TurnDoneEvent)
+
+    note = next(e for e in events if isinstance(e, ToolUseNote))
+    settled = next(e for e in events if isinstance(e, ToolSettled))
+    assert note.tool == "Write"
+    assert fake_agent.REFUSED_WRITE_TARGET_NAME in note.summary
+    assert settled.id == note.id and settled.ok is False
+    assert not (folder / fake_agent.REFUSED_WRITE_TARGET_NAME).exists()
+    # Same constraint as the write target: it must not steal the Read slot.
+    assert fake_agent.REFUSED_WRITE_TARGET_NAME > "notes.md"
+    # "refuse write" must not also trip the trigger that really writes.
+    assert not (folder / fake_agent.WRITE_TARGET_NAME).exists()
+
+
 async def test_ask_permission_round_trips_through_the_bridge(tmp_path: Path) -> None:
     session = manager_for(workspace_with_notes(tmp_path)).create("")
     queue = session.subscribe()
