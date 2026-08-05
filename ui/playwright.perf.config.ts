@@ -25,6 +25,7 @@ import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 import { PERF_WORKSPACE, REPO_ROOT } from "./e2e/perf/fixture";
+import { projectsDirFor } from "./e2e/perf/workspace";
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -46,11 +47,18 @@ const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
 /** Session storage lives *outside* the fixture on purpose: inside, it would be
  * a directory the file tree walks and the folder list reports, so the server
- * would be measuring a workspace it had just changed. */
-const PROJECTS_DIR = `${PERF_WORKSPACE}-projects`;
+ * would be measuring a workspace it had just changed. Derived rather than
+ * spelled out here, because the cleanup has to find the same directory. */
+const PROJECTS_DIR = projectsDirFor(PERF_WORKSPACE);
 
 export default defineConfig({
   testDir: "./e2e/perf",
+  // The suffix is the split, and Playwright's default `testMatch` does not make
+  // it: `*.test.ts` matches too, so `workspace.test.ts` — a vitest unit test
+  // over which directory a run owns — was loaded as a browser journey and failed
+  // on `beforeEach` coming from the wrong runner. `.spec.ts` is Playwright's,
+  // `.test.ts` is vitest's (`vitest.config.ts` claims exactly the other half).
+  testMatch: "**/*.spec.ts",
   fullyParallel: false,
   workers: 1,
   forbidOnly: process.env.CI !== undefined,

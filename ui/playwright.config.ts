@@ -74,6 +74,10 @@ export default defineConfig({
   // budgets are asserted against the small seeded journey workspace, where they
   // measure nothing and fail on a missing directory.
   testIgnore: "perf/**",
+  // Same split as the perf config: `.spec.ts` is a browser journey, `.test.ts`
+  // under `e2e/` is a vitest unit test over the harness itself. Playwright's
+  // default `testMatch` would take both.
+  testMatch: "**/*.spec.ts",
   fullyParallel: false,
   workers: 1,
   forbidOnly: process.env.CI !== undefined,

@@ -632,3 +632,14 @@ Format spec: `docs/shortcuts.md`.
    too — cold launch, frame timing — but they carry the `@wallclock` tag and CI
    records them instead of blocking on them. A budget that fails for reasons other
    than the code gets switched off, and a switched-off budget defends nothing.
+
+   The lane is **disk-neutral**, which is not free when the fixture is 5,105 files:
+   a bare run builds it in a `mkdtemp` directory and removes it — along with the
+   `-projects` sibling the backend puts next to it — from a `process.on("exit")`
+   hook in `ui/e2e/perf/fixture.ts`. Not a Playwright `globalTeardown`: those run
+   *before* the `webServer` processes are stopped, and on Windows a directory that
+   is a live process's CWD, with a watcher handle on every folder inside it, cannot
+   be deleted. Ownership is the other half of the rule and lives in
+   `ui/e2e/perf/workspace.ts` — a `WB_PERF_WORKSPACE` a developer named is kept, a
+   temp directory this run created is not, and leftovers from a run killed before
+   its hook are swept by the next bare run once they are a day old.

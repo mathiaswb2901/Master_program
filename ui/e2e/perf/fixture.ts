@@ -12,6 +12,12 @@
  * behind would change the file counts the budgets are stated against.
  * `WB_PERF_WORKSPACE` is the local-iteration knob: point it somewhere stable and
  * the generator's own stamp check skips the ~3 s rebuild.
+ *
+ * Fresh per run also means *gone* after the run: a fixture this module created
+ * is removed on the way out, along with the projects sibling the backend makes
+ * next to it. Who owns what, and the sweep for runs that never got to exit, are
+ * in `workspace.ts` — see `discardOnExit` below for why the removal is not a
+ * Playwright `globalTeardown`.
  */
 
 import { execFileSync } from "node:child_process";
@@ -20,12 +26,17 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Public: "build this run's fixture here" (and reuse it if it is current). */
-export const WORKSPACE_ENV = "WB_PERF_WORKSPACE";
-/** Internal: the built path, runner -> workers. Set below, never by hand. */
-const ACTIVE_ENV = "WB_PERF_WORKSPACE_ACTIVE";
-/** Internal: the generator's stamp, so workers need not re-run it. */
-const STAMP_ENV = "WB_PERF_FIXTURE_STAMP";
+import {
+  ACTIVE_ENV,
+  OWNED_ENV,
+  STAMP_ENV,
+  TMP_PREFIX,
+  WORKSPACE_ENV,
+  discardWorkspace,
+  pruneStaleWorkspaces,
+} from "./workspace";
+
+export { WORKSPACE_ENV };
 
 /** Repo root: this file lives in `<root>/ui/e2e/perf`. */
 export const REPO_ROOT = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..");
@@ -54,20 +65,49 @@ function generate(root: string): FixtureStamp {
   return JSON.parse(line) as FixtureStamp;
 }
 
+/**
+ * Remove the fixture when this process ends.
+ *
+ * Not Playwright's `globalTeardown`, and the reason is ordering. Playwright
+ * tears its setup tasks down in reverse, and the `webServer` processes are set
+ * up *first* — so a `globalTeardown` hook runs while the backend is still alive
+ * with the fixture as its working directory and a watcher handle on every
+ * directory inside it. Windows lets you delete neither. `exit` fires after
+ * Playwright has stopped the servers, which is the first moment the directory
+ * is actually free.
+ *
+ * Only the runner gets here: a worker returns from `ensureFixture` above, at the
+ * branch that finds the environment already stamped. That matters — a worker
+ * exiting must never remove a fixture the run is still measuring.
+ */
+function discardOnExit(root: string): void {
+  process.once("exit", () => {
+    try {
+      discardWorkspace(root);
+    } catch {
+      // A handle still held on the way out is not worth an error printed under
+      // the report. `pruneStaleWorkspaces` sweeps it on a later run.
+    }
+  });
+}
+
 function ensureFixture(): FixtureStamp {
   const active = process.env[ACTIVE_ENV];
   const stamped = process.env[STAMP_ENV];
   if (active !== undefined && active !== "" && stamped !== undefined && stamped !== "") {
     return JSON.parse(stamped) as FixtureStamp; // a worker: the runner built it
   }
-  const requested = process.env[WORKSPACE_ENV];
-  const root =
-    requested !== undefined && requested !== ""
-      ? path.resolve(requested)
-      : fs.mkdtempSync(path.join(os.tmpdir(), "workbench-perf-"));
+  const requested = process.env[WORKSPACE_ENV] ?? "";
+  const owned = requested === "";
+  // Sweep before creating, so a run that was killed before its exit hook does
+  // not leave 5,105 files in tmp for good.
+  if (owned) pruneStaleWorkspaces(os.tmpdir());
+  const root = owned ? fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX)) : path.resolve(requested);
   const stamp = generate(root);
   process.env[ACTIVE_ENV] = stamp.root;
   process.env[STAMP_ENV] = JSON.stringify(stamp);
+  process.env[OWNED_ENV] = owned ? "1" : "";
+  if (owned) discardOnExit(stamp.root);
   return stamp;
 }
 
