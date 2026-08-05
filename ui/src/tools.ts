@@ -17,6 +17,7 @@ import { agentTool } from "./panels/AgentPanel";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { layoutsTool } from "./panels/Layouts";
+import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
@@ -26,6 +27,11 @@ export const TOOLS: readonly WorkbenchTool[] = [
   editorTool,
   agentTool,
   terminalTool,
+  // Before the OnlyOffice tool, and that is the registration: `documentViewFor`
+  // takes the first enabled tool offering a view for a kind, so the native host
+  // claims `office` and renders OnlyOffice itself wherever it cannot dock a
+  // real window. Swapping these two lines puts the app back on OnlyOffice.
+  officeHostTool,
   officeTool,
   scratchpadTool,
   // Contributes no panel — it arranges the ones above. Last, so its status chip

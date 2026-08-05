@@ -13,6 +13,12 @@ dependencies = [
     "structlog>=26.1.0",
     "watchfiles>=1.2.0",
     "pywinpty>=3.0.5; sys_platform == 'win32'",
+    # COM automation + job objects for native Office hosting (M4). Windows-only,
+    # like the feature: it starts a private Word/Excel, reads the frame HWND the
+    # shell reparents, and holds the job object that guarantees the process is
+    # reaped. Named as the COM route in ARCHITECTURE.md since the M4 direction
+    # was set; ctypes would be the same calls with the bindings hand-written.
+    "pywin32>=311; sys_platform == 'win32'",
     "pyjwt>=2.13.0",
     "httpx>=0.28.1",
     "claude-agent-sdk>=0.2.128",
@@ -70,7 +76,19 @@ plugins = ["pydantic.mypy"]
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["winpty.*", "claude_agent_sdk.*"]
+module = [
+    "winpty.*",
+    "claude_agent_sdk.*",
+    # pywin32 ships no stubs; `types-pywin32` is a second package to keep in
+    # step with the real one for modules we call fewer than twenty times.
+    "pythoncom",
+    "win32api",
+    "win32com.*",
+    "win32event",
+    "win32gui",
+    "win32job",
+    "win32process",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

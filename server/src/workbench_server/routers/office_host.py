@@ -3,10 +3,19 @@
 ``GET /hosts`` is the reconnect path — the live updates ride ``/ws/events`` as
 ``office_host`` frames, and a client that missed them re-reads the same truth
 here.
+
+``/ws/office-host`` is the other direction, and the only one: a WebSocket the
+**desktop shell** holds open so the server can ask it to reparent, move, hide
+and release a window. Nothing else may usefully connect — a browser tab has no
+native window to host into — and nothing here decides that: the shell connects
+because ``isTauri()`` was true, and the service reports ``shell_attached`` so
+the UI degrades from a fact.
 """
 
+import contextlib
+
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from workbench_server.models.office_host import (
     HostReason,
@@ -15,6 +24,7 @@ from workbench_server.models.office_host import (
     OfficeHostList,
     OpenHostRequest,
     SetBoundsRequest,
+    SetVisibleRequest,
 )
 from workbench_server.services.office import OfficeService
 from workbench_server.services.office_host import (
@@ -23,6 +33,7 @@ from workbench_server.services.office_host import (
     HostStateError,
     OfficeHostService,
 )
+from workbench_server.services.office_host.shell_channel import ShellChannel
 from workbench_server.services.workspace import PathOutsideWorkspaceError
 
 log = structlog.get_logger()
@@ -91,6 +102,18 @@ async def set_bounds(request: Request, host_id: str, body: SetBoundsRequest) -> 
         raise HTTPException(409, str(e)) from e
 
 
+@router.post("/host/{host_id}/visible")
+async def set_visible(request: Request, host_id: str, body: SetVisibleRequest) -> OfficeHostInfo:
+    """The panel went behind another editor tab, or came back. A real window
+    does not hide itself because a ``div`` did."""
+    try:
+        return await _hosts(request).set_visible(host_id, body.visible)
+    except HostNotFoundError as e:
+        raise HTTPException(404, "no such host") from e
+    except HostStateError as e:
+        raise HTTPException(409, str(e)) from e
+
+
 @router.post("/host/{host_id}/detach")
 async def detach_host(request: Request, host_id: str) -> OfficeHostInfo:
     """Give the window back to the desktop; the document stays open."""
@@ -110,3 +133,26 @@ async def close_host(request: Request, host_id: str) -> OfficeHostInfo:
         return await _hosts(request).close(host_id)
     except HostNotFoundError as e:
         raise HTTPException(404, "no such host") from e
+
+
+#: WebSockets live under `/ws/*` like every other push channel here — the dev
+#: proxy upgrades that prefix and nothing else, so a socket under `/api` works
+#: in production and dies in `npm run dev`.
+ws_router = APIRouter()
+
+
+@ws_router.websocket("/ws/office-host")
+async def host_channel(ws: WebSocket) -> None:
+    """The desktop shell's socket: commands out, acks back.
+
+    Held open for the life of the window. Disconnecting is how the server learns
+    there is nothing to host into any more, so there is no goodbye message and
+    no heartbeat — the socket *is* the presence.
+    """
+    channel: ShellChannel | None = getattr(ws.app.state, "office_host_channel", None)
+    if channel is None:
+        await ws.close(code=1011, reason="native Office hosting is not configured")
+        return
+    await ws.accept()
+    with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+        await channel.serve(ws)

@@ -175,10 +175,7 @@ impl Mover {
             let batch = {
                 let mut queue = self.lock();
                 while queue.pending.is_empty() && !queue.stop {
-                    queue = self
-                        .wake
-                        .wait(queue)
-                        .unwrap_or_else(|err| err.into_inner());
+                    queue = self.wake.wait(queue).unwrap_or_else(|err| err.into_inner());
                 }
                 if queue.stop {
                     return;
@@ -276,7 +273,10 @@ mod tests {
     fn a_move_reaches_the_worker() {
         let (mover, rx) = recording("test-basic", Duration::ZERO);
         mover.place(WindowId(1), rect(400));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(1), 400)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(1), 400))
+        );
         mover.stop();
     }
 
@@ -287,7 +287,10 @@ mod tests {
         mover.place(WindowId(7), rect(410));
         // The real one arrives; the null one was dropped rather than posted to
         // a handle Win32 would have to reject.
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(7), 410)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(7), 410))
+        );
         mover.stop();
     }
 
@@ -301,7 +304,10 @@ mod tests {
         mover.place(WindowId(3), rect(500));
         // Wait until that pass is really in flight, or the frames below would
         // simply join it and the test would prove nothing.
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(3), 500)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(3), 500))
+        );
         for width in 600..700 {
             mover.place(WindowId(3), rect(width));
         }
@@ -330,7 +336,10 @@ mod tests {
     fn two_windows_in_one_pass_both_move() {
         let (mover, rx) = recording("test-two", Duration::from_millis(80));
         mover.place(WindowId(1), rect(300));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(1), 300)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(1), 300))
+        );
         mover.place(WindowId(1), rect(310));
         mover.place(WindowId(2), rect(320));
         let mut seen = vec![
@@ -349,7 +358,10 @@ mod tests {
     fn settle_drops_a_queued_move_and_waits_out_the_one_in_flight() {
         let (mover, rx) = recording("test-settle", Duration::from_millis(150));
         mover.place(WindowId(9), rect(800));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(9), 800)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(9), 800))
+        );
 
         // One frame queued behind the pass that is running, then a release.
         mover.place(WindowId(9), rect(900));
@@ -375,11 +387,17 @@ mod tests {
         // Releasing one panel must not cancel the other's pending frame.
         let (mover, rx) = recording("test-settle-other", Duration::from_millis(120));
         mover.place(WindowId(1), rect(200));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(1), 200)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(1), 200))
+        );
         mover.place(WindowId(1), rect(210));
         mover.place(WindowId(2), rect(220));
         assert!(mover.settle(WindowId(1)));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((WindowId(2), 220)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok((WindowId(2), 220))
+        );
         mover.stop();
     }
 

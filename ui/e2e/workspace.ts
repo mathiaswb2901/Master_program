@@ -52,8 +52,23 @@ export const NOTES_FILE = "notes.md";
 export const NOTES_MARKER = "SE3 battery notes";
 /** Seeded folder the file-tree journey creates a file in. */
 export const SRC_DIR = "src";
-/** Seeded office document — opened to assert degraded mode, never edited. */
+/** Seeded office document — opened to assert the host path, never edited. */
 export const DOCX_FILE = "sample.docx";
+/**
+ * Two more, named so the *fake host backend* takes a chosen branch on them
+ * (`services/office_host/fake_backend.py` matches the filename): the document
+ * somebody else already has open, and the window that refuses to dock. They
+ * exist so the office journey can assert that a refusal is an explanation with
+ * a way out, without a line of test-only server code.
+ *
+ * **Every name here must sort after `notes.md`.** The fake agent's scripted
+ * `Read` targets the first file in the workspace by name, and journey 4 asserts
+ * which file that is — a fixture called `already-…` quietly retargeted it.
+ */
+export const DOCX_ALREADY_OPEN = "sample-already-open.docx";
+export const DOCX_REFUSES_EMBED = "sample-refuse-embed.docx";
+/** A deck, for the one application v1 deliberately does not dock. */
+export const PPTX_FILE = "slides.pptx";
 /** Body of the working shell shortcut; the terminal journey asserts this text
  * lands on the prompt line and that nothing ever ran it. */
 export const SHORTCUT_NAME = "Show the marker";
@@ -110,9 +125,13 @@ function seed(root: string): void {
   fs.mkdirSync(path.join(root, SRC_DIR));
   fs.writeFileSync(path.join(root, SRC_DIR, "model.py"), "PRICE_AREA = 'SE3'\n", "utf-8");
   fs.writeFileSync(path.join(root, NOTES_FILE), `# Notes\n\n${NOTES_MARKER}.\n`, "utf-8");
-  // Never opened by an editor — the office journey runs with no Document Server
-  // configured, so the panel shows the degraded card without reading a byte.
-  fs.writeFileSync(path.join(root, DOCX_FILE), "not a real document\n", "utf-8");
+  // Never opened by an editor. The office journey runs against the *fake* host
+  // backend with no Document Server configured, so nothing ever reads a byte of
+  // these — three of them are named to choose a branch of the host lifecycle,
+  // and the fourth is the application v1 will not dock.
+  for (const name of [DOCX_FILE, DOCX_ALREADY_OPEN, DOCX_REFUSES_EMBED, PPTX_FILE]) {
+    fs.writeFileSync(path.join(root, name), "not a real document\n", "utf-8");
+  }
   fs.mkdirSync(path.join(root, ".workbench"));
   fs.writeFileSync(path.join(root, ".workbench", "shortcuts.md"), SHORTCUTS_FILE, "utf-8");
   seedTargetFolders(root);

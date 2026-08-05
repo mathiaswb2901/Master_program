@@ -561,6 +561,42 @@ export interface SetBoundsRequest {
   rect: PanelRect;
 }
 
+/** POST /api/office/host/{host_id}/visible — the panel went behind another
+ * editor tab, or came back. A real window does not hide because a div did. */
+export interface SetVisibleRequest {
+  visible: boolean;
+}
+
+/** What the shell is asked to do with a hosted window: one action per
+ * window-facing backend method. Launching, polling and ending the process are
+ * the server's own work and never arrive here. */
+export type HostCommandAction = "embed" | "set_bounds" | "set_visible" | "detach" | "close";
+
+/** Pushed to the shell over /ws/office-host. Rectangles are in
+ * PHYSICAL pixels, like every PanelRect on the wire; the shell divides by its
+ * own devicePixelRatio before calling into Rust, which takes CSS pixels and
+ * multiplies by the window's scale factor again. */
+export interface HostCommand {
+  type: "host_command";
+  command_id: string;
+  host_id: string;
+  action: HostCommandAction;
+  /** The guest's HWND, for `embed`. */
+  window_id: number | null;
+  rect: PanelRect | null;
+  visible: boolean | null;
+}
+
+/** The answer, back up the same socket. `code` is the shell's own refusal code
+ * (`embed_refused`, `window_gone`, `unknown_host`, …). */
+export interface HostCommandAck {
+  type: "host_command_ack";
+  command_id: string;
+  ok: boolean;
+  code: string | null;
+  message: string | null;
+}
+
 /** GET /api/office/capabilities — what this machine can actually do. The UI
  * degrades from this, never from a guess. */
 export interface OfficeCapabilities {
@@ -571,6 +607,10 @@ export interface OfficeCapabilities {
   office_detected: boolean;
   /** The in-process fake backend is answering: nothing is really hosted. */
   fake_backend: boolean;
+  /** The desktop shell is connected to the host channel. A browser tab has no
+   * native window to host into, which is why this is reported and not guessed
+   * from a user agent. */
+  shell_attached: boolean;
   hostable_kinds: HostAppKind[];
   onlyoffice: boolean;
   fallback: "native" | "onlyoffice" | "preview";

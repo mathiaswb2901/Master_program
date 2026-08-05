@@ -158,6 +158,31 @@ pub fn host_set_bounds(
     })
 }
 
+/// Show or hide a hosted panel without giving the window back.
+///
+/// The one thing a hosted window does that a `<div>` does not: it stays on
+/// screen when the element describing it is hidden. Switching editor tabs must
+/// therefore *say* so, or a real Word paints over the document the user
+/// switched to.
+///
+/// Only our panel window is touched, never the guest. `ShowWindow` on a parent
+/// takes its children with it, and hiding the guest itself would mean restoring
+/// a visibility bit that belongs to the application — one more piece of its
+/// state we would be holding on its behalf.
+#[tauri::command]
+pub fn host_set_visible(app: AppHandle, host_id: String, visible: bool) -> Result<(), HostError> {
+    let handle = app.clone();
+    on_main(&app, move || {
+        let registry = handle.state::<HostRegistry>();
+        let panels = lock(&registry)?;
+        let panel = panels
+            .get(&host_id)
+            .ok_or_else(|| HostError::unknown_host(&host_id))?;
+        class::set_visible(panel.window, visible);
+        Ok(())
+    })
+}
+
 /// Give the window back to the desktop, leaving the application running.
 ///
 /// Our two windows go; the process does not. That is the whole difference
