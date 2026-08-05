@@ -857,13 +857,19 @@ fn teardown_gives_the_window_back_and_leaves_nothing_behind() {
     assert!(!guest::window_exists(guest_window));
 }
 
-/// **The measurement that decides a product default.**
+/// **The measurement that decides a product default, now taken after the fix.**
 ///
 /// Windows attaches the input queues of a thread that owns a parent window and
-/// a thread that owns its child, so a guest that stops pumping can, in
-/// principle, take the host's input down with it. The owner has ruled that
-/// native hosting only becomes the default once that is proven contained; this
-/// PR does not try to contain it, it measures it.
+/// a thread that owns its child, so a guest that stops pumping used to make
+/// every resize frame cost ~1 s. The owner ruled that native hosting only
+/// becomes the default once that is proven contained. This test is that proof:
+/// it wedges a guest and then times **the production path** (`layout::apply`,
+/// which hands guest geometry to `host::mover`) against a direct
+/// `SetWindowPos` from this thread, which is what the code used to do.
+///
+/// The direct call is kept deliberately. Without it the containment number
+/// would be indistinguishable from "the guest was not actually hung", and the
+/// whole finding would rest on the fixture having done its job.
 ///
 /// `#[ignore]` because the last part needs this process to be the foreground
 /// application, and because it deliberately spends ten seconds inside a hang.
@@ -960,10 +966,11 @@ fn hang_isolation_measurement() {
     );
 
     // 4. **The finding that decides the product default.** Where the cost of a
-    //    resize lands while the guest is hung, with the two halves of
-    //    `layout::apply` timed apart.
+    //    resize lands while the guest is hung, timed through the code that
+    //    actually runs on a drag frame.
     let mut ours = Duration::ZERO;
     let mut with_guest = Duration::ZERO;
+    let mut last = fixture.layout;
     for step in 0..10 {
         let mut rect = fixture.layout.panel;
         rect.width = 700 + step;
@@ -983,60 +990,80 @@ fn hang_isolation_measurement() {
         .expect("with the guest");
         with_guest += started.elapsed();
         fixture.layout = plan;
+        last = plan;
     }
     println!("hang: 10 moves of our own two windows: {ours:?}");
-    println!("hang: 10 moves including the hung guest: {with_guest:?}");
+    println!("hang: 10 moves including the hung guest, contained: {with_guest:?}");
     assert!(
         ours < Duration::from_millis(200),
         "the panel and its clip child cannot be moved while the guest is hung"
     );
-    // Locked in deliberately. `SWP_ASYNCWINDOWPOS` is documented to post the
-    // request "if the calling thread and the thread that owns the window are
-    // attached to different input queues" — and making the guest our child
-    // attached them, so it does not post and the call waits. If this assertion
-    // ever fails because the number got *small*, the containment work below is
-    // no longer needed and this test should say so instead.
+    // **The containment, asserted.** Before `host::mover`, this line took ~10 s
+    // for these ten frames because `layout::apply` issued the guest's
+    // `SetWindowPos` from this thread, whose input queue the guest is attached
+    // to. It is now handed to a worker that owns no window, and the frame does
+    // not wait for it.
     assert!(
-        with_guest > Duration::from_secs(1),
-        "moving a hung guest is no longer slow — SWP_ASYNCWINDOWPOS now posts \
-         across an attached queue, and host::layout can stop working around it"
+        with_guest < Duration::from_millis(200),
+        "a hung guest still costs {with_guest:?} for ten resize frames — the \
+         geometry worker is not containing it"
     );
 
-    // 5. **The containment path, measured.** A thread that owns none of the
-    //    windows in the parent chain is attached to no input queue, so the same
-    //    asynchronous call from there should post rather than wait. This is not
-    //    fixed in this PR — it is the evidence for how it will be.
-    let guest = fixture.guest_window;
-    let plan = fixture.layout;
-    let probe = std::thread::spawn(move || {
-        let started = Instant::now();
-        // SAFETY: a plain Win32 call on a live window, from a thread that owns
-        // no window in its chain.
-        let accepted = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                guest.hwnd(),
-                None,
-                plan.guest.x,
-                plan.guest.y,
-                plan.guest.width - 3,
-                plan.guest.height,
-                layout::GUEST,
-            )
-        }
-        .is_ok();
-        (started.elapsed(), accepted)
-    });
-    let (unattached, accepted) = probe.join().unwrap_or((Duration::MAX, false));
-    println!("hang: the same move from an unattached worker thread: {unattached:?} (accepted: {accepted})");
-    assert!(accepted, "the unattached move was refused");
+    // 5. **The control.** The same move issued straight from this thread, which
+    //    is what the code did before. It must still be slow, or the numbers
+    //    above would only be saying that the fixture failed to hang.
+    let started = Instant::now();
+    // SAFETY: a plain Win32 call on a live window.
+    let direct = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            fixture.guest_window.hwnd(),
+            None,
+            last.guest.x,
+            last.guest.y,
+            last.guest.width - 3,
+            last.guest.height,
+            layout::GUEST,
+        )
+    };
+    let attached = started.elapsed();
+    println!("hang: one direct move from the main thread (the old path): {attached:?}");
     assert!(
-        unattached < Duration::from_millis(100),
-        "moving a hung guest from an unattached thread blocks too — the worker \
-         thread plan does not contain this and something else must"
+        direct.is_ok(),
+        "the control move was refused, so it measured nothing"
+    );
+    assert!(
+        attached > Duration::from_millis(400),
+        "a direct move on a hung guest returned in {attached:?} — either the \
+         guest is not hung (so the containment number proves nothing) or \
+         SWP_ASYNCWINDOWPOS now posts across an attached queue and host::mover \
+         is no longer needed"
     );
 
-    // Wait out the hang so the fixture tears down against a live guest.
+    // 6. **Containment must not mean dropping the move.** A worker that
+    //    swallowed every frame would post the same numbers as one that works,
+    //    so wait the hang out and check that a contained frame really lands.
     pump_for(HANG);
+    let mut rect = last.panel;
+    rect.width = 654;
+    let plan = host_layout(rect, 0);
+    layout::apply(
+        fixture.panel,
+        fixture.clip,
+        Some(fixture.guest_window.hwnd()),
+        &plan,
+    )
+    .expect("a frame after the hang");
+    fixture.layout = plan;
+    let guest_hwnd = fixture.guest_window.hwnd();
+    let expected = (plan.guest.width, plan.guest.height);
+    let landed = wait_until(|| client_size(guest_hwnd) == expected);
+    println!("hang: a contained frame issued after the hang landed = {landed}");
+    assert!(
+        landed,
+        "the guest settled at {:?}, not the {expected:?} the contained frame \
+         asked for — the worker is dropping moves, not deferring them",
+        client_size(guest_hwnd)
+    );
 }
 fn wait_until_hung(window: HWND) -> bool {
     let deadline = Instant::now() + Duration::from_secs(7);
