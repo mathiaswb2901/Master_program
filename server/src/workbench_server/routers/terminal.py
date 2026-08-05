@@ -15,6 +15,7 @@ from workbench_server.models.terminal import (
     terminal_client_message,
 )
 from workbench_server.services.pty_manager import PtyManager, PtySession
+from workbench_server.services.terminal_stream import coalesced_output
 
 log = structlog.get_logger()
 
@@ -22,14 +23,15 @@ router = APIRouter()
 
 
 async def _pump_output(session: PtySession, ws: WebSocket) -> None:
-    """PTY -> WebSocket until the process exits."""
+    """PTY -> WebSocket until the process exits.
+
+    One frame per *batch* of ConPTY reads, not per read — the batching policy
+    (and why it costs no interactive latency) lives in `terminal_stream`.
+    """
     with contextlib.suppress(RuntimeError):  # ws already closed mid-send
-        while True:
-            data = await session.read()
-            if data is None:
-                await ws.send_text(TerminalExit().model_dump_json())
-                break
-            await ws.send_text(TerminalOutput(data=data).model_dump_json())
+        async for chunk in coalesced_output(session):
+            await ws.send_text(TerminalOutput(data=chunk).model_dump_json())
+        await ws.send_text(TerminalExit().model_dump_json())
 
 
 @router.websocket("/ws/terminal")
