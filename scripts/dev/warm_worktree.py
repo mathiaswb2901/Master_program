@@ -1,12 +1,22 @@
-"""Make a fresh git worktree usable in seconds instead of minutes.
+"""Skip the install a fresh git worktree would otherwise repeat.
 
-A new worktree starts with no ``node_modules`` and no ``.venv``, so the first
-gate an agent runs pays 10-15 minutes of ``npm ci`` (twice: ``ui/`` and
-``desktop/``) plus ``uv sync --dev``. The dependency trees are almost always
-byte-identical to the main checkout's, because the branch usually does not touch
-a lockfile at all. This script skips that install by pointing the worktree's
-``node_modules`` at the main checkout's with a Windows **directory junction**
-(``mklink /J``, which needs neither administrator rights nor developer mode).
+A new worktree starts with no ``node_modules`` and no ``.venv``, so before it can
+run a single gate it re-installs what the main checkout already has on disk:
+``npm ci`` in ``ui/`` and in ``desktop/``, plus ``uv sync --dev``. The dependency
+trees are almost always byte-identical to the main checkout's, because the branch
+usually does not touch a lockfile at all. This script skips the npm half by
+pointing the worktree's ``node_modules`` at the main checkout's with a Windows
+**directory junction** (``mklink /J``, which needs neither administrator rights
+nor developer mode).
+
+Measured on the author's machine (fast SSD, warm npm cache, no antivirus in the
+path): ``npm ci`` writes 132 packages / 239 MB / 7 775 files into ``ui/`` in
+~9 s (~11.5 s against an empty npm cache, i.e. downloading from the registry)
+and ~2.3 s into ``desktop/``; the two junctions take ~0.03 s together. So a warm
+run is ~4.9 s end to end and ``uv sync --dev`` (~4 s, not skippable) is all of
+it. The saving scales with how slow installing actually is where you are — on a
+machine with real-time antivirus scanning those 7 775 files, on a VPN, or on CI,
+the npm side is minutes rather than seconds and the junction is still ~0.03 s.
 
 Run it from inside the fresh worktree, with any Python 3.11+ — it imports only
 the standard library on purpose, so it works *before* ``uv sync`` has built a
