@@ -21,6 +21,8 @@ export function isTauri(): boolean {
 
 /** Must match `CLOSE_REQUESTED_EVENT` in `desktop/src-tauri/src/lib.rs`. */
 const CLOSE_REQUESTED_EVENT = "workbench://close-requested";
+/** Must match `BACKEND_READY_EVENT` in `desktop/src-tauri/src/lib.rs`. */
+const BACKEND_READY_EVENT = "workbench://backend-ready";
 
 export type Unlisten = () => void;
 
@@ -40,17 +42,63 @@ async function invoke(command: string, args?: Record<string, unknown>): Promise<
 }
 
 /**
+ * Resolve once the shell has finished bringing the backend up — attached to one
+ * already listening, spawned one that answered, or given up on it.
+ *
+ * The shell opens its window immediately and supervises on a worker thread, so
+ * waiting is the UI's job. It is not optional: `/ws/events` reconnects on its
+ * own, but the terminal does not, and a PTY socket that hits `ECONNREFUSED` on
+ * first paint leaves the tab reading "Terminal exited" until the user clicks
+ * Reconnect. In a browser the backend is whatever served this page, so this
+ * resolves immediately.
+ */
+export async function awaitBackendReady(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const [{ listen }, { invoke: call }] = await Promise.all([
+      import("@tauri-apps/api/event"),
+      import("@tauri-apps/api/core"),
+    ]);
+    let settle = (): void => {};
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    // Subscribe before asking: the event can fire between the two otherwise,
+    // and the wait would never end.
+    const unlisten = await listen(BACKEND_READY_EVENT, () => settle());
+    try {
+      if (await call<boolean>("backend_ready")) settle();
+      await settled;
+    } finally {
+      unlisten();
+    }
+  } catch (err) {
+    // Never strand the UI behind a shell call that failed.
+    console.error("backend readiness could not be awaited", err);
+  }
+}
+
+/**
  * Register the native close guard; the returned function unregisters it.
  *
  * The shell arms its guard only once this resolves (`shell_ready`), so a
  * webview that never ran this code still closes normally instead of leaving an
- * unclosable window.
+ * unclosable window. It re-arms on every page load, so this must run on each
+ * one — which it does: it is a mount-time effect.
  */
 export async function onCloseRequested(handler: () => void): Promise<Unlisten> {
   if (!isTauri()) return noop;
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    const unlisten = await listen(CLOSE_REQUESTED_EVENT, () => handler());
+    const unlisten = await listen(CLOSE_REQUESTED_EVENT, () => {
+      // Tell the shell the prompt landed. Tauri's `emit` succeeds even against
+      // a page with no listener, so this ack is its only evidence that anyone
+      // is home; without it the shell stops holding the window after a few
+      // seconds. It gates the *watchdog*, not the user — the modal can stay up
+      // as long as they like.
+      void invoke("close_ack");
+      handler();
+    });
     await invoke("shell_ready");
     return unlisten;
   } catch (err) {

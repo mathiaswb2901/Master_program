@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  awaitBackendReady,
   cancelShellClose,
   closeShellWindow,
   isTauri,
@@ -46,5 +47,11 @@ describe("browser mode", () => {
     expect(unlisten).toBeTypeOf("function");
     unlisten();
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  // App.tsx renders nothing until this resolves. In a browser there is no shell
+  // to ask, so a wait here would be a permanently blank page.
+  it("does not make the app wait for a backend it cannot ask about", async () => {
+    await expect(awaitBackendReady()).resolves.toBeUndefined();
   });
 });

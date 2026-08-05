@@ -4,7 +4,7 @@ import {
   type IDockviewPanelHeaderProps,
   type IDockviewPanelProps,
 } from "dockview";
-import { useEffect, type FunctionComponent } from "react";
+import { useEffect, useState, type FunctionComponent } from "react";
 
 import { installCommandKeys, setDockApi } from "./commands";
 import { AgentPanel } from "./panels/AgentPanel";
@@ -15,7 +15,7 @@ import { QuickBar } from "./panels/QuickBar";
 import { StatusBar } from "./panels/StatusBar";
 import { TerminalPanel } from "./panels/Terminal";
 import { Toasts } from "./panels/Toasts";
-import { onCloseRequested, setAttention } from "./shell";
+import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
 
 const components: Record<string, FunctionComponent<IDockviewPanelProps>> = {
@@ -84,10 +84,24 @@ function onReady(event: DockviewReadyEvent): void {
 
 export default function App() {
   const attention = useStore((s) => anyNeedsAttention(s.sessionStates));
+  // In a browser the backend is whatever served this page. In the shell it may
+  // still be starting — the window opens first, deliberately — and nothing
+  // below may open a socket until it answers: the terminal does not reconnect.
+  const [backendReady, setBackendReady] = useState(!isTauri());
 
   useEffect(() => {
-    useStore.getState().init();
+    let live = true;
+    void awaitBackendReady().then(() => {
+      if (live) setBackendReady(true);
+    });
+    return () => {
+      live = false;
+    };
   }, []);
+
+  useEffect(() => {
+    if (backendReady) useStore.getState().init();
+  }, [backendReady]);
 
   // Attention badge in the window/taskbar title; cleared once attended. The
   // document title is what a browser tab shows; the shell retitles the native
@@ -126,18 +140,29 @@ export default function App() {
 
   useEffect(() => () => setDockApi(null), []);
 
+  // Only the panels wait for the backend — the modals stay mounted throughout,
+  // so a window closed while it is still starting is still a window that asks
+  // first. Nothing is dirty this early, but the guard must not depend on that.
   return (
     <div className="wb-root">
-      <div className="wb-dock">
-        <DockviewReact
-          components={components}
-          defaultTabComponent={PanelTab}
-          theme={WORKBENCH_THEME}
-          onReady={onReady}
-        />
-      </div>
-      <StatusBar />
-      <QuickBar />
+      {backendReady ? (
+        <>
+          <div className="wb-dock">
+            <DockviewReact
+              components={components}
+              defaultTabComponent={PanelTab}
+              theme={WORKBENCH_THEME}
+              onReady={onReady}
+            />
+          </div>
+          <StatusBar />
+          <QuickBar />
+        </>
+      ) : (
+        <div className="wb-boot" role="status">
+          Starting the Workbench backend…
+        </div>
+      )}
       <DirtyCloseModal />
       <ShellCloseModal />
       <Toasts />

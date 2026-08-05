@@ -54,26 +54,58 @@ them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns four things:
 | Close guard | WebView2 ignores `beforeunload`, so a native close silently discarded dirty buffers |
 | Attention badge | `document.title` never reaches a native title bar or the taskbar |
 
-**Backend supervision.** One probe of `GET /api/health` decides: if a server is
-already listening the shell **attaches** — a developer's own `uv run
+**Backend supervision.** One probe of `GET /api/health` decides: if a *Workbench*
+backend is already listening the shell **attaches** — a developer's own `uv run
 workbench-server` keeps owning the workspace (its CWD *is* the workspace) and
-outlives the window. Otherwise the shell **spawns** one from the repo root with
-`CREATE_NO_WINDOW`, pipes its output into the shell log, and confines it to a
-Windows **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The job handle
-is held for the process lifetime and never closed, so the child dies when this
+outlives the window. The probe checks the response body, not just the status
+line: any local proxy or file server can answer 200 on an unknown path, and
+attaching to one gives a window that 404s every `/api/*` call under a log line
+saying all is well. Otherwise the shell **spawns** one from the repo root with
+`CREATE_NO_WINDOW` and pipes its output into the shell log.
+
+The spawn is confined by a Windows **Job Object** with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` that *this process joins before spawning
+anything*. Assigning the child afterwards loses a race: `uv run
+workbench-server` is a launcher, and the uvicorn process holding the port is its
+grandchild, which can be created before `AssignProcessToJobObject` runs — an
+orphan that keeps 8787 and gets adopted by every later launch. Job membership is
+inherited, so joining first makes that window zero-width. The handle is held for
+the process lifetime and never closed, so every descendant dies when this
 process does — including a crash or a kill, where no shutdown code of ours would
 run. (Measured: a graceful-quit path left orphans; the job object did not.)
-Tauri creates the config's window after `setup` returns, so the spawn path
-*blocks* until health answers — otherwise the webview opens its sockets against
-a dead port, and while `/ws/events` reconnects, the terminal does not.
 Sidecars (`bundle.externalBin`, `tauri-plugin-shell`) are deliberately unused:
 documented orphan bugs, and no equivalent guarantee.
+
+Supervision runs on a worker thread and the window opens immediately. Tauri
+creates the config's window only after `setup` returns, so waiting there meant
+no window, no taskbar entry and no feedback for as long as a cold start took.
+The UI is what must not race the backend — `/ws/events` reconnects, the terminal
+does not — so it waits for `workbench://backend-ready` before opening any
+socket, showing a starting-up gate until then.
+
+Everything the shell decides goes to `shell.log` in the app log dir as well as
+stderr. Release builds are `windows_subsystem = "windows"` and have no stderr at
+all, which is exactly the build where "why is there no backend?" gets asked.
 
 **Close guard.** `CloseRequested` → `prevent_close()` → `workbench://close-requested`
 to the UI → the same confirm modal the editor tabs use, across every dirty
 buffer at once → `confirm_close` (or `cancel_close`) back over IPC. The guard is
 *armed by the UI* (`shell_ready`), never assumed: a webview that never ran our
-code closes normally instead of leaving a window that cannot be closed.
+code closes normally instead of leaving a window that cannot be closed. Two more
+escape hatches exist because an unclosable window is a worse failure than the
+buffer being protected — and killing one from Task Manager reaps the supervised
+backend too:
+
+- **Navigation disarms it** (`on_page_load`). A reload onto a dev server that
+  has since died leaves a page that will never register a listener; the UI
+  re-arms on every load.
+- **A prompt must be acknowledged** (`close_ack`) within a few seconds or the
+  shell stops holding the window. `emit` cannot report this: Tauri delivers
+  events by evaluating a script in the webview, which succeeds on any live page
+  — including one with no listener — so its `Err` is not the undelivered signal
+  it looks like. Only the *ack* is on that clock; once the modal is up the user
+  has as long as they like. The state machine and all of its transitions are
+  unit-tested in `close_guard.rs`.
 
 **Both hosts, always.** `ui/src/shell.ts` is the only module importing
 `@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
