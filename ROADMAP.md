@@ -441,6 +441,29 @@ because other sections and five running lanes reference these numbers.
    dirty-slot `needs_review` protection, per-slot watchers), multi-root file/terminal
    access through a root registry (path jail preserved per root), worktree-bound agent
    sessions. Parallel projects that cannot step on each other.
+   **Four design decisions, taken from `kunchenguid/treehouse` (MIT, read 2026-08-05,
+   not adopted as a dependency — a pool bound to agent sessions and inside our path
+   jail has to be ours) and each of which we would otherwise have rediscovered the hard
+   way:**
+   - **Detached HEAD.** A pooled worktree carries no branch, so "already checked out in
+     another worktree" cannot happen. Every fix-stage agent this session had to push
+     from a differently-named local branch for exactly that reason; the whole class goes
+     away.
+   - **Pool, never destroy.** A finished worktree is *reset and returned*, not removed —
+     so `node_modules`, `.venv` and build caches stay with it and the cold install is
+     paid once per slot rather than once per task. This is the honest answer to the
+     problem PR #32 tried to solve by junctioning `node_modules` from the main checkout
+     and had to be closed over: `git worktree remove` recurses *through* a Windows
+     junction and would have emptied the main checkout. Never removing the worktree
+     removes the hazard along with the cost.
+   - **Two idle signals.** Process/owner exit *and* an explicit durable lease that
+     survives with nothing running. Ours is cleaner than a subshell — a closed agent
+     session or pane is an exact signal — but the lease is what stops a slot being
+     reaped while an agent is still working in it unattended.
+   - **Fail safe on corrupt state.** If the pool's state file is truncated or lost,
+     rebuild from what is on disk and mark every slot **leased until verified** —
+     assume in use, never assume free. Same instinct as the dirty-slot rule above, and
+     the right default for anything that can destroy work.
 7. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
    (status, current activity, cost), inline permission chips answerable from the board;
    orchestrator session kind with a mission-control MCP toolset
@@ -653,6 +676,32 @@ without forking — the difference between a fixed app and an instrument.
 
 ## Decisions log
 
+- 2026-08-05 — **Two more `kunchenguid` repos read against the vetting bar; both
+  learn-and-build, neither adopted** (owner asked; the third, `lavish-axi`, was
+  rejected outright earlier today — see its entry below).
+  **`axi`** (MIT) is design standards plus reference CLIs. No disqualifying finding:
+  no telemetry, no global config writes, and its skill install is optional and unneeded
+  because principles can simply be applied. We already enforce its central idea further
+  than it states it — `agent_tools.py` fails the build on an unmeasured tool, where the
+  standard only prescribes — and we found the sharper form ourselves (a *schema* is
+  paid on every request whether or not the tool is called). Three of its principles are
+  real gaps and are now standing rules in `CLAUDE.md`: truncate with a stated size and
+  an escape hatch, say "none" explicitly, end with the obvious next step. Its TOON
+  output format is rejected with a number, not a shrug: the ~40% claim is on large list
+  payloads, ours are hundreds of bytes, and compact JSON already measured ~16% under
+  pretty-printed. These three bind hardest on the COM bridge's `office_read` —
+  a spreadsheet range is exactly the payload that needs "50 of 2,000 rows, ask like
+  this for more".
+  **`treehouse`** (MIT) is a pooled git-worktree manager — the same thing as M5 item 6.
+  Not adopted as a dependency (a pool bound to agent sessions and inside our path jail
+  has to be ours), but four of its design decisions are better than what item 6
+  specified and are folded in there: detached HEAD, pool-never-destroy so dependency
+  and build caches survive reuse, two idle signals (owner exit *and* a durable lease),
+  and fail-safe recovery that marks slots leased until verified. The second of those
+  also settles a mistake made earlier today: PR #32 tried to kill the cold-install cost
+  by junctioning `node_modules` and had to be closed because `git worktree remove`
+  recurses through a Windows junction and would have emptied the main checkout. Not
+  removing the worktree removes the hazard and the cost together.
 - 2026-08-04 — Prior-art check (GitHub + products): no existing tool combines IDE +
   full-fidelity Office editing + multi-session Claude agents. Closest: AionUi/OfficeCLI
   (agent-mediated docs, no direct editing), Nimbalyst (sessions + worktrees, no Office).
