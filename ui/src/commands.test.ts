@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { allCommands, BUILTIN_COMMANDS, mergeCommands, visibleCommands } from "./commands";
 import { parseChord, resolveCommand, type KeyLike } from "./keys";
 import { shortcutCommands } from "./shortcuts";
 import type { Command } from "./commands";
@@ -8,7 +7,9 @@ import type { ShortcutEntry } from "./types";
 
 // The registry reaches the store for `when`/`run`; the shapes it reads are all
 // that matters here, so the module is stubbed rather than dragging Monaco and
-// xterm into a unit test.
+// xterm into a unit test. Monaco is stubbed for the same reason: the built-in
+// list is now assembled from the tool registry, so this file imports the real
+// panel modules along with it.
 const mocks = vi.hoisted(() => ({
   state: {
     activePath: null,
@@ -21,7 +22,26 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("./store", () => ({ useStore: { getState: () => mocks.state } }));
+vi.mock("./store", () => ({
+  useStore: Object.assign(() => undefined, { getState: () => mocks.state }),
+  emptyPlanDraft: () => ({ choices: {}, annotations: {}, comment: "", verdict: null }),
+  unchosenOptionGroups: () => [],
+}));
+
+vi.mock("./monaco", () => ({
+  MONO_FONT: "mono",
+  editorPathProp: (path: string) => path,
+  languageForPath: () => "plaintext",
+  monacoThemeName: () => "workbench",
+  setActiveEditor: () => undefined,
+  disposeModel: () => undefined,
+  setModelContent: () => null,
+  defineWorkbenchTheme: () => undefined,
+  initMonaco: () => undefined,
+}));
+
+const { allCommands, builtinCommands, GLOBAL_COMMANDS, mergeCommands, visibleCommands } =
+  await import("./commands");
 
 const press = (key: string, mods: Partial<KeyLike> = {}): KeyLike => ({
   key,
@@ -44,7 +64,7 @@ const entry = (over: Partial<ShortcutEntry> = {}): ShortcutEntry => ({
 
 const chordKey = (text: string): string => {
   const chord = parseChord(text);
-  return `${chord.ctrl}|${chord.alt}|${chord.shift}|${chord.key}`;
+  return `${String(chord.ctrl)}|${String(chord.alt)}|${String(chord.shift)}|${chord.key}`;
 };
 
 /** The two registry invariants, asserted over any command list. */
@@ -67,7 +87,7 @@ beforeEach(() => {
 
 describe("command registry", () => {
   it("has unique ids and parseable chords, none bound twice", () => {
-    expectRegistryInvariants(BUILTIN_COMMANDS);
+    expectRegistryInvariants(builtinCommands());
   });
 
   // Chords the browser owns outright: a page cannot preventDefault them, so the
@@ -76,13 +96,56 @@ describe("command registry", () => {
   const browserReserved = ["Ctrl+W", "Ctrl+F4", "Ctrl+T", "Ctrl+N", "Ctrl+Tab"].map(chordKey);
 
   it("never advertises a browser-reserved chord as the primary binding", () => {
-    for (const command of BUILTIN_COMMANDS) {
+    for (const command of builtinCommands()) {
       const primary = command.keys?.[0];
       if (primary === undefined) continue;
-      expect(browserReserved.includes(chordKey(primary)), `${command.id} advertises ${primary}`).toBe(
-        false,
-      );
+      expect(
+        browserReserved.includes(chordKey(primary)),
+        `${command.id} advertises ${primary}`,
+      ).toBe(false);
     }
+  });
+
+  // The built-ins are no longer a hand-kept constant — they are assembled from
+  // the registry — but the *order* is still what a user sees: the QuickBar
+  // sorts on relevance, which ties at zero for the empty query the palette
+  // opens with, so this list is the palette, top to bottom. Pinned in full,
+  // because reordering it silently moves the row under someone's second
+  // ArrowDown. Changing it is allowed; changing it by accident is not.
+  it("lists the commands in the order the QuickBar shows them", () => {
+    expect(builtinCommands().map((command) => command.id)).toEqual([
+      "quickbar.files",
+      "quickbar.commands",
+      // …the Editor tool's, then the Agent's, then the Terminal's, then the
+      // Scratchpad's — registry order (`tools.ts`), never declared here.
+      "file.save",
+      "editor.nextTab",
+      "editor.prevTab",
+      "editor.close",
+      "session.new",
+      "session.jump.1",
+      "session.jump.2",
+      "session.jump.3",
+      "session.jump.4",
+      "session.jump.5",
+      "session.jump.6",
+      "session.jump.7",
+      "session.jump.8",
+      "session.jump.9",
+      "terminal.new",
+      "terminal.close",
+      "scratchpad.open",
+      "panel.files",
+      "panel.editors",
+      "panel.agent",
+      "panel.terminal",
+      "view.toggleTheme",
+    ]);
+  });
+
+  it("keeps every window-level command in the assembled list", () => {
+    const ids = builtinCommands().map((command) => command.id);
+    for (const command of GLOBAL_COMMANDS) expect(ids).toContain(command.id);
   });
 
   it("reaches the QuickBar command mode from any surface", () => {
@@ -94,6 +157,11 @@ describe("command registry", () => {
       );
       expect(resolved?.id).toBe("quickbar.commands");
     }
+  });
+
+  it("resolves a tool's own chord through the merged list", () => {
+    const resolved = resolveCommand(press("t", { altKey: true }), "terminal", allCommands());
+    expect(resolved?.id).toBe("terminal.new");
   });
 
   it("hides session jumps while there are no sessions", () => {
@@ -113,7 +181,7 @@ describe("shortcuts.md extension", () => {
     expectRegistryInvariants(merged);
     const added = merged.filter((command) => command.category === "Shortcuts");
     expect(added.map((command) => command.title)).toEqual(["Status board", "Review"]);
-    expect(merged.length).toBe(BUILTIN_COMMANDS.length + 2);
+    expect(merged.length).toBe(builtinCommands().length + 2);
   });
 
   it("binds a free chord to a shortcut", () => {
@@ -122,7 +190,7 @@ describe("shortcuts.md extension", () => {
     expect(resolved?.title).toBe("Status board");
   });
 
-  it("lets a built-in win a chord collision", () => {
+  it("lets a registered command win a chord collision", () => {
     mocks.state.shortcuts = [entry({ name: "Sneaky terminal", keys: "Alt+T" })];
     const merged = allCommands();
     expect(merged.find((command) => command.id === "terminal.new")?.keys).toContain("Alt+T");
@@ -152,10 +220,10 @@ describe("shortcuts.md extension", () => {
     expect(resolveCommand(press("v", { ctrlKey: true }), "other", allCommands())).toBeNull();
   });
 
-  it("never lets an extension shadow a built-in id", () => {
+  it("never lets an extension shadow a registered id", () => {
     const impostor: Command = { id: "file.save", title: "Not the real save", run: () => undefined };
-    const merged = mergeCommands(BUILTIN_COMMANDS, [impostor]);
-    expect(merged.length).toBe(BUILTIN_COMMANDS.length);
+    const merged = mergeCommands(builtinCommands(), [impostor]);
+    expect(merged.length).toBe(builtinCommands().length);
     expect(merged.find((command) => command.id === "file.save")?.title).toBe("Save file");
   });
 

@@ -111,6 +111,76 @@ backend too:
 `@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
 build never fetches the chunk and every call is inert in a tab.
 
+## Tool registry
+
+A **tool** is one capability, declared in one descriptor next to its own code
+(`ui/src/registry.ts` for the type, `ui/src/tools.ts` for the list). It may
+contribute any of:
+
+| Field | What registering gets you |
+|---|---|
+| `panel` | A dockview panel: component, where it docks, whether it opens with the app, whether it is a singleton, and the one badge its tab may carry. `App.tsx` names no panel — it renders `panelComponents(TOOLS)`, applies `defaultLayout(TOOLS)` and draws its tabs from `panelTabInfo(TOOLS, …)` |
+| `documentView` | A renderer for one `OpenFile` kind inside the editor area. Office claims `office`; the native Office host will claim it back through the same field |
+| `commands` + `shortcuts` | QuickBar rows and keymap entries. Commands are the same `Command` shape `commands.ts` already used, so the QuickBar, the pass-through policy and the `shortcuts.md` merge are unchanged; the chords live in one table per tool, which is the layer a user keymap file overrides later |
+| `statusContributions` | Items in the status bar's left/centre/right regions. The bar owns the regions and nothing that goes in them |
+| `shortcutKinds` | Which `shortcuts.md` kinds this panel hosts — the Terminal claims `shell`, the Agent `prompt` — so insertion is routed by capability rather than by a pair of panel ids in `commands.ts` |
+| `when` | A predicate that takes the whole tool out — panel, commands and status items together. **Boot-time**: it is asked once per tool and remembered, because the things it feeds are derived at different moments and a tool that enabled itself later would be half present |
+
+A panel's tab is closable exactly when it is *not* in the startup layout: one
+that a command opened must be dismissible by the tab it arrived on, while
+closing a startup panel would strand the app until a reload (layout persistence
+is M5 item 2).
+
+Agent-facing tools are **not** in this descriptor — `services/agent_tools.py` is
+their single registry (below).
+
+Derivation is what makes it a registry rather than a list: `Ctrl+1..N` focus
+commands are generated from the panels *in the default layout*, in registry
+order, so the four familiar chords are simply the first four registered panels
+and a fifth would get `Ctrl+5` by existing. Every derivation in `registry.ts` is
+a pure function of a tools array — never of `TOOLS` itself — which is what makes
+them unit-testable with fixtures and what makes a second, differently-sourced
+array possible.
+
+**Registration is static**: `TOOLS` is an array assembled from per-tool modules
+at build time, so the bundler sees every import and `tsc` type-checks every
+descriptor. That is the deliberate stopping point for now. **The plugin seam**
+is the shape, not a loader: because nothing reads `TOOLS` except the four call
+sites that pass it in, a later loader can concatenate descriptors from
+`.workbench/` (or an installed package) onto the same array and the shell will
+host them unchanged. That is the M7+ endgame in `ROADMAP.md` — the difference
+between a fixed app and an instrument.
+
+**The exit criterion, demonstrated.** `ui/src/panels/Scratchpad.tsx` is a whole
+capability — a panel that opens on demand and closes again, its command, its tab
+icon, a file on disk — added in one new module plus one line in `tools.ts`. It
+touches no file another work lane is likely to touch. It deliberately claims no
+chord: a registered chord beats a `shortcuts.md` one and `Alt` is the only
+modifier that file may use, so every chord a tool takes is one a user cannot
+have — a price the Terminal's `Alt+T` earns and a worked example does not.
+`docs/tools.md` is the walkthrough.
+
+**Agent-facing tools** carry the ergonomics budget on both sides.
+`services/agent_tools.py` is the server registry the SDK actually reads: name,
+model-facing description, input schema, and a **required** `output_format`, so
+`mypy --strict` fails an omission. `sdk_factory.py` builds the MCP server *and*
+the session's allow-list from that list, so a tool is added in one place. The
+budget is enforced where it can fail — `server/tests/test_agent_tools.py`
+asserts a ceiling on every description (loaded into every session's context, so
+paid for on every request), a **per-tool** ceiling on the serialized result,
+sized from the measured representative payload plus a stated margin, and that
+results are compact JSON rather than pretty-printed. Per-tool because one shared
+number large enough for the chattiest tool is a number no other tool can exceed,
+and a budget that cannot fail does not bind. The one result path that is not
+ours to size — a pydantic validation error — is clamped to the ceiling rather
+than trusted to fit.
+
+There is no second copy of any of this in the UI. A capability declares its
+panel and commands in `ui/src/registry.ts` and its agent-facing tools here, once:
+a duplicate of the model-facing text on the client would be another authority to
+keep honest with nothing reading it. Latency is not budgeted: these are
+in-process calls where the model and the user dominate.
+
 ## Module map (server/src/workbench_server/)
 
 | Module | Owns |
@@ -131,6 +201,7 @@ build never fetches the chunk and every call is inert in a tab.
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage |
+| `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
@@ -368,7 +439,8 @@ wins per name). The workspace file rides the existing watcher — its `FileChang
 the bus is the reload trigger — while the global one, living outside the workspace, gets
 its own small `watchfiles` watch; a reload that changes the merged state publishes
 `ShortcutsChangedEvent` and the UI refetches. Entries extend the command registry
-(`ui/src/commands.ts`) dynamically, and built-ins win every id/chord collision. Parsing is
+(`ui/src/commands.ts`) dynamically, and everything the tool registry contributes wins
+every id/chord collision — a file cannot shadow `Ctrl+S` or `Alt+T`. Parsing is
 total: a bad entry becomes a `problem` in the payload, never an exception; markdown
 inside any fence is example text, so a `##` line there registers nothing. **Entries are
 inserted, never executed** — a shell body is typed into the active terminal with no
@@ -403,7 +475,8 @@ Format spec: `docs/shortcuts.md`.
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
    launched in a per-run temp workspace with fake-agent mode on. Eight journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
-   ConPTY, QuickBar/shortcuts (including the never-executed rule), chat streaming and
+   ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
+   tool reaching the user through the registry alone), chat streaming and
    tool settling, plan cards, status chips and the attention badge, office degraded
    mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
    and links back to its session — *and* the negative half: an announced-but-failed

@@ -48,8 +48,9 @@ Frontend in a browser tab: `cd ui && npm install && npm run dev` (Vite, port 517
 The real thing — a native window:
 
 ```bash
-cd desktop && npm install
-npm run tauri dev
+cd desktop && npm install      # the Tauri CLI
+npm --prefix ../ui install     # the shell starts Vite from ui/ — skip it and the
+npm run tauri dev              # window opens on a dev server that never started
 ```
 
 That starts Vite itself and then either **attaches** to a backend already listening on

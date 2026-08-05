@@ -9,6 +9,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import * as api from "../api";
 import { loadDocsApi, type DocEditorInstance } from "../office";
+import type { WorkbenchTool } from "../registry";
 import { useStore, type OpenFile } from "../store";
 import type { Theme } from "../theme";
 
@@ -181,3 +182,22 @@ export function OfficePanel({ file }: { file: OpenFile }) {
     </div>
   );
 }
+
+// ---- registration -----------------------------------------------------------
+
+/**
+ * Office contributes a *document view*, not a dockview panel: it renders one
+ * kind of open buffer inside the editor area, which is why `EditorArea` no
+ * longer names it. The native Office host (M4 moat track) claims the same kind
+ * through the same field, and nothing else has to change to let it.
+ */
+export const officeTool: WorkbenchTool = {
+  id: "office",
+  title: "Office",
+  documentView: {
+    kind: "office",
+    component: OfficePanel,
+    hostClassName: "wb-office-host",
+    keepMounted: true,
+  },
+};

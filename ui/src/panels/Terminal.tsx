@@ -4,6 +4,7 @@ import type { IDockviewPanelProps } from "dockview";
 import { useEffect, useRef, useState } from "react";
 
 import { MONO_FONT } from "../monaco";
+import type { WorkbenchTool } from "../registry";
 import { useStore } from "../store";
 import { registerTerminal } from "../terminalInput";
 import { xtermTheme } from "../theme";
@@ -209,3 +210,34 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
     </>
   );
 }
+
+// ---- registration -----------------------------------------------------------
+
+export const terminalTool: WorkbenchTool = {
+  id: "terminal",
+  title: "Terminal",
+  panel: {
+    component: TerminalPanel,
+    defaultLocation: { area: "bottom", size: 260 },
+  },
+  // A `shell` shortcut is typed into the active terminal, so this panel comes
+  // forward first — declared here so `commands.ts` routes by capability.
+  shortcutKinds: ["shell"],
+  commands: [
+    {
+      id: "terminal.new",
+      title: "New terminal",
+      run: () => useStore.getState().newTerminal(),
+    },
+    {
+      id: "terminal.close",
+      title: "Close terminal",
+      when: () => useStore.getState().terminals.length > 0,
+      run: () => {
+        const s = useStore.getState();
+        if (s.activeTerminalId !== null) s.closeTerminal(s.activeTerminalId);
+      },
+    },
+  ],
+  shortcuts: { "terminal.new": ["Alt+T"] },
+};

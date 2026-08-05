@@ -5,9 +5,16 @@
  * Every command is reachable from the keyboard even without a chord, because
  * Ctrl+Shift+P lists all of them; `keys` exists for the ones worth a reflex.
  *
- * The list has two halves: the static built-ins below, and the dynamic commands
- * the user's `shortcuts.md` contributes (see `mergeCommands`). Built-ins win
- * every collision, so nothing a workspace file says can shadow `Ctrl+S`.
+ * The list has three sources, and they compose in this order:
+ *  1. the handful of genuinely global commands below (theme, QuickBar);
+ *  2. the **tool registry** — panel focus derived from the registered panels,
+ *     plus every command a registered tool owns (`registry.ts`, `tools.ts`).
+ *     Saving is the Editor tool's, `Alt+T` is the Terminal tool's, the session
+ *     jumps are the Agent tool's — each declared next to the panel it belongs
+ *     to, not here;
+ *  3. the dynamic commands the user's `shortcuts.md` contributes (see
+ *     `mergeCommands`). Everything above wins every collision, so nothing a
+ *     workspace file says can shadow `Ctrl+S`.
  *
  * Chord choices (browser-safe where it matters — the app runs in a dev browser
  * tab as well as in the Tauri shell):
@@ -17,18 +24,20 @@
  *  - Closing a tab is Alt+W. Ctrl+W closes the browser window and Ctrl+F4 is its
  *    alias in Chromium, so Ctrl+F4 stays a Tauri-only secondary — never the
  *    keycap the QuickBar advertises.
- *  - Ctrl+1..4 focus panels; in a browser tab Chrome/Firefox eat those to
- *    switch browser tabs, in the Tauri shell they arrive normally.
+ *  - Ctrl+1..N focus the panels in registry order; in a browser tab
+ *    Chrome/Firefox eat those to switch browser tabs, in the Tauri shell they
+ *    arrive normally.
  *  - Alt+1..9 jump to the n-th most recent session — Alt is free in browsers
  *    and is intercepted even inside a terminal or editor.
  */
 
-import type { DockviewApi } from "dockview";
-
+import { focusPanel } from "./dock";
 import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
+import { panelFocusCommands, shortcutHost, toolCommands } from "./registry";
 import { shortcutCommands } from "./shortcuts";
 import { useStore } from "./store";
-import type { SessionInfo, ShortcutEntry } from "./types";
+import { TOOLS } from "./tools";
+import type { ShortcutEntry } from "./types";
 
 export interface Command {
   id: string;
@@ -44,60 +53,19 @@ export interface Command {
   run: () => void;
 }
 
-// ---- dockview handle (set once the dock is ready) ---------------------------
-
-let dockApi: DockviewApi | null = null;
-
-export function setDockApi(api: DockviewApi | null): void {
-  dockApi = api;
-}
-
-/** Exported so a panel can send focus where its action landed — the file bar's
- * "open this session" has to bring the Agent panel forward to be of any use. */
-export function focusPanel(id: string): void {
-  dockApi?.getPanel(id)?.api.setActive();
-}
-
-// ---- small helpers over the store -------------------------------------------
-
-/** Folder a new session should be bound to: the active file's directory. */
-function activeFolder(): string {
-  const path = useStore.getState().activePath;
-  return path !== null && path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-}
-
-/** Every session, newest first — live ones and resumable transcripts alike. */
-function recentSessions(): SessionInfo[] {
-  return useStore
-    .getState()
-    .folders.flatMap((group) => group.sessions)
-    .sort((a, b) => b.updated_at - a.updated_at);
-}
-
-function cycleEditorTab(step: number): void {
-  const s = useStore.getState();
-  if (s.openFiles.length === 0) return;
-  const current = s.openFiles.findIndex((f) => f.path === s.activePath);
-  const index = (Math.max(current, 0) + step + s.openFiles.length) % s.openFiles.length;
-  const next = s.openFiles[index];
-  if (next !== undefined) s.setActiveFile(next.path);
-}
-
-const hasOpenFile = (): boolean => useStore.getState().openFiles.length > 0;
-
-const sessionJumps: Command[] = Array.from({ length: 9 }, (_, i) => ({
-  id: `session.jump.${i + 1}`,
-  title: `Jump to session ${i + 1}`,
-  keys: [`Alt+${i + 1}`],
-  when: () => recentSessions().length > i,
-  detail: () => recentSessions()[i]?.title ?? "",
-  run: () => {
-    const session = recentSessions()[i];
-    if (session !== undefined) useStore.getState().openSession(session);
-  },
-}));
-
-export const BUILTIN_COMMANDS: readonly Command[] = [
+/**
+ * Commands that belong to the window itself rather than to any capability.
+ * Everything panel-specific lives on its tool; if a command here starts needing
+ * to know what a panel is, it is in the wrong file.
+ *
+ * Split into a leading and a trailing half for one reason: order is what the
+ * user sees. The QuickBar sorts on relevance, which ties at zero for an empty
+ * query, so an empty command palette lists these in registry order — and the
+ * two QuickBar entries have always led it with the theme toggle at the end.
+ * Registry-contributed commands slot in between, where the hand-written list
+ * used to have them.
+ */
+const OPENING_COMMANDS: readonly Command[] = [
   {
     id: "quickbar.files",
     title: "Go to file…",
@@ -115,92 +83,35 @@ export const BUILTIN_COMMANDS: readonly Command[] = [
     // Always opens in command mode, including from an already-open file search.
     run: () => useStore.getState().setQuickBarOpen(true, ">"),
   },
-  {
-    id: "file.save",
-    title: "Save file",
-    keys: ["Ctrl+S"],
-    when: () => useStore.getState().activePath !== null,
-    run: () => {
-      const s = useStore.getState();
-      if (s.activePath !== null) void s.saveFile(s.activePath);
-    },
-  },
-  {
-    id: "editor.nextTab",
-    title: "Next editor tab",
-    keys: ["Ctrl+PageDown", "Alt+PageDown"],
-    when: hasOpenFile,
-    run: () => cycleEditorTab(1),
-  },
-  {
-    id: "editor.prevTab",
-    title: "Previous editor tab",
-    keys: ["Ctrl+PageUp", "Alt+PageUp"],
-    when: hasOpenFile,
-    run: () => cycleEditorTab(-1),
-  },
-  {
-    id: "editor.close",
-    title: "Close editor tab",
-    keys: ["Alt+W", "Ctrl+F4"],
-    when: () => useStore.getState().activePath !== null,
-    run: () => {
-      const path = useStore.getState().activePath;
-      if (path !== null) useStore.getState().requestCloseFile(path);
-    },
-  },
-  {
-    id: "panel.files",
-    title: "Focus Files panel",
-    keys: ["Ctrl+1"],
-    run: () => focusPanel("files"),
-  },
-  {
-    id: "panel.editors",
-    title: "Focus Editor panel",
-    keys: ["Ctrl+2"],
-    run: () => focusPanel("editors"),
-  },
-  {
-    id: "panel.agent",
-    title: "Focus Agent panel",
-    keys: ["Ctrl+3"],
-    run: () => focusPanel("agent"),
-  },
-  {
-    id: "panel.terminal",
-    title: "Focus Terminal panel",
-    keys: ["Ctrl+4"],
-    run: () => focusPanel("terminal"),
-  },
-  {
-    id: "session.new",
-    title: "New agent session here",
-    detail: () => activeFolder() || "workspace root",
-    run: () => void useStore.getState().createSessionIn(activeFolder()),
-  },
-  ...sessionJumps,
-  {
-    id: "terminal.new",
-    title: "New terminal",
-    keys: ["Alt+T"],
-    run: () => useStore.getState().newTerminal(),
-  },
-  {
-    id: "terminal.close",
-    title: "Close terminal",
-    when: () => useStore.getState().terminals.length > 0,
-    run: () => {
-      const s = useStore.getState();
-      if (s.activeTerminalId !== null) s.closeTerminal(s.activeTerminalId);
-    },
-  },
+];
+
+const CLOSING_COMMANDS: readonly Command[] = [
   {
     id: "view.toggleTheme",
     title: "Toggle theme (dark/light)",
     run: () => useStore.getState().toggleTheme(),
   },
 ];
+
+export const GLOBAL_COMMANDS: readonly Command[] = [...OPENING_COMMANDS, ...CLOSING_COMMANDS];
+
+/**
+ * Global commands + everything the tool registry contributes, in the order the
+ * QuickBar shows them (`commands.test.ts` pins it). Static — a tool's `when` is
+ * settled when the registry is first derived — so it is built once, which
+ * matters because this is read on every keystroke in the app.
+ */
+let builtins: Command[] | null = null;
+
+export function builtinCommands(): Command[] {
+  builtins ??= [
+    ...OPENING_COMMANDS,
+    ...toolCommands(TOOLS),
+    ...panelFocusCommands(TOOLS, focusPanel),
+    ...CLOSING_COMMANDS,
+  ];
+  return builtins;
+}
 
 // ---- dynamic extension: shortcuts.md ---------------------------------------
 
@@ -225,12 +136,12 @@ function isBindableByFile(text: string): boolean {
  * never the other way round.
  */
 export function mergeCommands(
-  builtins: readonly Command[],
+  builtin: readonly Command[],
   extra: readonly Command[],
 ): Command[] {
-  const ids = new Set(builtins.map((command) => command.id));
-  const chords = new Set(builtins.flatMap((command) => (command.keys ?? []).map(chordId)));
-  const merged: Command[] = [...builtins];
+  const ids = new Set(builtin.map((command) => command.id));
+  const chords = new Set(builtin.flatMap((command) => (command.keys ?? []).map(chordId)));
+  const merged: Command[] = [...builtin];
   for (const command of extra) {
     if (ids.has(command.id)) continue;
     ids.add(command.id);
@@ -247,9 +158,12 @@ export function mergeCommands(
 }
 
 /** Inserting is the only thing a shortcut may do — the surface it lands in
- * gets focus so the user's next keystroke (Enter, or more typing) goes there. */
+ * gets focus so the user's next keystroke (Enter, or more typing) goes there.
+ * Which panel that is, is a registry question (`shortcutKinds` on the tool that
+ * hosts the kind), not a pair of panel ids written down here. */
 function runShortcut(entry: ShortcutEntry): void {
-  focusPanel(entry.kind === "shell" ? "terminal" : "agent");
+  const host = shortcutHost(TOOLS, entry.kind);
+  if (host !== null) focusPanel(host);
   useStore.getState().runShortcut(entry);
 }
 
@@ -262,7 +176,7 @@ export function allCommands(): Command[] {
   const entries = useStore.getState().shortcuts;
   if (merged === null || merged.entries !== entries) {
     const extra = shortcutCommands(entries, runShortcut);
-    merged = { entries, commands: mergeCommands(BUILTIN_COMMANDS, extra) };
+    merged = { entries, commands: mergeCommands(builtinCommands(), extra) };
   }
   return merged.commands;
 }

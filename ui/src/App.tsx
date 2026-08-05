@@ -2,50 +2,61 @@ import {
   DockviewReact,
   type DockviewReadyEvent,
   type IDockviewPanelHeaderProps,
-  type IDockviewPanelProps,
 } from "dockview";
-import { useEffect, useState, type FunctionComponent } from "react";
+import { useEffect, useState } from "react";
 
-import { installCommandKeys, setDockApi } from "./commands";
-import { AgentPanel } from "./panels/AgentPanel";
-import { EditorAreaPanel } from "./panels/EditorArea";
-import { FileTreePanel } from "./panels/FileTree";
+import { installCommandKeys } from "./commands";
+import { layoutDefaultPanels, setDockApi } from "./dock";
 import { DirtyCloseModal, ShellCloseModal } from "./panels/Modal";
 import { QuickBar } from "./panels/QuickBar";
 import { StatusBar } from "./panels/StatusBar";
-import { TerminalPanel } from "./panels/Terminal";
 import { Toasts } from "./panels/Toasts";
+import { panelComponents, panelTabInfo } from "./registry";
 import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
+import { TOOLS } from "./tools";
 
-const components: Record<string, FunctionComponent<IDockviewPanelProps>> = {
-  files: FileTreePanel,
-  editors: EditorAreaPanel,
-  agent: AgentPanel,
-  terminal: TerminalPanel,
-};
+// Which panels exist, what they are called and where they dock are properties
+// of the registered tools (`tools.ts`) — this file names none of them.
+const components = panelComponents(TOOLS);
 
 const BASE_TITLE = "Workbench";
 
 const anyNeedsAttention = (states: Record<string, string>): boolean =>
   Object.values(states).some((state) => state === "needs_attention");
 
-/** Fixed panels: title only, no close button — closing them would strand the app.
- * The Agent tab carries an aggregate attention dot (DESIGN.md §6.4 dot-only). */
+/**
+ * Panel chrome, entirely from the descriptor: the tool's glyph, its title, the
+ * one badge it contributes, and a close button for a panel that is not in the
+ * startup layout.
+ *
+ * Only those close: a panel the app opened with has no way back if it is
+ * dismissed (no layout persistence yet), while one a command opened must be
+ * dismissible by the same tab it arrived on — otherwise the split it made stays
+ * for the session.
+ */
 function PanelTab(props: IDockviewPanelHeaderProps) {
-  const attention = useStore(
-    (s) => props.api.id === "agent" && anyNeedsAttention(s.sessionStates),
-  );
+  const { icon: Icon, badge: Badge, closable } = panelTabInfo(TOOLS, props.api.component);
+  const title = props.api.title ?? props.api.id;
   return (
     <div className="wb-panel-tab u-truncate">
-      {props.api.title ?? props.api.id}
-      {attention && (
-        <span
-          className="wb-tab-attention-dot"
-          role="img"
-          aria-label="A session needs attention"
-          title="A session needs attention"
-        />
+      {Icon !== undefined && <Icon />}
+      {title}
+      {Badge !== undefined && <Badge />}
+      {closable && (
+        <button
+          type="button"
+          className="wb-panel-tab-close"
+          aria-label={`Close ${title}`}
+          title={`Close ${title}`}
+          onClick={(e) => {
+            // The tab's own click would activate the panel we are removing.
+            e.stopPropagation();
+            props.api.close();
+          }}
+        >
+          ×
+        </button>
       )}
     </div>
   );
@@ -55,31 +66,10 @@ const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbenc
 
 function onReady(event: DockviewReadyEvent): void {
   const { api } = event;
-  // The registry needs the dock handle for the panel-focus commands (Ctrl+1..4).
+  // The registry needs the dock handle: panel focus (Ctrl+1..N), and opening a
+  // panel that is not in the startup layout.
   setDockApi(api);
-  api.addPanel({ id: "editors", component: "editors", title: "Editor" });
-  api.addPanel({
-    id: "files",
-    component: "files",
-    title: "Files",
-    position: { referencePanel: "editors", direction: "left" },
-    initialWidth: 240,
-  });
-  api.addPanel({
-    id: "agent",
-    component: "agent",
-    title: "Agent",
-    position: { referencePanel: "editors", direction: "right" },
-    initialWidth: 380,
-  });
-  api.addPanel({
-    id: "terminal",
-    component: "terminal",
-    title: "Terminal",
-    position: { referencePanel: "editors", direction: "below" },
-    initialHeight: 260,
-  });
-  api.getPanel("editors")?.api.setActive();
+  layoutDefaultPanels(api);
 }
 
 export default function App() {

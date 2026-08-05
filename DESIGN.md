@@ -233,6 +233,12 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
   underline, no accent bar.
 - Dirty dot: 6px `--text-secondary` circle replacing close button until hover.
 - Close button: 16px glyph in 20px hit area, visible on hover/active only.
+- **Panel** (not document) tabs are chrome: title, the tool's optional 14px glyph, and
+  at most one dot-only badge (§6.4). No close button — except on a panel that is *not*
+  in the startup layout, which one of its commands opened: that tab carries a close
+  button in an 18px hit area, always visible, because it is the only way back and a
+  hover-only affordance on the one closable tab is a dead end. Which panels those are
+  is a registry fact (`openByDefault: false`), never a list in the tab component.
 - Focused panel (keyboard focus lives inside it): its tab text `--text-primary` and a
   1px `--accent` top edge on the tab strip of that group only — the one place chrome
   uses accent structurally.
@@ -321,8 +327,11 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Every dot-only element carries an `aria-label` (§6.4).
 
 ### 6.8 Keymap and pass-through policy
-Every binding lives in the command registry (`ui/src/commands.ts`); the QuickBar lists
-the same registry, so nothing is reachable only by chord and nothing only by mouse.
+Every binding lives in the command registry; the QuickBar lists the same registry, so
+nothing is reachable only by chord and nothing only by mouse. `ui/src/commands.ts` holds
+only the window-level commands and assembles the rest — a capability declares its own
+commands and their default chords on its tool descriptor (`docs/tools.md`), and
+`Ctrl+1..N` is derived from the registered panels in order, not from fixed ids.
 
 | Chord | Command |
 |---|---|

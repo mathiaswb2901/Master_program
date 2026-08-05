@@ -1,0 +1,203 @@
+"""The agent-facing tool registry, and the ergonomics budget it carries.
+
+The budget is a quality-gate concern, not a review comment: a tool description
+is loaded into *every* session's context, so it is paid for on every request,
+and a result format is paid for on every call. These tests are where that stops
+being advice — raising a ceiling takes a diff someone has to justify.
+
+What is deliberately not tested here: latency. These are in-process calls where
+the model and the user dominate, so budgeting it would promise a measurement
+nobody takes.
+"""
+
+from pathlib import Path
+from typing import Any
+
+from workbench_server.config import Settings
+from workbench_server.models.agents import UiState
+from workbench_server.models.plans import PlanArtifact, PlanResponse
+from workbench_server.services.agent_tools import (
+    AGENT_TOOLS,
+    GET_WORKSPACE_STATE,
+    MAX_DESCRIPTION_CHARS,
+    PRESENT_PLAN,
+    allowed_tool_names,
+    clamp_result,
+    handle_present_plan,
+    workspace_state_result,
+)
+from workbench_server.services.sdk_factory import UiStateStore, build_agent_options
+
+
+def result_text(result: dict[str, Any]) -> str:
+    text: str = result["content"][0]["text"]
+    return text
+
+
+class _Bridge:
+    """SessionBridge stub: the user approves, as proposed."""
+
+    async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
+        return True
+
+    async def present_plan(self, artifact: PlanArtifact) -> PlanResponse:
+        return PlanResponse(
+            plan_id=artifact.plan_id,
+            verdict="approve",
+            choices={"approach": "local"},
+            comment="Go, but keep the .bak.",
+        )
+
+
+def representative_plan_payload() -> dict[str, Any]:
+    """A plan of the size the card was designed for: a choice and some steps."""
+    return {
+        "title": "Fix the DST boundary in the SE3 bidder",
+        "summary": "Two ways to handle the 23/25-hour days.",
+        "nodes": [
+            {
+                "kind": "option_group",
+                "node_id": "approach",
+                "prompt": "Which representation?",
+                "options": [
+                    {"option_id": "local", "label": "Local time with tz", "recommended": True},
+                    {"option_id": "utc", "label": "UTC everywhere"},
+                ],
+            },
+            {
+                "kind": "step_list",
+                "node_id": "steps",
+                "steps": [
+                    {"text": "Normalize the delivery hours", "file_refs": [{"path": "se3/bid.py"}]},
+                    {"text": "Backfill the affected days"},
+                ],
+            },
+        ],
+    }
+
+
+def representative_ui_state() -> UiState:
+    """A busy-but-ordinary session: a handful of tabs, two of them dirty."""
+    return UiState(
+        active_file="server/src/workbench_server/services/agent_tools.py",
+        open_files=[
+            "server/src/workbench_server/services/agent_tools.py",
+            "server/src/workbench_server/services/sdk_factory.py",
+            "ui/src/registry.ts",
+            "ui/src/tools.ts",
+            "ROADMAP.md",
+            "ARCHITECTURE.md",
+        ],
+        dirty_files=["ui/src/registry.ts", "ROADMAP.md"],
+    )
+
+
+class TestRegistry:
+    def test_every_tool_declares_a_name_schema_and_output_format(self) -> None:
+        assert [spec.name for spec in AGENT_TOOLS] == ["get_workspace_state", "present_plan"]
+        for spec in AGENT_TOOLS:
+            # ``output_format`` and ``max_result_bytes`` are required fields, so
+            # an omission is a type error — this asserts the values are the ones
+            # we actually ship.
+            assert spec.output_format == "compact-json"
+            assert spec.max_result_bytes > 0
+            assert isinstance(spec.input_schema, dict)
+
+    def test_names_are_unique(self) -> None:
+        names = [spec.name for spec in AGENT_TOOLS]
+        assert len(set(names)) == len(names)
+
+    def test_the_allow_list_is_derived_from_the_registry(self) -> None:
+        """One place a tool is added. A tool the SDK exposes but the session
+        does not allow becomes a permission prompt for our own context bridge."""
+        assert allowed_tool_names() == [
+            "mcp__workbench__get_workspace_state",
+            "mcp__workbench__present_plan",
+        ]
+
+    def test_a_session_allows_every_registered_tool(self) -> None:
+        """Asserted against the options a real session is built with, so the
+        registry and the SDK wiring cannot drift apart silently."""
+        options = build_agent_options(UiStateStore(), Settings(), Path.cwd(), None, _Bridge())
+        assert set(allowed_tool_names()) <= set(options.allowed_tools)
+        assert set(options.mcp_servers) == {"workbench"}
+
+
+class TestDescriptionBudget:
+    def test_each_description_fits_the_ceiling(self) -> None:
+        for spec in AGENT_TOOLS:
+            assert len(spec.description) <= MAX_DESCRIPTION_CHARS, spec.name
+
+    def test_descriptions_are_one_paragraph_of_plain_text(self) -> None:
+        """No markdown scaffolding, no examples block: the cheapest description
+        that still says what the tool does and what its result means."""
+        for spec in AGENT_TOOLS:
+            assert "\n" not in spec.description, spec.name
+            assert "```" not in spec.description, spec.name
+
+
+class TestResultBudget:
+    """Each ceiling is per tool and sized from the payload next to it, so it can
+    actually fail. A single global number big enough for the chattiest tool is
+    one no other tool can ever exceed — a budget that cannot fail does not
+    bind, which is the rule this file exists to keep (CLAUDE.md)."""
+
+    def test_workspace_state_result_is_compact_json(self) -> None:
+        text = result_text(workspace_state_result(representative_ui_state()))
+        assert len(text.encode()) <= GET_WORKSPACE_STATE.max_result_bytes
+        # Compact, not pretty: the indented form of this very payload is
+        # materially larger for no gain in what the model can read.
+        assert "\n" not in text
+        assert ", " not in text
+        assert UiState.model_validate_json(text) == representative_ui_state()
+
+    def test_the_compact_form_is_the_cheaper_one(self) -> None:
+        """The reason `compact-json` is the default answer, as a number rather
+        than an assertion in a comment: same payload, both serializations."""
+        state = representative_ui_state()
+        compact = len(state.model_dump_json().encode())
+        pretty = len(state.model_dump_json(indent=2).encode())
+        assert compact < pretty
+
+    async def test_present_plan_result_is_compact_json(self) -> None:
+        text = result_text(await handle_present_plan(_Bridge(), representative_plan_payload()))
+        assert len(text.encode()) <= PRESENT_PLAN.max_result_bytes
+        assert "\n" not in text
+        assert PlanResponse.model_validate_json(text).verdict == "approve"
+
+    async def test_a_validation_error_stays_within_the_budget(self) -> None:
+        """A malformed call must not answer with a wall of pydantic prose — the
+        agent reads it, and is charged for every character of it."""
+        bad = representative_plan_payload() | {"nodes": [{"kind": "html"}] * 20}
+        result = await handle_present_plan(_Bridge(), bad)
+        assert result["is_error"] is True
+        assert len(result_text(result).encode()) <= PRESENT_PLAN.max_result_bytes
+
+    async def test_a_pathological_validation_error_is_cut_to_the_budget(self) -> None:
+        """Ten distinct errors, each naming a long path — the case the ten-error
+        cap alone does not bound. Truncation is enforced, not hoped for."""
+        bad = representative_plan_payload() | {
+            "nodes": [
+                {"kind": "step_list", "node_id": f"n{index}" * 20, "steps": "not a list"}
+                for index in range(12)
+            ]
+        }
+        result = await handle_present_plan(_Bridge(), bad)
+        assert result["is_error"] is True
+        assert len(result_text(result).encode()) <= PRESENT_PLAN.max_result_bytes
+
+    def test_clamping_never_exceeds_the_limit_or_splits_a_character(self) -> None:
+        """Byte budgets over UTF-8: a cut mid-character must not produce mojibake
+        (paths and user comments are not ASCII — `Åsen`, `€/MWh`)."""
+        assert clamp_result("short", 64) == "short"
+        clamped = clamp_result("Åsen 2 " * 40, 32)
+        assert len(clamped.encode()) <= 32
+        assert clamped.endswith("…")
+        assert "�" not in clamped
+
+    def test_the_argument_schemas_are_the_smallest_that_work(self) -> None:
+        """A tool that takes nothing advertises nothing: an empty schema is one
+        line of context instead of a properties block the model must read."""
+        assert GET_WORKSPACE_STATE.input_schema == {}
+        assert PRESENT_PLAN.input_schema["properties"].keys() >= {"title", "nodes"}
+        assert "plan_id" not in PRESENT_PLAN.input_schema["properties"]
