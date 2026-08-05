@@ -106,10 +106,14 @@ the moat.
   that path within a 10 s window (`FileProvenanceEvent` on `/ws/events`, `GET
   /api/provenance` for load and reconnect); the tree marks unacknowledged files, the
   editor carries a one-line bar naming the session and linking back to that
-  conversation, and opening or dismissing acknowledges. Deliberately conservative: a
+  conversation, and opening acknowledges (the bar stands until the claim is retracted
+  or the user dismisses it — DESIGN.md §6.1). Deliberately conservative: a
   change with no matching tool call is reported *unattributed* — never assigned to the
   most recent session — two sessions inside the window resolve as most-recent-exact-
-  match-wins, and a later unattributed change clears the claim. **Limitation**: the map
+  match-wins, a claim from a tool that was declined or came back an error is withdrawn
+  before it can explain anything, and a later unattributed change (including every
+  write Workbench makes for the user: save, create, rename, OnlyOffice callback)
+  clears the claim. **Limitation**: the map
   is in-memory and bounded (LRU, 500 paths), so a server restart forgets who changed
   what; persisting it (and attributing writes made through the shell) is future work.
 - Committed carryover: pptx E2E fidelity pass and bundled skills —
@@ -129,7 +133,8 @@ the moat.
   problems toast), chat streaming with per-tool settle, plan cards (recommendation
   pre-selected → switch → approve → the agent's echo), status chips + `document.title`
   attention badge, office degraded mode, and provenance (agent write → tree marker →
-  file bar → back to the session → acknowledged). Agent journeys run against **fake-agent
+  file bar → back to the session → acknowledged, plus the changes that are *not* the
+  agent's: a failed write, the user's own saves). Agent journeys run against **fake-agent
   mode** (`WORKBENCH_FAKE_AGENT=1`, `services/fake_agent.py`): scripted replies, tool
   calls, permission prompts and plan artifacts through the real factory/bridge seams —
   no Claude login, no tokens, deterministic frames.

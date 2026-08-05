@@ -214,6 +214,13 @@ files, so it is built to be silent rather than wrong:
   `null`) and the UI shows nothing. A git checkout, an external editor, a build
   step and the user's own `Ctrl+S` all land here, correctly. The most recent
   session is *never* named as a guess.
+- A claim is announced *before* the tool runs, so it is **withdrawn** when the
+  tool turns out not to have written anything: a declined permission card
+  (`note_tool_denied`, fired the moment the user clicks Deny) or an error result
+  (`note_tool_result`, e.g. an `Edit` whose old string was not found). Otherwise
+  a refused `Write` would keep a live claim for the rest of the window and be
+  credited with whatever changed that path next — typically the user making the
+  same fix by hand.
 - Two sessions writing the same path inside the window is a genuine ambiguity;
   the rule is **most recent exact match wins**, and it is tested.
 - A claim is not consumed by the first change it explains — one logical write
@@ -222,19 +229,30 @@ files, so it is built to be silent rather than wrong:
   skipped for the same reason: order inside a watchfiles batch is not
   guaranteed.
 - An unattributed change to a tracked path **clears** the entry, so a file the
-  user has since rewritten stops being credited to an agent. The editor's own
-  `PUT /api/files/content` says so explicitly (`note_user_write`), which is what
-  keeps a save seconds after an agent's write attributed to the user.
+  user has since rewritten stops being credited to an agent. Every write
+  Workbench itself makes on the user's behalf says so explicitly
+  (`note_user_write`): the editor's `PUT /api/files/content`, file create and
+  rename, and the OnlyOffice save callback — that last one matters most, since a
+  `.docx` is the file a user cannot diff for themselves.
+- An entry the LRU evicts is **cleared on the wire** too. Clients hold their own
+  copy of the map, and the clear branch above only fires for paths the server
+  still tracks, so a silent eviction would strand a stale attribution on screen.
 - A path the agent spelled differently than the watcher reports it (a different
   case on Windows), a write outside the workspace, or a file written by a shell
   command rather than a file tool: all unattributed.
 
 Acknowledgment is explicit: opening the file (tree click or tab activation) or
-dismissing the bar marks the entry `acknowledged`, which clears the markers and
-keeps the attribution. A later agent change to the same path reopens it. A tree
-marker on a file inside a collapsed folder is only visible once that folder is
-expanded — a folder-level rollup is not built; the editor bar and the chat's
-tool row are the other two places the same change surfaces.
+dismissing the bar marks the entry `acknowledged`, which clears **the two dots**
+— tree row and background tab — and keeps the attribution. A later agent change
+to the same path reopens them. The editor bar is not an unread marker and is
+deliberately not gated on `acknowledged` (DESIGN.md §6.1): it answers "who wrote
+what I am reading", carries the only link back to that conversation, and stands
+until the attribution itself is retracted or the user dismisses it — a dismissal
+the UI persists in `localStorage`, since a reload undoing it would put the line
+back above a buffer the user had already decided about. A tree marker on a file
+inside a collapsed folder is only visible once that folder is expanded — a
+folder-level rollup is not built; the editor bar and the chat's tool row are the
+other two places the same change surfaces.
 
 State is **in memory only** — a server restart forgets every attribution and
 `GET /api/provenance` comes back empty — and bounded: `MAX_TRACKED_PATHS` (500,
@@ -288,7 +306,8 @@ Format spec: `docs/shortcuts.md`.
    - **Layer 2.5 — fake-agent mode** (`WORKBENCH_FAKE_AGENT=1`):
      `services/fake_agent.py` is a `ClientFactory` that answers deterministically — a
      streamed markdown reply, a `Read` of a real workspace file, a `Write` that really
-     lands on disk (announced before the bytes, as a real tool call is), a permission
+     lands on disk (announced before the bytes, as a real tool call is), a second `Write`
+     that is announced and then *fails* with nothing written, a permission
      prompt, a fixed `PlanArtifact` — through the *same* factory and `SessionBridge` seams the
      real SDK plugs into. Nothing else changes: the session state machine, both
      WebSocket fan-outs and every typed frame stay production code. This is what lets
@@ -302,5 +321,7 @@ Format spec: `docs/shortcuts.md`.
    ConPTY, QuickBar/shortcuts (including the never-executed rule), chat streaming and
    tool settling, plan cards, status chips and the attention badge, office degraded
    mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
-   and links back to its session). Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
+   and links back to its session — *and* the negative half: an announced-but-failed
+   write followed by the user's own change, and the user's own saves, mark nothing).
+   Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.

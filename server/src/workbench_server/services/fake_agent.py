@@ -27,6 +27,11 @@ What one user message produces, in order:
   note first, *then* the bytes hit disk, exactly as a real tool call orders
   them, so the provenance correlator sees the claim before the watcher event
   it has to explain;
+* ``refuse write``   — the same ``Write`` announcement for a *different* path,
+  settled as a tool **error** with nothing written. The shape of a denied
+  permission card or an ``Edit`` whose old string was not found: a claim exists
+  for a write that never happened, and whatever changes that path next must
+  still come back unattributed;
 * ``ask permission`` — a permission prompt through the bridge, then the
   outcome echoed as text;
 * ``plan please``    — a fixed :class:`PlanArtifact` through the bridge, then
@@ -62,6 +67,7 @@ log = structlog.get_logger()
 BUSY_TRIGGER = "stay busy"
 TOOL_TRIGGER = "use tool"
 WRITE_TRIGGER = "write file"
+REFUSED_WRITE_TRIGGER = "refuse write"
 PERMISSION_TRIGGER = "ask permission"
 PLAN_TRIGGER = "plan please"
 
@@ -89,6 +95,13 @@ WRITE_TARGET_NAME = "written-by-agent.md"
 #: What the scripted ``Write`` puts in that file. Changes on every call so a
 #: second write is a real change on disk, not a no-op the watcher never reports.
 WRITE_BODY = "# Written by the fake agent\n\nRevision {revision}.\n"
+
+#: Path the *refused* ``Write`` names and never creates. Must sort after the
+#: file a fake ``Read`` picks, for the same reason ``WRITE_TARGET_NAME`` does.
+REFUSED_WRITE_TARGET_NAME = "refused-by-agent.md"
+
+#: What that refused call comes back with — an error result, no bytes on disk.
+REFUSED_WRITE_ERROR = "String to replace not found in file"
 
 
 # ---- SDK-shaped messages ----------------------------------------------------
@@ -266,6 +279,14 @@ class FakeAgentClient:
             )
             result, failed = self._write_a_file()
             yield UserMessage([ToolResultBlock(call_id, result, is_error=failed)])
+        if REFUSED_WRITE_TRIGGER in lowered:
+            # Announced exactly like the real thing, settled as an error, and
+            # nothing touches disk: the claim must not survive its own failure.
+            call_id = f"fake-tool-{uuid.uuid4().hex[:8]}"
+            yield AssistantMessage(
+                [ToolUseBlock("Write", {"file_path": REFUSED_WRITE_TARGET_NAME}, call_id)]
+            )
+            yield UserMessage([ToolResultBlock(call_id, REFUSED_WRITE_ERROR, is_error=True)])
         if PERMISSION_TRIGGER in lowered:
             allowed = await self._bridge.ask_permission("Bash", {"command": PERMISSION_COMMAND})
             yield _delta(f"\n\npermission: {'allowed' if allowed else 'denied'}\n")

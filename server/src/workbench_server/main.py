@@ -83,6 +83,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jwt_secret=settings.onlyoffice_jwt_secret,
         public_base_url=settings.resolved_public_base_url(),
         backup_originals=settings.office_backup,
+        # A Document Server save is the user typing, flushed — the correlator
+        # has to hear about it or an open agent claim would take the credit.
+        provenance=provenance_service,
     )
 
     @asynccontextmanager

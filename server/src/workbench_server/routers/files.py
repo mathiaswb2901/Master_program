@@ -72,6 +72,9 @@ def create(request: Request, body: CreateRequest) -> OkResponse:
         raise HTTPException(400, "path escapes workspace") from e
     except FileExistsError as e:
         raise HTTPException(409, "already exists") from e
+    # Same reason as `write`: this is the user's doing, and the `added` event it
+    # produces must not land on an agent claim for that path.
+    _provenance(request).note_user_write(body.path)
     return OkResponse()
 
 
@@ -85,6 +88,9 @@ def rename(request: Request, body: RenameRequest) -> OkResponse:
         raise HTTPException(404, "file not found") from e
     except FileExistsError as e:
         raise HTTPException(409, "target already exists") from e
+    # The new path appears as an `added` event; renaming onto a name an agent
+    # had just claimed would otherwise be credited to it.
+    _provenance(request).note_user_write(body.new_path)
     return OkResponse()
 
 

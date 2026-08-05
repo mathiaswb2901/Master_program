@@ -61,8 +61,16 @@ function EditorTab({ file, active }: { file: OpenFile; active: boolean }) {
  * One line above the buffer for a file an agent changed: who, with what tool,
  * how long ago — and a link back to that exact conversation, which is the other
  * half of the loop the chat's file links start (a tool row opens the file; this
- * opens the session). Shown while the attribution stands and the user has not
- * closed it; Dismiss also acknowledges, which is what clears the tree marker.
+ * opens the session).
+ *
+ * Deliberately *not* gated on `acknowledged`, unlike the two dots. The dots
+ * mean "you have not looked at this yet" and opening the file answers them; the
+ * bar answers a different question — "who wrote what I am reading?" — which
+ * stays worth answering every time the file is opened, and is the only place
+ * the link back to that conversation lives. It ends by itself when the claim
+ * does: any later change from anywhere else clears the entry and the bar with
+ * it. Dismiss closes it for good (persisted, see the store), for a file the
+ * user has decided about. Documented in DESIGN.md §6.1.
  */
 function ProvenanceBar({ path }: { path: string }) {
   const entry = useStore((s) => s.provenance[path]);

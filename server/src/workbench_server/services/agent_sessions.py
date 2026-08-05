@@ -79,13 +79,19 @@ class SessionBridge(Protocol):
 
 
 class ToolUseObserver(Protocol):
-    """Told about every tool call, synchronously, as it is announced.
+    """Told about every tool call, synchronously, through its whole life.
 
     The provenance correlator is the only implementor: it needs the *path* a
     write tool named, which the ``ToolUseNote`` frame deliberately does not
     carry (that frame is a chat row, not a machine-readable claim). A direct
     call rather than a bus event because this is an internal signal — every
     payload on ``/ws/events`` is something a client must act on.
+
+    Announcement alone is not enough. A tool is announced *before* it runs, so
+    the observer also has to hear how it ended: a declined permission card or an
+    error result means nothing was written, and a claim left standing for a
+    write that never happened would be credited with whatever changed that path
+    next — usually the user's own edit.
     """
 
     def note_tool_use(
@@ -93,6 +99,18 @@ class ToolUseObserver(Protocol):
         *,
         session_id: str,
         session_title: str,
+        folder: Path,
+        tool: str,
+        tool_input: dict[str, Any],
+        call_id: str | None = None,
+    ) -> None: ...
+
+    def note_tool_result(self, *, call_id: str, ok: bool) -> None: ...
+
+    def note_tool_denied(
+        self,
+        *,
+        session_id: str,
         folder: Path,
         tool: str,
         tool_input: dict[str, Any],
@@ -238,14 +256,22 @@ class AgentSession:
         self._set_state("needs_attention")
         self._emit(request)
         try:
-            return await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
+            allowed = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
         except TimeoutError:
             log.info("agent.permission_timed_out", session=self.local_id, request=request_id)
-            return False
+            allowed = False
         finally:
             self._pending_permissions.pop(request_id, None)
             self._pending_permission_events.pop(request_id, None)
             self._restore_state_after_prompt()
+        if not allowed and self._tool_observer is not None:
+            # The tool will not run, so the claim its announcement made is not
+            # true. Withdraw it now: a user who just refused a write is exactly
+            # the person about to make that change themselves.
+            self._tool_observer.note_tool_denied(
+                session_id=self.local_id, folder=self.folder, tool=tool, tool_input=tool_input
+            )
+        return allowed
 
     def resolve_permission(self, request_id: str, allow: bool) -> None:
         fut = self._pending_permissions.get(request_id)
@@ -409,6 +435,7 @@ class AgentSession:
                             folder=self.folder,
                             tool=tool,
                             tool_input=tool_input,
+                            call_id=call_id,
                         )
         elif kind == "UserMessage":
             # Tool results arrive as a synthetic user turn (SDK naming — not a
@@ -419,13 +446,18 @@ class AgentSession:
                 raw_id = getattr(block, "tool_use_id", None)
                 if not isinstance(raw_id, str) or not raw_id:
                     continue
+                ok = not bool(getattr(block, "is_error", False))
                 self._emit(
                     ToolSettled(
                         id=raw_id,
-                        ok=not bool(getattr(block, "is_error", False)),
+                        ok=ok,
                         output_excerpt=_result_excerpt(getattr(block, "content", None)),
                     )
                 )
+                # A failed tool wrote nothing; the correlator drops its claim so
+                # it cannot be credited with the next change to that path.
+                if self._tool_observer is not None:
+                    self._tool_observer.note_tool_result(call_id=raw_id, ok=ok)
         elif kind == "ResultMessage":
             sdk_id = getattr(message, "session_id", None)
             if isinstance(sdk_id, str):

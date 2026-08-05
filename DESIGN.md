@@ -245,6 +245,11 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
   right as 24px ghost/outline buttons; a link inside the sentence is `--accent` text
   (§2.4), never a filled control. A tab whose file an agent changed carries the same 6px `--agent-done` dot
   as the tree row until the tab is brought forward.
+- The provenance bar is **not** an unread marker and does not clear on open — the two
+  dots do that. It answers "who wrote what I am reading", so it stands for as long as
+  the attribution does (any later change from anywhere else retracts it) and it carries
+  the only link back to that conversation. **Dismiss** ends it for that file, and the
+  dismissal persists across reloads: one line, one click, once.
 
 ### 6.2 File tree rows
 - Row height **26px**, full-row hit target, 12px/400 text, indent 16px/level.

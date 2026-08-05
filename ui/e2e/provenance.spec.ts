@@ -6,22 +6,41 @@
  * the user-visible end of that:
  *  - the tree marks the file, naming the session in its accessible name;
  *  - opening the file raises the bar that says who changed it, with what, when;
- *  - opening it is also the acknowledgment — the tree marker clears;
+ *  - opening is the acknowledgment — the dots clear, the bar stays (it answers
+ *    "who wrote this", not "have you looked": DESIGN.md §6.1);
  *  - the bar's link opens that exact conversation in the Agent panel (the loop
  *    the chat's file links start, closed from the other side);
- *  - Dismiss puts the bar away.
+ *  - Dismiss puts the bar away, and a reload leaves it away.
+ *
+ * And the half a badge is worthless without — the changes that are *not* the
+ * agent's. A wrong attribution is worse than none, so the journey also drives
+ * the two ways the app is told "this one was not them": a `Write` the agent
+ * announced and never completed, followed by the user making that exact change
+ * outside the app; and the user's own editor save, both of a fresh file and of
+ * the very file the agent had written. None of those may mark anything — and
+ * each of them would, against an implementation that simply credited the most
+ * recently active session.
  */
 
 import { expect, test } from "@playwright/test";
 
-import { newSession, openApp, sendChat } from "./app";
-import { readWorkspaceFile } from "./workspace";
+import { newSession, openApp, sendChat, treeMenu, typeInEditor, workspaceReady } from "./app";
+import { readWorkspaceFile, writeWorkspaceFile } from "./workspace";
 
 /** Must match `WRITE_TARGET_NAME` in services/fake_agent.py. */
 const WRITTEN = "written-by-agent.md";
+/** Must match `REFUSED_WRITE_TARGET_NAME`: announced, never written. */
+const REFUSED = "refused-by-agent.md";
+/** A file only the user ever touches. */
+const USER_FILE = "src/user-typed.md";
+
 const SESSION_PROMPT = "write file please and note the provenance";
 /** A second conversation, so the link has somewhere to come back from. */
 const OTHER_PROMPT = "an unrelated second conversation";
+const REFUSED_PROMPT = "refuse write and leave the file alone";
+/** A second real write, in the same conversation — distinct text, because
+ * `sendChat` locates the turn it just sent by its own words. */
+const SECOND_WRITE_PROMPT = "write file once more, please";
 
 test("an agent's file change is attributed, reviewable and acknowledged", async ({ page }) => {
   await openApp(page);
@@ -55,9 +74,13 @@ test("an agent's file change is attributed, reviewable and acknowledged", async 
     await expect(bar).toContainText("just now");
   });
 
-  await test.step("opening it is the acknowledgment: the marker clears", async () => {
+  await test.step("opening acknowledges: the dots clear, the bar stays", async () => {
     await expect(marked.getByRole("img")).toHaveCount(0);
     await expect(page.locator(".wb-tree-agent-dot")).toHaveCount(0);
+    await expect(page.locator(".wb-tab-agent-dot")).toHaveCount(0);
+    // The bar is not an unread marker: it answers "who wrote what I am reading"
+    // and carries the only link back to that conversation (DESIGN.md §6.1).
+    await expect(page.locator(".wb-provenance-bar")).toBeVisible();
   });
 
   await test.step("the bar links back to the exact session that changed it", async () => {
@@ -76,8 +99,62 @@ test("an agent's file change is attributed, reviewable and acknowledged", async 
     await expect(other).toHaveCount(0);
   });
 
-  await test.step("dismiss puts the bar away", async () => {
-    await page.locator(".wb-provenance-bar").getByRole("button", { name: "Dismiss" }).click();
+  await test.step("a write the agent announced but never made is not attributed", async () => {
+    // The agent says it will write this path and comes back with an error —
+    // a declined permission card, or an Edit whose old string was not found.
+    await sendChat(page, REFUSED_PROMPT);
+    await expect(
+      page.locator(".wb-tool-row.is-failed").filter({ hasText: REFUSED }),
+    ).toBeVisible();
+
+    // Now the user makes that change themselves, from outside the app and well
+    // inside the correlator's window: another editor, or `git checkout`.
+    writeWorkspaceFile(REFUSED, "# the user wrote this, not the agent\n");
+
+    const refused = page.getByRole("treeitem", { name: new RegExp(REFUSED) });
+    await expect(refused).toBeVisible();
+    await expect(refused.getByRole("img")).toHaveCount(0);
+    await refused.click();
+    await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
+    await expect(page.locator(".wb-tree-agent-dot")).toHaveCount(0);
+  });
+
+  await test.step("a file the user makes and saves is never marked", async () => {
+    await treeMenu(page, "src", "New file…");
+    const nameInput = page.getByRole("textbox", { name: "New file name" });
+    await nameInput.fill("user-typed.md");
+    await nameInput.press("Enter");
+    await typeInEditor(page, "the user typed this");
+    await page.keyboard.press("Control+s");
+    await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(0);
+    await expect.poll(() => readWorkspaceFile(USER_FILE)).toContain("the user typed this");
+
+    await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
+    await expect(page.locator(".wb-tree-agent-dot")).toHaveCount(0);
+  });
+
+  await test.step("the user's own save takes back a file the agent had written", async () => {
+    await marked.click();
+    await expect(page.locator(".wb-provenance-bar")).toBeVisible();
+    await typeInEditor(page, "and then the user edited it\n");
+    await page.keyboard.press("Control+s");
+    // The claim is retracted, not merely acknowledged: the bar goes with it.
+    await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
+    await expect(page.locator(".wb-tree-agent-dot")).toHaveCount(0);
+  });
+
+  await test.step("a fresh agent change raises it again, and Dismiss ends it for good", async () => {
+    await sendChat(page, SECOND_WRITE_PROMPT);
+    const bar = page.locator(".wb-provenance-bar");
+    await expect(bar).toBeVisible();
+    await bar.getByRole("button", { name: "Dismiss" }).click();
+    await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
+
+    // Dismissal is a decision about that file, not about this page load.
+    await page.reload();
+    await workspaceReady(page);
+    await page.getByRole("treeitem", { name: new RegExp(WRITTEN) }).click();
+    await expect(page.locator(".wb-editor-tab").filter({ hasText: WRITTEN })).toBeVisible();
     await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
   });
 });

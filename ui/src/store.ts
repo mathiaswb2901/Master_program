@@ -5,6 +5,7 @@ import { create } from "zustand";
 import * as api from "./api";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { isOfficePath, preloadDocsApi } from "./office";
+import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
 import { cancelShellClose, closeShellWindow } from "./shell";
 import { promptInsertText, shellInsertText } from "./shortcuts";
 import { terminalHandle } from "./terminalInput";
@@ -176,8 +177,9 @@ interface WorkbenchStore {
    * only ever exist for attributed changes: the server sends a null-agent entry
    * to say "drop this path", never to say "someone unknown did it". */
   provenance: Record<string, ProvenanceEntry>;
-  /** Paths whose file bar the user closed. Local to this window, and cleared by
-   * the next agent change to that path so a later edit raises the bar again. */
+  /** Paths whose file bar the user closed. Persisted across reloads, and
+   * cleared by the next agent change to that path so a later edit raises the
+   * bar again. */
   provenanceDismissed: Record<string, boolean>;
 
   init: () => void;
@@ -285,6 +287,41 @@ function without(record: Record<string, boolean>, key: string): Record<string, b
   return next;
 }
 
+/** Paths whose provenance bar the user closed. Persisted (as a path array)
+ * because the bar stands for as long as the attribution does: a dismissal that
+ * a reload undid would put the line back above a buffer the user had already
+ * decided about. Pruned against the live map on every refresh, so it cannot
+ * grow past the server's own bounded set of attributed paths. */
+const PROVENANCE_DISMISSED_KEY = "workbench-provenance-dismissed";
+
+function loadDismissed(): Record<string, boolean> {
+  const dismissed: Record<string, boolean> = {};
+  try {
+    const raw = localStorage.getItem(PROVENANCE_DISMISSED_KEY);
+    if (raw === null) return dismissed;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return dismissed;
+    for (const path of parsed) if (typeof path === "string") dismissed[path] = true;
+  } catch {
+    // unreadable or unavailable storage — start with nothing dismissed
+  }
+  return dismissed;
+}
+
+function persistDismissed(dismissed: Record<string, boolean>): void {
+  try {
+    const paths = Object.keys(dismissed).filter((path) => dismissed[path] === true);
+    localStorage.setItem(PROVENANCE_DISMISSED_KEY, JSON.stringify(paths));
+  } catch {
+    // storage unavailable — dismissal just won't survive a reload
+  }
+}
+
+/** Paths a `file_provenance` frame touched while a `GET /api/provenance` was in
+ * flight. Non-null only for the duration of that request (see
+ * `applyProvenanceSnapshot` for why the snapshot must not clobber them). */
+let provenanceInFlight: Set<string> | null = null;
+
 function errorDetail(err: unknown): string {
   if (err instanceof api.ApiError) return err.detail;
   if (err instanceof Error) return err.message;
@@ -357,7 +394,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     shortcuts: [],
     shortcutProblems: [],
     provenance: {},
-    provenanceDismissed: {},
+    provenanceDismissed: loadDismissed(),
 
     init: () => {
       if (initialized) return;
@@ -788,22 +825,39 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     },
 
     refreshProvenance: async () => {
+      // Frames that arrive before the response does describe a *later* state
+      // than it carries, so they are recorded here and re-applied on top.
+      const touched = new Set<string>();
+      provenanceInFlight = touched;
       try {
         const map = await api.getProvenance();
-        const provenance: Record<string, ProvenanceEntry> = {};
-        for (const entry of map.entries) provenance[entry.path] = entry;
-        set({ provenance });
+        // A later refresh started while this one was out (two reconnects in
+        // quick succession): its snapshot is the fresher one, so drop this
+        // response whole rather than let it overwrite what that one applies.
+        if (provenanceInFlight !== touched) return;
+        set((s) => ({
+          provenance: applyProvenanceSnapshot(map.entries, s.provenance, touched),
+          // A dismissal for a path nobody attributes any more (a server restart
+          // forgets the whole map) is dead weight — drop it here rather than
+          // let the persisted set outlive what it describes.
+          provenanceDismissed: prunedDismissed(s.provenanceDismissed, map.entries),
+        }));
+        persistDismissed(get().provenanceDismissed);
       } catch (err) {
         console.error("provenance refresh failed", err);
+      } finally {
+        if (provenanceInFlight === touched) provenanceInFlight = null;
       }
     },
 
     handleFileProvenance: (event) => {
       const entry = event.entry;
+      provenanceInFlight?.add(entry.path);
+      const before = get().provenanceDismissed;
       set((s) => {
         if (entry.agent === null) {
-          // The user (or something outside Workbench) wrote this path: the
-          // agent claim is no longer true, so it goes — never lingers.
+          // The user (or something outside Workbench) wrote this path — or the
+          // server evicted it: the agent claim is no longer true, so it goes.
           if (s.provenance[entry.path] === undefined) return {};
           const provenance = { ...s.provenance };
           delete provenance[entry.path];
@@ -818,6 +872,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
             : without(s.provenanceDismissed, entry.path),
         };
       });
+      const after = get().provenanceDismissed;
+      if (after !== before) persistDismissed(after);
     },
 
     acknowledgeProvenance: (path) => {
@@ -836,6 +892,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
     dismissProvenance: (path) => {
       set((s) => ({ provenanceDismissed: { ...s.provenanceDismissed, [path]: true } }));
+      persistDismissed(get().provenanceDismissed);
       get().acknowledgeProvenance(path);
     },
 
