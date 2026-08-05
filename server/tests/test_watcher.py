@@ -43,7 +43,7 @@ def test_external_edit_is_observed(settings: Settings, tmp_path: Path) -> None:
 
 
 @pytest.mark.timeout(60)
-def test_build_cache_written_while_watching_produces_no_events(
+def test_build_cache_written_while_watching_produces_no_file_events(
     settings: Settings, tmp_path: Path
 ) -> None:
     """A cargo build starting under a running server: churn stops at the tag.
@@ -51,6 +51,14 @@ def test_build_cache_written_while_watching_produces_no_events(
     The directory does not exist when the watcher starts, so this is the case
     the ignore memo has to be told about — the tag arrives after the events it
     governs, sometimes inside the same debounce window.
+
+    Two kinds of frame are legitimate before the sentinel and are skipped here:
+    the ordinary folders on the way down (`desktop`, `desktop/src-tauri` are
+    real directories a user sees), and the `tree_invalidated` notice the tag
+    itself raises — the signal that tells a client with an incrementally patched
+    tree to re-read what it is showing. Nothing from *inside* the cache may
+    appear, and the watcher preserves order, so an artifact that slipped past
+    would arrive before the sentinel.
     """
     app = create_app(settings)
     with TestClient(app) as client, client.websocket_connect("/ws/events") as ws:
@@ -59,12 +67,22 @@ def test_build_cache_written_while_watching_produces_no_events(
         (build / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
         for i in range(20):
             (build / "debug" / "build" / f"artifact{i}.rlib").write_bytes(b"\x00" * 64)
-        # Written last, and the only event allowed through: an artifact that
-        # slipped past would arrive before it, since the watcher preserves order.
+        # Written last: the sentinel that says every earlier event has been seen.
         (tmp_path / "model.py").write_bytes(b"VERSION = 3\n")
 
-        event = json.loads(ws.receive_text())
-        assert event["path"] == "model.py"
+        seen: list[dict[str, object]] = []
+        while True:
+            event = json.loads(ws.receive_text())
+            if event.get("path") == "model.py":
+                break
+            seen.append(event)
+
+        assert [e for e in seen if e["type"] == "tree_invalidated"], "the tag was never announced"
+        for event in seen:
+            if event["type"] != "file_changed":
+                continue
+            assert event["is_dir"] is True, f"a file inside the cache surfaced: {event}"
+            assert event["path"] in ("desktop", "desktop/src-tauri"), event
 
 
 @pytest.mark.timeout(60)

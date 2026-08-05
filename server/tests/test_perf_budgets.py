@@ -157,16 +157,40 @@ class TestBudgets:
         assert resp.status_code == 200
         assert counter.count <= 1, f"listed {counter.listings}"
 
-    async def test_file_tree_walks_the_workspace_exactly_once(
+    async def test_the_file_tree_lists_one_directory_per_request(
         self, perf_client: AsyncClient, perf_workspace: Fixture
     ) -> None:
-        """`GET /api/files/tree` is allowed one walk — and only one.
+        """`GET /api/files/dir` is one directory. Always one, whatever is in it.
 
-        Measured today: **16 listings, 359 ms, 471 KB of JSON** for one request;
-        one listing per visible directory is exactly one full walk. A second walk
-        slipping in (a caller asking for the tree to answer a smaller question,
-        which is precisely what the sessions endpoint used to do) doubles this
-        number and fails here, with the count naming what went wrong.
+        This is the lazy-tree budget. Before it, the tree came from
+        `GET /api/files/tree`: **16 listings, 359 ms and 471 KB of JSON** on
+        every request, to render the ten rows a user can see. Now the root costs
+        one listing, and so does the 2,000-file directory — the count does not
+        move with the size of the workspace, which is the property being bought.
+
+        The `flat` case is the one that matters: 2,000 entries, and still not a
+        single listing of anything below them.
+        """
+        await perf_client.get("/api/files/dir")  # warm the OS directory cache
+
+        for path, expected_entries in (("", 6), ("flat", 2_000)):
+            with DirListingCounter(perf_workspace.root) as counter:
+                resp = await perf_client.get("/api/files/dir", params={"path": path})
+
+            assert resp.status_code == 200
+            assert len(resp.json()["entries"]) == expected_entries
+            assert counter.count == 1, f"listing {path!r} listed {counter.listings}"
+
+    async def test_the_search_index_still_walks_the_workspace_exactly_once(
+        self, perf_client: AsyncClient, perf_workspace: Fixture
+    ) -> None:
+        """`GET /api/files/tree` is the QuickBar's index, and is allowed one walk.
+
+        Nothing renders from it any more and the UI fetches it on demand, but it
+        is still a full walk when it is asked for: **16 listings, 359 ms, 471 KB**
+        — one listing per visible directory, exactly once. A second walk slipping
+        in (a caller asking for the whole tree to answer a smaller question, which
+        is what the sessions endpoint used to do) doubles this and fails here.
         """
         await perf_client.get("/api/files/tree")  # warm
 
@@ -176,33 +200,39 @@ class TestBudgets:
         assert resp.status_code == 200
         assert counter.count == perf_workspace.visible_dirs, f"listed {counter.listings}"
 
-    async def test_neither_endpoint_descends_into_a_tagged_build_cache(
+    async def test_no_endpoint_descends_into_a_tagged_build_cache(
         self, perf_client: AsyncClient, perf_workspace: Fixture
     ) -> None:
         """The ignore rules are part of the budget, not separate from it.
 
         A build cache is where the file counts that make a workspace slow
         actually come from, so a "one directory" claim is only worth something
-        if that directory's tagged children are still skipped — by both callers,
-        through the same rule (`services/ignore.py`).
+        if that directory's tagged children are still skipped — by all three
+        callers, through the same rule (`services/ignore.py`). The tagged
+        directory must not even be *offered* as a row: a user who clicks it
+        would get the listing this budget says nobody takes.
         """
         with DirListingCounter(perf_workspace.root) as counter:
+            root = await perf_client.get("/api/files/dir")
             await perf_client.get("/api/files/tree")
             await perf_client.get("/api/agents/sessions")
 
         cache = perf_workspace.root / CACHE_DIR
         assert not [p for p in counter.listings if p == cache or cache in p.parents]
+        assert CACHE_DIR not in [e["name"] for e in root.json()["entries"]]
 
-    async def test_session_list_still_names_the_top_level_folders(
+    async def test_the_three_first_level_readers_agree_on_what_exists(
         self, perf_client: AsyncClient, perf_workspace: Fixture
     ) -> None:
-        """The cheap path must return the same folders the expensive one did.
+        """The folder list, the tree panel's root and the walk name the same
+        folders in the same order.
 
         Nothing is grouped under them in a fresh workspace (no transcripts on
-        disk), so the endpoint's own output cannot show it — this asserts the
-        service method the router now calls, against the tree the user sees.
+        disk), so the sessions endpoint's own output cannot show it — this
+        asserts the service methods the routers call, against each other.
         """
         workspace = Workspace(perf_workspace.root)
         walked = [n.path for n in (workspace.tree().children or []) if n.kind == "dir"]
-        assert workspace.top_level_dirs() == walked
+        listed = [e.path for e in workspace.list_dir("").entries if e.kind == "dir"]
+        assert workspace.top_level_dirs() == walked == listed
         assert (await perf_client.get("/api/agents/sessions")).status_code == 200

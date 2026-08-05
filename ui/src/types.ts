@@ -5,6 +5,12 @@
 
 // ---- files.py ---------------------------------------------------------------
 
+/**
+ * The whole workspace in one payload — the *search index*, not the file tree.
+ * `GET /api/files/tree` is a full recursive walk, so it is fetched on demand
+ * (the QuickBar's fuzzy search, the chat's tool-row file links) and never from
+ * a watcher event. The tree panel reads `DirListing`, one level at a time.
+ */
 export interface TreeNode {
   name: string;
   /** Workspace-relative, forward slashes; "" = root. */
@@ -12,6 +18,33 @@ export interface TreeNode {
   kind: "file" | "dir";
   /** null for files, list (possibly empty) for dirs. */
   children: TreeNode[] | null;
+}
+
+/** One visible child of one directory. Childless by design: what is inside a
+ * directory is a separate question, asked when it is expanded. */
+export interface DirEntry {
+  name: string;
+  /** Workspace-relative, forward slashes. */
+  path: string;
+  kind: "file" | "dir";
+}
+
+/** `GET /api/files/dir?path=` — exactly one directory listing, never a walk.
+ * Directories first, then files, each by lowercased name. */
+export interface DirListing {
+  /** "" = workspace root. */
+  path: string;
+  /** The directory's own name; the workspace folder's at the root. */
+  name: string;
+  entries: DirEntry[];
+}
+
+/** Every loaded listing is suspect — re-list what is expanded. Published when
+ * the visibility rules moved (a `CACHEDIR.TAG` appeared or went), which no
+ * per-file event can describe. */
+export interface TreeInvalidatedEvent {
+  type: "tree_invalidated";
+  reason: "ignore_rules";
 }
 
 export interface FileContent {
@@ -47,18 +80,24 @@ export interface OkResponse {
   ok: true;
 }
 
+/** Directories appear here only when added or deleted — the two changes the
+ * tree has a row for. */
 export interface FileChangedEvent {
   type: "file_changed";
   path: string;
   change: "added" | "modified" | "deleted";
-  /** null for deletions and unreadable/binary-too-large files. */
+  /** null for deletions, directories, and unreadable/binary-too-large files. */
   hash: string | null;
+  /** The path was a directory when the change was observed. False for a
+   * deletion, which cannot know — the row goes by path either way. */
+  is_dir: boolean;
   origin: "watcher";
 }
 
 /** Everything that arrives on /ws/events (see also SessionStatusEvent below). */
 export type WorkspaceEvent =
   | FileChangedEvent
+  | TreeInvalidatedEvent
   | SessionStatusEvent
   | ShortcutsChangedEvent
   | FileProvenanceEvent
