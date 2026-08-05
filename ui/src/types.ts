@@ -62,7 +62,8 @@ export type WorkspaceEvent =
   | SessionStatusEvent
   | ShortcutsChangedEvent
   | FileProvenanceEvent
-  | OfficeHostEvent;
+  | OfficeHostEvent
+  | UsageEvent;
 
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
@@ -101,6 +102,79 @@ export interface ProvenanceMap {
 
 export interface AcknowledgeRequest {
   path: string;
+}
+
+// ---- usage.py ---------------------------------------------------------------
+// Claude plan limits, as far as the Agent SDK reports them. Every field here is
+// one the SDK's `RateLimitInfo` actually has; nothing is derived from a trend.
+// The figures only arrive on a live session's stream, so a snapshot is stale
+// until you talk to an agent — hence `observed_at` on every bucket and `age_s`
+// on the snapshot, and `buckets: []` as the honest "never emitted" state.
+
+/** The SDK's five `RateLimitType` values, plus ours for an event that named no
+ * window (`rate_limit_type: null`, which the SDK's own type allows). */
+export type UsageBucketKind =
+  | "five_hour"
+  | "seven_day"
+  | "seven_day_opus"
+  | "seven_day_sonnet"
+  | "overage"
+  | "unspecified";
+
+/** `allowed_warning` = approaching the limit; `rejected` = already refused. */
+export type UsageStatus = "allowed" | "allowed_warning" | "rejected";
+
+export interface UsageBucket {
+  kind: UsageBucketKind;
+  status: UsageStatus;
+  /** 0..1, or null when the event carried none — never render null as zero. */
+  utilization: number | null;
+  /** Unix seconds, or null. */
+  resets_at: number | null;
+  /** Unix seconds this bucket last arrived. Per bucket: windows transition
+   * independently, so one figure can be far older than another. */
+  observed_at: number;
+}
+
+export interface UsageOverage {
+  status: UsageStatus;
+  resets_at: number | null;
+  disabled_reason: string | null;
+  observed_at: number;
+}
+
+export interface UsageModelCost {
+  model: string;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** This server's own spend — the degraded view. NOT plan usage. */
+export interface UsageSessionCost {
+  turns: number;
+  total_cost_usd: number;
+  last_turn_cost_usd: number | null;
+  models: UsageModelCost[];
+  observed_at: number | null;
+}
+
+/** GET /api/usage. In-memory server-side: a restart returns it empty. */
+export interface UsageSnapshot {
+  /** Fixed presentation order, not arrival order. Empty = never emitted. */
+  buckets: UsageBucket[];
+  overage: UsageOverage | null;
+  observed_at: number | null;
+  /** Seconds since `observed_at`, measured on the server so the age does not
+   * depend on the browser's clock agreeing with it. */
+  age_s: number | null;
+  session_cost: UsageSessionCost;
+}
+
+/** Broadcast on /ws/events whenever the snapshot changes. */
+export interface UsageEvent {
+  type: "usage";
+  snapshot: UsageSnapshot;
 }
 
 // ---- shortcuts.py -----------------------------------------------------------

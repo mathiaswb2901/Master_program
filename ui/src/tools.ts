@@ -21,6 +21,7 @@ import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
+import { usageTool } from "./panels/UsagePanel";
 
 export const TOOLS: readonly WorkbenchTool[] = [
   filesTool,
@@ -34,6 +35,7 @@ export const TOOLS: readonly WorkbenchTool[] = [
   officeHostTool,
   officeTool,
   scratchpadTool,
+  usageTool,
   // Contributes no panel — it arranges the ones above. Last, so its status chip
   // sits at the outer edge of the bar and its QuickBar section reads as the
   // window's own section rather than one capability's.

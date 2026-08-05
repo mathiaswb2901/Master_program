@@ -117,6 +117,25 @@ class ToolUseObserver(Protocol):
     ) -> None: ...
 
 
+class UsageObserver(Protocol):
+    """Told what the SDK says about the account's limits, and what a turn cost.
+
+    Two signals from the same stream, and both belong to the *account* rather
+    than to this session — which is why they leave the session immediately
+    instead of becoming frames on ``/ws/agent/{id}``. The service fans the
+    resulting snapshot out on the shared bus, so every window sees the figure a
+    turn in any one session produced.
+
+    A direct call rather than a bus event for the same reason
+    :class:`ToolUseObserver` is one: this is an internal hand-off of raw SDK
+    values, not a payload a client acts on.
+    """
+
+    def note_rate_limit(self, info: Any) -> None: ...
+
+    def note_turn(self, *, cost_usd: float | None, model_usage: Any = None) -> None: ...
+
+
 ClientFactory = Callable[[Path, str | None, SessionBridge], SdkClient]
 
 
@@ -159,6 +178,7 @@ class AgentSession:
         resume_session_id: str | None = None,
         event_publisher: EventPublisher | None = None,
         tool_observer: ToolUseObserver | None = None,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
         self.local_id = local_id
         self.folder = folder
@@ -175,6 +195,7 @@ class AgentSession:
         self._factory = factory
         self._publisher = event_publisher
         self._tool_observer = tool_observer
+        self._usage_observer = usage_observer
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
@@ -458,16 +479,31 @@ class AgentSession:
                 # it cannot be credited with the next change to that path.
                 if self._tool_observer is not None:
                     self._tool_observer.note_tool_result(call_id=raw_id, ok=ok)
+        elif kind == "RateLimitEvent":
+            # The account's plan limits, as the CLI reports them when one of
+            # them *transitions*. Nothing about it belongs to this conversation,
+            # so it leaves here rather than becoming a frame on this session's
+            # socket; the usage service publishes the snapshot on the shared bus
+            # (services/usage.py).
+            if self._usage_observer is not None:
+                self._usage_observer.note_rate_limit(getattr(message, "rate_limit_info", None))
         elif kind == "ResultMessage":
             sdk_id = getattr(message, "session_id", None)
             if isinstance(sdk_id, str):
                 self.sdk_session_id = sdk_id
                 self.sdk_session_ids.add(sdk_id)
             cost = getattr(message, "total_cost_usd", None)
+            cost_usd = cost if isinstance(cost, int | float) else None
+            if self._usage_observer is not None:
+                # What the turn cost, and per model. The only usage figure an
+                # account that never emits a rate-limit event ever produces.
+                self._usage_observer.note_turn(
+                    cost_usd=cost_usd, model_usage=getattr(message, "model_usage", None)
+                )
             self._emit(
                 TurnDone(
                     session_id=self.local_id,
-                    cost_usd=cost if isinstance(cost, int | float) else None,
+                    cost_usd=cost_usd,
                     is_error=bool(getattr(message, "is_error", False)),
                 )
             )
@@ -544,6 +580,7 @@ class SessionManager:
         session_index: SessionIndex | None = None,
         event_publisher: EventPublisher | None = None,
         tool_observer: ToolUseObserver | None = None,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
         self._root = workspace_root
         self._factory = factory
@@ -551,6 +588,7 @@ class SessionManager:
         self._index = session_index
         self._publisher = event_publisher
         self._tool_observer = tool_observer
+        self._usage_observer = usage_observer
         self._sessions: dict[str, AgentSession] = {}
 
     @property
@@ -573,6 +611,7 @@ class SessionManager:
             resume_session_id=resume_session_id,
             event_publisher=self._publisher,
             tool_observer=self._tool_observer,
+            usage_observer=self._usage_observer,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.

@@ -513,36 +513,39 @@ because other sections and five running lanes reference these numbers.
     nor collides with the watcher-protocol rewrite in the Feel track. Exit criterion:
     four sessions working at once are legible from one pane, updating in place, with no
     measurable cost to the shared `/ws/events` socket under a Grep-heavy turn.
-11. **Native plan usage meters** (5-hour window, weekly per model) — the owner's ask to
-    see in the app what Claude Code shows in the terminal. **There is an honest source
-    and we checked before promising**: the installed `claude_agent_sdk` 0.2.129 defines
-    `RateLimitEvent`/`RateLimitInfo` with exactly the needed fields — `rate_limit_type`
-    (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `overage`),
-    `utilization` (0.0–1.0), `resets_at`, `status` (`allowed` / `allowed_warning` /
-    `rejected`) — and its parser already handles the frame. So this is a thin read, not
-    an integration: a fifth branch in `AgentSession._handle_sdk_message()` (which today
-    dispatches on four type names with no `else` and therefore **silently discards this
-    event**), a `UsageService` holding the last info per window, one Pydantic event on the
-    existing bus, `GET /api/usage` for load and reconnect, a fake frame in
-    `services/fake_agent.py` for E2E, and a no-panel registered tool contributing a status
-    chip plus an optional breakdown panel — the `Layouts.tsx` shape exactly. **Four
-    constraints that must be visible in the UI rather than papered over**, because a meter
-    that guesses is worse than no meter (the same discipline provenance committed to):
-    (1) there is **no query API** — no `claude usage` subcommand, `/usage` exists only as
-    an in-session slash command, and `~/.claude.json` caches no utilization; (2) it is
-    emitted on *transition* and only on a live session's message stream, so the meters are
-    **last known, labelled "as of HH:MM"** — a cold app or a fresh workspace reads "not
-    reported yet", never "0%"; (3) events arriving *between* turns are not read at all
-    today, so a between-turns read path is part of the work; (4) "weekly per model" is
-    only as granular as the SDK's three weekly types — we show exactly those and
-    **synthesize no per-model breakdown the source does not have**. If the CLI turns out
-    never to emit for an account, the surface degrades to what we can honestly show: the
-    per-turn `total_cost_usd` and `model_usage` already on `ResultMessage`, labelled as
-    session cost rather than plan usage — and it says so in the panel. Nothing leaves the
-    machine: this reads the local CLI's own frames, and the zero-telemetry stance holds.
-    Exit criterion: after one real turn the status chip shows a named window, its
-    utilization and its reset time; before any turn it shows "not reported yet" and
-    explains why.
+11. ~~**Native plan usage meters** (5-hour window, weekly per model)~~ **done** — the
+    owner's ask to see in the app what Claude Code shows in the terminal, and the four
+    constraints below are on screen rather than papered over. What landed:
+    `services/usage.py` + `models/usage.py` + `GET /api/usage`, captured at the SDK
+    seam (`AgentSession._handle_sdk_message` gained the `RateLimitEvent` branch it was
+    silently discarding), published as `UsageEvent` on the existing `/ws/events` bus,
+    and rendered by a registered tool (`ui/src/panels/UsagePanel.tsx` + `usage.ts`) —
+    a status-bar reading plus an on-demand panel of meters, one module and one line in
+    `tools.ts`. Nothing is persisted: live state about an *account* is not workspace
+    data, so a restart honestly reads "not reported yet".
+    **The plan's shape was wrong in one way and the code follows the source, not the
+    plan** (decisions log): `RateLimitEvent` carries a **single** `RateLimitInfo` — one
+    `rate_limit_type`, one `utilization` — so the windows arrive as *separate* events
+    and the snapshot is accumulated one window at a time. A window nobody has
+    transitioned in is **absent**, never zero.
+    The four constraints, each with a rendering: (1) **no query API** — confirmed
+    against the bundled CLI's own `--help` (no `usage` subcommand) — so there is no
+    refresh button, because none could work; (2) emitted on *transition*, on a live
+    session's stream, so every bucket carries `observed_at`, the snapshot carries a
+    server-measured `age_s`, each meter is stamped with its own age, and past 15
+    minutes the panel says the figures are old and why; (3) an account that never emits
+    gets a designed empty state that degrades to `total_cost_usd` + `model_usage` from
+    `ResultMessage`, labelled **"Session cost — not plan usage"** — and the status bar
+    shows *nothing* rather than a zero; (4) exactly the SDK's own weekly types, no
+    synthesized per-model breakdown, and a missing `utilization` renders as an em dash.
+    Nothing leaves the machine; the zero-telemetry stance holds.
+    **Deferred, and why:** the between-turns read path. The SDK buffers messages in its
+    own receive channel, so an event that fires between turns is delivered at the start
+    of the next turn rather than lost — which is caveat 2 doing its job. Draining that
+    channel from a background task would *steal* the next turn's messages, so a true
+    between-turns reader means restructuring `AgentSession` around a single reader loop
+    that dispatches to the current turn. That is its own PR, and until it lands the
+    figures update when you next talk to an agent — which the UI says plainly.
 12. **Session browser — every conversation, grouped by folder** (registers as a tool,
     plural: one browser can be scoped to a project while another watches everything). The
     Claude Code resume list, natively: folder groups → session rows (title, relative time,
@@ -825,6 +828,29 @@ without forking — the difference between a fixed app and an instrument.
   breakdown**. If it turns out an account never emits, the surface degrades to per-turn
   `total_cost_usd`/`model_usage` labelled as session cost — and says so. A meter that
   guesses is worse than no meter.
+
+- 2026-08-05 — **Plan usage: the SDK gives one window per event, and that shapes the
+  whole surface** (M5 item 9). The research pass described a usage event "carrying
+  five_hour, seven_day, per-model seven_day figures and any overage state". Read against
+  the installed SDK (claude-agent-sdk 0.2.129, bundled CLI 2.1.221), that is not the
+  shape: `RateLimitEvent` carries a **single** `RateLimitInfo` with one
+  `rate_limit_type` and one `utilization`, plus the `overage_*` fields riding along;
+  each window transitions — and is reported — on its own. So the snapshot is
+  *accumulated*, one window at a time, a window that has not transitioned is **absent**
+  rather than zero, and the per-model weeklies appear only if they arrive. Confirmed
+  with the rest of the research: there is no `usage` subcommand on the bundled CLI,
+  `/usage` is TUI-only, and nothing in the SDK reads current utilization — the
+  transition event is the entire supply.
+
+  **Consequence, taken as a product decision rather than a limitation to hide:** the
+  four caveats are rendered, not documented. Every figure is stamped with its own age
+  (server-measured, plus local elapsed — never a subtraction between two clocks); there
+  is no refresh button, because there is nothing to ask; the never-emitted account gets
+  a designed empty state that degrades to *session cost* under its own heading; and a
+  missing `utilization` renders as an em dash, because "not reported" and "0% used" are
+  different facts. The only judgement on our side is where a bar starts looking
+  alarming (75% / 90%), and it defers to the SDK's own `allowed_warning`/`rejected`
+  first. Nothing is persisted: live state about an account is not workspace data.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

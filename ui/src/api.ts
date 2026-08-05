@@ -26,6 +26,7 @@ import type {
   TranscriptResponse,
   TreeNode,
   UiState,
+  UsageSnapshot,
   WriteRequest,
   WriteResponse,
 } from "./types";
@@ -81,6 +82,8 @@ export const deleteEntry = (path: string): Promise<OkResponse> =>
 export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcuts");
 
 export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
+
+export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
 
