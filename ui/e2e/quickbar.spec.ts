@@ -26,7 +26,15 @@ import path from "node:path/posix";
 import { expect, test } from "@playwright/test";
 
 import type { FileContent, ShortcutsState } from "../src/types";
-import { gotoApp, runInTerminal, terminal, terminalText, treeItem, workspaceReady } from "./app";
+import {
+  expectTerminal,
+  gotoApp,
+  runInTerminal,
+  terminal,
+  terminalText,
+  treeItem,
+  workspaceReady,
+} from "./app";
 import {
   BROKEN_SHORTCUT_NAME,
   OWN_TARGET_FILE,
@@ -126,7 +134,7 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
       .locator(".wb-qb-row", { hasText: SHORTCUT_NAME })
       .first()
       .click();
-    await expect(terminal(page).locator(".xterm-rows")).toContainText(MARKER);
+    await expectTerminal(page, MARKER);
     // The line it sits on is the live prompt, not a finished command's output.
     const typed = await terminalText(page);
     expect(typed.slice(typed.lastIndexOf("PS "))).toContain(SHORTCUT_BODY);
@@ -140,7 +148,7 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
     await terminal(page).locator(".xterm-screen").click();
     await page.keyboard.press("Control+c");
     await runInTerminal(page, SYNC_COMMAND);
-    await expect(terminal(page).locator(".xterm-rows")).toContainText(SYNC_OUTPUT);
+    await expectTerminal(page, SYNC_OUTPUT);
 
     const text = await terminalText(page);
     const occurrences = text.split(MARKER).length - 1;
