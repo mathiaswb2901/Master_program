@@ -495,12 +495,33 @@ not exist, belonging to a process that did not exist. One new window can still
 belong to an old process — a single Word owns several frames — and reparenting
 one of those would take over the user's session.
 
-**Closing never kills first.** `close` saves the document, asks the application
-to quit, and waits. An instance that is gone-or-saved may then be killed through
-its job; one that will not close *and* could not be saved is deliberately let
-go — the job's kill flag is cleared before its handle closes — so the user keeps
-their unsaved work as an ordinary window on their desktop, and the host record
-carries `close_failed`.
+**And "new" is never allowed to be ambiguous.** A second, genuinely new instance
+can appear *during* a launch — the user double-clicks a `.docx` at the wrong
+second — and then two frames are new behind two pids that were not running
+before, so "the new one" no longer names a single window. Picking either is a
+coin toss whose losing side puts the user's own window in a Job Object with
+`KILL_ON_JOB_CLOSE`. So Excel is asked which frame it owns (`Application.Hwnd`,
+a correlation rather than an inference) and Word — which has no such property
+before a document is open — must produce exactly one new pid across two looks,
+or the launch fails with nothing contained. The self-check after `Documents.Open`
+carries the same rule the other way: a document that lands in a frame belonging
+to a *different* process proves the contained pid was never ours, and that job is
+released with its kill flag cleared instead of being terminated.
+
+**Closing never kills first, and never discards at all.** `close` saves the
+document, asks the application to quit, and waits; an instance that is
+gone-or-saved may then be killed through its job. A document whose save
+**failed** is never closed — `Close` here means `wdDoNotSaveChanges`, and the
+"keep your changes?" prompt that would normally stand in the way was silenced at
+launch, so closing would destroy the edit both certainly and invisibly. (Nor is
+letting Word prompt an option: that modal blocks the COM call with no timeout,
+which is the hang the whole apartment design is shaped around.) The save is
+retried, because the measured failures are transient; if it still will not
+write, the instance is deliberately let go — its own alerts turned back on, the
+job's kill flag cleared before the handle closes — so the user keeps their
+unsaved work as an ordinary window on their desktop. Same for one that will not
+close after a save that worked. Either way the host record carries
+`close_failed` and the sweep re-asks until the window is really gone.
 
 **Two owner decisions are encoded, not just documented** (2026-08-05).
 PowerPoint is **preview-only**: it is single-instance and exposes no

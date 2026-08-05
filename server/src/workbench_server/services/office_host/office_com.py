@@ -32,12 +32,30 @@ we host must be one that did not exist, belonging to a process that did not
 exist. One new window can still belong to an old process — the author's Word
 owns two frames — which is why both are checked.
 
-**Killing is never the first answer.** :func:`close` saves the document, asks
-the application to quit, and waits. Only an instance that is gone-or-saved is
-killed; one that will not close *and* could not be saved is deliberately let go
-— the job's kill flag is cleared before its handle closes — so the user keeps
-their unsaved work as an ordinary window on their desktop. That is the
-``close_failed`` path the service already models.
+**"New" is not the same as "ours", and ambiguity is refused rather than
+guessed.** A second, genuinely new instance can appear while a launch is in
+flight — the user double-clicks a ``.docx`` in Explorer at the wrong second —
+and then *two* frames are new, behind *two* pids that were not running before.
+Picking either would be a coin toss whose losing side puts the user's own window
+in a job object and, on the next failure, terminates it. So :func:`_identify`
+never picks from more than one candidate process: Excel is asked which frame it
+owns (``Application.Hwnd``), and Word — which has no such property before a
+document is open — must produce exactly one new pid across two looks or the
+launch fails with nothing contained. The later self-check has the same rule: a
+document that lands in a frame belonging to another process proves the contained
+pid was never ours, and such a job is released *without* its kill flag
+(:class:`ForeignWindowError`) instead of being terminated.
+
+**Killing is never the first answer, and discarding is never an answer at all.**
+:func:`close` saves the document, asks the application to quit, and waits. Only
+an instance that is gone-or-saved is killed. A document whose save *failed* is
+never closed — ``Close`` here means ``wdDoNotSaveChanges``, and the "keep your
+changes?" prompt that would normally stand in the way was turned off at launch,
+so closing would destroy the user's edit in silence. That instance is
+deliberately let go instead: alerts are turned back on, the job's kill flag is
+cleared before its handle closes, and the user keeps their unsaved work as an
+ordinary window on their desktop. That is the ``close_failed`` path the service
+already models, and it re-asks every couple of seconds until the window is gone.
 """
 
 from __future__ import annotations
@@ -107,6 +125,23 @@ CLOSE_GRACE_S = 6.0
 #: Measured at ~0.8 s warm; this covers a cold start of the whole Office stack.
 FRAME_WAIT_S = 30.0
 
+#: How often :func:`_identify` looks for the frame window.
+_IDENTIFY_POLL_S = 0.05
+
+#: How long it waits *after* the first new frame turns up, before believing it.
+#: One frame is not proof of ownership: a document the user opened a moment
+#: earlier is a new frame too, and would be the only candidate. A second look
+#: sees both and refuses, where the first look would have picked theirs. The
+#: cost is one tick on a ~1.6 s launch; the alternative is hosting — and later
+#: force-killing — somebody else's window.
+_IDENTIFY_SETTLE_S = 0.15
+
+#: How many times a close tries to write the document before giving up on it.
+#: The failures this covers are transient (a share that blinked, an antivirus
+#: holding the file), and the thing a second try buys is the user's edit.
+_SAVE_ATTEMPTS = 2
+_SAVE_RETRY_S = 0.5
+
 
 class OfficeComError(Exception):
     """Any COM or Win32 step that refused. The message is the whole story."""
@@ -114,6 +149,15 @@ class OfficeComError(Exception):
 
 class DocumentBusyError(OfficeComError):
     """The document is already open in an instance we did not launch."""
+
+
+class ForeignWindowError(OfficeComError):
+    """The document opened in a frame belonging to another process.
+
+    Which proves the window this launch contained was never ours — so the job
+    holding it must be released *without* its kill flag. Terminating it would
+    end an Office instance the user started, taking their unsaved work with it.
+    """
 
 
 @dataclass
@@ -282,7 +326,15 @@ def launch(
     # That order is the point (see the docstring): `Documents.Open` is the call
     # that can sit behind a modal forever, and by the time it runs we already
     # hold a job object that can end this instance from another thread.
-    instance = _identify(app, kind, before_pids, before_frames)
+    try:
+        instance = _identify(app, kind, before_pids, before_frames)
+    except OfficeComError:
+        # Nothing was contained, so there is no job to release and no pid we are
+        # sure of — which is the whole reason this failed. The COM object is the
+        # one thing that does name our own instance exactly, so it is what ends
+        # it; every window this call declined to claim is left alone.
+        _quit_quietly(app, kind)
+        raise
     if not instance.adopted:
         _contain(instance)
     if observer is not None:
@@ -293,6 +345,15 @@ def launch(
         return instance
     try:
         _open_document(instance, path)
+    except ForeignWindowError:
+        # The frame we contained is not the one our own document landed in, so
+        # the process in that job belongs to somebody else. Let it go untouched
+        # — `kill=False` clears the kill-on-close flag first — and end only our
+        # own instance, which we can reach precisely through its COM object.
+        log.warning("office_host.released_foreign_job", kind=kind, pid=instance.pid)
+        _quit_quietly(app, kind)
+        _release_job(instance, kill=False)
+        raise
     except Exception:
         _quit_quietly(app, kind)
         _release_job(instance, kill=True)
@@ -320,32 +381,81 @@ def _identify(
     Ownership is checked twice over, because one new *window* can still belong
     to an old *process* — the user's Word owns two frames on this machine — and
     reparenting one of those would take over their session.
+
+    And "new" is never allowed to be ambiguous. Excel is simply asked which
+    frame it owns. Word cannot be, so the candidate set is read twice and must
+    name exactly one process: two new pids means a second instance appeared
+    during the launch, and no amount of looking will say which one this call
+    started. Failing there costs a retry; guessing costs the user their window.
     """
     _com_call(setattr, app, "Visible", True)
     # Alerts off before anything is opened: a "file in use" prompt would block
     # the open behind a modal on a window the user cannot see yet.
     _silence_alerts(app, kind)
     deadline = time.monotonic() + FRAME_WAIT_S
+    seen: dict[int, int] = {}
     while time.monotonic() < deadline:
+        owned = _own_frame(app, kind)
+        if owned is not None:
+            window, pid = owned
+            return _instance(app, kind, window, pid, before_pids)
         new = {
             window: pid
             for window, pid in frame_windows(kind).items()
             if window not in before_frames
         }
-        if new:
-            window, pid = next(iter(new.items()))
-            return OfficeInstance(
-                kind=kind,
-                pid=pid,
-                window_id=window,
-                adopted=pid in before_pids,
-                app=app,
-                document=None,
-                job=None,
-                process=None,
+        if not new:
+            time.sleep(_IDENTIFY_POLL_S)
+            continue
+        if not seen:
+            seen = new
+            time.sleep(_IDENTIFY_SETTLE_S)
+            continue
+        # Both looks count: a frame that has come *or gone* since the first one
+        # is still a window that was new while this launch was starting.
+        candidates = {**seen, **new}
+        pids = set(candidates.values())
+        if len(pids) > 1:
+            raise OfficeComError(
+                f"{len(pids)} new {FRAME_CLASSES[kind]} windows from different processes "
+                f"appeared while {kind} was starting; refusing to guess which one is ours"
             )
-        time.sleep(0.05)
+        window, pid = next(iter(candidates.items()))
+        return _instance(app, kind, window, pid, before_pids)
     raise OfficeComError(f"{kind} started but never showed a {FRAME_CLASSES[kind]} window")
+
+
+def _instance(
+    app: Any, kind: HostAppKind, window: int, pid: int, before_pids: set[int]
+) -> OfficeInstance:
+    return OfficeInstance(
+        kind=kind,
+        pid=pid,
+        window_id=window,
+        adopted=pid in before_pids,
+        app=app,
+    )
+
+
+def _own_frame(app: Any, kind: HostAppKind) -> tuple[int, int] | None:
+    """``(hwnd, pid)`` of the frame this very ``Application`` object owns.
+
+    Excel answers ``Application.Hwnd``, which turns identification from "the
+    window that is new" into "the window this COM server says is its own" — no
+    inference, no race, nothing to disambiguate. Word has no such property
+    before a document is open (measured), so it gets ``None`` and falls back to
+    the snapshot comparison above. ``None`` also covers "not yet": the frame is
+    asked for on every poll tick until it exists.
+    """
+    if kind != "excel":
+        return None
+    try:
+        window = int(app.Hwnd)
+        if not window or win32gui.GetClassName(window) != FRAME_CLASSES[kind]:
+            return None
+        return window, int(win32process.GetWindowThreadProcessId(window)[1])
+    except Exception:
+        return None
 
 
 def _open_document(instance: OfficeInstance, path: Path) -> None:
@@ -367,8 +477,19 @@ def _open_document(instance: OfficeInstance, path: Path) -> None:
     _assert_frame_class(root, instance.kind)
     if root != instance.window_id:
         # The document landed in a frame other than the one this launch made.
-        # Refusing is the only safe answer: that frame may be somebody else's.
-        raise OfficeComError(f"{instance.kind} opened the document in a window we did not start")
+        # Refusing is the only safe answer either way — but *which* answer
+        # depends on whose process is behind the frame we contained. Our own
+        # instance with a second frame is still ours to reap; a different pid
+        # means the containment grabbed a stranger, and killing it is precisely
+        # the outcome this module exists to prevent.
+        if _window_pid(root) == instance.pid:
+            raise OfficeComError(
+                f"{instance.kind} opened the document in another frame of its own instance"
+            )
+        raise ForeignWindowError(
+            f"{instance.kind} opened the document in a window we did not start: "
+            f"the frame contained as pid {instance.pid} belongs to another process"
+        )
     if bool(_com_call(getattr, document, "ReadOnly")):
         # Office silently downgraded us because somebody else holds the file.
         # Hosting a read-only copy would be a panel that quietly cannot save.
@@ -376,6 +497,13 @@ def _open_document(instance: OfficeInstance, path: Path) -> None:
             f"{path.name} opened read-only: it is already open in another {instance.kind} instance"
         )
     instance.document = document
+
+
+def _window_pid(window: int) -> int | None:
+    try:
+        return int(win32process.GetWindowThreadProcessId(window)[1])
+    except Exception:  # pragma: no cover - a window that vanished mid-check
+        return None
 
 
 def abandon(instance: OfficeInstance) -> None:
@@ -400,6 +528,24 @@ def _silence_alerts(app: Any, kind: HostAppKind) -> None:
         _com_call(setattr, app, "DisplayAlerts", with_value)
     except Exception as error:  # not fatal: it only changes what a failure looks like
         log.debug("office_host.alerts_not_silenced", kind=kind, detail=str(error))
+
+
+def _restore_alerts(app: Any, kind: HostAppKind) -> None:
+    """Hand the application its own prompts back before letting go of it.
+
+    The mirror of :func:`_silence_alerts`, and used on one path only: a window
+    that is about to become the user's again must be able to ask them the
+    questions we spent the session suppressing — starting with "do you want to
+    save your changes?".
+    """
+    if app is None:
+        return
+    # wdAlertsAll is -1; Excel's DisplayAlerts is a plain boolean.
+    value: Any = -1 if kind == "word" else True
+    try:
+        _com_call(setattr, app, "DisplayAlerts", value)
+    except Exception as error:  # not fatal: the window is the user's either way
+        log.debug("office_host.alerts_not_restored", kind=kind, detail=str(error))
 
 
 def _assert_frame_class(window: int, kind: HostAppKind) -> None:
@@ -454,9 +600,10 @@ def window_exists(instance: OfficeInstance) -> bool:
 def close(instance: OfficeInstance, *, grace_s: float = CLOSE_GRACE_S) -> None:
     """Save, quit, and make sure the process is gone. Safe to call twice.
 
-    Raises :class:`OfficeComError` when the instance would not close *and* its
-    document could not be saved: the caller records that as ``close_failed``,
-    and the process is deliberately released rather than killed.
+    Raises :class:`OfficeComError` when the instance could not be saved, or
+    would not close after a save that worked. Both are recorded by the caller as
+    ``close_failed``, and in both the process is deliberately released rather
+    than killed.
     """
     if not is_running(instance):
         _release_job(instance, kill=False)
@@ -466,42 +613,73 @@ def close(instance: OfficeInstance, *, grace_s: float = CLOSE_GRACE_S) -> None:
             "this instance was released with unsaved changes and is now the user's"
         )
 
-    saved = _save(instance)
+    if not _save(instance):
+        # The changes are not on disk, and this is the last moment anyone could
+        # keep them. Going on would not merely risk losing them, it *is* the
+        # loss: `_quit` closes with wdDoNotSaveChanges, and the "keep your
+        # changes?" prompt that normally stands in the way was silenced at
+        # launch, so the discard would be both certain and invisible.
+        #
+        # Nor is asking Word to prompt an option here — that modal blocks the
+        # COM call with no timeout, which is the hang this whole module is shaped
+        # around. So the instance stops being ours: its own alerts back on, the
+        # job's kill flag cleared, its window left on the user's desktop with
+        # their edit still in it. The service shows `close_failed` and re-asks
+        # every sweep until the window is gone.
+        _restore_alerts(instance.app, instance.kind)
+        instance.app = None
+        instance.document = None
+        instance.escaped = True
+        _release_job(instance, kill=False)
+        log.warning("office_host.released_unsaved", kind=instance.kind, pid=instance.pid)
+        raise OfficeComError(
+            f"the document could not be saved, so it was not closed; {instance.kind} is "
+            "still open with unsaved changes"
+        )
+
     _quit(instance)
     if _wait_for_exit(instance, grace_s):
         _release_job(instance, kill=False)
         return
-    if saved:
-        log.info("office_host.killing_after_quit_ignored", pid=instance.pid)
-        _release_job(instance, kill=True)
-        return
-    # Would not close, and its changes are not on disk. Killing here is the one
-    # thing that loses the user's work, so the instance stops being ours: the
-    # job's kill flag is cleared and the window is theirs.
-    instance.escaped = True
-    _release_job(instance, kill=False)
-    raise OfficeComError(
-        "the document would not close and could not be saved; "
-        f"{instance.kind} is still open with unsaved changes"
-    )
+    # Saved, so nothing is lost by ending a process that ignored its own Quit.
+    log.info("office_host.killing_after_quit_ignored", pid=instance.pid)
+    _release_job(instance, kill=True)
 
 
 def _save(instance: OfficeInstance) -> bool:
-    """True when the document is on disk — including when it never changed."""
+    """True when the document is on disk — including when it never changed.
+
+    Tried more than once on purpose. The failures measured behind ``Save()`` are
+    transient ones — a share that blinked, an antivirus still holding the file —
+    and a second attempt costs half a second against an outcome (see
+    :func:`close`) that costs the user their edit.
+    """
     document = instance.document
     if document is None:
         return True
-    try:
-        if bool(_com_call(getattr, document, "Saved")):
+    for attempt in range(1, _SAVE_ATTEMPTS + 1):
+        try:
+            if bool(_com_call(getattr, document, "Saved")):
+                return True
+            _com_call(document.Save)
             return True
-        _com_call(document.Save)
-        return True
-    except Exception as error:
-        log.warning("office_host.save_failed", pid=instance.pid, detail=str(error))
-        return False
+        except Exception as error:
+            log.warning(
+                "office_host.save_failed",
+                pid=instance.pid,
+                attempt=attempt,
+                of=_SAVE_ATTEMPTS,
+                detail=str(error),
+            )
+            if attempt < _SAVE_ATTEMPTS:
+                time.sleep(_SAVE_RETRY_S)
+    return False
 
 
 def _quit(instance: OfficeInstance) -> None:
+    """Close the document and end the application. **Only ever after a save
+    that succeeded** — :func:`_close_document` discards, and :func:`close` is
+    the one caller, which does not reach here otherwise."""
     document, app = instance.document, instance.app
     # Drop our references either way: an outstanding COM proxy is one of the
     # reasons an Office process outlives its own Quit.
@@ -509,8 +687,9 @@ def _quit(instance: OfficeInstance) -> None:
     instance.app = None
     try:
         if document is not None:
-            # Never "save on close" here — `_save` already decided that, and a
-            # second decision could re-open the very dialog we are escaping.
+            # "Discard" is the safe word here and nowhere else: the bytes are
+            # already on disk, and asking Office to decide a second time could
+            # re-open the very dialog we are escaping.
             _close_document(document, instance.kind)
     except Exception as error:
         log.debug("office_host.document_close_failed", pid=instance.pid, detail=str(error))
