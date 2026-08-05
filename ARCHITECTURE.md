@@ -116,12 +116,13 @@ build never fetches the chunk and every call is inert in a tab.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts, provenance |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
+| `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `services/workspace.py` | path jail, atomic writes, hashing, tree |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
@@ -132,6 +133,7 @@ build never fetches the chunk and every call is inert in a tab.
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
+| `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 
 ## Agent sessions
 
@@ -189,6 +191,56 @@ Session history is not ours: Claude Code and the SDK persist transcripts under
 (`session_index.py`), so CLI sessions and Workbench sessions share one history,
 grouped per folder.
 
+## Provenance
+
+Agents write to disk with their own tools, so a file can change under the user
+with nothing saying who did it. `services/provenance.py` correlates the two
+signals that already exist: a live session announces a tool call naming a path
+(`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, matched on the last name segment so
+namespaced MCP tools count), and moments later the watcher reports that file
+changed. A match inside `ATTRIBUTION_WINDOW_S` (10 s) — **exact path only**,
+after normalizing backslashes, quotes, `..` segments and paths relative to the
+session's own folder — becomes a `ProvenanceEntry` on the bus as
+`FileProvenanceEvent`, and into the map `GET /api/provenance` serves for initial
+load and reconnect. The UI shows it as a right-aligned dot in the tree, a dot on
+a background editor tab, and a one-line bar above the buffer that names the
+session and links back to that conversation — the return leg of the chat's
+tool-row file links.
+
+**What the heuristic can and cannot know.** It is a claim about the user's own
+files, so it is built to be silent rather than wrong:
+
+- No matching tool call → the change is reported **unattributed** (`agent` is
+  `null`) and the UI shows nothing. A git checkout, an external editor, a build
+  step and the user's own `Ctrl+S` all land here, correctly. The most recent
+  session is *never* named as a guess.
+- Two sessions writing the same path inside the window is a genuine ambiguity;
+  the rule is **most recent exact match wins**, and it is tested.
+- A claim is not consumed by the first change it explains — one logical write
+  routinely surfaces as several watcher events on Windows, and calling the
+  follow-ups "the user" would be the false claim we are avoiding. Deletions are
+  skipped for the same reason: order inside a watchfiles batch is not
+  guaranteed.
+- An unattributed change to a tracked path **clears** the entry, so a file the
+  user has since rewritten stops being credited to an agent. The editor's own
+  `PUT /api/files/content` says so explicitly (`note_user_write`), which is what
+  keeps a save seconds after an agent's write attributed to the user.
+- A path the agent spelled differently than the watcher reports it (a different
+  case on Windows), a write outside the workspace, or a file written by a shell
+  command rather than a file tool: all unattributed.
+
+Acknowledgment is explicit: opening the file (tree click or tab activation) or
+dismissing the bar marks the entry `acknowledged`, which clears the markers and
+keeps the attribution. A later agent change to the same path reopens it. A tree
+marker on a file inside a collapsed folder is only visible once that folder is
+expanded — a folder-level rollup is not built; the editor bar and the chat's
+tool row are the other two places the same change surfaces.
+
+State is **in memory only** — a server restart forgets every attribution and
+`GET /api/provenance` comes back empty — and bounded: `MAX_TRACKED_PATHS` (500,
+LRU) entries and `MAX_PENDING_CLAIMS` (200) in-flight claims, so a long session
+cannot grow it without limit.
+
 ## Office editing
 
 **Direction (M4, decided 2026-08-04):** documents open in *real* installed
@@ -235,8 +287,9 @@ Format spec: `docs/shortcuts.md`.
    scripted-fake agent turns incl. permission flow.
    - **Layer 2.5 — fake-agent mode** (`WORKBENCH_FAKE_AGENT=1`):
      `services/fake_agent.py` is a `ClientFactory` that answers deterministically — a
-     streamed markdown reply, a `Read` of a real workspace file, a permission prompt, a
-     fixed `PlanArtifact` — through the *same* factory and `SessionBridge` seams the
+     streamed markdown reply, a `Read` of a real workspace file, a `Write` that really
+     lands on disk (announced before the bytes, as a real tool call is), a permission
+     prompt, a fixed `PlanArtifact` — through the *same* factory and `SessionBridge` seams the
      real SDK plugs into. Nothing else changes: the session state machine, both
      WebSocket fan-outs and every typed frame stay production code. This is what lets
      layer 4 exercise chat, tool rows, permissions and plan cards with no Claude login
@@ -244,9 +297,10 @@ Format spec: `docs/shortcuts.md`.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
-   launched in a per-run temp workspace with fake-agent mode on. Seven journeys: file
+   launched in a per-run temp workspace with fake-agent mode on. Eight journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
    ConPTY, QuickBar/shortcuts (including the never-executed rule), chat streaming and
-   tool settling, plan cards, status chips and the attention badge, and office degraded
-   mode. Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
+   tool settling, plan cards, status chips and the attention badge, office degraded
+   mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
+   and links back to its session). Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.

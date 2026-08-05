@@ -57,7 +57,50 @@ export interface FileChangedEvent {
 }
 
 /** Everything that arrives on /ws/events (see also SessionStatusEvent below). */
-export type WorkspaceEvent = FileChangedEvent | SessionStatusEvent | ShortcutsChangedEvent;
+export type WorkspaceEvent =
+  | FileChangedEvent
+  | SessionStatusEvent
+  | ShortcutsChangedEvent
+  | FileProvenanceEvent;
+
+// ---- provenance.py ----------------------------------------------------------
+// Who last changed a file. `agent === null` is the honest "we do not know" —
+// never a guess at the most recent session.
+
+export interface AgentAttribution {
+  session_id: string;
+  session_title: string;
+  /** The file-writing tool that named the path (Write/Edit/…). */
+  tool: string;
+}
+
+export interface ProvenanceEntry {
+  /** Workspace-relative, forward slashes — exactly as the watcher reports it. */
+  path: string;
+  /** Unix seconds. */
+  changed_at: number;
+  /** null = unattributed: the user, another editor, a git checkout. */
+  agent: AgentAttribution | null;
+  /** The user has opened or dismissed this change; the tree marker clears. */
+  acknowledged: boolean;
+}
+
+/** Broadcast on /ws/events when a path's provenance changes. An entry whose
+ * `agent` is null means "no agent claim on this path any more" — drop it from
+ * the map rather than keep showing a claim that is no longer true. */
+export interface FileProvenanceEvent {
+  type: "file_provenance";
+  entry: ProvenanceEntry;
+}
+
+/** GET /api/provenance. In-memory server-side: a restart returns it empty. */
+export interface ProvenanceMap {
+  entries: ProvenanceEntry[];
+}
+
+export interface AcknowledgeRequest {
+  path: string;
+}
 
 // ---- shortcuts.py -----------------------------------------------------------
 // One markdown file per scope (workspace + user-global), merged. An entry is

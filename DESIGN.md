@@ -239,6 +239,12 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Drop hints during drag: overlay `--accent-muted` fill + 1px `--accent` border.
 - Document (Office) panels: body `--surface-paper-surround`; page shadow `--shadow-1`;
   rim `--border-paper-rim`.
+- Bars above the buffer (conflict, provenance): one line, 12px, 6px/12px padding,
+  bottom hairline `--border-subtle`, background = the status wash for what they mean
+  (`--warn-bg` for a conflict, `--agent-done-bg` for an agent change). Actions on the
+  right as 24px ghost/outline buttons; a link inside the sentence is `--accent` text
+  (§2.4), never a filled control. A tab whose file an agent changed carries the same 6px `--agent-done` dot
+  as the tree row until the tab is brought forward.
 
 ### 6.2 File tree rows
 - Row height **26px**, full-row hit target, 12px/400 text, indent 16px/level.
@@ -247,7 +253,10 @@ and the working-dot pulse stops (steady dot). Provided globally in tokens.css.
 - Chevron 12px, `--text-tertiary`, rotates 90° in 80ms (the one tolerated tree motion —
   transform, not layout). File-type icons 16px, single-color `--text-tertiary` (Lucide
   strokes; no colored icon soup).
-- Git/agent-modified markers: 6px dot right-aligned, semantic colors.
+- Agent-modified marker: 6px dot right-aligned, `--agent-done` (§2.6) — "an agent
+  changed this and you have not looked yet". Carries an `aria-label`/tooltip naming
+  the session, never colour alone (§6.4); it clears when the file is opened or its
+  provenance bar dismissed. Git markers reuse the same slot in semantic colours.
 
 ### 6.3 Chat: messages, tool calls, permission prompts
 - Column max-width **760px**, centered in panel, 16px side padding, 14px/22px body.

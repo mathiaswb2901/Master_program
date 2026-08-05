@@ -52,7 +52,9 @@ export function setDockApi(api: DockviewApi | null): void {
   dockApi = api;
 }
 
-function focusPanel(id: string): void {
+/** Exported so a panel can send focus where its action landed — the file bar's
+ * "open this session" has to bring the Agent panel forward to be of any use. */
+export function focusPanel(id: string): void {
   dockApi?.getPanel(id)?.api.setActive();
 }
 

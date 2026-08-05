@@ -12,11 +12,13 @@ import { THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
   FileChangedEvent,
+  FileProvenanceEvent,
   FolderSessions,
   OfficeStatus,
   PlanAnnotation,
   PlanArtifact,
   PlanVerdict,
+  ProvenanceEntry,
   SessionInfo,
   SessionState,
   SessionStatusEvent,
@@ -170,6 +172,13 @@ interface WorkbenchStore {
   /** shortcuts.md entries (workspace merged over global) + what failed to parse. */
   shortcuts: ShortcutEntry[];
   shortcutProblems: ShortcutProblem[];
+  /** path -> who last changed it, for the paths an agent is claiming. Entries
+   * only ever exist for attributed changes: the server sends a null-agent entry
+   * to say "drop this path", never to say "someone unknown did it". */
+  provenance: Record<string, ProvenanceEntry>;
+  /** Paths whose file bar the user closed. Local to this window, and cleared by
+   * the next agent change to that path so a later edit raises the bar again. */
+  provenanceDismissed: Record<string, boolean>;
 
   init: () => void;
   setTheme: (theme: Theme) => void;
@@ -203,6 +212,15 @@ interface WorkbenchStore {
   reloadFromDisk: (path: string) => Promise<void>;
   keepMine: (path: string) => Promise<void>;
 
+  refreshProvenance: () => Promise<void>;
+  handleFileProvenance: (event: FileProvenanceEvent) => void;
+  /** Mark an agent change as seen: the tree marker clears, the attribution
+   * stays. Called on open and on dismiss — those two, explicitly, are what
+   * "acknowledged" means. */
+  acknowledgeProvenance: (path: string) => void;
+  /** Close the file bar for this path (and acknowledge it). */
+  dismissProvenance: (path: string) => void;
+
   refreshShortcuts: () => Promise<void>;
   /** Insert a shortcut into its surface. Never executes: shell snippets are
    * typed into the terminal without a newline, prompts land in the chat draft. */
@@ -215,6 +233,10 @@ interface WorkbenchStore {
 
   refreshSessions: () => Promise<void>;
   openSession: (info: SessionInfo) => void;
+  /** Open a session known only by id — the file bar's link back to the agent
+   * that made the change. A session the server no longer lists (a restart
+   * dropped it) says so instead of opening the wrong one. */
+  openSessionById: (sessionId: string) => void;
   openLiveSession: (info: SessionInfo) => void;
   openTranscript: (info: SessionInfo) => Promise<void>;
   createSessionIn: (folder: string) => Promise<void>;
@@ -252,6 +274,15 @@ function focusChatInput(): void {
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
   }, 0);
+}
+
+/** A copy of `record` without `key` — used where deleting means "no longer
+ * true", not "set to false". */
+function without(record: Record<string, boolean>, key: string): Record<string, boolean> {
+  if (record[key] === undefined) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 function errorDetail(err: unknown): string {
@@ -325,6 +356,8 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     officeStatus: null,
     shortcuts: [],
     shortcutProblems: [],
+    provenance: {},
+    provenanceDismissed: {},
 
     init: () => {
       if (initialized) return;
@@ -335,12 +368,14 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           if (event.type === "file_changed") get().handleFileChanged(event);
           else if (event.type === "session_status") get().handleSessionStatus(event);
           else if (event.type === "shortcuts_changed") void get().refreshShortcuts();
+          else if (event.type === "file_provenance") get().handleFileProvenance(event);
         },
         // Re-sync on every (re)connect — covers events missed while offline.
         onOpen: () => {
           void get().refreshTree();
           void get().refreshSessions();
           void get().refreshShortcuts();
+          void get().refreshProvenance();
         },
       });
       void get().ensureOfficeStatus();
@@ -423,6 +458,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     },
 
     openFile: async (path) => {
+      // Opening it IS seeing it: half of the acknowledge rule (the other half
+      // is dismissing the bar). Fires even for an already-open tab, because
+      // clicking a marked file in the tree is exactly how a user attends to it.
+      get().acknowledgeProvenance(path);
       if (get().openFiles.some((f) => f.path === path)) {
         set({ activePath: path });
         return;
@@ -583,7 +622,12 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       void get().refreshTree();
     },
 
-    setActiveFile: (path) => set({ activePath: path }),
+    setActiveFile: (path) => {
+      // Bringing a tab forward is opening it, so it acknowledges too — an agent
+      // can change a file that is open behind the active one.
+      get().acknowledgeProvenance(path);
+      set({ activePath: path });
+    },
 
     updateBuffer: (path, text) => {
       set((s) => ({
@@ -743,6 +787,58 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }
     },
 
+    refreshProvenance: async () => {
+      try {
+        const map = await api.getProvenance();
+        const provenance: Record<string, ProvenanceEntry> = {};
+        for (const entry of map.entries) provenance[entry.path] = entry;
+        set({ provenance });
+      } catch (err) {
+        console.error("provenance refresh failed", err);
+      }
+    },
+
+    handleFileProvenance: (event) => {
+      const entry = event.entry;
+      set((s) => {
+        if (entry.agent === null) {
+          // The user (or something outside Workbench) wrote this path: the
+          // agent claim is no longer true, so it goes — never lingers.
+          if (s.provenance[entry.path] === undefined) return {};
+          const provenance = { ...s.provenance };
+          delete provenance[entry.path];
+          return { provenance, provenanceDismissed: without(s.provenanceDismissed, entry.path) };
+        }
+        return {
+          provenance: { ...s.provenance, [entry.path]: entry },
+          // A fresh, unacknowledged change re-raises a bar the user closed for
+          // the previous one; an acknowledgment echo leaves it closed.
+          provenanceDismissed: entry.acknowledged
+            ? s.provenanceDismissed
+            : without(s.provenanceDismissed, entry.path),
+        };
+      });
+    },
+
+    acknowledgeProvenance: (path) => {
+      const entry = get().provenance[path];
+      if (entry === undefined || entry.acknowledged) return;
+      set((s) => {
+        const current = s.provenance[path];
+        if (current === undefined) return {};
+        return { provenance: { ...s.provenance, [path]: { ...current, acknowledged: true } } };
+      });
+      // Server-side so every window agrees and a reconnect refetch keeps it.
+      void api.acknowledgeProvenance({ path }).catch(() => {
+        // Best-effort: the marker is a nudge, not state worth a toast.
+      });
+    },
+
+    dismissProvenance: (path) => {
+      set((s) => ({ provenanceDismissed: { ...s.provenanceDismissed, [path]: true } }));
+      get().acknowledgeProvenance(path);
+    },
+
     refreshShortcuts: async () => {
       try {
         const state = await api.getShortcuts();
@@ -874,6 +970,17 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     openSession: (info) => {
       if (info.live) get().openLiveSession(info);
       else void get().openTranscript(info);
+    },
+
+    openSessionById: (sessionId) => {
+      const info = get()
+        .folders.flatMap((group) => group.sessions)
+        .find((session) => session.session_id === sessionId);
+      if (info === undefined) {
+        get().pushToast("warn", "That session is no longer available in this workspace.");
+        return;
+      }
+      get().openSession(info);
     },
 
     openLiveSession: (info) => {

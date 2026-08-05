@@ -101,7 +101,18 @@ the moat.
   description is loaded into every session's context. Latency is deliberately *not*
   budgeted: these are in-process local calls where the model and the user dominate.
   Revisit with a real aggregate measurement if the tool surface passes ~20.
-- Committed carryover: pptx E2E fidelity pass, provenance badges, and bundled skills —
+- ~~**Provenance badges**~~ **done**: `services/provenance.py` attributes a file
+  change to the session whose `Write`/`Edit`/`MultiEdit`/`NotebookEdit` named exactly
+  that path within a 10 s window (`FileProvenanceEvent` on `/ws/events`, `GET
+  /api/provenance` for load and reconnect); the tree marks unacknowledged files, the
+  editor carries a one-line bar naming the session and linking back to that
+  conversation, and opening or dismissing acknowledges. Deliberately conservative: a
+  change with no matching tool call is reported *unattributed* — never assigned to the
+  most recent session — two sessions inside the window resolve as most-recent-exact-
+  match-wins, and a later unattributed change clears the claim. **Limitation**: the map
+  is in-memory and bounded (LRU, 500 paths), so a server restart forgets who changed
+  what; persisting it (and attributing writes made through the shell) is future work.
+- Committed carryover: pptx E2E fidelity pass and bundled skills —
   `plan-visual`, `remember` and `workbench-dev` ship as the session-scoped `workbench`
   plugin; `validate`, `loop-objective` and Workbench-authored Word/Excel/PowerPoint
   skills remain, the office ones following the COM bridge rather than wrapping a
@@ -112,12 +123,13 @@ the moat.
   test`, both in the CI ui job); ~~Playwright E2E still pending (standing bar)~~
   **done** — `ui/e2e/` drives the built UI against a real backend in a per-run temp
   workspace (`npm run e2e`, chromium, own CI job with the HTML report uploaded on
-  failure). Seven journeys: files (create → Monaco → Ctrl+S → watcher reload → conflict
+  failure). Eight journeys: files (create → Monaco → Ctrl+S → watcher reload → conflict
   → dirty-close), terminals (real ConPTY, tabs, surviving scrollback), QuickBar +
   shortcuts.md (categories, keycaps, the snippet that is typed but never run, the
   problems toast), chat streaming with per-tool settle, plan cards (recommendation
   pre-selected → switch → approve → the agent's echo), status chips + `document.title`
-  attention badge, and office degraded mode. Agent journeys run against **fake-agent
+  attention badge, office degraded mode, and provenance (agent write → tree marker →
+  file bar → back to the session → acknowledged). Agent journeys run against **fake-agent
   mode** (`WORKBENCH_FAKE_AGENT=1`, `services/fake_agent.py`): scripted replies, tool
   calls, permission prompts and plan artifacts through the real factory/bridge seams —
   no Claude login, no tokens, deterministic frames.

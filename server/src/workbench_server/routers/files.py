@@ -11,6 +11,7 @@ from workbench_server.models.files import (
     WriteRequest,
     WriteResponse,
 )
+from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.workspace import (
     NotTextError,
     PathOutsideWorkspaceError,
@@ -24,6 +25,11 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 def _ws(request: Request) -> Workspace:
     workspace: Workspace = request.app.state.workspace
     return workspace
+
+
+def _provenance(request: Request) -> ProvenanceService:
+    service: ProvenanceService = request.app.state.provenance
+    return service
 
 
 @router.get("/tree")
@@ -52,6 +58,9 @@ def write(request: Request, body: WriteRequest) -> WriteResponse:
         raise HTTPException(400, "path escapes workspace") from e
     except StaleWriteError as e:
         raise HTTPException(409, "file changed on disk since it was read") from e
+    # This save is the user's. Said out loud so the watcher event it produces is
+    # not attributed to an agent that wrote the same file moments earlier.
+    _provenance(request).note_user_write(body.path)
     return WriteResponse(path=body.path, hash=digest)
 
 

@@ -2,6 +2,7 @@
 
 import type { Theme } from "./theme";
 import type {
+  AcknowledgeRequest,
   CallbackResponse,
   CreateRequest,
   CreateSessionRequest,
@@ -11,6 +12,7 @@ import type {
   OfficeLastSave,
   OfficeStatus,
   OkResponse,
+  ProvenanceMap,
   RenameRequest,
   SessionInfo,
   ShortcutsState,
@@ -70,6 +72,11 @@ export const deleteEntry = (path: string): Promise<OkResponse> =>
   request(`/api/files/content?path=${encodeURIComponent(path)}`, { method: "DELETE" });
 
 export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcuts");
+
+export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
+
+export const acknowledgeProvenance = (body: AcknowledgeRequest): Promise<OkResponse> =>
+  request("/api/provenance/acknowledge", jsonInit("POST", body));
 
 export const getSessions = (): Promise<FolderSessions[]> => request("/api/agents/sessions");
 

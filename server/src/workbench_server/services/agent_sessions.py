@@ -78,6 +78,27 @@ class SessionBridge(Protocol):
     async def present_plan(self, artifact: PlanArtifact) -> PlanResponse: ...
 
 
+class ToolUseObserver(Protocol):
+    """Told about every tool call, synchronously, as it is announced.
+
+    The provenance correlator is the only implementor: it needs the *path* a
+    write tool named, which the ``ToolUseNote`` frame deliberately does not
+    carry (that frame is a chat row, not a machine-readable claim). A direct
+    call rather than a bus event because this is an internal signal — every
+    payload on ``/ws/events`` is something a client must act on.
+    """
+
+    def note_tool_use(
+        self,
+        *,
+        session_id: str,
+        session_title: str,
+        folder: Path,
+        tool: str,
+        tool_input: dict[str, Any],
+    ) -> None: ...
+
+
 ClientFactory = Callable[[Path, str | None, SessionBridge], SdkClient]
 
 
@@ -119,6 +140,7 @@ class AgentSession:
         factory: ClientFactory,
         resume_session_id: str | None = None,
         event_publisher: EventPublisher | None = None,
+        tool_observer: ToolUseObserver | None = None,
     ) -> None:
         self.local_id = local_id
         self.folder = folder
@@ -134,6 +156,7 @@ class AgentSession:
         self.title: str | None = None  # derived from the first user message
         self._factory = factory
         self._publisher = event_publisher
+        self._tool_observer = tool_observer
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
@@ -377,6 +400,16 @@ class AgentSession:
                             id=call_id, tool=tool, summary=_describe_tool_call(tool, tool_input)
                         )
                     )
+                    # Announced before the tool runs, which is what lets the
+                    # provenance correlator claim the file change that follows.
+                    if self._tool_observer is not None:
+                        self._tool_observer.note_tool_use(
+                            session_id=self.local_id,
+                            session_title=self.title or FALLBACK_TITLE,
+                            folder=self.folder,
+                            tool=tool,
+                            tool_input=tool_input,
+                        )
         elif kind == "UserMessage":
             # Tool results arrive as a synthetic user turn (SDK naming — not a
             # message the human typed); each block settles exactly one row.
@@ -478,12 +511,14 @@ class SessionManager:
         max_sessions: int,
         session_index: SessionIndex | None = None,
         event_publisher: EventPublisher | None = None,
+        tool_observer: ToolUseObserver | None = None,
     ) -> None:
         self._root = workspace_root
         self._factory = factory
         self._max = max_sessions
         self._index = session_index
         self._publisher = event_publisher
+        self._tool_observer = tool_observer
         self._sessions: dict[str, AgentSession] = {}
 
     @property
@@ -505,6 +540,7 @@ class SessionManager:
             factory=self._factory,
             resume_session_id=resume_session_id,
             event_publisher=self._publisher,
+            tool_observer=self._tool_observer,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.
