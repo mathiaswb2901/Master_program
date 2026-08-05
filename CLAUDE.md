@@ -16,7 +16,13 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
   (both: the shell's `beforeDevCommand` starts Vite from `ui/`), then
   `npm run tauri dev` — native window; starts Vite itself and either attaches to
   a backend already on 8787 or spawns one.
-  Gates: `cd desktop/src-tauri && cargo fmt --check && cargo build && cargo test`
+  Gates: `cd desktop/src-tauri && cargo fmt --check && cargo build && cargo test`.
+  `cargo test` includes the Office-host window tests: they create real windows and
+  start the synthetic guest process, so they need a desktop session (any normal
+  Windows login). The two that additionally need the *foreground* — the real-click
+  and hang-isolation measurements — are `#[ignore]`d; run them with
+  `cargo test -- --ignored --nocapture`. `WORKBENCH_HOST_DEMO=1 cargo run` docks a
+  synthetic guest in the running shell, and `=hang` wedges it a few seconds later.
 
 ## Think big (standing directive)
 

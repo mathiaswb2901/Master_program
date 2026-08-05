@@ -417,10 +417,67 @@ programmatically or by the *name of the document* (`…-refuse-embed.docx`,
 `…-crash-after-embed.docx`, `…-already-open.docx`, …), so every branch is
 reachable from a test and, later, from the UI.
 
-**Deliberately deferred:** the Rust window hosting itself, the pywin32 COM
-bridge (and with it the agent-facing document tools), and the panel — which
-lands after the tool registry, so it can register itself instead of editing
-`App.tsx`. Nothing here changes the OnlyOffice path below.
+**Deliberately deferred:** the pywin32 COM bridge (and with it the agent-facing
+document tools) and the panel — which lands after the tool registry, so it can
+register itself instead of editing `App.tsx`. Nothing here changes the
+OnlyOffice path below.
+
+### Native window hosting (`desktop/src-tauri/src/host/`)
+
+The mechanism that puts a real child window inside a panel rectangle, built and
+proven against a **synthetic guest** (`src/bin/workbench-guest.rs`) rather than
+against Word. Every hard part — class registration, style stripping,
+`SetParent`, geometry, focus, teardown — is independent of who owns the guest
+window, so proving it against a window we wrote makes the whole thing runnable
+in `cargo test` on any machine, with no Office installed. The guest is a
+separate **process** on purpose: reaping, input-queue attachment and hanging are
+all cross-process problems, and a second window on one of our own threads would
+prove none of them. It is debug-only — its body is behind `debug_assertions` and
+`lib.rs` keeps three explicit command lists so a release build cannot reach it.
+
+```
+Tauri window (main thread, owns the message loop)
+└── panel window     WS_CHILD, one per hosted document, our class
+    └── clip child   WS_CHILD, the viewport
+        └── guest    another process's top-level window, restyled WS_CHILD and
+                     offset up by its own caption height
+```
+
+Styles are stripped **before** `SetParent` (as the `SetParent` docs ask) and
+`SWP_FRAMECHANGED` applied after, which is what makes the guest's client
+rectangle match the panel exactly rather than approximately. Teardown restores
+the original styles, parent and desktop position — an un-parented window still
+wearing child styles has no caption, no border and no way to be closed. Guests
+are launched into a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and
+reaped by closing it, for the reason `backend.rs` documents: a graceful quit was
+measured not to be enough. Because a guest is a *child* of the Tauri window and
+children die with their parent, every path that closes the window releases the
+guests first — otherwise closing Workbench would take a real Word down with it.
+
+CSS pixels become physical pixels through **one** DPI authority, the window's own
+`scale_factor()`; edges are rounded and sizes derived from the rounded edges, so
+two adjacent panels cannot leave a one-pixel seam.
+
+**Four things were measured that the documentation does not tell you**, each one
+now a test in `host/hosting_tests.rs`:
+
+| Claim | What actually happens |
+|---|---|
+| `WM_PARENTNOTIFY` tells a parent its child was destroyed or clicked | **It never arrives** for a window reparented in from another process — not on a graceful `WM_CLOSE`, not on a killed process, not on a real `SendInput` click. Destruction is therefore found by asking (`host/watchdog.rs`), which is exactly what the Python `HostBackend::poll` models |
+| Click-to-focus needs the host to route the click | It does not. The guest's own window procedure focuses itself, and the keyboard follows. What is lost is only the *notification* to the webview |
+| `SetFocus` across processes needs `AttachThreadInput` | It does not, for a parent/child pair: that relationship already attaches the input queues. No `AttachThreadInput` call exists in this crate |
+| `SWP_ASYNCWINDOWPOS` keeps a hung guest from stalling the host | **It does not**, for the same reason: the flag only posts when the two threads are on *different* input queues, and being our child put them on the same one. `DeferWindowPos` also rejects the flag outright (`ERROR_INVALID_PARAMETER`), so our own two windows are batched and the guest is moved separately |
+
+**Hang isolation is the open risk, and it is now quantified.** With the guest
+deliberately wedged (`hosting_tests::hang_isolation_measurement`): the host
+window keeps its own message loop (50/50 posted messages dispatched), keeps
+painting, and Windows does not judge it hung — but a resize costs **~1 s per
+frame** because the guest's `SetWindowPos` waits. Moving *our* two windows alone
+stays at ~0.02 ms, and the same guest move issued from a thread that owns no
+window in the parent chain — and so is attached to no input queue — takes
+**~0.15 ms**. That is the containment path, measured rather than assumed, and it
+is deliberately not implemented here: `WORKBENCH_OFFICE_NATIVE=auto` stays off
+until it is.
 
 ### OnlyOffice (preview/diff/fallback)
 
