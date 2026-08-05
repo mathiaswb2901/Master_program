@@ -35,20 +35,21 @@ import { installTelemetry, readTelemetry, record, round, sampleFrames } from "./
  * panes plus the four defaults — the default Editor pane holds a fourth Monaco):
  *
  * * building the fleet — nine splits, four of them a round trip that creates a
- *   server session, plus three files opened: **3,936 ms**;
+ *   server session, plus three files opened: **4,306 ms**;
  * * the measured **split** — a Monaco pane onto the 5,000-line file, with three
- *   editors, four agents and two PTYs already live: p95 frame **50.0 ms**,
- *   longest **50.0 ms** — three dropped frames at 60 Hz;
+ *   editors, four agents and two PTYs already live: p95 frame **33.4 ms**,
+ *   longest **50.0 ms** — one frame in which three were due;
  * * **pane navigation**, eight directional moves across the full window: p95
- *   **33.4 ms**, longest **33.4 ms**, **0 of 27** frames over 50 ms — moving
+ *   **33.3 ms**, longest **33.3 ms**, **0 of 21** frames over 50 ms — moving
  *   between panes does not care how full the window is;
- * * slowest input event over the whole run: **192 ms** — the Monaco mount.
+ * * slowest input event over the whole run: **120 ms** — the Monaco mount.
  *
  * The honest reading: **mounting an editor is the expensive gesture**, and it is
  * the one the previous version of this budget never measured (4 agents + 2
- * terminals and no file open at all: 33.3 ms split, 64 ms slowest event). Three
- * dropped frames on a fourth Monaco is a visible hitch, not a freeze, and it is
- * the number item 9's lazy-acquisition and hibernation work has to move.
+ * terminals and no file open at all: 33.3 ms longest split frame, 64 ms slowest
+ * event). Run-to-run the worst split frame sits at 50 ms and the slowest event
+ * between 120 and 192 ms — a visible hitch, not a freeze, and the number item
+ * 9's lazy acquisition and hibernation have to move.
  *
  * The two constants below are sized well above those as "the window looked
  * frozen" guards, not as the budget. The budget is the recorded line, and the
