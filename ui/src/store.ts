@@ -915,6 +915,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     },
 
     runShortcut: (entry) => {
+      // Insertion only. A kind a registered tool *carries out* never reaches
+      // here (commands.ts routes it), and a kind nothing knows is a no-op
+      // rather than text delivered to the wrong surface.
+      if (entry.kind !== "shell" && entry.kind !== "prompt") return;
       if (entry.kind === "shell") {
         const id = get().activeTerminalId;
         const handle = id === null ? null : terminalHandle(id);

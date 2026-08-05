@@ -22,14 +22,18 @@ import {
   defaultLayout,
   documentViewFor,
   documentViews,
+  dynamicCommandsKey,
+  notifyDockReady,
   openToolPanel,
   panelComponents,
   panelFocusCommands,
   panelTabInfo,
   panelTools,
+  shortcutAction,
   shortcutHost,
   statusItems,
   toolCommands,
+  toolDynamicCommands,
   type WorkbenchTool,
 } from "./registry";
 
@@ -115,6 +119,53 @@ describe("commands from a descriptor", () => {
     expect(commands.map((command) => command.when?.())).toEqual([undefined, false]);
     hasFiles = true;
     expect(commands.map((command) => command.when?.())).toEqual([undefined, true]);
+  });
+
+  // Dynamic commands exist because one row per saved layout cannot be written
+  // down at build time. They are re-derived only when `key` changes, because
+  // the merged list they join is rebuilt on every keystroke in the app.
+  it("re-derives dynamic commands only when their key changes", () => {
+    let names = ["one"];
+    let builds = 0;
+    const tools = [
+      tool({
+        id: "demo",
+        dynamicCommands: {
+          key: () => names.join(" "),
+          build: () => {
+            builds += 1;
+            return names.map((name) => ({ id: `demo.${name}`, title: name, run: () => undefined }));
+          },
+        },
+      }),
+    ];
+    expect(dynamicCommandsKey(tools)).toBe("one");
+    expect(toolDynamicCommands(tools).map((command) => command.id)).toEqual(["demo.one"]);
+    names = ["one", "two"];
+    expect(dynamicCommandsKey(tools)).toBe("one two");
+    expect(toolDynamicCommands(tools)).toHaveLength(2);
+    expect(builds).toBe(2);
+  });
+
+  it("hands a shortcut kind to the tool that carries it out, if any", () => {
+    const carried: string[] = [];
+    const tools = [
+      tool({ id: "quiet" }),
+      tool({ id: "actor", shortcutActions: { layout: (body) => carried.push(body) } }),
+    ];
+    shortcutAction(tools, "layout")?.("Review");
+    expect(carried).toEqual(["Review"]);
+    // Nothing claims `shell`, so it stays an insertion — the caller's fallback.
+    expect(shortcutAction(tools, "shell")).toBeNull();
+  });
+
+  it("drops a disabled tool's shortcut action with the rest of it", () => {
+    const off = tool({
+      id: "off",
+      when: () => false,
+      shortcutActions: { layout: () => undefined },
+    });
+    expect(shortcutAction([off], "layout")).toBeNull();
   });
 
   it("reports a shortcut table entry that names no command of that tool", () => {
@@ -276,6 +327,20 @@ describe("panels", () => {
     expect(dock.active).toEqual(["mid"]);
   });
 
+  // How the layout system gets the dock without `App.tsx` calling it by name.
+  it("hands the dock to the tools that asked for it, and to no others", () => {
+    const seen: (string | null)[] = [];
+    const tools = [
+      tool({ id: "watcher", onDockReady: (api) => seen.push(api === null ? null : "api") }),
+      tool({ id: "quiet" }),
+      tool({ id: "off", when: () => false, onDockReady: () => seen.push("never") }),
+    ];
+    const dock = fakeDock();
+    notifyDockReady(tools, asDock(dock));
+    notifyDockReady(tools, null);
+    expect(seen).toEqual(["api", null]);
+  });
+
   it("focuses a singleton panel instead of opening a second one", () => {
     const tools = [withPanel("mid", "center"), withPanel("side", "right")];
     const dock = fakeDock();
@@ -433,6 +498,7 @@ describe("the registered tools", () => {
       "Alt+8": "session.jump.8",
       "Alt+9": "session.jump.9",
       "Alt+T": "terminal.new",
+      "Alt+M": "layout.focus",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",
       "Ctrl+3": "panel.agent",

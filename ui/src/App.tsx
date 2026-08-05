@@ -66,10 +66,13 @@ const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbenc
 
 function onReady(event: DockviewReadyEvent): void {
   const { api } = event;
-  // The registry needs the dock handle: panel focus (Ctrl+1..N), and opening a
-  // panel that is not in the startup layout.
-  setDockApi(api);
+  // The default arrangement first, so the window is never blank — then the
+  // handle. Handing it over is what starts layout restore (a tool declaring
+  // `onDockReady`), which arranges over the default rather than instead of it.
   layoutDefaultPanels(api);
+  // The registry needs the dock handle: panel focus (Ctrl+1..N), opening a
+  // panel that is not in the startup layout, and the layout system.
+  setDockApi(api);
 }
 
 export default function App() {

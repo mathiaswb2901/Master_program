@@ -55,8 +55,10 @@ export function promptInsertText(draft: string, body: string): string {
  * and detail are attacker-controlled free text from the same untrusted file as
  * the body, so a row reading "branch + short status" could type anything. The
  * row shows what will actually be typed; the label stops being load-bearing.
+ * A `layout` entry shows the layout it switches to, for the same reason.
  */
 export function entryDetail(entry: ShortcutEntry): string {
+  if (entry.kind === "layout") return `layout · ${entry.body}`;
   if (entry.kind !== "shell") return entry.detail ?? PROMPT_DETAIL;
   const text = shellInsertText(entry.body);
   return text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text;

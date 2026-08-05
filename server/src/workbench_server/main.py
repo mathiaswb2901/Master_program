@@ -17,6 +17,7 @@ from workbench_server.routers import (
     events,
     files,
     health,
+    layouts,
     office,
     office_host,
     provenance,
@@ -26,6 +27,7 @@ from workbench_server.routers import (
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
+from workbench_server.services.layouts import LayoutsService
 from workbench_server.services.office import OfficeService
 from workbench_server.services.office_host import OfficeHostService, build_backend
 from workbench_server.services.provenance import ProvenanceService
@@ -54,6 +56,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
     # Correlates agent tool calls with the watcher's file events; in-memory only.
     provenance_service = ProvenanceService(workspace.root, event_bus)
+    # One JSON document per workspace, so different projects keep different
+    # arrangements. Stateless: read and written on demand, nothing to start.
+    layouts_service = LayoutsService(workspace.root)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
     # Fake mode replaces the SDK client and nothing else: same SessionManager,
@@ -140,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.office_host = office_host_service
     app.state.shortcuts = shortcuts_service
     app.state.provenance = provenance_service
+    app.state.layouts = layouts_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -157,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(office_host.router)
     app.include_router(shortcuts.router)
     app.include_router(provenance.router)
+    app.include_router(layouts.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

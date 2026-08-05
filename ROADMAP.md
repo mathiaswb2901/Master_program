@@ -223,15 +223,43 @@ Ordered by what unblocks what.
    dynamic plugin loader — but every derivation takes a tools array rather than reading
    `TOOLS`, which is the seam one plugs into (`ARCHITECTURE.md` §Tool registry,
    `docs/tools.md`).
-2. **Layout system** — the "work full screen" gap. dockview already supports far more
+2. ~~**Layout system** — the "work full screen" gap. dockview already supports far more
    than we use: panel **maximize / focus mode**, floating and popped-out panels, and
    full serialization. Add named, savable layouts ("review", "writing", "three
    agents") switchable from the QuickBar and from `shortcuts.md`, plus **layout
    persistence across restarts** — today every reload throws your arrangement away,
-   which is the single most anti-premium behaviour left in the app.
-3. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: bind a
-   layout, a registered tool, a workspace jump, or a saved agent objective to a chord.
-   The file becomes the user's own control surface over everything the registry knows.
+   which is the single most anti-premium behaviour left in the app.~~ **done** — and
+   built as a registered capability with **no panel** (`ui/src/panels/Layouts.tsx`),
+   which is the point: focus mode, persistence and named layouts arrive as commands, a
+   status chip, a `shortcuts.md` kind and one `onDockReady` hook, and `App.tsx` names
+   nothing. `Alt+M` fills the window with the focused panel and gives the arrangement
+   back exactly (dockview's own hidden-view bookkeeping). The arrangement is debounced
+   into `<workspace>/.workbench/layouts.json` — *in* the workspace, so different
+   projects keep different windows, next to `shortcuts.md` and already gitignored;
+   the server stores it verbatim because its shape belongs to a UI library and its
+   validity is a registry fact. Presets (`Review`, `Focus`, `Agents`) name **tool ids**
+   rather than geometry, so one naming a tool that is gone builds without it. The part
+   that would actually have broken in the field is handled explicitly: dockview
+   restores a panel whose component is unregistered and kills the render, so every
+   persisted layout is pruned against `panelComponents(TOOLS)` first — unknown panels
+   dropped, empty groups collapsed, the rest kept, one toast — and a corrupt file, an
+   unusable layout or a throwing `fromJSON` all resolve to the default arrangement.
+   `shortcuts.md` gains a third kind, `layout`, the first that *acts* rather than
+   inserts; it stays inside the never-execute doctrine because its whole vocabulary is
+   the name of an arrangement the user saved. Deliberately deferred: floating and
+   popped-out panels (dockview supports both; nothing asks for them yet), a saved
+   layout does not gain a panel that was added to the default *after* it was saved
+   (switch to Default, or open it from the QuickBar), and switching to a preset rebuilds
+   the dock — so the terminals in it restart, while switching to a *saved* layout reuses
+   the panels that are already there.
+3. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: ~~bind a
+   layout~~ (**done** with item 2: `type: layout`), a registered tool, a workspace jump,
+   or a saved agent objective to a chord. The file becomes the user's own control
+   surface over everything the registry knows. The seam is in place —
+   `shortcutActions` on the descriptor routes a kind to the tool that carries it out —
+   so each further kind is a parser case plus a handler, not a new mechanism. The bar
+   every one of them has to clear is the one `layout` cleared: it may not run a command,
+   send a prompt, or reach a file, because a workspace file is untrusted input.
 4. **Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history. Supersedes the
@@ -272,9 +300,10 @@ without forking — the difference between a fixed app and an instrument.
 
 - The logged "frontend is too plain" change request executed in full: aggressive
   ui-ux-pro-max design overhaul on top of the now-complete structural layer —
-  distinctive welcome surface, branded empty states, micro-interactions, layout
-  persistence, dockview floating/maximize, Monaco enrichment, content search
-  (Ctrl+Shift+F), settings UI.
+  distinctive welcome surface, branded empty states, micro-interactions, Monaco
+  enrichment, content search (Ctrl+Shift+F), settings UI. (Layout persistence and
+  dockview maximize moved to M5 item 2 and **landed** there; floating and popped-out
+  panels are still unclaimed — dockview supports both and nothing has asked yet.)
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
 - Remaining OSS product bar: first-run experience (workspace picker, Claude-login and

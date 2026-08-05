@@ -16,6 +16,7 @@ import type { WorkbenchTool } from "./registry";
 import { agentTool } from "./panels/AgentPanel";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
+import { layoutsTool } from "./panels/Layouts";
 import { officeTool } from "./panels/OfficePanel";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
@@ -27,4 +28,8 @@ export const TOOLS: readonly WorkbenchTool[] = [
   terminalTool,
   officeTool,
   scratchpadTool,
+  // Contributes no panel — it arranges the ones above. Last, so its status chip
+  // sits at the outer edge of the bar and its QuickBar section reads as the
+  // window's own section rather than one capability's.
+  layoutsTool,
 ];

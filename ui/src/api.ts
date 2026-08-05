@@ -9,6 +9,8 @@ import type {
   DocEditorConfig,
   FileContent,
   FolderSessions,
+  LayoutsResponse,
+  LayoutsState,
   OfficeLastSave,
   OfficeStatus,
   OkResponse,
@@ -74,6 +76,11 @@ export const deleteEntry = (path: string): Promise<OkResponse> =>
 export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcuts");
 
 export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
+
+export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
+
+export const putLayouts = (body: LayoutsState): Promise<OkResponse> =>
+  request("/api/layouts", jsonInit("PUT", body));
 
 export const acknowledgeProvenance = (body: AcknowledgeRequest): Promise<OkResponse> =>
   request("/api/provenance/acknowledge", jsonInit("POST", body));
