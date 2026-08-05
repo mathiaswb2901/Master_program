@@ -1226,12 +1226,19 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     sendChat: (text) => {
       const id = get().activeSessionId;
       if (!id) return;
+      // The server names a session from its **first** user message, and until
+      // this the listing only refreshed for a session it had never seen — so a
+      // conversation stayed "new session" everywhere until the next reload.
+      // That was survivable with one Agent panel and is not with four panes:
+      // four tabs reading "new session" are four panes you cannot tell apart.
+      const named = (get().chats[id]?.items ?? []).some((item) => item.kind === "user");
       ensureAgentSocket(id).send({ type: "user_message", text });
       appendChat(id, { kind: "user", text });
       set((s) => ({
         sessionStates: { ...s.sessionStates, [id]: "working" },
         chatDrafts: { ...s.chatDrafts, [id]: "" },
       }));
+      if (!named) scheduleSessionsRefresh();
     },
 
     decidePermission: (requestId, allow) => {

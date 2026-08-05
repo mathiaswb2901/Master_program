@@ -116,11 +116,17 @@ function paneRects(dock: DockviewApi): PaneRect[] {
 const groupById = (dock: DockviewApi, id: string): DockviewGroupPanel | undefined =>
   dock.groups.find((group) => group.id === id);
 
-/** The pane the keyboard is in. dockview's `activeGroup` is authoritative; a
- * window that has never been clicked has none, and every command below treats
- * that as "nothing to do" rather than guessing. */
+/**
+ * The pane the keyboard is in.
+ *
+ * dockview's `activeGroup` is the answer, but it can be momentarily unset — a
+ * window that has never been clicked, or one whose active group was just
+ * removed. Falling back to the active panel's group and then to the first pane
+ * matters: a split chord that answers "nothing is focused" because an overlay
+ * closed a moment ago is a chord the user learns not to trust.
+ */
 function focusedGroup(dock: DockviewApi): DockviewGroupPanel | undefined {
-  return dock.activeGroup;
+  return dock.activeGroup ?? dock.activePanel?.api.group ?? dock.groups[0];
 }
 
 /** Bring a pane forward *and* put the keyboard in it — `setActive` on the
@@ -206,7 +212,10 @@ export function closeFocusedPane(): void {
     toast("warn", "That is the last pane — Workbench needs one.");
     return;
   }
-  dock.activePanel?.api.close();
+  // The focused pane's visible panel, by the same rule everything else here
+  // uses — a group holding three editor tabs is one pane with three things in
+  // it, and "close this pane" must not throw away two of them unasked.
+  focusedGroup(dock)?.activePanel?.api.close();
 }
 
 // ---- splitting --------------------------------------------------------------
@@ -223,6 +232,10 @@ export async function placeChoice(
   // Awaited *before* the group is looked up: "New agent session" is a round
   // trip to the server, and the arrangement may have moved on meanwhile.
   const key = await choice.key();
+  // A row that is not the tool's default pane and answered with no key did not
+  // get what it was going to bind to — a session that failed to start. Opening
+  // the tool's default pane instead would silently do something else.
+  if (key === null && choice.defaultPane !== true) return;
   const reference = groupById(dock, referenceId) ?? focusedGroup(dock);
   if (reference === undefined) return;
   const id = paneId(choice.toolId, key);

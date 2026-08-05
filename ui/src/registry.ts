@@ -66,6 +66,19 @@ export interface PaneInstanceOption {
   key: () => string | null | Promise<string | null>;
 }
 
+/** An option with the tool it belongs to — which is all the picker needs to
+ * turn a row into a pane id (`paneId(toolId, await key())`). */
+export interface PaneChoice extends PaneInstanceOption {
+  toolId: string;
+  /**
+   * This row *is* the tool's default pane, so a null key means the bare tool
+   * id and not a failure. Set by the derivation below, never by a tool: it is
+   * what lets the picker tell "you asked for the Agent panel" apart from "the
+   * session I was going to bind this pane to could not be created".
+   */
+  defaultPane?: boolean;
+}
+
 /**
  * How a tool is *plural*: what a new pane of it can be bound to, and what a
  * pane calls itself once it is.
@@ -368,10 +381,6 @@ export function paneVocabulary(tools: readonly WorkbenchTool[]): PaneVocabulary 
   return { components: new Set(Object.keys(panelComponents(tools))), plural: pluralPanelIds(tools) };
 }
 
-/** An option with the tool it belongs to — which is all the picker needs to
- * turn a row into a pane id (`paneId(toolId, await key())`). */
-export type PaneChoice = PaneInstanceOption & { toolId: string };
-
 /**
  * Every row the pane picker offers, in registry order.
  *
@@ -389,6 +398,7 @@ export function paneInstanceOptions(tools: readonly WorkbenchTool[]): PaneChoice
       title: tool.title,
       category: "Panels",
       key: () => null,
+      defaultPane: true,
     };
     const instances = tool.panel?.singleton === false ? tool.panel.instances : undefined;
     if (instances === undefined) return [base];

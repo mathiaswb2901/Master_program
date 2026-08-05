@@ -1,6 +1,6 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
-import { Fragment, useEffect } from "react";
+import { Fragment, useEffect, useRef } from "react";
 
 import { focusPanel } from "../dock";
 import {
@@ -187,11 +187,23 @@ export function EditorAreaPanel(props: IDockviewPanelProps) {
 function FilePane({ path, api }: { path: string; api: DockviewPanelApi }) {
   const file = useStore((s) => s.openFiles.find((f) => f.path === path));
   const theme = useStore((s) => s.theme);
-  // A pane restored from a layout names a file nothing has opened yet.
-  const missing = file === undefined;
+
+  /**
+   * Open it **once**, when the pane appears — a pane restored from a layout
+   * names a file nothing has read yet.
+   *
+   * Once, and not "whenever it is missing": the tab strip can close this file
+   * too, and a pane that reopened whatever it lost would make that close button
+   * do nothing. Closed from elsewhere, the pane says so and offers it back.
+   */
+  const openedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (missing) void useStore.getState().openFile(path);
-  }, [missing, path]);
+    if (openedFor.current === path) return;
+    openedFor.current = path;
+    if (!useStore.getState().openFiles.some((f) => f.path === path)) {
+      void useStore.getState().openFile(path);
+    }
+  }, [path]);
 
   // Ctrl+S saves the file you are looking at, so the focused pane decides which
   // one that is — the same rule the session panes follow.
@@ -203,7 +215,22 @@ function FilePane({ path, api }: { path: string; api: DockviewPanelApi }) {
     return () => subscription.dispose();
   }, [api, path]);
 
-  if (file === undefined) return <div className="wb-pane-single" />;
+  if (file === undefined) {
+    return (
+      <div className="wb-pane-single">
+        <div className="wb-pane-note">
+          <span className="wb-pane-note-msg u-truncate">{path} is closed.</span>
+          <button
+            type="button"
+            className="wb-btn wb-btn-sm wb-btn-outline"
+            onClick={() => void useStore.getState().openFile(path)}
+          >
+            Reopen
+          </button>
+        </div>
+      </div>
+    );
+  }
   const view = documentViewFor(TOOLS, file.kind);
   return (
     <div className="wb-pane-single">
