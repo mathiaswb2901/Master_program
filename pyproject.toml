@@ -16,6 +16,7 @@ dependencies = [
     "pyjwt>=2.13.0",
     "httpx>=0.28.1",
     "claude-agent-sdk>=0.2.128",
+    "tzdata>=2026.3",
 ]
 
 [dependency-groups]

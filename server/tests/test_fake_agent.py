@@ -19,7 +19,8 @@ from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.agents import PermissionRequest, TextDelta, ToolSettled, ToolUseNote
 from workbench_server.models.agents import TurnDone as TurnDoneEvent
-from workbench_server.models.plans import PlanPresented, PlanResponse
+from workbench_server.models.plans import PlanPresented, PlanResponse, VisualNode
+from workbench_server.models.visuals import ChartLeaf, TableLeaf, TimeAxis
 from workbench_server.services import fake_agent
 from workbench_server.services.agent_sessions import SessionManager
 from workbench_server.services.fake_agent import fake_client_factory, first_workspace_file
@@ -181,6 +182,45 @@ async def test_plan_please_presents_a_card_and_echoes_the_decision(tmp_path: Pat
     events = await drain(queue, TurnDoneEvent)
     # The echo is what proves the agent side received the user's choice.
     assert "plan approve: approach=utc" in text_of(events)
+
+
+async def test_visual_please_presents_a_scene_the_e2e_journey_can_assert(
+    tmp_path: Path,
+) -> None:
+    """The scripted artifact is the fixture the Playwright journey renders, so
+    what it contains is a contract: every leaf kind, every block layout, and a
+    cell whose text looks like markup. Pinned here so a change to the fake is a
+    deliberate change to the journey rather than a silent one."""
+    session = manager_for(workspace_with_notes(tmp_path)).create("")
+    queue = session.subscribe()
+    session.send_user_message("visual please")
+
+    presented: PlanPresented | None = None
+    while presented is None:
+        event = await asyncio.wait_for(queue.get(), timeout=10)
+        if isinstance(event, PlanPresented):
+            presented = event
+    node = presented.plan.nodes[0]
+    assert isinstance(node, VisualNode)
+    assert [block.layout for block in node.blocks] == ["single", "single", "split", "row"]
+    kinds = [item.kind for block in node.blocks for item in block.items]
+    assert kinds == ["metrics", "chart", "table", "table", "diagram", "code_diff"]
+
+    chart = node.blocks[1].items[0]
+    assert isinstance(chart, ChartLeaf)
+    assert isinstance(chart.x, TimeAxis)
+    # 25 delivery hours: the day the clocks go back is the point of the fixture.
+    assert [len(series.values) for series in chart.series] == [25, 25]
+    assert chart.x.timezone == "Europe/Stockholm"
+    assert [series.style for series in chart.series] == ["line", "step"]
+
+    after = node.blocks[2].items[1]
+    assert isinstance(after, TableLeaf)
+    assert fake_agent.VISUAL_MARKUP_CELL in after.rows[1]
+
+    session.resolve_plan(PlanResponse(plan_id=presented.plan.plan_id, verdict="approve"))
+    events = await drain(queue, TurnDoneEvent)
+    assert "plan approve: no choices" in text_of(events)
 
 
 async def test_each_presentation_is_a_fresh_card(tmp_path: Path) -> None:

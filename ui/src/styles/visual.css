@@ -1,0 +1,504 @@
+/* Visual plan artifacts — the scene graph's pixels (M5).
+
+   Zero raw colours: every value here is a token from design/tokens.css, so the
+   whole renderer follows the theme without a second palette to keep honest.
+
+   Series colours come from the harmonized ANSI ramp (DESIGN.md §2.7) rather
+   than from --accent. Accent is spent on focus, selection, the primary action
+   and "agent working" (principle 3); data ink is content, not chrome, and §2.7
+   is the one categorical ramp the design system already contrast-pairs in both
+   themes — the same one xterm and Monaco read from, so a chart reads as part of
+   the same system. Colour is never the only signal: every series is named in
+   the legend with a swatch shaped like its own mark, every highlighted cell
+   carries a screen-reader word, and every diff line carries a +/− sign. */
+
+.wb-vis {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  /* Never wider than the chat column it lives in (DESIGN.md §6.3). */
+  max-width: 100%;
+  min-width: 0;
+  /* A *container*, not the viewport: this card sits in a dock panel that can be
+     340px wide inside a 1500px window, and a viewport media query would keep
+     three leaves side by side in it. */
+  container-type: inline-size;
+  container-name: wb-vis;
+}
+
+.wb-vis-heading {
+  margin: 0;
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-vis-title {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ---- blocks --------------------------------------------------------------- */
+
+.wb-vis-block {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+/* auto-fit rather than a media query: the card is laid out inside a dock panel
+   whose width has nothing to do with the viewport's. */
+.wb-vis-block.is-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.wb-vis-block.is-row {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+}
+
+.wb-vis-block.is-split {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+/* A split is a comparison, so the seam between the two halves is stated. */
+.wb-vis-block.is-split > .wb-vis-leaf + .wb-vis-leaf {
+  padding-left: var(--space-5);
+  border-left: 1px solid var(--border-subtle);
+}
+
+@container wb-vis (max-width: 560px) {
+  .wb-vis-block.is-row,
+  .wb-vis-block.is-grid,
+  .wb-vis-block.is-split {
+    grid-auto-flow: row;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wb-vis-block.is-split > .wb-vis-leaf + .wb-vis-leaf {
+    padding-left: 0;
+    padding-top: var(--space-5);
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
+  }
+}
+
+.wb-vis-leaf {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  min-width: 0;
+}
+
+/* Wide content scrolls inside itself; the chat column never scrolls sideways. */
+.wb-vis-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.wb-vis-unit {
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+}
+
+/* ---- table ---------------------------------------------------------------- */
+
+.wb-vis-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-vis-table th,
+.wb-vis-table td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.wb-vis-table th {
+  display: table-cell;
+  color: var(--text-tertiary);
+  font-weight: var(--weight-medium);
+  border-bottom-color: var(--border-default);
+}
+
+.wb-vis-th-label {
+  display: block;
+  color: var(--text-secondary);
+}
+
+.wb-vis-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* "Numbers are data" (DESIGN.md principle 7) — and it is the column *type*
+   that says so, never the shape of the text in the cell. */
+.wb-vis-table .is-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.wb-vis-table .is-code {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+}
+
+/* Role tints. The 2px left edge is the non-colour half of the signal, paired
+   with the screen-reader word the cell carries (§7). */
+.wb-vis-table td.is-accent,
+.wb-vis-table tr.is-accent td {
+  background: var(--accent-muted);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.wb-vis-table td.is-success,
+.wb-vis-table tr.is-success td {
+  background: var(--success-bg);
+  box-shadow: inset 2px 0 0 var(--success);
+}
+
+.wb-vis-table td.is-warning,
+.wb-vis-table tr.is-warning td {
+  background: var(--warn-bg);
+  box-shadow: inset 2px 0 0 var(--warn);
+}
+
+.wb-vis-table td.is-error,
+.wb-vis-table tr.is-error td {
+  background: var(--error-bg);
+  box-shadow: inset 2px 0 0 var(--error);
+}
+
+/* On a whole-row highlight only the first cell carries the edge, or the row
+   reads as five separate marks. */
+.wb-vis-table tr[class*="is-"] td:not(:first-child) {
+  box-shadow: none;
+}
+
+/* ---- chart ---------------------------------------------------------------- */
+
+/* Drawn at measured size (see `useDrawWidth`), so the type inside an SVG is the
+   size DESIGN.md says it is instead of whatever a viewBox scaled it to. Below
+   the floor the surface scrolls inside its own box rather than shrinking. */
+.wb-vis-chart,
+.wb-vis-diagram {
+  display: block;
+  overflow: visible;
+}
+
+.wb-vis-grid {
+  stroke: var(--border-subtle);
+  stroke-width: 1;
+}
+
+.wb-vis-axis {
+  stroke: var(--border-default);
+  stroke-width: 1;
+}
+
+.wb-vis-tick {
+  fill: var(--text-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--type-xs-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.wb-vis-tick.is-y {
+  text-anchor: end;
+  dominant-baseline: middle;
+}
+
+.wb-vis-tick.is-y2 {
+  text-anchor: start;
+  dominant-baseline: middle;
+}
+
+.wb-vis-tick.is-x {
+  text-anchor: middle;
+}
+
+.wb-vis-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.wb-vis-bar,
+.wb-vis-dot {
+  fill: currentColor;
+}
+
+.wb-vis-series.is-s1,
+.wb-vis-key.is-s1 {
+  color: var(--ansi-blue);
+}
+
+.wb-vis-series.is-s2,
+.wb-vis-key.is-s2 {
+  color: var(--ansi-green);
+}
+
+.wb-vis-series.is-s3,
+.wb-vis-key.is-s3 {
+  color: var(--ansi-yellow);
+}
+
+.wb-vis-series.is-s4,
+.wb-vis-key.is-s4 {
+  color: var(--ansi-magenta);
+}
+
+.wb-vis-series.is-s5,
+.wb-vis-key.is-s5 {
+  color: var(--ansi-cyan);
+}
+
+.wb-vis-series.is-s6,
+.wb-vis-key.is-s6 {
+  color: var(--ansi-red);
+}
+
+.wb-vis-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-secondary);
+}
+
+.wb-vis-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The swatch takes the shape of the mark it stands for, so the legend is
+   readable without colour vision. */
+.wb-vis-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  background: currentColor;
+}
+
+.wb-vis-swatch.is-bar {
+  height: 10px;
+  width: 8px;
+}
+
+.wb-vis-swatch.is-scatter {
+  height: 6px;
+  width: 6px;
+  border-radius: var(--radius-full);
+}
+
+.wb-vis-swatch.is-step {
+  height: 8px;
+  border-top: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+  background: none;
+  width: 12px;
+}
+
+.wb-vis-grid-caption {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- diagram -------------------------------------------------------------- */
+
+.wb-vis-edge {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+}
+
+.wb-vis-arrow {
+  fill: var(--border-strong);
+}
+
+.wb-vis-edge-label {
+  fill: var(--text-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--type-xs-size);
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--surface-elevated);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.wb-vis-node rect {
+  fill: var(--surface-panel);
+  stroke: var(--border-default);
+  stroke-width: 1;
+}
+
+.wb-vis-node text {
+  fill: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--type-sm-size);
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+/* Role tints, and — as everywhere else in this file — the non-colour half of
+   the signal (§7). A roled box wears a 2px stroke against the neutral box's
+   1px, and its role word rides in the drawing's accessible name (`roleLabel`);
+   an `svg` with `role="img"` has one accessible name, so a hidden span inside
+   it would never be read. */
+.wb-vis-node.is-accent rect,
+.wb-vis-node.is-success rect,
+.wb-vis-node.is-warning rect,
+.wb-vis-node.is-error rect {
+  stroke-width: 2;
+}
+
+.wb-vis-node.is-accent rect {
+  fill: var(--accent-muted);
+  stroke: var(--accent);
+}
+
+.wb-vis-node.is-success rect {
+  fill: var(--success-bg);
+  stroke: var(--success);
+}
+
+.wb-vis-node.is-warning rect {
+  fill: var(--warn-bg);
+  stroke: var(--warn);
+}
+
+.wb-vis-node.is-error rect {
+  fill: var(--error-bg);
+  stroke: var(--error);
+}
+
+/* ---- code diff ------------------------------------------------------------ */
+
+.wb-vis-diff {
+  margin: 0;
+  padding: var(--space-4) 0;
+  background: var(--surface-terminal);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-code-line);
+  color: var(--text-secondary);
+}
+
+.wb-vis-diff-line {
+  display: block;
+  padding: 0 var(--space-5);
+  white-space: pre;
+}
+
+.wb-vis-diff-sign {
+  display: inline-block;
+  width: 1.2em;
+  color: var(--text-tertiary);
+}
+
+.wb-vis-diff-line.is-add {
+  background: var(--success-bg);
+  color: var(--text-primary);
+}
+
+.wb-vis-diff-line.is-add .wb-vis-diff-sign {
+  color: var(--success);
+}
+
+.wb-vis-diff-line.is-del {
+  background: var(--error-bg);
+  color: var(--text-primary);
+}
+
+.wb-vis-diff-line.is-del .wb-vis-diff-sign {
+  color: var(--error);
+}
+
+/* ---- metrics -------------------------------------------------------------- */
+
+.wb-vis-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.wb-vis-metric {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.wb-vis-metric dt {
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-tertiary);
+}
+
+.wb-vis-metric dd {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.wb-vis-figure {
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+/* A roled figure's rule doubles to 4px against the neutral 2px, and the padding
+   gives back the two pixels so a row of metrics stays on one baseline grid. The
+   colour names *which* role; the weight says there is one at all, and the
+   `u-sr-only` word in the `dt` says both without either (§7). */
+.wb-vis-metric.is-accent,
+.wb-vis-metric.is-success,
+.wb-vis-metric.is-warning,
+.wb-vis-metric.is-error {
+  border-left-width: 4px;
+  padding-left: calc(var(--space-4) - 2px);
+}
+
+.wb-vis-metric.is-accent {
+  border-left-color: var(--accent);
+}
+
+.wb-vis-metric.is-success {
+  border-left-color: var(--success);
+}
+
+.wb-vis-metric.is-warning {
+  border-left-color: var(--warn);
+}
+
+.wb-vis-metric.is-error {
+  border-left-color: var(--error);
+}

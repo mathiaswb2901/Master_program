@@ -156,7 +156,7 @@ the moat.
   test`, both in the CI ui job); ~~Playwright E2E still pending (standing bar)~~
   **done** — `ui/e2e/` drives the built UI against a real backend in a per-run temp
   workspace (`npm run e2e`, chromium, own CI job with the HTML report uploaded on
-  failure). Eight journeys: files (create → Monaco → Ctrl+S → watcher reload → conflict
+  failure). Nine journeys: files (create → Monaco → Ctrl+S → watcher reload → conflict
   → dirty-close), terminals (real ConPTY, tabs, surviving scrollback), QuickBar +
   shortcuts.md (categories, keycaps, the snippet that is typed but never run, the
   problems toast), chat streaming with per-tool settle, plan cards (recommendation
@@ -293,7 +293,32 @@ Ordered by what unblocks what.
    (switch to Default, or open it from the QuickBar), and switching to a preset rebuilds
    the dock — so the terminals in it restart, while switching to a *saved* layout reuses
    the panels that are already there.
-3. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: ~~bind a
+3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
+   (PRs 1–2 landed: the schema and its renderer). Asked for after watching an
+   agentic-workflow video where the agent renders an interactive artifact instead of
+   a wall of text. The third-party tool that does it (lavish-axi) **failed vetting**
+   — undisclosed on-by-default telemetry, a skill that `npx`'s an unpinned package
+   with sandbox-evasion fallbacks, and, worst, a bridge letting any script inside a
+   model-authored artifact write into the agent's instruction channel with no user
+   gesture — so this is built our way: a fifth `PlanNode` kind whose payload is a
+   **typed, depth-2, non-recursive scene graph** (`models/visuals.py`). The model
+   sends structure and numbers; Workbench computes every coordinate and emits every
+   pixel (`ui/src/visual/`). No markup, HTML, SVG, CSS or URL ever crosses the wire,
+   which keeps the closed-union posture that makes plan cards immune to XSS and
+   exfiltration while removing the expressiveness limit that prompted the request.
+   Leaves: `table` (typed columns — numeric renders in tabular figures because the
+   *schema* says so), `chart` (line/bar/step/scatter on typed axes), `diagram`
+   (nodes and edges; we lay it out as a layered DAG), `code_diff`, `metrics`.
+   **Owner decisions, recorded:** domain types **yes** — a DST-aware time axis that
+   draws a 23- and a 25-hour day correctly (asserted on real Nordic clock-change
+   dates on both sides of the wire) and `step` as first-class, because a dispatch
+   schedule drawn as a line is a lie; a **live workspace** artifact **yes**; and
+   **persisting artifacts to `.workbench/` yes** — the latter two are *later PRs*,
+   not these. Still open: annotation anchors and annotate mode (PR 3), expanding an
+   artifact into a dockview panel (PR 4), live refinement and note batches (PR 5),
+   persistence (later), and component/design-system specimens (M7-gated, alongside
+   the "design-system-faithful visual mockups" gap logged in M4).
+4. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: ~~bind a
    layout~~ (**done** with item 2: `type: layout`), a registered tool, a workspace jump,
    or a saved agent objective to a chord. The file becomes the user's own control
    surface over everything the registry knows. The seam is in place —
@@ -301,20 +326,20 @@ Ordered by what unblocks what.
    so each further kind is a parser case plus a handler, not a new mechanism. The bar
    every one of them has to clear is the one `layout` cleared: it may not run a command,
    send a prompt, or reach a file, because a workspace file is untrusted input.
-4. **Workspace switcher** — the workspace is currently whatever directory the server
+5. **Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history. Supersedes the
    first-run picker in the OSS bar item 3.
-5. **Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
+6. **Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
    dirty-slot `needs_review` protection, per-slot watchers), multi-root file/terminal
    access through a root registry (path jail preserved per root), worktree-bound agent
    sessions. Parallel projects that cannot step on each other.
-6. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
+7. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
    (status, current activity, cost), inline permission chips answerable from the board;
    orchestrator session kind with a mission-control MCP toolset
    (spawn/list/read/send/wait/stop workers), worker budget + cost ceiling,
    escalate-to-board permission policy (never auto-allow shell).
-7. **Security hardening pulled forward** (OSS bar item 1): per-launch auth token
+8. **Security hardening pulled forward** (OSS bar item 1): per-launch auth token
    injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
    access and a workspace switcher all widen the unauthenticated localhost surface
    unacceptably.
@@ -508,3 +533,16 @@ Build for real external users, not just the author. Consequences, tracked as wor
   are the difference between an app and an instrument, and belong in the plan rather
   than a later design pass. → M5 reordered as the **Modular track**, run in parallel
   with the Office moat track, registry first.
+
+- 2026-08-05 — **Visual artifacts, built rather than adopted** (user): after an
+  agentic-workflow video showing an agent render an interactive artifact instead of a
+  wall of text, the third-party tool that does it (lavish-axi) was read in full and
+  **rejected** under the skill-vetting bar: undisclosed on-by-default telemetry, a
+  skill that `npx`'s an unpinned package with sandbox-evasion fallbacks, and a bridge
+  letting a script inside a model-authored artifact write into the agent's instruction
+  channel with no user gesture. Build the capability our way — a typed scene graph the
+  model fills with structure and numbers while Workbench draws every pixel. Three owner
+  decisions on top: **domain types yes** (a DST-aware time axis and first-class `step`,
+  because a generic renderer lies about a 23- or 25-hour day and about a dispatch
+  schedule), **live workspace artifacts yes**, and **persistence to `.workbench/`
+  yes** — the last two are later PRs. → M5 item 3.

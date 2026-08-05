@@ -188,7 +188,7 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts, provenance, layouts, office host |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
@@ -293,8 +293,8 @@ back — its hooks and permission rules, not only its skills.
 
 **Visual plan artifacts:** `present_plan` (the second context-bridge tool) takes a
 `PlanArtifact` — a closed, size-capped discriminated union of option groups, step
-lists, questions and markdown (`models/plans.py`), never free-form markup — which
-the UI renders as a native card; the user's choices, annotations and verdict come
+lists, questions, markdown and *visuals* (`models/plans.py`), never free-form markup —
+which the UI renders as a native card; the user's choices, annotations and verdict come
 back to the agent as a typed `PlanResponse` through the same future-and-timeout
 discipline as permissions. A timeout or an interrupt resolves to verdict
 `no_decision`, never an implied approval, and an `approve` that leaves an option
@@ -308,6 +308,56 @@ to any client that subscribes after they were emitted, and both are abandoned on
 interrupt/close, so neither a reconnect nor a Stop leaves an unanswerable
 `needs_attention` session. The factory seam (`ClientFactory`) passes the session
 itself as a `SessionBridge` — the bundle of callbacks that must reach the human.
+
+**The scene graph** (`models/visuals.py`, `ui/src/visual/`) is the fifth node kind,
+and the answer to "let the agent draw" without letting it ship markup. A `visual`
+node is a typed, **depth-2, non-recursive** graph: blocks (`single`/`row`/`grid`/
+`split`) holding *leaves* — `table` (typed columns, so a numeric column renders in
+tabular figures because the schema says it is numbers), `chart` (typed series on
+typed axes), `diagram` (nodes and edges only), `code_diff`, `metrics`. The model
+sends structure and numbers; Workbench computes every coordinate (`visual/layout.ts`,
+`visual/timeAxis.ts`) and emits every pixel from its own React/SVG components in
+`tokens.css` colours. Two domain types are first-class because a generic renderer
+lies about them: a **time axis** that is a regular grid in *absolute* time labelled
+in a market's IANA zone — so a 23-hour and a 25-hour day draw and label correctly,
+asserted on real Nordic clock-change dates in both `test_visuals.py` and
+`timeAxis.test.ts` — and **`step`**, because a dispatch schedule holds its value
+across a settlement period and a line between hour centres claims ramps that never
+happened.
+
+*Threat model.* The rejected alternative was a third-party artifact bridge that
+failed vetting on undisclosed telemetry, an unpinned `npx` with sandbox-evasion
+fallbacks, and — worst — a channel letting a script inside a model-authored
+artifact write into the agent's instruction channel with no user gesture. The
+scene graph closes all three by construction rather than by policy:
+
+- **Nothing is executable.** There is no HTML, SVG, CSS, script or event-handler
+  field, and every payload string becomes a React *text node* — a cell reading
+  `<script>…` renders those characters (`Visual.test.tsx`, and the E2E journey
+  asserts nothing was added to the document).
+- **Nothing reaches the network.** No URL, no image source, no font, no fetch. The
+  E2E journey records every request the page makes while an artifact renders and
+  asserts the list is **empty**.
+- **Nothing addresses the agent.** The only channel back is the existing typed
+  `PlanResponse` — the user's own choices, notes and verdict.
+- **Nothing is unbounded.** Rows, columns, series, points, nodes, edges, diff
+  lines, leaves per node and visual nodes per card are all capped in the schema, so
+  a runaway artifact is a tool error the agent can fix, not a wedged renderer.
+  Those caps bound one leaf each, and their *product* is the number that decides
+  whether a card renders: eight leaves inside the chart cap is 19,200 marks, and a
+  card holds three such nodes. So a visual node also carries an aggregate cap
+  (`MAX_VISUAL_MARKS`), and both halves are measured rather than argued —
+  `test_visuals.py::TestRenderBudget` builds the payload at every cap at once and
+  watches it be rejected, and `visual/budget.test.tsx` renders a whole card at the
+  ceiling (18,000 marks → 20,619 elements, ~0.2 s) to prove the ceiling is one the
+  renderer can draw.
+- **Nothing recurses.** Depth stops at the leaf, which is what keeps rendering cost
+  bounded in the payload *and* keeps `plan_input_schema()`'s ref-inlining
+  terminating. It is also a token budget: the leaf union is inlined once, and
+  `AgentToolSpec.max_schema_bytes` fails the gate if that stops being true.
+
+A safety property asserted only in prose is a property until someone edits the
+file, so each bullet above has a test named after it.
 
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage
@@ -650,11 +700,14 @@ Format spec: `docs/shortcuts.md`.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
-   launched in a per-run temp workspace with fake-agent mode on. Eight journeys: file
+   launched in a per-run temp workspace with fake-agent mode on. Nine journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
    ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
    tool reaching the user through the registry alone), chat streaming and
-   tool settling, plan cards, status chips and the attention badge, office degraded
+   tool settling, plan cards, **visual artifacts** (every leaf kind drawn, the
+   25-hour day labelled in its market's zone, markup rendered as text, and *zero*
+   network requests during the render — the safety property that can only be proven
+   in a real browser), status chips and the attention badge, office degraded
    mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
    and links back to its session — *and* the negative half: an announced-but-failed
    write followed by the user's own change, and the user's own saves, mark nothing).
