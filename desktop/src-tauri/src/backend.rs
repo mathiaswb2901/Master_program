@@ -356,7 +356,10 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// Forward one of the child's pipes into the shell log, line by line.
-fn pump<R: Read + Send + 'static>(stream: R, tag: &'static str) {
+///
+/// `pub(crate)` because a hosted guest's output belongs in the same log: a
+/// pipe nobody drains is a child that blocks once it fills.
+pub(crate) fn pump<R: Read + Send + 'static>(stream: R, tag: &'static str) {
     thread::spawn(move || {
         for line in BufReader::new(stream).lines() {
             match line {
