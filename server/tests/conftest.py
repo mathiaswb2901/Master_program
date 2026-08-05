@@ -1,5 +1,6 @@
 """Shared fixtures. Tests build Settings explicitly — never from ambient env."""
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -9,6 +10,23 @@ from httpx import ASGITransport, AsyncClient
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.services import shortcuts as shortcuts_service
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop every ``WORKBENCH_*`` variable for the duration of a test.
+
+    ``Settings()`` reads the environment, so without this the suite asserts
+    against whatever the developer running it exported — and CLAUDE.md tells
+    this project's developers to export ``WORKBENCH_ONLYOFFICE_URL`` and
+    ``WORKBENCH_ONLYOFFICE_JWT_SECRET`` for Office editing, which turns Office
+    on and fails the tests that assert it is off by default. Same reason
+    `playwright.config.ts` strips the prefix before starting the E2E backend: a
+    run on a working machine must be the run a bare CI runner gets. A test that
+    wants a setting passes it to ``Settings(...)``.
+    """
+    for key in [k for k in os.environ if k.startswith("WORKBENCH_")]:
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture

@@ -102,7 +102,18 @@ the moat.
   — read in full (a skill can execute anything on the user's machine) and shown to help
   before it ships; popularity is not evidence.
 - UI quality tooling starts here: eslint + vitest **done** (`npm run lint` / `npm run
-  test`, both in the CI ui job); Playwright E2E still pending (standing bar).
+  test`, both in the CI ui job); ~~Playwright E2E still pending (standing bar)~~
+  **done** — `ui/e2e/` drives the built UI against a real backend in a per-run temp
+  workspace (`npm run e2e`, chromium, own CI job with the HTML report uploaded on
+  failure). Seven journeys: files (create → Monaco → Ctrl+S → watcher reload → conflict
+  → dirty-close), terminals (real ConPTY, tabs, surviving scrollback), QuickBar +
+  shortcuts.md (categories, keycaps, the snippet that is typed but never run, the
+  problems toast), chat streaming with per-tool settle, plan cards (recommendation
+  pre-selected → switch → approve → the agent's echo), status chips + `document.title`
+  attention badge, and office degraded mode. Agent journeys run against **fake-agent
+  mode** (`WORKBENCH_FAKE_AGENT=1`, `services/fake_agent.py`): scripted replies, tool
+  calls, permission prompts and plan artifacts through the real factory/bridge seams —
+  no Claude login, no tokens, deterministic frames.
 
 ### M5 — Parallel (worktrees + Mission Control)
 

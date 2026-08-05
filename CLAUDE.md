@@ -10,6 +10,8 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
 - `uv run workbench-server` — run backend (port 8787)
 - UI: `cd ui && npm run dev` (Vite, port 5173); `npm run lint` — eslint;
   `npm run test` — vitest; `npm run build` — type-check + bundle
+- `cd ui && npm run e2e` — Playwright: builds the UI, then drives it against a real
+  server in a temp workspace with `WORKBENCH_FAKE_AGENT=1` (`ui/e2e/`, chromium only)
 
 ## Think big (standing directive)
 
