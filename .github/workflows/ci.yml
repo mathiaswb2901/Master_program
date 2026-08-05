@@ -86,6 +86,79 @@ jobs:
           path: ui/playwright-report
           retention-days: 7
 
+  # The Feel performance lane: the production build against a real backend in a
+  # generated 5,005-file workspace (server/tests/perf_fixture.py), collecting
+  # navigation/paint timing, event timing at durationThreshold 0, long tasks,
+  # long animation frames and rAF frame intervals.
+  #
+  # Two steps, and the split is the reason the job exists in this shape:
+  #
+  #   * **Budgets (blocking)** — every test *without* the `@wallclock` tag.
+  #     Those assertions count work: how many directories a request lists, how
+  #     many full tree fetches twenty file changes cost. A count is the same
+  #     number on a developer's laptop and on a throttled shared runner, so it
+  #     can gate a merge without ever failing for a reason that is not the code.
+  #   * **Timings (reported)** — the `@wallclock` tests, with
+  #     `continue-on-error`. Cold-launch and frame-timing numbers on a shared
+  #     runner are information, not a verdict. Blocking on them is precisely how
+  #     a performance gate ends up switched off, and a switched-off gate defends
+  #     nothing.
+  #
+  # Both reports are uploaded on every run, pass or fail: the numbers, not the
+  # green tick, are what the next Feel PR is measured against. Note that the
+  # server-side budgets (directory-listing counts) also run in the `server` job
+  # as ordinary pytest — this job is the browser half.
+  perf:
+    runs-on: windows-latest
+    env:
+      # One fixture for both steps: the generator's stamp check makes the second
+      # run reuse it instead of writing 5,105 files again.
+      WB_PERF_WORKSPACE: ${{ runner.temp }}\perf-fixture
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Sync backend dependencies
+        run: uv sync --dev
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Install Playwright browser
+        working-directory: ui
+        run: npx playwright install --with-deps chromium
+      - name: Build UI
+        working-directory: ui
+        run: npm run build
+      - name: Budgets (blocking)
+        working-directory: ui
+        run: npx playwright test --config playwright.perf.config.ts --grep-invert "@wallclock"
+      - name: Upload budget report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-budgets
+          path: |
+            ui/playwright-report-perf
+            ui/perf-results
+          retention-days: 7
+      - name: Timings (reported, never blocking)
+        working-directory: ui
+        continue-on-error: true
+        run: npx playwright test --config playwright.perf.config.ts --grep "@wallclock"
+      - name: Upload timing report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-timings
+          path: |
+            ui/playwright-report-perf
+            ui/perf-results
+          retention-days: 7
+
   # Does this PR touch the Tauri shell? A full Rust toolchain + tauri build is
   # minutes of windows-latest, so the desktop job below is skipped when nothing
   # under desktop/ changed. GitHub has no per-job `paths:` filter, hence this.
@@ -136,7 +209,7 @@ jobs:
   # The single check the master ruleset requires: green only when every job is green.
   quality-gate:
     runs-on: ubuntu-latest
-    needs: [changes, server, ui, e2e, desktop]
+    needs: [changes, server, ui, e2e, perf, desktop]
     if: always()
     steps:
       - name: Verify all jobs passed
@@ -145,7 +218,7 @@ jobs:
           echo "job results: $results"
           for r in $results; do
             # `skipped` is allowed for exactly one reason: `desktop` is
-            # path-filtered. server/ui/e2e/changes carry no `if:` and no
+            # path-filtered. server/ui/e2e/perf/changes carry no `if:` and no
             # `needs:`, so they can never be skipped — unreachable there.
             if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
               echo "a required job did not succeed"; exit 1

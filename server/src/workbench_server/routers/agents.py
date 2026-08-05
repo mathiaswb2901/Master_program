@@ -48,7 +48,7 @@ def list_sessions(request: Request) -> list[FolderSessions]:
     live_sdk_ids = manager.live_sdk_ids()
 
     # folders worth showing: root + first-level dirs (deeper folders appear once used)
-    folders = [""] + [node.path for node in (workspace.tree().children or []) if node.kind == "dir"]
+    folders = ["", *workspace.top_level_dirs()]
     for folder in folders:
         for info in index.list_sessions(workspace.safe_path(folder), folder):
             if info.session_id in live_sdk_ids:
