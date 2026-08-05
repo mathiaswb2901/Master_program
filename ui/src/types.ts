@@ -295,7 +295,134 @@ export interface MarkdownNode {
   text: string;
 }
 
-export type PlanNode = OptionGroupNode | StepListNode | QuestionNode | MarkdownNode;
+// ---- visuals.py -------------------------------------------------------------
+// The scene graph. The model sends structure and numbers; `ui/src/visual/`
+// computes every coordinate and emits every pixel. Depth stops at the leaf:
+// blocks hold leaves, leaves hold data, nothing nests (see visuals.py for why
+// that is a safety and a token-budget property before it is a design one).
+
+/** The whole colour language of a visual — one vocabulary across every leaf. */
+export type VisualRole = "neutral" | "accent" | "success" | "warning" | "error";
+
+export interface TableColumn {
+  label: string;
+  /** `numeric` right-aligns in tabular figures because the *schema* says these
+   * are figures (DESIGN.md principle 7) — never because the text looked numeric. */
+  type: "text" | "numeric" | "code";
+  unit: string;
+}
+
+export interface CellHighlight {
+  row: number;
+  /** null highlights the whole row. */
+  column: number | null;
+  role: VisualRole;
+}
+
+export interface TableLeaf {
+  kind: "table";
+  title: string;
+  columns: TableColumn[];
+  rows: string[][];
+  highlights: CellHighlight[];
+}
+
+export interface ValueAxis {
+  kind: "value";
+  label: string;
+  unit: string;
+  scale: "linear" | "log";
+}
+
+/** A regular grid in absolute time, labelled in a market's own clock — which is
+ * what makes a 23- or 25-hour day draw at its true length (`visual/timeAxis.ts`). */
+export interface TimeAxis {
+  kind: "time";
+  label: string;
+  /** ISO-8601 instant, with an offset. */
+  start: string;
+  step_minutes: number;
+  /** IANA zone, validated server-side. */
+  timezone: string;
+}
+
+export type ChartXAxis = ValueAxis | TimeAxis;
+
+export interface ChartSeries {
+  label: string;
+  style: "line" | "bar" | "step" | "scatter";
+  values: number[];
+  /** Empty on a time axis, where the grid supplies x. */
+  x: number[];
+  axis: "left" | "right";
+}
+
+export interface ChartLeaf {
+  kind: "chart";
+  title: string;
+  x: ChartXAxis;
+  y: ValueAxis;
+  y_right: ValueAxis | null;
+  series: ChartSeries[];
+}
+
+export interface DiagramNode {
+  id: string;
+  label: string;
+  role: VisualRole;
+}
+
+export interface DiagramEdge {
+  source: string;
+  target: string;
+  label: string;
+}
+
+/** Acyclic, validated server-side: we lay it out as a layered DAG. */
+export interface DiagramLeaf {
+  kind: "diagram";
+  title: string;
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+}
+
+export interface CodeDiffLeaf {
+  kind: "code_diff";
+  title: string;
+  /** A tag for a data attribute — never a loader, never a path. */
+  language: string;
+  before: string;
+  after: string;
+}
+
+export interface Metric {
+  label: string;
+  value: string;
+  unit: string;
+  role: VisualRole;
+}
+
+export interface MetricsLeaf {
+  kind: "metrics";
+  title: string;
+  items: Metric[];
+}
+
+export type VisualLeaf = TableLeaf | ChartLeaf | DiagramLeaf | CodeDiffLeaf | MetricsLeaf;
+
+export interface VisualBlock {
+  layout: "single" | "row" | "grid" | "split";
+  items: VisualLeaf[];
+}
+
+export interface VisualNode {
+  kind: "visual";
+  node_id: string;
+  title: string;
+  blocks: VisualBlock[];
+}
+
+export type PlanNode = OptionGroupNode | StepListNode | QuestionNode | MarkdownNode | VisualNode;
 
 export interface PlanArtifact {
   plan_id: string;

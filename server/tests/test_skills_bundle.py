@@ -27,6 +27,10 @@ EXPECTED_SKILLS = {"plan-visual", "remember", "workbench-dev"}
 #: Skills are progressive disclosure: the body is loaded into context on use, so
 #: a bloated one is a cost paid on every invocation.
 MAX_SKILL_LINES = 150
+#: Reference files a SKILL.md points at, loaded only when the agent goes looking
+#: — the second level of the same disclosure. They ship as package data like the
+#: skill bodies, and a reference a wheel dropped is guidance nobody ever reads.
+EXPECTED_REFERENCES = {"plan-visual/reference/visual.md"}
 
 
 class StubBridge:
@@ -66,6 +70,12 @@ def skill_files() -> Iterator[Path]:
     root = bundled_plugin_path()
     assert root is not None
     yield from sorted(root.joinpath("skills").glob("*/SKILL.md"))
+
+
+def reference_files() -> Iterator[Path]:
+    root = bundled_plugin_path()
+    assert root is not None
+    yield from sorted(root.joinpath("skills").glob("*/reference/*.md"))
 
 
 class TestPathResolution:
@@ -123,10 +133,38 @@ class TestSkillFiles:
 
     def test_no_secrets_or_personal_paths_leak_into_the_bundle(self) -> None:
         """The bundle is tracked, published package data (CLAUDE.md danger zone)."""
-        for path in skill_files():
+        for path in [*skill_files(), *reference_files()]:
             body = path.read_text(encoding="utf-8")
             assert "C:\\Users\\" not in body
             assert "/home/" not in body
+
+
+class TestReferenceFiles:
+    """The second level of progressive disclosure.
+
+    A reference is how a skill grows without growing what every invocation
+    costs — but only if the SKILL.md actually points at it and the file
+    actually ships. Both fail silently otherwise: the agent reads a body that
+    promises detail it can never find.
+    """
+
+    def test_exactly_the_expected_references_ship(self) -> None:
+        root = bundled_plugin_path()
+        assert root is not None
+        found = {path.relative_to(root / "skills").as_posix() for path in reference_files()}
+        assert found == EXPECTED_REFERENCES
+
+    def test_every_reference_is_named_by_its_own_skill(self) -> None:
+        for path in reference_files():
+            body = path.parent.parent.joinpath("SKILL.md").read_text(encoding="utf-8")
+            assert f"reference/{path.name}" in body, path.name
+
+    def test_a_reference_stays_out_of_the_skill_body_budget(self) -> None:
+        """The whole point: detail lives here, not in the body that is loaded on
+        every invocation. If a reference is shorter than the body's own section
+        about it, it is not carrying its weight."""
+        for path in reference_files():
+            assert len(path.read_text(encoding="utf-8").splitlines()) > MAX_SKILL_LINES // 2
 
 
 class TestAgentOptions:
@@ -276,6 +314,10 @@ def test_wheel_ships_the_skill_files(tmp_path: Path) -> None:
     assert "workbench_server/skills_bundle/.claude-plugin/plugin.json" in names
     assert {
         f"workbench_server/skills_bundle/skills/{skill}/SKILL.md" for skill in EXPECTED_SKILLS
+    } <= names
+    # A reference the wheel dropped is a SKILL.md pointing at nothing.
+    assert {
+        f"workbench_server/skills_bundle/skills/{reference}" for reference in EXPECTED_REFERENCES
     } <= names
 
 

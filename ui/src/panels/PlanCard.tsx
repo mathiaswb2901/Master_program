@@ -16,6 +16,7 @@ import { useId, useState } from "react";
 import { Markdown } from "../markdown";
 import { emptyPlanDraft, unchosenOptionGroups, useStore, type PlanDraft } from "../store";
 import type { OptionGroupNode, PlanArtifact, PlanNode, PlanVerdict, StepListNode } from "../types";
+import { VisualView } from "../visual/Visual";
 
 /** Server caps (models/plans.py) — enforced here so a decision never bounces. */
 const MAX_ANNOTATION = 600;
@@ -209,6 +210,13 @@ function NodeView({
       return (
         <div className="wb-plan-node">
           <StepList node={node} />
+          <NoteToggle planId={planId} nodeId={node.node_id} value={note} readOnly={readOnly} />
+        </div>
+      );
+    case "visual":
+      return (
+        <div className="wb-plan-node">
+          <VisualView node={node} />
           <NoteToggle planId={planId} nodeId={node.node_id} value={note} readOnly={readOnly} />
         </div>
       );

@@ -15,14 +15,22 @@ or in a descriptor, would be a second authority to keep honest with nothing
 reading it, and the first edit that touched one and not the other would go
 unnoticed.
 
-The budget is enforced by tests, never by a comment. Every description is loaded
-into every session's context, so it is a cost paid on every request (CLAUDE.md);
-``server/tests/test_agent_tools.py`` asserts a ceiling on each description and
-on the serialized size of a representative result, and the quality gate fails
-bloat. Latency is deliberately not budgeted — these are in-process calls where
-the model and the user dominate.
+The budget is enforced by tests, never by a comment. Every description *and
+every input schema* is loaded into every session's context, so both are a cost
+paid on every request (CLAUDE.md); ``server/tests/test_agent_tools.py`` asserts
+a ceiling on each description, on each input schema and on the serialized size
+of a representative result, and the quality gate fails bloat. Latency is
+deliberately not budgeted — these are in-process calls where the model and the
+user dominate.
+
+The schema ceiling is the one that bites hardest and is the least visible: a
+result is paid for when a tool is called, a description once per session, but a
+schema is paid for on every request whether or not the tool is ever used. It is
+what made the scene graph's shape (``models/visuals.py``) a budget decision
+before a design one.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -60,7 +68,17 @@ class AgentToolSpec:
     #: measured representative payload plus a margin you can say out loud (see
     #: the two below), so that growing the result is a diff someone justifies.
     max_result_bytes: int
+    #: Ceiling on the compact JSON of ``input_schema``, in bytes. Also per tool,
+    #: and required for the same reason: a tool that takes nothing must fail the
+    #: gate the moment it starts taking something, and a tool with a rich schema
+    #: must fail it the moment that schema grows without anyone noticing.
+    max_schema_bytes: int
     input_schema: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def schema_bytes(self) -> int:
+        """What this tool's schema actually costs, compactly serialized."""
+        return len(json.dumps(self.input_schema, separators=(",", ":")).encode())
 
     @property
     def qualified_name(self) -> str:
@@ -105,6 +123,9 @@ GET_WORKSPACE_STATE = AgentToolSpec(
     # per-file (hashes, dirty flags, line counts) blows it, which is the point:
     # that is a redesign of what this tool costs, not an incremental edit.
     max_result_bytes=512,
+    # A tool that takes nothing advertises nothing: `{}` is two bytes, and this
+    # ceiling is what fails the gate if arguments ever appear here by accident.
+    max_schema_bytes=8,
 )
 
 
@@ -123,12 +144,14 @@ def workspace_state_result(state: UiState) -> dict[str, Any]:
 PRESENT_PLAN = AgentToolSpec(
     name="present_plan",
     description=(
-        "Show the user an interactive plan card in Workbench and wait for their "
-        "decision. Use this instead of writing a plan as chat prose whenever you "
-        "propose multi-step work or ask the user to choose between alternatives. "
-        "Nodes render natively: option_group (the user picks one option), step_list "
-        "(ordered steps, file_refs open real editor tabs), question, markdown. "
-        "Returns JSON {plan_id, verdict, choices, annotations, comment}. verdict "
+        "Show the user an interactive plan card and wait for their decision. "
+        "Use it instead of chat prose whenever you propose multi-step work "
+        "or ask the user to choose between alternatives. Nodes render natively: "
+        "option_group (user picks one), step_list (ordered steps; file_refs open "
+        "editor tabs), question, markdown, visual (tables, charts, diagrams, diffs, "
+        "metrics — we draw them from your numbers; read the workbench:plan-visual "
+        "skill first). Returns JSON {plan_id, verdict, choices, annotations, comment}. "
+        "verdict "
         "'approve' means proceed with the chosen options; 'revise' means rework the "
         "plan using their comments and present it again; 'reject' means drop this "
         "approach; 'no_decision' means the user never answered (timeout or "
@@ -141,6 +164,13 @@ PRESENT_PLAN = AgentToolSpec(
     # budget — the ceiling is on the shape, and the one path we *can* overrun
     # (a validation error) is clamped to it in `handle_present_plan`.
     max_result_bytes=512,
+    # 8,370 bytes measured for the five node kinds: 2,388 for the four original
+    # ones and 5,981 for the scene graph (models/visuals.py). 9,500 leaves room
+    # for a leaf kind's fields to grow but not for a sixth leaf kind to arrive
+    # unmeasured — which is the point, because this is the one budget paid on
+    # every request whether the tool is called or not. Raising it is a number
+    # someone has to defend.
+    max_schema_bytes=9_500,
     input_schema=plan_input_schema(),
 )
 

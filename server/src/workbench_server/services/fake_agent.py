@@ -35,7 +35,13 @@ What one user message produces, in order:
 * ``ask permission`` — a permission prompt through the bridge, then the
   outcome echoed as text;
 * ``plan please``    — a fixed :class:`PlanArtifact` through the bridge, then
-  the user's verdict and choices echoed as text.
+  the user's verdict and choices echoed as text;
+* ``visual please``  — a plan whose one node is a ``visual``: every leaf kind
+  and every block layout at once, on a real 25-hour market day, with a cell
+  whose text looks like markup. A separate trigger rather than a bigger
+  ``plan please`` on purpose — that card is the regression test for the four
+  original node kinds, and growing it would quietly change what that journey
+  proves.
 
 Never enabled by default (``Settings.fake_agent``), and ``main.py`` logs a
 warning on startup when it is: a workbench that quietly answers with canned
@@ -45,6 +51,7 @@ text instead of an agent is worse than one that fails loudly.
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +65,23 @@ from workbench_server.models.plans import (
     PlanResponse,
     PlanStep,
     StepListNode,
+    VisualNode,
+)
+from workbench_server.models.visuals import (
+    CellHighlight,
+    ChartLeaf,
+    ChartSeries,
+    CodeDiffLeaf,
+    DiagramEdge,
+    DiagramLeaf,
+    DiagramNode,
+    Metric,
+    MetricsLeaf,
+    TableColumn,
+    TableLeaf,
+    TimeAxis,
+    ValueAxis,
+    VisualBlock,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SdkClient, SessionBridge
 
@@ -70,6 +94,7 @@ WRITE_TRIGGER = "write file"
 REFUSED_WRITE_TRIGGER = "refuse write"
 PERMISSION_TRIGGER = "ask permission"
 PLAN_TRIGGER = "plan please"
+VISUAL_TRIGGER = "visual please"
 
 #: How long ``stay busy`` holds the turn open (before the reply, or after the
 #: tool result when ``use tool`` is asked for too). Long enough for a UI test to
@@ -201,6 +226,137 @@ def fake_plan() -> PlanArtifact:
     )
 
 
+#: The autumn clock change in the Nordic market: 2026-10-25 is 25 hours long in
+#: Europe/Stockholm, and 02:00 happens twice. Hard-coded because the point of
+#: the journey is that the *renderer* draws that day correctly — a date computed
+#: from "today" would stop testing DST on 364 days of the year.
+VISUAL_DAY_START = datetime(2026, 10, 25, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+VISUAL_ZONE = "Europe/Stockholm"
+
+#: A cell whose text looks like markup. The card must show these characters,
+#: never interpret them — asserted in the E2E journey and in the vitest suite.
+VISUAL_MARKUP_CELL = "<script>alert('xss')</script>"
+
+#: 25 hourly prices and the dispatch they imply — a duck curve with a negative
+#: midday hour, which is what makes the day worth drawing.
+VISUAL_PRICES = [
+    41.2, 38.7, 36.1, 35.4, 34.9, 37.8, 46.3, 58.1, 64.7, 52.2,
+    31.5, 12.4, -3.8, -6.1, 4.7, 22.9, 48.6, 71.3, 88.4, 79.5,
+    63.2, 55.8, 49.1, 44.6, 42.3,
+]  # fmt: skip
+VISUAL_DISPATCH = [
+    0.0, 0.0, -5.0, -5.0, -5.0, 0.0, 2.5, 5.0, 5.0, 0.0,
+    -5.0, -5.0, -5.0, -5.0, -5.0, 0.0, 5.0, 5.0, 5.0, 5.0,
+    2.5, 0.0, 0.0, 0.0, 0.0,
+]  # fmt: skip
+
+
+def fake_visual_plan() -> PlanArtifact:
+    """The card ``visual please`` presents: one visual node exercising every
+    leaf kind and every block layout, on a real 25-hour market day."""
+    return PlanArtifact(
+        title="Åsen 2 — 25 October dispatch",
+        summary="The autumn clock change: 25 delivery hours, two of them 02:00.",
+        nodes=[
+            VisualNode(
+                node_id="scene",
+                title="Day-ahead result",
+                blocks=[
+                    VisualBlock(
+                        items=[
+                            MetricsLeaf(
+                                title="Day totals",
+                                items=[
+                                    Metric(label="Delivery hours", value="25", role="accent"),
+                                    Metric(label="Revenue", value="18 420", unit="EUR"),
+                                    Metric(label="Cycles", value="1.4", role="success"),
+                                    Metric(label="Negative hours", value="2", role="warning"),
+                                ],
+                            )
+                        ]
+                    ),
+                    VisualBlock(
+                        items=[
+                            ChartLeaf(
+                                title="Price and dispatch",
+                                x=TimeAxis(start=VISUAL_DAY_START, timezone=VISUAL_ZONE),
+                                y=ValueAxis(label="Price", unit="EUR/MWh"),
+                                y_right=ValueAxis(label="Dispatch", unit="MW"),
+                                series=[
+                                    ChartSeries(label="SE3 day-ahead", values=VISUAL_PRICES),
+                                    ChartSeries(
+                                        label="Åsen 2",
+                                        style="step",
+                                        values=VISUAL_DISPATCH,
+                                        axis="right",
+                                    ),
+                                ],
+                            )
+                        ]
+                    ),
+                    VisualBlock(
+                        layout="split",
+                        items=[
+                            TableLeaf(
+                                title="Before",
+                                columns=[
+                                    TableColumn(label="Hour"),
+                                    TableColumn(label="Price", type="numeric", unit="EUR/MWh"),
+                                ],
+                                rows=[["02:00 (1st)", "-3.8"], ["02:00 (2nd)", "-6.1"]],
+                                highlights=[CellHighlight(row=1, column=1, role="error")],
+                            ),
+                            TableLeaf(
+                                title="After",
+                                columns=[
+                                    TableColumn(label="Hour"),
+                                    TableColumn(label="Price", type="numeric", unit="EUR/MWh"),
+                                    TableColumn(label="Source", type="code"),
+                                ],
+                                rows=[
+                                    ["02:00 (1st)", "-3.8", "fold=0"],
+                                    ["02:00 (2nd)", "-6.1", VISUAL_MARKUP_CELL],
+                                ],
+                                highlights=[CellHighlight(row=1, role="success")],
+                            ),
+                        ],
+                    ),
+                    VisualBlock(
+                        layout="row",
+                        items=[
+                            DiagramLeaf(
+                                title="Pipeline",
+                                nodes=[
+                                    DiagramNode(id="feed", label="TGN feed"),
+                                    DiagramNode(id="curve", label="Price curve"),
+                                    DiagramNode(id="opt", label="Optimizer", role="accent"),
+                                    DiagramNode(id="bid", label="Bid file", role="success"),
+                                    DiagramNode(id="gate", label="Gate 12:00", role="warning"),
+                                ],
+                                edges=[
+                                    DiagramEdge(source="feed", target="curve", label="hourly"),
+                                    DiagramEdge(source="curve", target="opt"),
+                                    DiagramEdge(source="opt", target="bid"),
+                                    DiagramEdge(source="bid", target="gate"),
+                                    DiagramEdge(source="feed", target="opt", label="fallback"),
+                                ],
+                            ),
+                            CodeDiffLeaf(
+                                title="calendar.py",
+                                language="python",
+                                before="hours = range(24)\nfor h in hours:\n    bid(h)\n",
+                                after=(
+                                    "hours = delivery_hours(day, tz)\nfor h in hours:\n    bid(h)\n"
+                                ),
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        ],
+    )
+
+
 def reply_text(prompt: str) -> str:
     """The markdown reply, as one string (streamed in chunks below)."""
     echoed = " ".join(prompt.split())[:120]
@@ -292,6 +448,9 @@ class FakeAgentClient:
             yield _delta(f"\n\npermission: {'allowed' if allowed else 'denied'}\n")
         if PLAN_TRIGGER in lowered:
             response = await self._bridge.present_plan(fake_plan())
+            yield _delta(plan_echo(response))
+        if VISUAL_TRIGGER in lowered:
+            response = await self._bridge.present_plan(fake_visual_plan())
             yield _delta(plan_echo(response))
         yield ResultMessage(self._session_id)
 
