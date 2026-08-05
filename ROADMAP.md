@@ -67,9 +67,22 @@ the moat.
   decisions are encoded there rather than left to reviewers: PowerPoint is
   preview-only in v1 (single-instance, no `Application.Hwnd` to prove ownership) and
   `WORKBENCH_OFFICE_NATIVE=auto` resolves to *not* hosting natively until hang
-  isolation is proven. Still open here: the Rust window hosting behind that Protocol,
-  the COM bridge (agents reading/writing the live document), the **host panel** — which
-  waits for the tool registry so it registers itself instead of editing `App.tsx` — and
+  isolation is proven. The **Rust window hosting landed** too (PR 3,
+  `desktop/src-tauri/src/host/`): a real child window from another process docked in a
+  panel rectangle — window class + WndProc, style-strip-then-`SetParent`, a clip child
+  that hides a guest's self-drawn caption, batched geometry through one DPI authority,
+  focus routing, job-object teardown, and the `embed`/`set_bounds`/`detach`/`close`/
+  `poll` commands that line up one-for-one with the Python Protocol. It is proven
+  against a **synthetic guest process** (`src/bin/workbench-guest.rs`, debug-only), so
+  the whole mechanism is exercised by `cargo test` with no Office installed, and four
+  documented Win32 behaviours turned out to be false in this configuration —
+  `WM_PARENTNOTIFY`, click routing, `AttachThreadInput`, `SWP_ASYNCWINDOWPOS` (see
+  ARCHITECTURE.md). **Hang isolation is now quantified rather than feared**: a wedged
+  guest leaves the host painting and pumping its own messages, but costs ~1 s per
+  resize frame — and the same move from a thread attached to no input queue takes
+  ~0.15 ms, which is the containment path. Still open here: that containment, the COM
+  bridge (agents reading/writing the live document), the **host panel** — which waits
+  for the tool registry so it registers itself instead of editing `App.tsx` — and
   packaging: the shell runs from source (`cd desktop && npm run tauri dev`); a bundled
   installer that carries its own Python needs `tauri build` work not done yet.
 - ~~**Visual plan artifacts** as a typed product primitive: `present_plan` MCP tool →
@@ -163,8 +176,8 @@ Modular: the UI shell and registry), so both run at once. The milestone table st
 the record of scope; the tracks are how it gets built.
 
 - **Moat track** — the Office host sequence (M4): ~~domain layer with a fake backend~~
-  (**landed**) → Rust window hosting → Word docked → COM bridge + agent tools → Excel.
-  What no competitor can copy quickly.
+  → ~~Rust window hosting~~ (both **landed**) → Word docked → COM bridge + agent tools
+  → Excel. What no competitor can copy quickly.
 - **Modular track** — M5 below, reordered so the *seam* comes first. What the product
   feels like every day.
 
@@ -348,6 +361,21 @@ without forking — the difference between a fixed app and an instrument.
   resolves to *not* hosting** until hang isolation is proven — with
   `GET /api/office/capabilities` reporting that plainly, so the UI degrades to the
   OnlyOffice path from a fact rather than a guess. Browser mode remains fully supported.
+
+- 2026-08-05 — **Native hosting: four documented Win32 behaviours measured false**, and
+  one product risk quantified (PR 3, `desktop/src-tauri/src/host/`). For a window
+  reparented in from another process: `WM_PARENTNOTIFY` never arrives (so destruction is
+  found by polling — the Protocol's `poll` is the *only* crash signal, not a backstop);
+  click-to-focus needs no code because the guest focuses itself; `SetFocus` across the
+  process boundary needs no `AttachThreadInput`, because being a child already attached
+  the input queues; and `SWP_ASYNCWINDOWPOS` does **not** protect against a hung guest,
+  for that same reason — it only posts across *different* input queues, and
+  `DeferWindowPos` rejects the flag outright. Consequence for the product: a wedged
+  guest leaves the host window painting, pumping and not judged hung by Windows, but
+  makes each resize frame cost ~1 s. The fix is measured, not guessed — the same move
+  from a thread that owns no window in the parent chain takes ~0.15 ms — and is
+  deliberately left to its own PR. `WORKBENCH_OFFICE_NATIVE=auto` stays off until then,
+  as decided.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

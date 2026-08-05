@@ -6,16 +6,38 @@ authors = ["Workbench contributors"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.77.2"
+# There are two binaries from here on (the shell and the synthetic guest), and
+# without this `cargo run` refuses to choose — which would break `tauri dev` and
+# every documented way of starting the app.
+default-run = "workbench-desktop"
 
 [lib]
 name = "workbench_desktop_lib"
 path = "src/lib.rs"
+
+# The synthetic guest the Office host is proven against (`src/host/`). A
+# separate process on purpose — every risk native hosting carries is a
+# cross-process risk — and a fixture, not a feature: its body is behind
+# `debug_assertions`, and `lib.rs` registers the commands that drive it only in
+# a debug build.
+[[bin]]
+name = "workbench-guest"
+path = "src/bin/workbench-guest.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Not a new dependency in the tree — tauri already builds serde, and this is the
+# same version cargo has been resolving all along. Declared directly because
+# `#[tauri::command]` payloads and event payloads have to derive its traits, and
+# tauri does not re-export it.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Asserting that a refusal serializes as the word the Python layer expects.
+serde_json = "1"
 
 # Pinned to Tauri 2.x's own `windows` major on purpose. A mismatch gives us a
 # *different* `HANDLE` type than the one Tauri hands out: it compiles, and then
@@ -27,4 +49,11 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # Window hosting: the class, the WndProc, SetParent, DeferWindowPos.
+    "Win32_UI_WindowsAndMessaging",
+    # SetFocus lives here rather than with the other window calls.
+    "Win32_UI_Input_KeyboardAndMouse",
+    # RegisterClassExW needs an HINSTANCE, and the guest fixture paints.
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
 ] }
