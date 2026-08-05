@@ -124,10 +124,20 @@ mod guest {
             // The handshake. Not how the window is found — that is by class and
             // pid, the way Word will be — but what the integration test checks
             // the finder's answer against.
-            println!("{SYNTHETIC_GUEST_HANDSHAKE}{}", window.0 as isize);
-            println!("guest-pid {}", std::process::id());
+            //
+            // **Written with `writeln!`, not `println!`, and the handshake
+            // last.** `println!` panics on a write error, and the test stops
+            // reading — and so closes the pipe — the moment it has the
+            // handshake line. A `println!` that raced that closure aborted the
+            // process, which showed up as a guest whose window "no longer
+            // exists" a few milliseconds after it was found. A fixture must not
+            // die because nobody is listening any more.
             use std::io::Write;
-            let _ = std::io::stdout().flush();
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "guest-pid {}", std::process::id());
+            let _ = writeln!(out, "{SYNTHETIC_GUEST_HANDSHAKE}{}", window.0 as isize);
+            let _ = out.flush();
+            drop(out);
 
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {

@@ -49,7 +49,6 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 /// arrangement `commands.rs` builds, assembled directly so the test can hold
 /// each piece.
 struct Fixture {
-    _serial: MutexGuard<'static, ()>,
     panel: HWND,
     clip: HWND,
     /// A second window of ours with no guest in it, standing in for the
@@ -63,6 +62,12 @@ struct Fixture {
     layout: HostLayout,
     /// What the guest itself said its `HWND` was.
     handshake: isize,
+    /// **Declared last on purpose.** Struct fields drop in declaration order,
+    /// so holding the lock in the *first* field released it before any of the
+    /// teardown below it had run — windows still being destroyed and a guest
+    /// still being reaped while the next test was already launching its own.
+    /// Last means the desktop is quiet again before anyone else gets it.
+    _serial: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
@@ -103,7 +108,6 @@ impl Fixture {
         .expect("the stand-in window should be created");
 
         Self {
-            _serial: serial,
             panel,
             clip,
             elsewhere,
@@ -112,6 +116,7 @@ impl Fixture {
             embedded: None,
             layout: plan,
             handshake,
+            _serial: serial,
         }
     }
 
@@ -150,6 +155,10 @@ impl Drop for Fixture {
 // ---- helpers -----------------------------------------------------------------
 
 /// Read the guest's own account of its window handle.
+///
+/// Stops at the handshake line, which closes the pipe — so the guest prints it
+/// **last** and writes without panicking on a closed one. See the comment
+/// beside those writes in `src/bin/workbench-guest.rs`.
 fn read_handshake(process: &mut GuestProcess) -> isize {
     use std::io::{BufRead, BufReader};
     let stdout = process.take_stdout().expect("the guest's stdout is piped");
@@ -500,16 +509,20 @@ fn closing_a_focused_panel_does_not_strand_the_keyboard() {
     );
     settle();
 
+    // What `host_close` does with the keyboard, once the instance is gone.
     let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+    focus::reclaim_if_stranded(elsewhere, &dead_ends);
+
+    // Asserted as the outcome rather than as "the reclaim fired", because where
+    // Windows *would* have put the focus is session-dependent: destroying an
+    // active top-level window activates another of the same thread on an
+    // interactive desktop, and leaves the focus null where nothing of ours was
+    // active. Either way the keyboard must end up on a live window that is not
+    // one of the two we just destroyed.
+    let focused = focus::focused_here();
     assert!(
-        focus::reclaim_if_stranded(elsewhere, &dead_ends),
-        "the reclaim declined a keyboard left on {:?}",
-        focus::focused_here()
-    );
-    assert_eq!(
-        focus::focused_here(),
-        Some(elsewhere),
-        "the keyboard was not handed back to a window the user can type in"
+        focused.is_some_and(|window| exists(window) && !dead_ends.contains(&window)),
+        "the keyboard was left on {focused:?} after the panel closed under it"
     );
 }
 
