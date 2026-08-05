@@ -265,6 +265,49 @@ def test_a_stale_marker_is_cleared_when_nothing_is_shared(repo: tuple[Path, Path
     assert not (worktree / MARKER_NAME).exists()
 
 
+# --- giving the links back ---------------------------------------------------
+#
+# `git worktree remove` recurses through a junction and deletes the main
+# checkout's node_modules, so unlinking is not tidiness — it is the difference
+# between removing a worktree and wiping the checkout it borrowed from.
+
+
+def test_unlink_drops_every_recorded_link_and_the_marker(repo: tuple[Path, Path]) -> None:
+    main_checkout, worktree = repo
+    ops = _ops(main_checkout, worktree)
+    main([], ops=ops, cwd=worktree)
+
+    code = main(["--unlink"], ops=ops, cwd=worktree)
+
+    assert code == 0
+    assert not (worktree / "ui" / "node_modules").exists()
+    assert not (worktree / "desktop" / "node_modules").exists()
+    assert not (worktree / MARKER_NAME).exists()
+    assert (main_checkout / "ui" / "node_modules").is_dir()
+
+
+def test_unlink_refuses_a_real_populated_node_modules(repo: tuple[Path, Path]) -> None:
+    """os.rmdir is the safety net: it cannot recurse, so a real tree survives."""
+    main_checkout, worktree = repo
+    ops = _ops(main_checkout, worktree)
+    main([], ops=ops, cwd=worktree)
+    (worktree / "ui" / "node_modules" / "react").mkdir(parents=True)
+
+    code = main(["--unlink"], ops=ops, cwd=worktree)
+
+    assert code == 1
+    assert (worktree / "ui" / "node_modules" / "react").is_dir()
+    assert (worktree / MARKER_NAME).exists()  # still describes reality
+
+
+def test_unlink_without_a_marker_is_a_no_op(repo: tuple[Path, Path]) -> None:
+    main_checkout, worktree = repo
+    ops = _ops(main_checkout, worktree)
+
+    assert main(["--unlink"], ops=ops, cwd=worktree) == 0
+    assert ops.runs == [] and ops.links == []
+
+
 def test_dry_run_changes_nothing(repo: tuple[Path, Path]) -> None:
     main_checkout, worktree = repo
     ops = _ops(main_checkout, worktree)

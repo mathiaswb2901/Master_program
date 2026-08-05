@@ -23,21 +23,29 @@ names. That is exactly what makes warming free, and it has two consequences:
 
 1. **Reading is safe, writing is not.** Running the test suite, the linter, the
    type-checker, Vite or Playwright out of a junctioned ``node_modules`` is
-   fine — they only read. But ``npm ci``, ``npm install``, ``npm update`` and
-   ``npm dedupe`` *rewrite the tree they are pointed at*, so running one inside
-   a warmed worktree silently rewrites the main checkout's dependencies — and
-   every other worktree junctioned to it. ``npm ci`` is the worst case: it
-   deletes ``node_modules`` first.
+   fine — they only read. Two things are not fine, and both are measured, not
+   assumed:
 
-   Before installing or adding a dependency, break the link first. Removing a
-   junction removes only the link, never the target::
+   * ``npm ci``, ``npm install``, ``npm update``, ``npm dedupe`` *rewrite the
+     tree they are pointed at*, so one of these inside a warmed worktree
+     silently rewrites the main checkout's dependencies — and every other
+     worktree linked to it. ``npm ci`` is the worst case: it deletes
+     ``node_modules`` first.
+   * ``git worktree remove`` **recurses through the junction and deletes the
+     main checkout's ``node_modules``.** (Verified on git for Windows; ``rm
+     -rf``, ``shutil.rmtree`` and PowerShell's ``Remove-Item -Recurse`` all
+     stop at the link, but git does not.) This is the dangerous one, because
+     removing the worktree is the normal end of a branch's life.
 
-       cmd /c rmdir ui\\node_modules      # Windows: unlinks, target untouched
-       rm ui/node_modules                 # POSIX symlink fallback
+   So both before installing *and* before deleting the worktree, drop the
+   links::
 
-   then ``npm install`` normally. (``rmdir`` refuses if you point it at a real
-   directory with contents, which is the safety net; ``shutil.rmtree`` likewise
-   refuses to recurse into a link.)
+       python scripts/dev/warm_worktree.py --unlink
+
+   which is ``os.rmdir`` on each recorded link: that unlinks a junction,
+   succeeds on an empty directory, and refuses a populated real one, so it can
+   never eat the shared tree. By hand it is ``cmd /c rmdir ui\\node_modules``
+   on Windows, ``rm ui/node_modules`` on POSIX.
 
 2. **A junction is only correct while the lockfiles agree.** If the worktree's
    ``package-lock.json`` differs from the main checkout's, its ``node_modules``
@@ -272,21 +280,57 @@ def write_marker(worktree: Path, main: Path, linked: Sequence[str]) -> None:
     )
 
 
+def unlink_shared(worktree: Path) -> int:
+    """Drop the links this worktree borrowed, leaving the main checkout untouched.
+
+    ``os.rmdir`` is the whole trick: it unlinks a junction, succeeds on an empty
+    directory, and *refuses* a populated one — so it can never recurse into the
+    shared tree, whatever the marker claims.
+    """
+    marker = worktree / MARKER_NAME
+    if not marker.is_file():
+        print(f"No {MARKER_NAME} here — nothing is shared, nothing to unlink.")
+        return 0
+
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    shared = payload.get("junctioned", []) if isinstance(payload, dict) else []
+    failures = 0
+    for relative in shared:
+        path = worktree / str(relative)
+        try:
+            os.rmdir(path)
+        except FileNotFoundError:
+            print(f"  {relative} already gone")
+        except OSError as exc:
+            failures += 1
+            print(f"  ! {relative} is not a link (or is busy) — left alone: {exc}")
+        else:
+            print(f"  unlinked {relative}")
+    if failures:
+        return 1
+    marker.unlink(missing_ok=True)
+    print("Unlinked. `npm install` and `git worktree remove` are safe again.")
+    return 0
+
+
 def _report(outcomes: Sequence[Outcome], elapsed: float, linked: Sequence[str]) -> None:
-    verb = {"link": "linked  ", "install": "installed", "skip": "skipped "}
+    verb = {"link": "linked", "install": "installed", "skip": "skipped"}
     print("\nSummary")
     for outcome in outcomes:
         mark = " " if outcome.ok else "!"
         timing = f"{outcome.seconds:6.1f}s" if outcome.action != "skip" else "       "
-        print(f" {mark} {verb[outcome.action]} {outcome.name:<8} {timing}  {outcome.reason}")
+        print(f" {mark} {verb[outcome.action]:<9} {outcome.name:<8} {timing}  {outcome.reason}")
     print(f"\nTotal {elapsed:.1f}s")
     if linked:
         shared = ", ".join(f"{name}/node_modules" for name in linked)
         print(
             f"\n  !! {shared} is SHARED with the main checkout, not copied.\n"
-            "     Tests and builds read it safely. npm ci / npm install / npm update\n"
-            "     would rewrite the main checkout's tree and every worktree linked to\n"
-            "     it - unlink first:  cmd /c rmdir ui\\node_modules\n"
+            "     Reading it — tests, lint, build — is safe. These are not:\n"
+            "       npm ci / npm install / npm update   rewrites the main checkout\n"
+            "       git worktree remove                 DELETES the main checkout's\n"
+            "                                           node_modules through the link\n"
+            "     Run this first, both times:\n"
+            "       python scripts/dev/warm_worktree.py --unlink\n"
             f"     Recorded in {MARKER_NAME}."
         )
 
@@ -301,6 +345,11 @@ def main(
         description="Warm a fresh git worktree from the main checkout (see module docstring).",
     )
     parser.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
+    parser.add_argument(
+        "--unlink",
+        action="store_true",
+        help="drop the links again — required before npm install or git worktree remove",
+    )
     args = parser.parse_args(argv)
 
     ops = ops or SystemOps()
@@ -313,6 +362,9 @@ def main(
     except (subprocess.CalledProcessError, OSError) as exc:
         print(f"Not inside a git checkout ({exc}).")
         return 1
+
+    if args.unlink:
+        return unlink_shared(worktree)
 
     if _same_path(worktree, main_checkout):
         print(

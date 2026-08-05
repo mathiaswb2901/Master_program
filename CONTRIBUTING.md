@@ -25,11 +25,17 @@ A stale `ui/node_modules` does not report itself as stale — it surfaces as a V
 Working in a `git worktree`? Run `python scripts/dev/warm_worktree.py` inside the new
 worktree instead of installing from scratch: when its lockfiles are byte-identical to
 the main checkout's it links `node_modules` across (a Windows directory junction — no
-admin rights needed) and syncs Python, turning a ~10 minute setup into a few seconds.
-The linked tree is **shared with the main checkout**, so never run `npm ci`/`npm install`
-inside a warmed worktree — unlink first (`cmd /c rmdir ui\node_modules`). The script's
-module docstring has the full rationale, and it records what it linked in
-`.warm-worktree.json`.
+admin rights needed) and syncs Python. It records what it linked in
+`.warm-worktree.json`; the module docstring has the full rationale.
+
+The linked tree is **shared with the main checkout, not copied**. Reading it is safe;
+writing to it is not, and neither is deleting the worktree — `git worktree remove`
+recurses through the junction and takes the main checkout's `node_modules` with it. So
+before `npm install` **and** before removing the worktree:
+
+```bash
+python scripts/dev/warm_worktree.py --unlink
+```
 
 Optional: agent features need a Claude subscription login (`claude login` /
 `claude setup-token`) or `ANTHROPIC_API_KEY`. Office editing needs a local
