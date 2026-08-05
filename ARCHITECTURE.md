@@ -116,13 +116,14 @@ build never fetches the chunk and every call is inert in a tab.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts, provenance |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, shortcuts, provenance, office host |
 | `routers/files.py` | tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
+| `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
 | `services/workspace.py` | path jail, atomic writes, hashing, tree |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
@@ -134,6 +135,7 @@ build never fetches the chunk and every call is inert in a tab.
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
+| `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
 ## Agent sessions
 
@@ -270,6 +272,71 @@ the Tauri shell — a browser tab cannot host native windows — which now exist
 above). The OnlyOffice integration below remains as preview, document diffing for
 review, and fallback when Office isn't installed.
 
+### Office host (`services/office_host/`)
+
+The domain layer for "a real document hosted in a panel" is built **fake-first**:
+the lifecycle, the ownership rules and the whole REST/WS surface exist and are
+tested on a machine with no Office and no Rust, and the native implementation
+slots in behind one `Protocol`. That seam is the point — it is what makes the
+risky part testable before it is written.
+
+```
+routers/office_host.py ──► OfficeHostService ──► HostBackend (Protocol)
+   REST                       state machine        ├── FakeHostBackend   (today)
+   /ws/events ◄── OfficeHostEvent on the bus       └── Win32/COM backend (later PR)
+```
+
+**Lifecycle.** `launching → embedding → embedded`, with `detached` (window given
+back to the desktop, document still open) as the one live state you can return
+from. `closed`, `crashed` and `failed` are terminal and never move again; the
+record stays, because it is the answer to "what happened to that document", and
+`GET /api/office/hosts` replays it to a client that reconnected. Every change is
+published as an `OfficeHostEvent` on the existing bus, so hosting needed no new
+plumbing and a window that never issued the request still tracks the state.
+
+**The backend contract is deliberately small** (`backend.py`): launch, embed,
+set_bounds, detach, close, poll — every one of them something a real
+`SetParent` implementation can actually do, all `async` because launching Word
+costs about a second. There is no synchronous screenshot and no document
+mutation: reading and writing the *live* document is COM work arriving with the
+bridge in a later PR, behind its own seam. Polling is the only crash signal
+there is — nothing calls back when Word disappears.
+
+**Never adopt a process we did not launch.** Reparenting is destructive: the
+window moves into our panel and its chrome is restyled, so doing it to an
+instance the *user* started would hijack their session, and closing our panel
+would then close their work. A backend that admits it found the instance
+(`HostHandle.adopted`) is refused outright, and the pid it *did* launch is bound
+to the host for life, so no later handle can be substituted. "Already open
+elsewhere" is a first-class refusal with a reason the UI can show, never a
+silent takeover. An instance we launched is always reaped — including when the
+embed is refused, when the user closes the panel mid-launch, and on server
+shutdown.
+
+**Two owner decisions are encoded, not just documented** (2026-08-05).
+PowerPoint is **preview-only**: it is single-instance and exposes no
+`Application.Hwnd` to prove a window is ours, so the service refuses a
+PowerPoint host (`powerpoint_preview_only`) rather than risk reparenting the
+user's own open presentation. And native hosting stays behind
+`WORKBENCH_OFFICE_NATIVE`, where **`auto` currently resolves to *not* hosting
+natively** — it becomes the default only once hang isolation is proven.
+`GET /api/office/capabilities` says all of this out loud (mode, whether hosting
+is available at all, whether Office was detected, whether the *fake* backend is
+answering, and whether the fallback is OnlyOffice or read-only preview) so the
+UI degrades from a fact rather than a guess.
+
+**The fake backend** (`WORKBENCH_OFFICE_FAKE=1`, off by default, warned about at
+startup — the `WORKBENCH_FAKE_AGENT` precedent) walks the same lifecycle in
+process and starts nothing: its pids are counters. Failures are chosen
+programmatically or by the *name of the document* (`…-refuse-embed.docx`,
+`…-crash-after-embed.docx`, `…-already-open.docx`, …), so every branch is
+reachable from a test and, later, from the UI.
+
+**Deliberately deferred:** the Rust window hosting itself, the pywin32 COM
+bridge (and with it the agent-facing document tools), and the panel — which
+lands after the tool registry, so it can register itself instead of editing
+`App.tsx`. Nothing here changes the OnlyOffice path below.
+
 ### OnlyOffice (preview/diff/fallback)
 
 OnlyOffice Docs Community runs as a native local service (port 8880). The backend
@@ -313,6 +380,10 @@ Format spec: `docs/shortcuts.md`.
      WebSocket fan-outs and every typed frame stay production code. This is what lets
      layer 4 exercise chat, tool rows, permissions and plan cards with no Claude login
      and no tokens. Off by default; `main.py` logs a structlog warning when it is on.
+   - The **fake host backend** (`WORKBENCH_OFFICE_FAKE=1`) is the same idea one layer
+     down: the Office host lifecycle, its failure branches and its ownership refusals,
+     driven in process with no Office, no windows and no real pid — see *Office host*
+     above.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
