@@ -296,10 +296,29 @@ transitions that never get animated; born with the vocabulary, every later panel
 it for free. This is a sequencing constraint between two tracks, so it is stated here
 rather than inside either. **Re-pointed 2026-08-05**: the interlock originally named M5
 item 2 (the layout system), which shipped in #34 without it — so the constraint expired
-unmet once. Its live target is **M5 item 9 (panes)**, because pane split, swap, close and
-the picker are the transitions that would otherwise be written un-animated forever, and
-because both lanes edit `Layouts.tsx` and `styles/dockview.css`. `feel/motion-foundation`
-lands first; panes rebases onto it, never the reverse.
+unmet once, and focus mode shipped teleporting. Its live target is **M5 item 9 (panes)**,
+because pane split, swap, close and the picker are the transitions that would otherwise
+be written un-animated forever, and because both lanes edit `Layouts.tsx` and
+`styles/dockview.css`. The vocabulary lands first; panes rebases onto it, never the
+reverse.
+
+**What the vocabulary is** (landed): spring-based rather than fixed-duration, as
+`DESIGN.md` §5 — rewritten in the same PR, because the doctrine it replaced *forbade*
+animating tab activation, panel resize, tree expand/collapse and the theme switch, and
+that restraint is half of what made the app read as static. Two easings and four
+durations, derived from stiffness/damping/bounce in `ui/src/design/springs.ts` and
+emitted as CSS `linear()`; two channels (travel = `transform`, tint = opacity/colour) so
+`prefers-reduced-motion` can zero the travel and keep the colour feedback; and a
+conformance test in the perf lane that fails the build on an animated layout property,
+a `transition: all`, a static `will-change` or a hover that eases in.
+
+**What the retrofit cost**, stated so the next interlock is taken seriously: focus mode
+and layout switches are animated from `ui/src/motion.ts` *after* dockview has already
+rearranged the grid — a replay of an arrival rather than a transition into it. Written in
+the other order, the layout system would have handed its own before/after geometry to the
+motion layer and the panels could genuinely travel between arrangements. Nothing is
+wrong; it is one indirection and one less expressive move than it would have been — and
+it is the whole argument for holding the panes interlock above.
 
 **Exit criterion**, in the budgets' own terms: on the 5,005-file fixture, cold launch
 reaches a clickable file tree **under 800 ms**; twenty watcher events cost **zero** full
