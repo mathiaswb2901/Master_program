@@ -17,7 +17,13 @@
 import { expect, test } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
-import { installTelemetry, readTelemetry, record, round } from "./instrument";
+import {
+  cumulativeLayoutShift,
+  installTelemetry,
+  readTelemetry,
+  record,
+  round,
+} from "./instrument";
 
 /**
  * Measured 2026-08-05 on the author's machine (Win11, production build served
@@ -34,8 +40,40 @@ import { installTelemetry, readTelemetry, record, round } from "./instrument";
  * diff. Note what the table does *not* show moving — first contentful paint and
  * the long-task total are unchanged, because the bytes and the parse are the
  * next problem and this PR did not touch them.
+ *
+ * **The bytes and the parse, 2026-08-05** — Monaco off the critical path (the
+ * entry chunk drops from 1,030 kB gzipped to 191 kB) and `main.tsx` no longer
+ * waiting for `window.load` before it renders. Same machine, `WB_PERF_WORKSPACE`
+ * pinned so all eight runs measure one warm fixture, four runs each, medians:
+ *
+ * | | tree rows | FCP | DCL | long tasks |
+ * |---|---|---|---|---|
+ * | before | 1,566 ms | 618 ms | 434 ms | 2, ~290 ms, both before FCP |
+ * | after  |   903 ms | 160 ms |  89 ms | 2, ~230 ms, all after FCP |
+ *
+ * Read the last column: the blocking total barely moved, but it moved to the
+ * *other side of first paint* — what used to be Monaco parsing before the app
+ * could draw anything is now Monaco parsing on an idle callback while the user
+ * looks at their file tree.
+ *
+ * The ceiling comes down to ~2.2x the measured number. It is not 2.2x of
+ * something that got 4x faster: what a *row* costs is still dominated by
+ * `GET /api/files/tree` walking 5,005 files and by rendering them
+ * unvirtualised, and two queued Feel items own that. This one owns the paint.
  */
-const LAUNCH_CEILING_MS = 3_000;
+const LAUNCH_CEILING_MS = 2_000;
+
+/**
+ * Rendering before the webfonts arrive is what buys the paint above, and the
+ * bill for it would be a shell that reflows under the user a moment later.
+ * `@fontsource` ships `font-display: swap`, so the swap is real; the shell's
+ * geometry is grid/flex sized in `px` tokens and does not depend on it, which
+ * is why the measured shift did not move at all — **0.003 before, 0.003 after**,
+ * one sub-pixel shift from the status bar in both. This is the assertion that
+ * keeps it that way: a layout whose height comes from text would start failing
+ * here, and the fix would be `font-display`/`size-adjust`, not the gate again.
+ */
+const LAYOUT_SHIFT_CEILING = 0.02;
 
 test("cold launch reaches a clickable file tree", { tag: "@wallclock" }, async ({ page }, info) => {
   await installTelemetry(page);
@@ -52,16 +90,58 @@ test("cold launch reaches a clickable file tree", { tag: "@wallclock" }, async (
   const treeReady = telemetry.treeReady;
   const fcp = telemetry.paints.find((p) => p.name === "first-contentful-paint")?.startTime ?? null;
   const blocked = telemetry.longTasks.reduce((total, task) => total + task.duration, 0);
+  const shift = cumulativeLayoutShift(telemetry);
 
   await record(
     info,
     "cold-launch",
     `tree rows at ${treeReady === null ? "never" : round(treeReady)} ms, ` +
       `FCP ${fcp === null ? "n/a" : round(fcp)} ms, ` +
-      `${telemetry.longTasks.length} long tasks totalling ${round(blocked)} ms`,
+      `DCL ${telemetry.navigation === null ? "n/a" : round(telemetry.navigation.domContentLoaded)} ms, ` +
+      `${telemetry.longTasks.length} long tasks totalling ${round(blocked)} ms, ` +
+      `layout shift ${shift.toFixed(3)}`,
     { fixture: FIXTURE, telemetry },
   );
 
   expect(treeReady, "no file row ever appeared").not.toBeNull();
   expect(treeReady ?? Infinity).toBeLessThan(LAUNCH_CEILING_MS);
+  expect(shift, "the shell reflowed after first paint").toBeLessThan(LAYOUT_SHIFT_CEILING);
+});
+
+/**
+ * The same launch with the bytes already on disk — every start after the first,
+ * and in the shell every reload of a running window. It is the number that
+ * isolates *evaluating* the entry chunk from downloading it, which is why it is
+ * measured separately rather than inferred from the cold one.
+ *
+ * Measured 2026-08-05, same machine, four runs each, medians: FCP **158 ms**
+ * before and **84 ms** after; DCL **61 ms** before and **27 ms** after; tree
+ * rows 915 ms before and 822 ms after (that last one is the server's walk, as
+ * above). Warm is where the entry chunk's *parse* shows on its own, with no
+ * download in the way, and it more than halved.
+ */
+test("a warm reload paints from cache", { tag: "@wallclock" }, async ({ page }, info) => {
+  await installTelemetry(page);
+  await page.goto("/");
+  await expect(page.getByRole("treeitem", { name: "notes.md", exact: true })).toBeVisible();
+
+  // A reload is a new document with a new timeline, so everything read below
+  // describes the *second* navigation — with the first one's cache behind it.
+  await page.reload();
+  await expect(page.getByRole("treeitem", { name: "notes.md", exact: true })).toBeVisible();
+
+  const telemetry = await readTelemetry(page);
+  const fcp = telemetry.paints.find((p) => p.name === "first-contentful-paint")?.startTime ?? null;
+
+  await record(
+    info,
+    "warm-launch",
+    `tree rows at ${telemetry.treeReady === null ? "never" : round(telemetry.treeReady)} ms, ` +
+      `FCP ${fcp === null ? "n/a" : round(fcp)} ms, ` +
+      `DCL ${telemetry.navigation === null ? "n/a" : round(telemetry.navigation.domContentLoaded)} ms`,
+    { fixture: FIXTURE, telemetry },
+  );
+
+  expect(telemetry.treeReady, "no file row ever appeared").not.toBeNull();
+  expect(telemetry.treeReady ?? Infinity).toBeLessThan(LAUNCH_CEILING_MS);
 });
