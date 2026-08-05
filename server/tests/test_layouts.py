@@ -7,6 +7,7 @@ window that will not open.
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,66 @@ def test_a_failed_save_leaves_no_temp_file(service: LayoutsService, tmp_path: Pa
         service.save(LayoutsState(current={"blob": "x" * (MAX_FILE_BYTES + 1)}))
     workbench = tmp_path / ".workbench"
     assert not workbench.exists() or list(workbench.iterdir()) == []
+
+
+# ---- the Windows replace lock -----------------------------------------------
+#
+# `os.replace` onto a path another process has open fails on Windows instead of
+# waiting, and the holder here is never us: the watcher reacting to the previous
+# write, Defender, the indexer. Two layout switches in a row put two replaces on
+# this file ~20 ms apart, which was losing the second write about half the time
+# — the *later* arrangement discarded, with the file left holding the earlier
+# one. Retrying is the whole fix; these pin that it retries, that it gives up,
+# and that it never leaves a temp file behind either way.
+
+
+def test_a_transient_lock_on_the_file_does_not_lose_the_write(
+    service: LayoutsService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(src: object, dst: object) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 3:  # the transient holder, gone by the fourth attempt
+            raise PermissionError(13, "Access is denied")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr("workbench_server.services.layouts.time.sleep", lambda _: None)
+
+    service.save(LayoutsState(current=GRID, current_name="Agents"))
+
+    assert calls["n"] == 4
+    assert service.load().state.current_name == "Agents"
+    assert [p.name for p in (tmp_path / ".workbench").iterdir()] == ["layouts.json"]
+
+
+def test_a_lock_that_never_lifts_is_reported_rather_than_swallowed(
+    service: LayoutsService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def locked(src: object, dst: object) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(os, "replace", locked)
+    monkeypatch.setattr("workbench_server.services.layouts.time.sleep", lambda _: None)
+
+    # A file genuinely held open (an editor, read-only) is not something to
+    # retry away: the router turns this into the 500 the UI reports as a toast.
+    with pytest.raises(PermissionError):
+        service.save(LayoutsState(current=GRID))
+    assert list((tmp_path / ".workbench").iterdir()) == []
+
+
+async def test_two_writes_in_a_row_both_land(client: AsyncClient) -> None:
+    """The endpoint-level shape of the bug: the second of two quick writes must
+    win, because it is the one the user's window is showing."""
+    for name in ("Review", "Agents"):
+        response = await client.put(
+            "/api/layouts", json={"current": GRID, "current_name": name, "saved": []}
+        )
+        assert response.status_code == 200, response.text
+    assert (await client.get("/api/layouts")).json()["state"]["current_name"] == "Agents"
 
 
 # ---- the endpoints ----------------------------------------------------------

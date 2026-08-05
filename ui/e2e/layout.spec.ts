@@ -19,7 +19,10 @@
  *  - a saved layout naming a panel that no longer exists loses **that panel**
  *    and nothing else, and says so once;
  *  - a corrupt `layouts.json` opens the default arrangement with a warning —
- *    never a blank window.
+ *    never a blank window;
+ *  - a saved layout dockview *cannot* deserialize falls back to the default and
+ *    leaves neither the chip nor the file naming the layout it came from;
+ *  - two switches in a row survive a network that answers them out of order.
  *
  * It ends by resetting to the default arrangement, because the journeys after
  * it share this workspace and expect the window they have always had.
@@ -35,6 +38,29 @@ const SAVED_LAYOUT = "Bidding desk";
 /** A panel id nothing is registered under — what a tool removed after a save
  * (or renamed, or gated off by its `when`) leaves behind in the file. */
 const GHOST_PANEL = "missioncontrol";
+const BROKEN_LAYOUT = "Broken grid";
+
+/**
+ * A saved layout that passes vetting and still breaks dockview.
+ *
+ * `pruneLayout` vets **panel ids** — it does not, and cannot cheaply, vet
+ * dockview's grid algebra. dockview's own deserializer requires the grid root
+ * to be a branch and calls `clear()` *before* it checks, so this layout — whose
+ * one panel (`editors`) is perfectly registered — empties the window and then
+ * throws. That is the second, quieter failure mode of a restore: not "leave the
+ * window alone", but "the window is now the default arrangement", and the two
+ * cannot be reported to the caller as the same thing.
+ */
+const LEAF_ROOT_LAYOUT = {
+  grid: {
+    root: { type: "leaf", size: 1000, data: { id: "1", views: ["editors"], activeView: "editors" } },
+    width: 1000,
+    height: 800,
+    orientation: "HORIZONTAL",
+  },
+  panels: { editors: { id: "editors", contentComponent: "editors", title: "Editor" } },
+  activeGroup: "1",
+};
 
 const DEFAULT_PANELS = ["Agent", "Editor", "Files", "Terminal"];
 const REVIEW_PANELS = ["Agent", "Editor", "Files"];
@@ -243,4 +269,138 @@ test("a saved layout that names a panel Workbench no longer has", async ({ page 
     await persisted(page, null);
     expect((await layouts(page)).state.saved).toEqual([]);
   });
+});
+
+/**
+ * A failed switch must not leave the chip — or the file — naming the layout it
+ * failed to reach.
+ *
+ * The regression: `applySerialized` has two failure modes and used to report
+ * both as `false`. When dockview's own deserializer throws, the fallback
+ * rebuilds the **default** arrangement — but the switch went on setting nothing
+ * and persisting anyway, so the window showed Default while the chip and
+ * `layouts.json` still said the layout the user came from. Reloading read that
+ * back as truth, so the mislabelling outlived the session that caused it.
+ */
+test("a saved layout dockview cannot deserialize leaves nothing lying about it", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await test.step("a layout that survives pruning and still throws", async () => {
+    await withAppClosed(page, async () => {
+      const response = await page.request.put("/api/layouts", {
+        data: {
+          current: null,
+          current_name: null,
+          saved: [{ name: BROKEN_LAYOUT, state: LEAF_ROOT_LAYOUT }],
+        },
+      });
+      expect(response.ok()).toBe(true);
+    });
+    // Somewhere named, so "the name it came from" is a thing that can survive.
+    await runCommand(page, "Switch to the Review layout");
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Review");
+    await persisted(page, "Review");
+  });
+
+  await test.step("the window falls back to the default, and says so once", async () => {
+    await runCommand(page, `Switch to the ${BROKEN_LAYOUT} layout`);
+    expect(await panels(page)).toEqual(DEFAULT_PANELS);
+    await expect(
+      page.locator(".wb-toast.is-error").filter({ hasText: "could not be restored" }),
+    ).toContainText(BROKEN_LAYOUT);
+  });
+
+  await test.step("and neither the chip nor the file still says Review", async () => {
+    // The default arrangement is nobody's named layout, so the chip is unnamed.
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Layout");
+    // The half that survives a reload — and the half that made this worth
+    // fixing rather than tolerating.
+    await persisted(page, null);
+    await page.reload();
+    await workspaceReady(page);
+    expect(await panels(page)).toEqual(DEFAULT_PANELS);
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Layout");
+  });
+});
+
+/**
+ * Two switches in a row, and a network that delivers them out of order.
+ *
+ * The regression: every layout action wrote immediately and independently — no
+ * in-flight tracking, no sequence number, and `request()` is a bare `fetch`.
+ * `PUT /api/layouts` replaces the whole document and the server `os.replace()`s
+ * whatever arrives, so two bodies in flight at once persist in delivery order
+ * rather than in the order the user acted. Switch to Review, switch to Agents,
+ * let the Review body arrive last, and the window and the chip say Agents while
+ * the file the next reload trusts says Review — the user's real choice
+ * discarded silently, inside a single window and a single session.
+ *
+ * **Why the delay and not a parked request.** Every switch also schedules the
+ * debounced autosave, so a stale write released *early* is followed ~500 ms
+ * later by a correct one that quietly repairs the file — the first version of
+ * this test held the first PUT and passed against the unfixed app for exactly
+ * that reason. Holding the Review body for longer than the debounce is what
+ * makes "it arrived last" a fact of the run instead of a race with a timer.
+ *
+ * The fix is that there is never a second body in flight to be reordered with:
+ * writes go through one chain, and a queued write reads the arrangement as it
+ * is when it is finally sent.
+ */
+const REORDER_DELAY_MS = 2_000;
+
+test("two layout switches in a row cannot land on disk out of order", async ({ page }) => {
+  await openApp(page);
+  await runCommand(page, "Switch to the Default layout");
+  await persisted(page, null);
+
+  /** The layout name a `PUT` body carries — how a write is identified here. */
+  const nameIn = (body: string | null): string =>
+    /"current_name":\s*("[^"]*"|null)/.exec(body ?? "")?.[1] ?? "?";
+  const isLayoutPut = (request: { method: () => string; url: () => string }): boolean =>
+    request.method() === "PUT" && request.url().includes("/api/layouts");
+
+  await page.route("**/api/layouts", async (route) => {
+    const request = route.request();
+    // The reordering, made concrete: the body that carries Review is held on
+    // the wire until every write the second switch produces has been answered.
+    if (isLayoutPut(request) && nameIn(request.postData()) === '"Review"') {
+      await page.waitForTimeout(REORDER_DELAY_MS);
+    }
+    await route.continue();
+  });
+
+  // Armed before the switches: the assertion below is only meaningful once the
+  // stale body has actually landed, and a waiter registered afterwards could
+  // miss it.
+  const stale = page.waitForResponse(
+    (response) =>
+      isLayoutPut(response.request()) && nameIn(response.request().postData()) === '"Review"',
+  );
+
+  await test.step("switch twice while the first write is still on the wire", async () => {
+    await runCommand(page, "Switch to the Review layout");
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Review");
+    await runCommand(page, "Switch to the Agents layout");
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Agents");
+    expect(await panels(page)).toEqual(AGENTS_PANELS);
+  });
+
+  await test.step("the late write cannot bury the choice the window is showing", async () => {
+    // The stale body has landed — every Agents write went to the server before
+    // it, so at this instant the unfixed app's file says Review and has nothing
+    // left to write that would change it. Asserting any earlier would be free
+    // to sample the file in the gap before it lands and pass on a bug it had
+    // simply not seen yet.
+    expect((await stale).ok()).toBe(true);
+    // Fixed, the write that was queued behind the stale one now goes out
+    // carrying the arrangement as it is *now*. Unfixed, this never arrives.
+    await persisted(page, "Agents");
+    expect(await panels(page)).toEqual(AGENTS_PANELS);
+  });
+
+  await page.unroute("**/api/layouts");
+  await runCommand(page, "Switch to the Default layout");
+  await persisted(page, null);
 });

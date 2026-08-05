@@ -467,6 +467,29 @@ contributes **no panel**: commands, a status chip, a `shortcuts.md` kind and an
   only when nothing was dropped. Nothing usable left, a file that is not a
   layout, a `fromJSON` that throws: all three resolve to the default arrangement
   plus one toast. The floor is a working window, never a blank one.
+- **A failed apply reports which failure it was.** Pruning vets panel ids, not
+  dockview's grid algebra, so a file whose every panel is registered can still
+  make dockview's deserializer throw — and dockview calls `clear()` before it
+  validates, so the fallback rebuilds the *default* arrangement. That is a
+  different outcome from "nothing usable, window left alone", and
+  `applySerialized` returns `applied` / `unchanged` / `default` rather than a
+  boolean so a caller cannot label the window with a layout it is not showing.
+  The default arrangement is nobody's named layout: the chip goes unnamed, and
+  that is what gets persisted.
+- **Writes are serialized.** `PUT /api/layouts` replaces the whole document and
+  the server persists whatever arrives last, so two requests in flight at once
+  land in delivery order rather than in the order the user acted. Every write
+  goes through one chain and reads the document at the moment it is sent, which
+  makes a queued write send the *current* arrangement and makes a second queued
+  write redundant. The debounce coalesces a drag; this is what covers two
+  deliberate actions a moment apart.
+- **The atomic write retries a Windows lock.** `os.replace` onto a path another
+  process has open fails on Windows rather than waiting, and serialized writes
+  land ~20 ms apart — close enough that the watcher, Defender or the indexer
+  reacting to the *previous* write was losing the second one about half the
+  time, leaving the file holding the arrangement the user had moved away from.
+  `services/layouts.py` retries past it on a short bounded budget; a lock that
+  outlasts the budget is a real one and still surfaces as a 500 and a toast.
 - **Two conservative choices** worth knowing: the autosave is armed only after a
   successful read, so a backend that did not answer cannot let this session's
   default arrangement overwrite the user's file; and switching to a *preset*

@@ -81,9 +81,11 @@ interface LayoutUiState {
 
 /**
  * The capability's own store. zustand remains the only state library in the app
- * (the standard); this is a second *instance* on purpose — layout state is this
- * tool's and nothing else reads it, so putting it in the app store would put a
- * capability back into a shared file that parallel lanes edit. `useStore` is
+ * and `useStore` remains the home for app-wide state; this is a second
+ * *instance* on purpose — layout state is this tool's and nothing else reads
+ * it, so putting it in the app store would put a capability back into a shared
+ * file that parallel lanes edit. That is now the written standard rather than
+ * this tool's local argument (CLAUDE.md, `docs/tools.md` "State"). `useStore` is
  * still reached for the things that genuinely are app-wide: toasts.
  */
 const useLayoutUi = create<LayoutUiState>()(() => ({
@@ -117,7 +119,16 @@ function layoutsDocument(dock: DockviewApi): LayoutsState {
   return { current: dock.toJSON(), current_name: state.current, saved: state.saved };
 }
 
-async function persist(): Promise<void> {
+/** Tail of the write chain — see `persist`. Settles fulfilled, always. */
+let writeChain: Promise<void> = Promise.resolve();
+/** A write is queued and has not yet read the document it is going to send. */
+let writeQueued = false;
+
+/** One request. Reads the document at the moment it is sent, never earlier. */
+async function writeOnce(): Promise<void> {
+  // Cleared before the read below, with no `await` in between: from here on a
+  // change needs its own request, and everything up to here rides this one.
+  writeQueued = false;
   const dock = dockApiHandle();
   if (dock === null) return;
   try {
@@ -129,6 +140,35 @@ async function persist(): Promise<void> {
     saveFailureReported = true;
     toast("error", `Layout not saved: ${detailOf(err)}`);
   }
+}
+
+/**
+ * Write the whole layouts document — one request at a time, newest state wins.
+ *
+ * `PUT /api/layouts` replaces the document and the server has no ordering
+ * authority: it `os.replace()`s whatever arrives, so two requests in flight at
+ * once persist in delivery order, not in the order the user acted. Switch to
+ * Review, switch to Agents, let the network deliver those two responses the
+ * other way round, and disk is left holding *Review* while the window and the
+ * chip both say Agents — the user's actual choice lost silently, and handed
+ * back to them on the next reload. `SAVE_DEBOUNCE_MS` does not cover this: it
+ * coalesces the continuous events of a drag, while two deliberate actions a
+ * moment apart each write immediately and independently.
+ *
+ * So every write goes through one chain, and the body is read when the request
+ * is about to be sent rather than when it was asked for. A write waiting behind
+ * another therefore sends the arrangement as it is *now* — which is what makes
+ * a second queued write redundant, so `writeQueued` collapses them instead of
+ * letting the chain grow one link per keystroke.
+ */
+function persist(): Promise<void> {
+  if (writeQueued) return writeChain;
+  writeQueued = true;
+  // `catch` on the chain and not only inside the write: a chain left rejected
+  // would swallow every write after it, and losing persistence silently is the
+  // exact failure this function exists to prevent.
+  writeChain = writeChain.then(writeOnce).catch(() => undefined);
+  return writeChain;
 }
 
 function scheduleSave(): void {
@@ -147,30 +187,49 @@ function applyDefault(dock: DockviewApi): void {
 }
 
 /**
- * Apply a serialized arrangement, having vetted it. False = it could not be
- * used and the caller's own arrangement is untouched (or rebuilt from the
- * default, if dockview failed halfway through).
+ * What applying an arrangement did to the dock.
+ *
+ * The two failure modes are not interchangeable, which is why this is not a
+ * boolean. `"unchanged"` means the window is exactly as it was, so whatever
+ * name it already carries is still true. `"default"` means the window is now
+ * the registry's default arrangement — which is *not* what the caller asked
+ * for, and is nobody's named layout. A caller that goes on calling it by the
+ * requested name puts the wrong label on the status chip, and, because every
+ * switch is persisted, writes that wrong label to `layouts.json` under the
+ * arrangement it does not describe.
  */
-function applySerialized(dock: DockviewApi, state: unknown, source: string): boolean {
-  if (state === null || state === undefined) return false;
+type ApplyOutcome = "applied" | "unchanged" | "default";
+
+/** Apply a serialized arrangement, having vetted it. See `ApplyOutcome`. */
+function applySerialized(dock: DockviewApi, state: unknown, source: string): ApplyOutcome {
+  if (state === null || state === undefined) return "unchanged";
   const pruned = pruneLayout(state, knownComponents());
   if (pruned === null) {
-    toast("warn", `${source} no longer describes any panel this Workbench has — using the default.`);
-    return false;
+    // Nothing was touched, so say so: on startup the window this leaves behind
+    // is the default arrangement, but mid-session it is whatever the user was
+    // already in, and "using the default" would be a lie about half of them.
+    toast(
+      "warn",
+      `${source} no longer describes any panel this Workbench has — leaving the window as it is.`,
+    );
+    return "unchanged";
   }
   try {
     // `reuseExistingPanels`: a panel that exists in both arrangements is moved,
     // not recreated — so a restore does not tear down Monaco or a live PTY.
     dock.fromJSON(pruned.layout, { reuseExistingPanels: true });
   } catch (err) {
-    // dockview strips the half-built layout on a failed deserialize, which
-    // would leave an empty window. The default arrangement is the floor.
+    // dockview strips the half-built layout on a failed deserialize — it calls
+    // `clear()` *before* it validates the grid — which would leave an empty
+    // window. The default arrangement is the floor. `pruneLayout` vets panel
+    // ids, not dockview's grid algebra, so this is reachable with a file whose
+    // every panel is registered.
     applyDefault(dock);
     toast("error", `${source} could not be restored (${detailOf(err)}) — using the default.`);
-    return false;
+    return "default";
   }
   if (pruned.dropped.length > 0) toast("warn", droppedPanelsMessage(pruned.dropped));
-  return true;
+  return "applied";
 }
 
 /** Build a preset out of whatever is registered. False = nothing it names
@@ -210,7 +269,11 @@ export function switchToLayout(name: string): void {
   }
   const preset = LAYOUT_PRESETS.find((candidate) => matches(candidate.name, name));
   if (preset !== undefined) {
-    if (applyPreset(dock, preset)) useLayoutUi.setState({ current: preset.name });
+    // False = nothing the preset names is registered and the dock was never
+    // touched. The arrangement, and the name it already carries, both stand —
+    // so there is nothing to relabel and nothing new to write.
+    if (!applyPreset(dock, preset)) return;
+    useLayoutUi.setState({ current: preset.name });
     void persist();
     return;
   }
@@ -219,9 +282,13 @@ export function switchToLayout(name: string): void {
     toast("warn", `No layout named "${name}".`);
     return;
   }
-  if (applySerialized(dock, saved.state, `The "${saved.name}" layout`)) {
-    useLayoutUi.setState({ current: saved.name });
-  }
+  const outcome = applySerialized(dock, saved.state, `The "${saved.name}" layout`);
+  if (outcome === "unchanged") return;
+  // `"default"` put the default arrangement on screen, which no saved name
+  // describes — so the chip goes back to unnamed, exactly as `restore` does
+  // for the same failure. Persisting `saved.name` over it would carry the
+  // mislabelling to disk, where a reload would read it back as truth.
+  useLayoutUi.setState({ current: outcome === "applied" ? saved.name : null });
   void persist();
 }
 
@@ -298,9 +365,11 @@ async function restore(dock: DockviewApi): Promise<void> {
     return;
   }
   useLayoutUi.setState({ saved: state.saved, current: state.current_name });
-  if (applySerialized(dock, state.current, "Your saved layout")) {
+  if (applySerialized(dock, state.current, "Your saved layout") === "applied") {
     useLayoutUi.setState({ maximized: dock.hasMaximizedGroup() });
   } else {
+    // Neither failure leaves the named arrangement on screen, so neither may
+    // leave its name on the chip.
     useLayoutUi.setState({ current: null });
   }
   // Armed last, so nothing above is written back before it has been read.

@@ -33,7 +33,16 @@ ruling it out.
   `mypy --strict` and ruff must pass; new behavior ships with tests (unit + integration; Playwright E2E per milestone).
 - Routers stay thin; logic lives in `services/`. structlog only — never `print`.
 - Disk is the single source of truth for files; all change notifications flow through the watcher bus.
-- UI: follow `DESIGN.md` tokens; zustand is the only state store; no new dependencies without justification.
+- UI: follow `DESIGN.md` tokens; no new dependencies without justification.
+- **zustand is the only state library, and `ui/src/store.ts` is the default home for
+  state.** A capability may own a second `create()` instance *in its own module* on one
+  condition: nothing outside that module reads it. That is not a loophole — it is the
+  same rule as the one above. State only one tool uses, living in a shared file, is
+  exactly the coupling that makes parallel lanes collide, and `store.ts` naming a
+  capability is `App.tsx` naming a capability by another route. State two tools share is
+  app-wide by definition and belongs in `store.ts`; a tool that starts sharing moves
+  there. Never a second state *library*, and never a store outside the module that owns
+  it. The layout system (`ui/src/panels/Layouts.tsx`) is the first of these.
 - A new capability **registers itself** — a `WorkbenchTool` descriptor in its own module
   (panel, commands, default chords, status items) plus one line in `ui/src/tools.ts`.
   Never add a panel or a panel-specific command by editing `App.tsx`, `commands.ts` or

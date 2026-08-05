@@ -109,6 +109,23 @@ Size that one from the measured payload plus a margin you can state — a number
 for anything is a test that cannot fail. Prefer compact JSON or plain text over
 pretty-printed JSON; prefer a thin call over a wrapped API.
 
+## State
+
+zustand, always — it is the only state library, and adding a second one is not a call a
+tool gets to make. **Where** the store lives is the call you do get to make, and it has
+one rule: state nothing outside your module reads may live in a `create()` instance in
+your own module; state another tool reads is app-wide and belongs in `ui/src/store.ts`.
+
+This is the registration rule again, not an exception to it. A tool that puts its own
+state in `store.ts` has put a capability back into a shared file — the same collision
+between parallel lanes that keeping `App.tsx` and `commands.ts` capability-free exists to
+prevent, arriving by a different door. The layout system (`ui/src/panels/Layouts.tsx`)
+is the first tool to own one; `useStore` is still what it reaches for to raise a toast,
+because toasts genuinely are app-wide.
+
+If your tool's state starts being read from outside, that is the signal to move it to
+`store.ts` — not to export a getter from your module.
+
 ## Styling
 
 Follow `DESIGN.md` tokens — no literal colours, ever. A one-file tool can use inline

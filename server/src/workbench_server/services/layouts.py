@@ -15,6 +15,7 @@ why", which the UI turns into one toast.
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import structlog
@@ -29,6 +30,20 @@ from workbench_server.models.layouts import (
 log = structlog.get_logger()
 
 LAYOUTS_PATH = ".workbench/layouts.json"
+
+# Windows: `os.replace` onto a path some other process has open fails outright
+# with PermissionError ("Access is denied" / "sharing violation") instead of
+# waiting. The holder is transient and unrelated to us — the workspace watcher
+# reacting to the previous write, Defender, the search indexer — and lets go in
+# a few milliseconds, so a short bounded retry turns a *lost* write into a
+# marginally slower one.
+#
+# This is reachable in normal use, not in theory: the client serializes its
+# writes and issues the next one as soon as the previous is answered, so two
+# layout switches in a row put two `os.replace` calls on the same file about
+# 20 ms apart. Observed failing ~50% of the time that way (`test_layouts.py`).
+REPLACE_ATTEMPTS = 10
+REPLACE_BACKOFF_S = 0.02
 
 
 class LayoutTooLargeError(Exception):
@@ -83,10 +98,25 @@ class LayoutsService:
         try:
             with os.fdopen(fd, "wb") as tmp:
                 tmp.write(data)
-            os.replace(tmp_name, self._path)
+            self._replace(tmp_name)
         except BaseException:
             Path(tmp_name).unlink(missing_ok=True)
             raise
+
+    def _replace(self, tmp_name: str) -> None:
+        """`os.replace`, retried past a transient Windows lock — see the
+        constants. A lock that outlasts the budget is a real one (the file is
+        open in an editor, or read-only), so the last attempt raises and the
+        router turns it into a 500 the UI reports."""
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp_name, self._path)
+                return
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                log.debug("layouts.replace_retry", path=str(self._path), attempt=attempt + 1)
+                time.sleep(REPLACE_BACKOFF_S)
 
     def _empty(self, reason: str) -> LayoutsResponse:
         log.warning("layouts.unusable", path=str(self._path), reason=reason)
