@@ -80,6 +80,32 @@ class TestTree:
             "children": None,
         }
 
+    async def test_a_directory_tagged_mid_session_is_gone_from_the_next_walk(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The tree re-reads the tag on every walk and remembers nothing.
+
+        The watcher memoizes the same test (``IgnoreIndex``) because a build
+        buries it in events, and so has to be told when a tag appears. The tree
+        is walked on demand and deliberately does not — this is the guard on
+        that difference. Applying the watcher's optimization here would leave
+        the tree serving a build directory it had already been told to skip,
+        until a restart. A server does not need starting for it: the tree walk
+        holds no state to start, which is the whole claim.
+        """
+        build = tmp_path / "target"
+        (build / "debug").mkdir(parents=True)
+        (build / "debug" / "app.exe").write_bytes(b"MZ")
+
+        before = (await client.get("/api/files/tree")).json()
+        assert [c["name"] for c in before["children"]] == ["target"]
+
+        # cargo, creating its build directory under a session already running
+        (build / "CACHEDIR.TAG").write_bytes(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+
+        after = (await client.get("/api/files/tree")).json()
+        assert [c["name"] for c in after["children"]] == []
+
     async def test_tree_skips_build_caches_but_keeps_folders_of_the_same_name(
         self, client: AsyncClient, tmp_path: Path
     ) -> None:
