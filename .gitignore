@@ -16,6 +16,9 @@ ui/dist/
 ui/playwright-report/
 ui/test-results/
 ui/blob-report/
+# Perf lane output — its own folders so a perf run never overwrites a journey run
+ui/playwright-report-perf/
+ui/perf-results/
 
 # Tauri
 desktop/src-tauri/target/
