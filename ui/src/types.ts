@@ -585,6 +585,61 @@ export interface PlanResponse {
   comment: string;
 }
 
+// ---- conversations.py -------------------------------------------------------
+
+/** One transcript on disk, as a row in the conversation browser. */
+export interface ConversationInfo {
+  session_id: string;
+  /** Derived by the same function live sessions use — a conversation does not
+   * retitle when it stops being live. */
+  title: string;
+  /** Unix mtime of the transcript: when the conversation was last active. */
+  updated_at: number;
+  /** User messages carrying text. Tool results are stored as user records and
+   * are deliberately not counted. */
+  turns: number;
+  /** The scan hit its byte budget, so `turns` is a floor — rendered as "120+". */
+  turns_capped: boolean;
+  /** Local id of the live session continuing this transcript, or null. Opening
+   * such a row focuses the pane it is already in instead of forking it. */
+  live_session_id: string | null;
+  /** Why this row is not fully knowable. Never a reason to drop it. */
+  problem: string | null;
+}
+
+/** One folder's conversations — a directory of Claude Code's storage. */
+export interface ProjectGroup {
+  /** The encoded directory name. Always true, never a guess. */
+  key: string;
+  /** Resolved path when there is one, the encoded key when there is not. */
+  label: string;
+  resolved: boolean;
+  folder: string | null;
+  /** Workspace-relative path when the folder is inside this workspace
+   * ("" = the workspace root); null when it is outside or unresolved. */
+  workspace_relative: string | null;
+  /** Whether a row here can be opened now. False is a *visible* refusal. */
+  openable: boolean;
+  reason: string | null;
+  updated_at: number;
+  conversations: ConversationInfo[];
+}
+
+/** `GET /api/conversations` — read-only view of Claude Code's own storage. */
+export interface ConversationStore {
+  projects: ProjectGroup[];
+  projects_root: string;
+  root_exists: boolean;
+  total_projects: number;
+  total_conversations: number;
+  /** How many were read in full (title + turns). Less than
+   * `total_conversations` means the rest were withheld by `limit`. */
+  returned_conversations: number;
+  limit: number;
+  /** When the scan ran. There is no watcher on somebody else's storage. */
+  scanned_at: number;
+}
+
 // ---- agents.py --------------------------------------------------------------
 
 export type SessionState = "idle" | "working" | "needs_attention";

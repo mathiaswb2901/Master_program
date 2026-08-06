@@ -383,6 +383,16 @@ interface WorkbenchStore {
   /** Resolves with the new session's id, so a caller that is opening a *pane*
    * for it can bind the pane to it (`agent#<session_id>`); null if it failed. */
   createSessionIn: (folder: string) => Promise<string | null>;
+  /** Continue a stored transcript as a live session, seeded with what was said
+   * before. Resolves with the new session's local id — which is what a pane
+   * binds to — or null if the server refused. `known` is the transcript when
+   * the caller already has it (the Agent panel is reading one); without it the
+   * messages are fetched. */
+  resumeConversation: (
+    folder: string,
+    sessionId: string,
+    known?: TranscriptMessage[],
+  ) => Promise<string | null>;
   resumeSession: () => Promise<void>;
   sendChat: (text: string) => void;
   decidePermission: (requestId: string, allow: boolean) => void;
@@ -1410,15 +1420,22 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       }
     },
 
-    resumeSession: async () => {
-      const view = get().transcriptView;
-      if (!view) return;
+    // The one resume path. The Agent panel's transcript view and the
+    // conversation browser both land here, so a conversation continued from
+    // either place comes back the same way: a live session carrying what was
+    // said before, rather than an empty chat over a transcript that exists.
+    resumeConversation: async (folder, sessionId, known) => {
       try {
-        const info = await api.createSession({
-          folder: view.session.folder,
-          resume_session_id: view.session.session_id,
-        });
-        const items: ChatItem[] = view.messages.map((m) =>
+        const [info, transcript] = await Promise.all([
+          api.createSession({ folder, resume_session_id: sessionId }),
+          // Only fetched when the caller does not already have it — the Agent
+          // panel resumes from a transcript it is currently showing. Best
+          // effort either way: a session whose transcript we cannot read is
+          // still worth resuming, since the agent has the history and only the
+          // chat we draw above it would be empty.
+          known ?? api.getTranscript(folder, sessionId).then((r) => r.messages).catch(() => null),
+        ]);
+        const items: ChatItem[] = (transcript ?? []).map((m) =>
           m.role === "user"
             ? { kind: "user", text: m.text }
             : { kind: "assistant", text: m.text, done: true, costUsd: null, isError: false },
@@ -1429,10 +1446,22 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         }));
         get().openLiveSession(info);
         void get().refreshSessions();
+        return info.session_id;
       } catch (err) {
         console.error("session resume failed", err);
         get().pushToast("error", `Session resume failed: ${errorDetail(err)}`);
+        return null;
       }
+    },
+
+    resumeSession: async () => {
+      const view = get().transcriptView;
+      if (!view) return;
+      await get().resumeConversation(
+        view.session.folder,
+        view.session.session_id,
+        view.messages,
+      );
     },
 
     sendChat: (text) => {

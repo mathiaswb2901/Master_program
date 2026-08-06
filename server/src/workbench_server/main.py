@@ -14,6 +14,7 @@ from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
 from workbench_server.routers import (
     agents,
+    conversations,
     events,
     files,
     health,
@@ -27,6 +28,7 @@ from workbench_server.routers import (
     worktrees,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
+from workbench_server.services.conversations import ConversationBrowser
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
@@ -79,6 +81,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     usage_service = UsageService(event_bus)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
+    # The same storage, browsed whole instead of one folder at a time. Read-only
+    # and lazy: nothing scans until a client asks, so this costs a bare object
+    # on a workspace whose owner never opens the panel.
+    conversation_browser = ConversationBrowser(settings.resolved_projects_dir(), workspace.root)
     # Fake mode replaces the SDK client and nothing else: same SessionManager,
     # same bridge, same WebSockets — so what a test drives is the real backend.
     client_factory: ClientFactory
@@ -180,6 +186,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.ui_state_store = ui_state_store
     app.state.session_manager = session_manager
     app.state.session_index = session_index
+    app.state.conversations = conversation_browser
     app.state.office = office_service
     app.state.office_host = office_host_service
     app.state.office_host_channel = host_channel
@@ -201,6 +208,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(agents.router)
     app.include_router(agents.ws_router)
+    app.include_router(conversations.router)
     app.include_router(office.router)
     app.include_router(office_host.router)
     app.include_router(office_host.ws_router)

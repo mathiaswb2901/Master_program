@@ -1,0 +1,209 @@
+/* The conversation browser: folder groups, conversation rows, and the two
+   things it has to say out loud (a folder it may not open, a transcript it
+   could not read).
+
+   Tokens only — no literal colours anywhere, and no new ones invented. A row is
+   a session row by another name, so it borrows the file-tree/session row height
+   (`--row-height`) and the same hover/selected washes; the refusal note reuses
+   the warning treatment the plan and usage cards already use, because "this is
+   a limit, not a failure" is a thing the app already knows how to say. */
+
+.wb-conv {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+}
+
+/* ---- header: search + the refresh this panel genuinely needs ---------------- */
+
+.wb-conv-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wb-conv-search {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-4);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--type-sm-size);
+}
+
+.wb-conv-search::placeholder {
+  color: var(--text-tertiary);
+}
+
+.wb-conv-search:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+/* ---- the list -------------------------------------------------------------- */
+
+.wb-conv-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Never sideways. A dock column dragged narrower than a row clips the row;
+     it does not turn the panel into a two-axis scroll (DESIGN.md §1). */
+  overflow-x: hidden;
+  padding-bottom: var(--space-4);
+}
+
+.wb-conv-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-conv-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5) var(--space-1);
+  position: sticky;
+  top: 0;
+  /* Opaque: rows scroll under this. */
+  background: var(--surface-panel);
+  z-index: 1;
+}
+
+.wb-conv-group-name {
+  min-width: 0;
+}
+
+.wb-conv-group-count {
+  flex: none;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* Why a folder cannot be opened, in words rather than a lock glyph (§7). */
+.wb-conv-reason {
+  margin: 0 var(--space-5) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-default);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+  color: var(--text-secondary);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-sm-line);
+}
+
+/* ---- one conversation ------------------------------------------------------ */
+
+.wb-conv-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  height: var(--row-height);
+  padding: 0 var(--space-5);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.wb-conv-row:hover {
+  background: var(--surface-hover);
+}
+
+.wb-conv-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Blocked, not hidden: the conversation exists and the group says why it will
+   not open. Dimmed and still clickable, because clicking is how a user asks —
+   and the answer is the reason, not silence. */
+.wb-conv-row.is-blocked {
+  color: var(--text-tertiary);
+}
+
+.wb-conv-row.is-busy {
+  color: var(--text-tertiary);
+}
+
+.wb-conv-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Shrinkable rather than fixed: in a dock column dragged very narrow the title
+   gives up its width first (it is the one that truncates well), and these give
+   up theirs only when there is nothing left — but they do give it up, instead
+   of pushing the row past its pane. */
+.wb-conv-turns,
+.wb-conv-time {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-conv-problem {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  font-size: var(--type-xs-size);
+  color: var(--warn);
+}
+
+/* ---- states ---------------------------------------------------------------- */
+
+.wb-conv-error {
+  margin: var(--space-4) var(--space-5) 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-default);
+  border-left: 2px solid var(--error);
+  border-radius: var(--radius-md);
+  background: var(--error-bg);
+  color: var(--text-secondary);
+  font-size: var(--type-xs-size);
+}
+
+.wb-conv-note {
+  padding: var(--space-5);
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}
+
+.wb-conv .wb-empty-icon {
+  color: var(--text-tertiary);
+  display: flex;
+}
+
+/* ---- footer: what was read, and what was not ------------------------------- */
+
+.wb-conv-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-conv-foot .wb-conv-note {
+  padding: 0;
+}

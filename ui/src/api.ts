@@ -4,6 +4,7 @@ import type { Theme } from "./theme";
 import type {
   AcknowledgeRequest,
   CallbackResponse,
+  ConversationStore,
   CreateRequest,
   CreateSessionRequest,
   DirListing,
@@ -115,6 +116,14 @@ export const getTranscript = (folder: string, sessionId: string): Promise<Transc
 
 export const putUiState = (body: UiState): Promise<unknown> =>
   request("/api/agents/ui-state", jsonInit("PUT", body));
+
+/** Every Claude conversation on this machine, grouped by the folder it ran in.
+ * `limit` bounds only the expensive half — everything that exists is counted,
+ * and the newest `limit` are read for their title and turn count. */
+export const getConversations = (limit?: number): Promise<ConversationStore> =>
+  request(
+    limit === undefined ? "/api/conversations" : `/api/conversations?limit=${String(limit)}`,
+  );
 
 export const getOfficeStatus = (): Promise<OfficeStatus> => request("/api/office/status");
 

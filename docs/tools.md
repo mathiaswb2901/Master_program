@@ -140,8 +140,12 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
 **the pane id is the whole of what a restart gets back**. Three rules follow:
 
 - the key must still mean the same thing after a restart — `agent#<session_id>`,
-  `editors#<workspace-relative path>`, `terminal#<n>`. Changing what a key means renames
-  the user's saved arrangement, exactly as renaming a tool id does;
+  `editors#<workspace-relative path>`, `terminal#<n>`,
+  `conversations#<claude-project-key>`. Changing what a key means renames the user's
+  saved arrangement, exactly as renaming a tool id does. The conversation browser is
+  worth a look here: its key is *Claude Code's own encoded directory name* rather than a
+  path, because that encoding is lossy and the path is the thing we cannot reconstruct —
+  the key that persists is the one we know is true;
 - `key()` is a thunk and may be `async`, because minting one sometimes takes a round trip
   ("New agent session" creates the session, then binds the pane to its id). Answering
   `null` abandons the split rather than binding a pane to nothing;
@@ -166,6 +170,15 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
   session the server no longer has. The Agent pane waits for the session to appear live
   in the listing before it opens a socket, because a socket that reconnects behind a
   correct "this session is gone" note is a reconnect storm nobody can see.
+- **Opening someone else's pane is one call.** `revealPane(toolId, key)`
+  (`ui/src/panels/Panes.tsx`) puts `toolId#key` on screen, or focuses the pane that
+  already shows it. That second half is not a nicety: the conversation browser opens
+  agent panes, and "open this conversation" must never clone the pane it is already in.
+  Use it rather than reaching for `dockApiHandle()` — placing panes belongs to the pane
+  capability, and a second copy of `addPanel` is how the two drift. It is the *open*
+  gesture; `placeChoice` is the *split* gesture, and the difference is what happens to a
+  pane that already exists (focused where it is, versus moved into the split you asked
+  for).
 - **A limit you know before the gesture belongs on the row.** `disabled: true` on an
   instance option greys it in the picker with `detail` as the reason, and the keyboard
   skips it (DESIGN.md §6.5). The agent's `New agent session` uses it: the server caps
