@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 
-import { visibleCommands } from "../commands";
+import { useVisibleCommands } from "../commands";
 import { chordKeycaps } from "../keys";
 import { usePresence } from "../motion";
 import { useStore } from "../store";
@@ -66,6 +66,8 @@ export function QuickBar() {
   const prefill = useStore((s) => s.quickBarPrefill);
   const pick = useStore((s) => s.quickPick);
   const tree = useStore((s) => s.tree);
+  // Subscribed, not sampled: the command set grows after launch (see the hook).
+  const commands = useVisibleCommands();
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -159,7 +161,7 @@ export function QuickBar() {
     const q = query.slice(1).trim();
     // Every command in the registry, so the QuickBar is the complete keyboard
     // path to the app — nothing is reachable only by mouse or only by chord.
-    rows = visibleCommands()
+    rows = commands
       .map((command) => ({ command, score: fuzzyScore(q, command.title) }))
       .filter((x) => x.score !== null)
       // Categorized commands (shortcuts.md) sort after the built-ins, so their

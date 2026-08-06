@@ -215,6 +215,26 @@ export function visibleCommands(): Command[] {
 }
 
 /**
+ * The same list, as a **subscription** — what a React surface has to use.
+ *
+ * The registry is not static after launch: `shortcuts.md` entries arrive on
+ * their own fetch once the window is already up, and again every time the
+ * watcher sees the file change. `visibleCommands()` reads them through
+ * `getState()`, so a component that called it directly would render whatever
+ * happened to be registered at that moment and never hear about the rest — a
+ * QuickBar opened during launch listed the built-ins, the user's own commands
+ * landed a moment later, and the open palette went on showing the old set.
+ *
+ * The store slice is selected for the re-render rather than for its value:
+ * `visibleCommands()` reads the same array back on the next line, together with
+ * the `when()` state no snapshot can carry.
+ */
+export function useVisibleCommands(): Command[] {
+  useStore((s) => s.shortcuts);
+  return visibleCommands();
+}
+
+/**
  * Capture-phase keymap: capture so a chord that IS ours wins over Monaco and
  * xterm, `isIntercepted` (via resolveCommand) so the ones that are not stay
  * invisible to us and reach the surface untouched.
