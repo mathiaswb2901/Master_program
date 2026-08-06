@@ -103,7 +103,8 @@ export type WorkspaceEvent =
   | FileProvenanceEvent
   | OfficeHostEvent
   | WorktreeChangedEvent
-  | UsageEvent;
+  | UsageEvent
+  | SessionActivityEvent;
 
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
@@ -215,6 +216,62 @@ export interface UsageSnapshot {
 export interface UsageEvent {
   type: "usage";
   snapshot: UsageSnapshot;
+}
+
+// ---- activity.py ------------------------------------------------------------
+// What the fleet is touching *right now* — the other end of provenance above.
+// That one answers "who wrote this file", after the fact and conservatively;
+// this answers "what is happening this second", across every session, whether
+// or not this window has that conversation open. Bounded by construction: a
+// rolling window per session, a cap on sessions, and everything dropped is
+// counted rather than silently lost. Never persisted.
+
+export interface ActivityEntry {
+  /** The SDK's `tool_use` id: the same id the chat row settles on. */
+  entry_id: string;
+  tool: string;
+  /** One capped line, built server-side with paths jailed to the workspace. */
+  summary: string;
+  /** Workspace-relative path this call names, or null when it named none (or
+   * named one outside the workspace, which is redacted rather than sent). */
+  target: string | null;
+  /** Unix seconds. */
+  started_at: number;
+  /** Unix seconds, or null while the call is still running. */
+  settled_at: number | null;
+  /** null while running — the distinction the panel is built on, so not a bool. */
+  ok: boolean | null;
+}
+
+export interface SessionActivity {
+  session_id: string;
+  folder: string;
+  title: string;
+  /** Newest first, capped. Ordered by when each call *started*; a settle
+   * patches an entry where it stands rather than moving it. */
+  entries: ActivityEntry[];
+  /** Entries this session's window has dropped. Shown, never silent. */
+  dropped: number;
+  /** Unix seconds of the most recent thing that happened in this session. */
+  active_at: number;
+}
+
+/** GET /api/activity. Empty `sessions` = no agent sessions running, which is
+ * both the common case and what a restart honestly reports. */
+export interface ActivitySnapshot {
+  sessions: SessionActivity[];
+  max_entries_per_session: number;
+  max_sessions: number;
+  dropped_sessions: number;
+}
+
+/** Broadcast on /ws/events when some sessions' activity changes. Carries whole
+ * rows for the sessions that moved (never the fleet, unless the fleet moved)
+ * and names the ones that left, because clients hold their own copy. */
+export interface SessionActivityEvent {
+  type: "session_activity";
+  sessions: SessionActivity[];
+  removed: string[];
 }
 
 // ---- shortcuts.py -----------------------------------------------------------
