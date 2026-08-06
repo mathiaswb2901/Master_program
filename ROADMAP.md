@@ -328,6 +328,22 @@ emitted as CSS `linear()`; two channels (travel = `transform`, tint = opacity/co
 conformance test in the perf lane that fails the build on an animated layout property,
 a `transition: all`, a static `will-change` or a hover that eases in.
 
+**The window frame** (landed). The first pixel of the product was a stock Windows
+caption reading "Workbench" in default grey above a dark app — the one surface that
+looked like every other program on the machine, and the only one no stylesheet can
+reach, because the window manager draws it in another process. It is now **tinted**
+from the app's own tokens (`DWMWA_CAPTION_COLOR`/`_TEXT_COLOR`/`_BORDER_COLOR`), which
+means Windows keeps drawing it: dragging, snapping, double-click-to-maximise, the
+system menu and the three window buttons are still the real ones, verified by
+read-back on the live window rather than argued. The colours come from
+`ui/src/captionTint.ts` through the existing `shell.ts` seam and follow the theme
+toggle; the window-button glyphs follow the caption's measured luminance, since
+`DWMWA_TEXT_COLOR` does not reach them; and the last tint is cached so the *next*
+window is born wearing it instead of flashing grey until the bundle mounts. Windows 10
+degrades to a log line. A **fully custom frame** — our own drag region and window
+buttons — is deliberately not this: see M7, where it belongs, because what such a frame
+should carry depends on which visual direction is chosen.
+
 **What the retrofit cost**, stated so the next interlock is taken seriously: focus mode
 and layout switches are animated from `ui/src/motion.ts` *after* dockview has already
 rearranged the grid — a replay of an arrival rather than a transition into it. Written in
@@ -829,6 +845,14 @@ without forking — the difference between a fixed app and an instrument.
   browser are exactly the surfaces that stop the app reading as a code editor — which is
   what the change request was actually about. Nothing above smuggles the redesign
   forward; it all ships in current tokens and gets restyled here.
+  **The custom title bar is part of this bullet, not a new item** (scope freeze, below).
+  The Feel track has tinted the native caption from our own tokens, which is the cheap
+  90%: the frame is ours, and Windows still draws it, so nothing about dragging,
+  snapping, maximising or the window buttons had to be reimplemented. Replacing it
+  outright — our own drag region, our own buttons, our own everything in that strip —
+  waits here on purpose, because its *content* is a consequence of the visual direction
+  chosen in this milestone (the tape belongs in it under one direction, pane identifiers
+  under another). Built before that choice, it gets built twice.
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
 - Remaining OSS product bar: first-run experience (workspace picker, Claude-login and
