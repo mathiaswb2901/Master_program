@@ -886,10 +886,14 @@ arrangement belongs to the user. The whole system is one capability
   | `--accent` as the live rule on `--surface-app` | 6.92:1 | 3.75:1 | 3.0 |
   | `--border-subtle` on `--surface-panel` | 2.51:1 | 2.51:1 | — (§1.4) |
   | every `--ansi-*` on `--surface-code` (bar the dim `black`) | ≥ 5.34:1 | ≥ 5.42:1 | 4.5 |
+  | `--text-primary` on `--surface-paper-surround` (document tabs) | 6.33:1 | 7.41:1 | 4.5 |
+  | `--text-secondary` on `--surface-paper-surround` | 4.75:1 | 5.59:1 | 4.5 |
 
-  Every text pair in the system is ≥ 5:1 except one, named here rather than rounded
-  away: `--text-tertiary` on `--surface-overlay` in dark, at 4.55:1 — above the floor,
-  and the test pins it so it cannot quietly become the second. `--text-disabled` (4.42:1)
+  Every text pair on the six ramp surfaces is ≥ 5:1 except one, named here rather than
+  rounded away: `--text-tertiary` on `--surface-overlay` in dark, at 4.55:1 — above the
+  floor, and the test pins it so it cannot quietly become the second. (The mat is not a
+  ramp surface; it is a mid-grey by design and `--text-tertiary` is 3.33:1 on it, which is
+  why §6.1 forbids tertiary there.) `--text-disabled` (4.42:1)
   is exempt under WCAG 1.4.3; a disabled row that reads as enabled is the worse failure.
   `--accent` is not text-capable on light chrome and is never used as text there — §2.8
   says why, and it is the reason `--accent-fill` exists.

@@ -268,6 +268,10 @@ describe("text clears WCAG on every surface it is drawn on", () => {
       [LIGHT, "--text-primary", "--surface-terminal", 18.26],
       [LIGHT, "--accent", "--surface-panel", 4.67],
       [LIGHT, "--accent", "--surface-app", 3.75],
+      [DARK, "--text-primary", "--surface-paper-surround", 6.33],
+      [DARK, "--text-secondary", "--surface-paper-surround", 4.75],
+      [LIGHT, "--text-primary", "--surface-paper-surround", 7.41],
+      [LIGHT, "--text-secondary", "--surface-paper-surround", 5.59],
     ];
     for (const [theme, token, surface, expected] of rows) {
       expect(contrast(hex(theme, token), hex(theme, surface)), `${token} on ${surface}`)
