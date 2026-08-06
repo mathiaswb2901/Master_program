@@ -17,7 +17,10 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
   A bare run builds its fixture in a temp directory and removes it (with the
   `-projects` sibling) on the way out; `WB_PERF_WORKSPACE=<dir>` reuses a fixture
   instead of rebuilding it, and a directory you named is never one the lane deletes.
-  The server-side budgets are plain pytest (`server/tests/test_perf_budgets.py`)
+  **Pin it when comparing before/after** — a fresh 5,105-file fixture per run swamps
+  a 100 ms difference in disk and AV noise. The server-side budgets are plain pytest
+  (`server/tests/test_perf_budgets.py`); the bundle budget reads the build's own
+  module attribution (`ui/e2e/perf/bundle.spec.ts` + `dist/bundle-metafile.json`)
 - Desktop shell: `cd desktop && npm install && npm --prefix ../ui install` once
   (both: the shell's `beforeDevCommand` starts Vite from `ui/`), then
   `npm run tauri dev` — native window; starts Vite itself and either attaches to
@@ -46,6 +49,14 @@ ruling it out.
 - Routers stay thin; logic lives in `services/`. structlog only — never `print`.
 - Disk is the single source of truth for files; all change notifications flow through the watcher bus.
 - UI: follow `DESIGN.md` tokens; no new dependencies without justification.
+- **Nothing that is not needed to paint is statically imported from `main.tsx`.** A
+  module script blocks `DOMContentLoaded` until it is downloaded, parsed *and*
+  evaluated, so anything reachable from the entry is paid on every cold start whether
+  the feature is used or not — that is how the editor came to be 88% of the launch
+  bundle. Heavy, on-demand capabilities load behind a dynamic `import()` and are
+  warmed on idle once the launch is over (`ARCHITECTURE.md`, "The launch path"). The
+  budget that enforces it is `ui/e2e/perf/bundle.spec.ts`, which asserts what is
+  *inside* the entry chunk, not only what it weighs.
 - **zustand is the only state library, and `ui/src/store.ts` is the default home for
   state.** A capability may own a second `create()` instance *in its own module* on one
   condition: nothing outside that module reads it. That is not a loophole — it is the

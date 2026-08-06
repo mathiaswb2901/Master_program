@@ -279,6 +279,31 @@ covers the one change no file event can describe (see ARCHITECTURE.md, *The file
 gzip, ~88% Monaco — the largest single number left in the launch path), and the motion
 vocabulary below.
 
+**Monaco off the entry chunk** (landed, PR 2 of this track): the eager entry chunk was
+**88% Monaco**, reached through the `monaco-editor` barrel that `main.tsx` imported
+statically — 1,030 kB gzipped that a cold start had to download, parse and evaluate before
+it could paint, whether or not a file was ever opened. It is now a hand-picked build
+(`ui/src/monacoBundle.ts` — `edcore.main` plus the 22 basic-language grammars the
+extension table can actually name, and JSON as the only language *service*) behind one
+dynamic import, mounted through `React.lazy` inside the editor panel rather than as the
+panel, and warmed on `requestIdleCallback` once the workspace tree has landed. `main.tsx`
+also stopped awaiting `window.load` — first paint no longer waits for the last webfont.
+Measured on the pinned fixture, four runs each, medians: entry chunk **1,030 → 191 kB**
+gzipped, cold **FCP 618 → 160 ms**, **DCL 434 → 89 ms**, tree rows **1,566 → 903 ms**,
+warm FCP 158 → 84 ms — and first file open **unchanged at ~150 ms**, which is the whole
+point of the prefetch (without it the same click costs ~700 ms). Layout shift stayed 0.003,
+so the font gate was buying nothing. Two side effects worth knowing: the eager stylesheet
+went 225 → 92 kB with Monaco's CSS following its chunk, and dropping the standalone
+TypeScript service removed 10 false "cannot find module" squiggles from this repo's own
+`store.ts`. The line is held by `ui/e2e/perf/bundle.spec.ts`, which reads rollup's module
+attribution and fails if any `node_modules/monaco-editor` module is back in the entry chunk.
+
+**Queued**: the watcher protocol (twenty file changes cost twenty full walks and 9.4 MB of
+JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptance
+criterion), the terminal's renderer and frame coalescing, and a virtualised file tree —
+the last two now the largest things left in the entry chunk (xterm 285 kB, dockview-core
+423 kB attributed) as well as the reason a *row* still costs ~900 ms.
+
 **Motion, and a hard interlock.** The track is not only speed: an instrument that moves
 *well* reads as fast even when it is not. The **motion vocabulary** — the durations,
 easings and transition primitives, as `DESIGN.md` tokens — must land **before** the
@@ -489,6 +514,18 @@ because other sections and five running lanes reference these numbers.
    so each further kind is a parser case plus a handler, not a new mechanism. The bar
    every one of them has to clear is the one `layout` cleared: it may not run a command,
    send a prompt, or reach a file, because a workspace file is untrusted input.
+   **Extended (owner, 2026-08-06, from tmux):** a user's config should be able to bind
+   *anything the registry knows*, not only the kinds we thought to expose —
+   `.tmux.conf` can rebind all ~170 of tmux's commands, and that is why people can make
+   tmux theirs. Exit: a newly registered command is bindable from `shortcuts.md` the day
+   it is registered, with no parser change; the untrusted-input bar above still holds,
+   which is what makes "bind anything" safe rather than a shell in a markdown file.
+   **And it is what the switcher ran into first** (item 5): "bind anything" cannot mean
+   *every* registered command, because `workspace.open` takes a filesystem root, and a
+   binding for it in a project's own `.workbench/shortcuts.md` would re-point the path
+   jail. Whatever this item builds needs a way for a command to say it is not bindable
+   from an untrusted file — the bar above, expressed on the descriptor rather than in
+   a parser case.
 5. ~~**Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history.~~ **done** —
@@ -749,6 +786,33 @@ because other sections and five running lanes reference these numbers.
     window, which is exactly the class of bug the host ownership rules were written to
     prevent. Exit criterion: any pane pops out to a second monitor and restores to its
     group, and a native Office pane either follows or refuses with a reason on screen.
+14. **Commands the window does not own** (owner, 2026-08-06, from tmux). In tmux a key
+    binding is *only* a binding: every action is a named command, and the same command
+    can be fired from a shell (`tmux split-window`), from a script, or from another
+    program. Workbench has the registry — every capability already declares its commands
+    — but nothing outside the window can invoke one. Give the command list an external
+    entry point: a small CLI that talks to the running backend, and the same surface
+    exposed as an agent tool, so an agent can arrange the window it is working in
+    (`open this file beside the terminal`, `put a plan card in a pane of its own`)
+    instead of only describing what the user should click. Two constraints make this
+    safe rather than a remote-control hole: it reaches only *registered* commands, never
+    arbitrary code, and it inherits the localhost auth token from item 8 — which is why
+    it is sequenced after hardening, not before. Exit: a command registered today is
+    invocable from a shell and from an agent tomorrow with no per-command wiring, and a
+    request without the token is refused.
+15. **Detachable working sessions** (owner, 2026-08-06, from tmux). tmux's real magic is
+    not panes — it is that the *session* outlives the client: you detach, the work keeps
+    running, and you re-attach later, or from somewhere else entirely. Workbench already
+    has the pieces separately (layouts persist per workspace, the backend outlives the
+    window, agent sessions are server-side, the worktree pool holds a slot under a lease)
+    but no concept that ties them into one thing a user can name, leave and return to.
+    Make it one: a named session is a workspace + an arrangement + its live agents,
+    terminals and worktree leases; closing the window detaches rather than ends; opening
+    re-attaches. This is also what makes the app usable from a second machine later, and
+    it is the honest home for the transcript-after-reload gap PR #43 documented — a
+    re-attached session should show what happened while you were away, not an empty pane.
+    Sequenced after the workspace switcher (item 5), whose recents list is the same
+    surface a session list wants to be.
 
 **Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
 infrastructure read as nothing produced, so the order below front-loads visible shape
@@ -1149,3 +1213,41 @@ Build for real external users, not just the author. Consequences, tracked as wor
   a per-model weekly breakdown finer than the SDK reports, an unbounded fleet with no
   caps or reaping, native Office in a popped-out window before the parent-chain question
   is decided, and any part of the visual redesign moving out of M7.
+
+- 2026-08-06 — **Three things taken from tmux, and one thing not** (owner: "look at the
+  TMUX source code... for inspiration", after saying the app "still looks superold").
+  Read honestly: tmux is a C program that draws text in a terminal, so its *source* has
+  no visual design to borrow, and pretending otherwise would have been flattery. Its
+  *model* does, and three gaps were named and accepted: **commands the window does not
+  own** (M5 item 14 — in tmux a key binding is only a binding; every action is a named
+  command a shell or another program can fire, which is what makes it scriptable and
+  what would let an agent arrange the window it works in), **detachable working
+  sessions** (item 15 — the session outlives the client; we have every piece and no
+  concept that names them), and **a config that can bind anything** (folded into item 4
+  — `.tmux.conf` rebinds all of tmux, and "bind anything the registry knows" is the
+  version of that which survives our untrusted-workspace-file rule). The look is a
+  separate problem with a separate answer: three visual directions, rendered rather than
+  described, for the owner to choose between — see the M7 change request.
+
+- 2026-08-06 — **Scope freeze** (owner: "continue with our plan and add stuff
+  afterwards"). M5 grew from seven items to fifteen in a single day — every addition
+  was good, which is exactly how a project becomes permanently 80% done. The list is
+  now closed: no new items are added to M5, M6 or M7 until M7 ships, and a good idea
+  arriving before then is recorded under **Deferred ideas** rather than scheduled. The
+  test of the plan from here is not what it contains but that it ends. Two consequences
+  worth stating: an idea that arrives with a measurement behind it still waits, and the
+  bar for reopening the list is a defect or a decision the owner makes, not a better
+  idea. (The author of this entry is the party most likely to break it.)
+
+## Deferred ideas
+
+Recorded, not scheduled. Nothing here is worked on until M7 ships — see the scope
+freeze above.
+
+- Voice input (local faster-whisper push-to-talk with a domain vocabulary) — was M7
+  item; deferred out with the freeze since it is additive rather than shipping work.
+- TOON output format for agent-facing tools, if a list-heavy tool ever ships (rejected
+  with a measurement in the axi entry; the measurement is what would change).
+- A sanitized OfficeCLI fork, only if the COM bridge leaves real fidelity gaps.
+- Folder-level rollup for provenance markers, and provenance surviving a restart.
+- Plan artifacts persisted to `.workbench/` and re-rendered when resuming a transcript.

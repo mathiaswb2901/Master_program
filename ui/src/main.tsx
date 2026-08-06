@@ -21,21 +21,25 @@ import "./styles/overlays.css";
 import { createRoot } from "react-dom/client";
 
 import App from "./App";
-import { initMonaco } from "./monaco";
-import { useStore } from "./store";
 
-async function start(): Promise<void> {
-  // Monaco/xterm themes are computed from the CSS tokens — make sure the
-  // stylesheet is applied before anything reads computed values.
-  if (document.readyState !== "complete") {
-    await new Promise<void>((resolve) => {
-      window.addEventListener("load", () => resolve(), { once: true });
-    });
-  }
-  initMonaco(useStore.getState().theme);
-  const root = document.getElementById("root");
-  if (!root) throw new Error("missing #root element");
-  createRoot(root).render(<App />);
-}
-
-void start();
+/**
+ * Render as soon as this module is ready.
+ *
+ * This used to `await` `window.load` first, so that surfaces which compute
+ * their colors from the CSS tokens (Monaco, xterm) could not read them before
+ * the stylesheet applied. `load` waits for the *last* subresource, which in
+ * practice meant first paint was gated on four webfont files — 200 ms of doing
+ * nothing, on every start, to protect a read that was never at risk: a
+ * classic-or-module script's execution already waits for the stylesheets
+ * declared above it, and both surfaces are built later still (Monaco inside its
+ * own dynamic import, xterm when its panel mounts).
+ *
+ * What the fonts can now do is arrive after the first paint and swap. That is a
+ * layout-shift risk rather than a theoretical one, so it is measured instead of
+ * argued about: `ui/e2e/perf/launch.spec.ts` asserts a cumulative layout shift
+ * ceiling, and the fix if it is ever breached is `font-display`/`size-adjust`,
+ * not this gate coming back.
+ */
+const root = document.getElementById("root");
+if (!root) throw new Error("missing #root element");
+createRoot(root).render(<App />);

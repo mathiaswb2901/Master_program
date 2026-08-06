@@ -1,45 +1,88 @@
 /**
- * Monaco setup: bundled monaco (no CDN), Vite workers, workbench themes derived
- * from the design tokens, and model helpers for external (on-disk) updates.
+ * Monaco, kept off the launch path.
+ *
+ * This module is what the rest of the app imports, and it contains **no static
+ * reference to `monaco-editor`** — only `import type`, which the compiler
+ * erases. The bundle itself (`./monacoBundle`) is reached through one dynamic
+ * `import()`, so rollup gives it its own chunk and the entry chunk a cold start
+ * must parse before it can paint no longer carries an editor.
+ *
+ * That is the whole design, and everything below follows from it:
+ *
+ * * **The pure half is always available.** `MONO_FONT`, `languageForPath`,
+ *   `editorPathProp` and `monacoThemeName` are strings and lookups. The
+ *   Terminal reads the font from here, the store asks for a theme name — none
+ *   of that should cost 3.5 MB.
+ * * **The model helpers no-op until the editor exists.** `setModelContent` and
+ *   `disposeModel` act on models, and until Monaco has loaded there are none,
+ *   so "not loaded" and "no model for that path" are the same answer — which
+ *   the store already handles (`setModelContent(...) ?? content`).
+ * * **Loading is idempotent and shared.** `loadMonaco` memoizes its promise, so
+ *   the idle-time prefetch and a user clicking a file in the same moment
+ *   produce one download, not two.
  */
 
-import { loader } from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
-import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
-import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
-import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
-import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+import type * as Monaco from "monaco-editor";
 
-import { cssVar, hexVar, toHex, type Theme } from "./theme";
+import { cssVar, documentTheme, hexVar, toHex, type Theme } from "./theme";
 
 export const MONO_FONT =
   "'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace";
 
-export function initMonaco(theme: Theme): void {
-  (globalThis as { MonacoEnvironment?: monaco.Environment }).MonacoEnvironment = {
-    getWorker(_workerId: string, label: string): Worker {
-      switch (label) {
-        case "json":
-          return new jsonWorker();
-        case "css":
-        case "scss":
-        case "less":
-          return new cssWorker();
-        case "html":
-        case "handlebars":
-        case "razor":
-          return new htmlWorker();
-        case "typescript":
-        case "javascript":
-          return new tsWorker();
-        default:
-          return new editorWorker();
-      }
-    },
+/** The loaded API, or null while nothing has needed an editor yet. */
+let api: typeof Monaco | null = null;
+/** In-flight (or settled) load, so concurrent callers share one import. */
+let loading: Promise<typeof Monaco> | null = null;
+
+/**
+ * Load Monaco, configure it, and define the theme. Safe to call from anywhere,
+ * any number of times; the work happens once.
+ *
+ * The theme is defined *here* rather than by the caller because it must exist
+ * before the first `<Editor>` renders — `@monaco-editor/react` applies the
+ * theme name on creation, and for a name it does not know Monaco silently
+ * falls back to a built-in one.
+ *
+ * **This function takes no theme, and that is the point.** It used to, and the
+ * value was captured when the load was *scheduled* — which for the idle
+ * prefetch is long before it lands. `defineWorkbenchTheme` can do nothing while
+ * `api` is null, so a toggle inside that window was dropped, and the theme then
+ * defined here carried the stale *name* while reading the *live* tokens: the
+ * two disagreed, and the name the editor went on to ask for was never defined
+ * at all. Reading `documentTheme()` at the moment the bundle lands is what
+ * keeps the name and the colors describing the same theme, and there is no
+ * longer a parameter through which they can drift apart
+ * (`ui/e2e/theme.spec.ts`, `ui/src/monacoLoad.test.ts`).
+ */
+export async function loadMonaco(): Promise<typeof Monaco> {
+  loading ??= import("./monacoBundle").then((bundle) => {
+    api = bundle.configureBundle();
+    defineWorkbenchTheme(documentTheme());
+    return api;
+  });
+  return loading;
+}
+
+/**
+ * Start the load when the browser has nothing better to do.
+ *
+ * Monaco's first construction is ~100 ms of work, and moving it off the launch
+ * path only helps if the user does not simply pay it on their first click
+ * instead. So the bytes are warmed after first paint — deliberately with **no
+ * `timeout`**: an idle callback that fires anyway is a 3.5 MB parse landing in
+ * the middle of whatever the user is doing, which is the problem this change
+ * exists to remove, not a smaller version of it. A page that never goes idle
+ * simply loads the editor on demand, as it would have anyway.
+ */
+export function prefetchMonaco(): void {
+  if (loading !== null) return;
+  const warm = (): void => {
+    void loadMonaco();
   };
-  loader.config({ monaco });
-  defineWorkbenchTheme(theme);
+  const idle = (globalThis as { requestIdleCallback?: (cb: () => void) => number })
+    .requestIdleCallback;
+  if (idle === undefined) setTimeout(warm, 1_000);
+  else idle(warm);
 }
 
 export function monacoThemeName(theme: Theme): string {
@@ -50,13 +93,18 @@ export function monacoThemeName(theme: Theme): string {
  * (Re)build the Monaco theme from the CURRENT computed tokens. Call after the
  * data-theme attribute changes so both themes are defined from live values.
  * Chrome colors per DESIGN.md §2.8; syntax colors from the ANSI palette.
+ *
+ * A no-op before the editor is loaded, and safely so: `loadMonaco` defines
+ * whatever theme is current at the moment it finishes, so a toggle that landed
+ * inside the load window is picked up there rather than lost here.
  */
 export function defineWorkbenchTheme(theme: Theme): void {
-  const rule = (token: string, varName: string): monaco.editor.ITokenThemeRule => ({
+  if (api === null) return;
+  const rule = (token: string, varName: string): Monaco.editor.ITokenThemeRule => ({
     token,
     foreground: hexVar(varName).slice(1),
   });
-  monaco.editor.defineTheme(monacoThemeName(theme), {
+  api.editor.defineTheme(monacoThemeName(theme), {
     base: theme === "dark" ? "vs-dark" : "vs",
     inherit: true,
     rules: [
@@ -103,12 +151,29 @@ export function defineWorkbenchTheme(theme: Theme): void {
 /** Uri scheme must match the `path` prop given to <Editor> (see EditorArea). */
 export const editorPathProp = (path: string): string => `file:///${path}`;
 
-export const uriFor = (path: string): monaco.Uri => monaco.Uri.parse(editorPathProp(path));
+let activeEditor: Monaco.editor.IStandaloneCodeEditor | null = null;
 
-let activeEditor: monaco.editor.IStandaloneCodeEditor | null = null;
-
-export function setActiveEditor(editor: monaco.editor.IStandaloneCodeEditor | null): void {
+export function setActiveEditor(editor: Monaco.editor.IStandaloneCodeEditor | null): void {
   activeEditor = editor;
+}
+
+/**
+ * Withdraw an editor that is going away — and *only* it.
+ *
+ * There is more than one editor in the window now (the tab strip's, plus one
+ * per `editors#<path>` pane), so "an editor unmounted" is not "there is no
+ * active editor": closing one pane must not cost the pane beside it the cursor
+ * and scroll restore that `setModelContent` does. A no-op unless the editor
+ * being dropped is the one currently registered.
+ */
+export function clearActiveEditor(editor: Monaco.editor.IStandaloneCodeEditor): void {
+  if (activeEditor === editor) activeEditor = null;
+}
+
+/** The model for a path, or null — including "the editor has not loaded yet",
+ * which is indistinguishable from "no model" and means the same thing here. */
+function modelFor(path: string): Monaco.editor.ITextModel | null {
+  return api?.editor.getModel(api.Uri.parse(editorPathProp(path))) ?? null;
 }
 
 /**
@@ -119,8 +184,8 @@ export function setActiveEditor(editor: monaco.editor.IStandaloneCodeEditor | nu
  * store the returned value so dirty-tracking compares like with like.
  */
 export function setModelContent(path: string, content: string): string | null {
-  const model = monaco.editor.getModel(uriFor(path));
-  if (!model) return null;
+  const model = modelFor(path);
+  if (model === null) return null;
   if (activeEditor && activeEditor.getModel() === model) {
     const viewState = activeEditor.saveViewState();
     model.setValue(content);
@@ -133,9 +198,17 @@ export function setModelContent(path: string, content: string): string | null {
 
 /** Drop the cached model when a tab closes so reopening reloads from disk. */
 export function disposeModel(path: string): void {
-  monaco.editor.getModel(uriFor(path))?.dispose();
+  modelFor(path)?.dispose();
 }
 
+/**
+ * Extension -> Monaco language id.
+ *
+ * **This table and `monacoBundle.ts`'s import list are one list.** Every value
+ * here must have a contribution imported there, or the file opens as plain
+ * text with no warning; every contribution imported there should be reachable
+ * from here, or it is bytes on a path nobody can ask for.
+ */
 const LANG_BY_EXT: Record<string, string> = {
   ts: "typescript",
   tsx: "typescript",
@@ -174,6 +247,12 @@ const LANG_BY_EXT: Record<string, string> = {
   hpp: "cpp",
   cs: "csharp",
 };
+
+/** Every language id this app can ask Monaco for — the contract
+ * `monacoBundle.ts` has to satisfy, asserted in `monaco.test.ts`. */
+export const SHIPPED_LANGUAGES: readonly string[] = [
+  ...new Set([...Object.values(LANG_BY_EXT), "dockerfile"]),
+];
 
 export function languageForPath(path: string): string {
   const name = (path.split("/").pop() ?? "").toLowerCase();
