@@ -409,6 +409,54 @@ describe("visual renderer — anchors", () => {
     expect(out).not.toContain("<button");
   });
 
+  it("shows a row's note and a chart point's note in place while the mode is off", () => {
+    // The cell case above covers a part whose container is drawn anyway. These
+    // two are the parts whose *container* exists only for annotations — a
+    // table's row-handle column and a chart's point strip — so gating those on
+    // the mode alone deleted the note with the mode. On a settled card the mode
+    // never comes back, which makes the note unreachable rather than hidden.
+    const row = anchorKey(partAnchor("scene", ["leaf", 0, "row", 1]));
+    const point = anchorKey(partAnchor("scene", ["leaf", 1, "series", "SE3", "point", 1]));
+    const node: VisualNode = {
+      kind: "visual",
+      node_id: "scene",
+      title: "",
+      blocks: [
+        { layout: "single", items: [table(rows)] },
+        { layout: "single", items: [chart] },
+      ],
+    };
+    const annotation: VisualAnnotation = {
+      nodeId: "scene",
+      notes: { [row]: "whole row is fold 1", [point]: "negative here is real" },
+      editing: null,
+      onPick: null,
+    };
+    expect(anchorsIn(node, annotation).sort()).toEqual([row, point].sort());
+
+    const out = renderToStaticMarkup(<VisualView node={node} annotation={annotation} />);
+    // Present, marked, and inert — the ✎ is what the reader sees, and there is
+    // nothing left to click or tab into.
+    expect(out).toContain("whole row is fold 1");
+    expect(out).toContain("negative here is real");
+    expect(out.match(/wb-vis-pin/g)).toHaveLength(2);
+    expect(out).not.toContain("<button");
+    // The row handle keeps the table rectangular: a header cell for the column
+    // it occupies, and a `<td>` on the unnoted row too.
+    expect(out.match(/wb-vis-pick-col/g)).toHaveLength(3);
+    // The picker is annotate mode's, so it went with the mode; the strip stayed.
+    expect(out).not.toContain("wb-vis-points-pick");
+    expect(out).toContain("wb-vis-points-list");
+  });
+
+  it("draws no handle column and no point strip when nothing is noted", () => {
+    // The other half of the same rule: these two containers are not free, so
+    // they exist only when annotate mode or a note asks for them.
+    const out = html(scene(table(rows), chart));
+    expect(out).not.toContain("wb-vis-pick-col");
+    expect(out).not.toContain("wb-vis-points");
+  });
+
   it("keeps markup in a cell as text with an anchor on it", () => {
     // The scene graph's threat model, re-run with annotations present: an
     // anchor adds a wrapper, and the wrapper must not become a way in.

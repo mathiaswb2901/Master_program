@@ -20,6 +20,7 @@ import {
   partAnchor,
   PLAN_ANCHOR,
   rangeAnchor,
+  sliceCodePoints,
   textSegments,
 } from "./anchors";
 
@@ -178,8 +179,37 @@ describe("text ranges", () => {
    */
   it("slices the source, exactly", () => {
     for (const segment of textSegments(PROSE)) {
-      expect(PROSE.slice(segment.start, segment.end)).toBe(segment.text);
+      expect(sliceCodePoints(PROSE, segment.start, segment.end)).toBe(segment.text);
     }
+  });
+
+  it("counts code points, so an emoji cannot shift the range", () => {
+    // The offsets are read by Python, which indexes code points; JavaScript
+    // indexes UTF-16, where "🔋" is two units rather than one. Counting units
+    // would put the second sentence at 20–37 — in range, so accepted, and one
+    // character off for every astral character before it. The Python half of
+    // this same string is asserted in `server/tests/test_plan_anchors.py`.
+    const astral = "Battery 🔋 is full. Charge it anyway.";
+    const [first, second] = textSegments(astral);
+    expect(second.text).toBe("Charge it anyway.");
+    expect(second.start).toBe([...astral].indexOf("C"));
+    // Python's `len()`, not JavaScript's `.length` — they differ here by one.
+    expect(second.end).toBe([...astral].length);
+    expect(second.end).toBeLessThan(astral.length);
+    for (const segment of [first, second]) {
+      expect(sliceCodePoints(astral, segment.start, segment.end)).toBe(segment.text);
+    }
+  });
+
+  it("labels a range by the characters the server would slice", () => {
+    const astral = "Battery 🔋 is full. Charge it anyway.";
+    const astralPlan: PlanArtifact = {
+      ...plan,
+      nodes: [{ kind: "markdown", node_id: "note", text: astral }],
+    };
+    const segment = textSegments(astral)[1];
+    const label = anchorLabel(rangeAnchor("note", segment.start, segment.end), astralPlan);
+    expect(label).toBe("“Charge it anyway.”");
   });
 
   it("splits prose into sentences", () => {

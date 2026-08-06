@@ -16,6 +16,8 @@ would make it a lie. Neither may be silent, so every case below asserts the
 failure is *reported*, not swallowed.
 """
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
@@ -43,10 +45,19 @@ from workbench_server.models.visuals import (
     TableLeaf,
     ValueAxis,
     VisualBlock,
+    VisualLeaf,
 )
-from workbench_server.services.plan_anchors import anchor_problem, annotation_problems
+from workbench_server.services.plan_anchors import (
+    _LEAF_KEYS,
+    anchor_problem,
+    annotation_problems,
+)
 
 MARKDOWN_TEXT = "The 25-hour day needs a fold tag. Everything else is unchanged."
+
+#: The same string `ui/src/plan/anchors.test.ts` splits, holding one character
+#: outside the basic plane — where UTF-16 and code points stop agreeing.
+ASTRAL_TEXT = "Battery 🔋 is full. Charge it anyway."
 
 
 def artifact() -> PlanArtifact:
@@ -252,6 +263,22 @@ class TestEveryKindResolves:
         # would get rather than merely in range.
         assert MARKDOWN_TEXT[4:16] == "25-hour day "
 
+    def test_a_range_over_text_outside_the_basic_plane(self) -> None:
+        """A range anchor's offsets are Unicode **code points**, because this is
+        where they are spent: ``len(text)`` here, and ``text[from:to]`` in the
+        agent. The browser indexes UTF-16, so "🔋" is two units there and one
+        here — `ui/src/plan/anchors.test.ts` asserts it emits exactly the
+        numbers below for this string. Had it counted units, the second
+        sentence would arrive as 20 to 37: still inside the string, so accepted,
+        and naming ``harge it anyway.`` instead."""
+        plan = artifact()
+        node = plan.nodes[0]
+        assert isinstance(node, MarkdownNode)
+        node.text = ASTRAL_TEXT
+        anchor = AnnotationAnchor(kind="range", node_id="intro", path=["from", 19, "to", 36])
+        assert anchor_problem(plan, anchor) is None
+        assert node.text[19:36] == "Charge it anyway."
+
     def test_a_range_over_a_question(self) -> None:
         anchor = AnnotationAnchor(kind="range", node_id="q1", path=["from", 0, "to", 8])
         assert anchor_problem(artifact(), anchor) is None
@@ -325,6 +352,51 @@ class TestUnresolvableAnchors:
         """A row on a chart. Every segment is grammatical and the leaf exists;
         it is the *pairing* that is wrong, which only the artifact can see."""
         assert anchor_problem(artifact(), part(["leaf", 1, "row", 0])) is not None
+
+    @pytest.mark.parametrize(
+        ("path", "unexpected"),
+        [
+            (["leaf", 1, "series", "SE3", "row", 999], "'row'"),
+            (["leaf", 2, "row", 0, "node", "opt"], "'node'"),
+            (["leaf", 2, "row", 0, "col", "Price", "point", 999], "'point'"),
+            (["leaf", 3, "node", "opt", "line", 4], "'line'"),
+            (["leaf", 4, "side", "after", "metric", "Revenue"], "'metric'"),
+            (["leaf", 0, "metric", "Revenue", "col", "Price"], "'col'"),
+        ],
+        ids=[
+            "chart+row",
+            "table+node",
+            "table+point",
+            "diagram+line",
+            "diff+metric",
+            "metrics+col",
+        ],
+    )
+    def test_a_segment_that_addresses_a_different_kind_of_leaf(
+        self, path: list[str | int], unexpected: str
+    ) -> None:
+        """A *valid* anchor with one extra segment that belongs to another leaf
+        kind. Each validator reads only the keys it knows, so the stray one used
+        to ride along unread and the anchor resolved clean — the note then lands
+        on the part the *understood* half names, which is not what anybody
+        pointed at. The grammar cannot catch this: every key here is legal, and
+        the no-duplicates rule does not stop a client mixing two leaves' keys.
+        """
+        problem = anchor_problem(artifact(), part(path))
+        assert problem is not None
+        assert unexpected in problem
+
+    def test_a_diagram_part_is_a_node_or_an_edge_but_not_both(self) -> None:
+        """Both keys belong to a diagram, so the subset check passes them — and
+        the node branch used to answer first and drop the edge on the floor."""
+        problem = anchor_problem(artifact(), part(["leaf", 3, "node", "opt", "edge", 0]))
+        assert problem == "a diagram part is a node or an edge, not both"
+
+    def test_every_leaf_kind_declares_which_segments_address_it(self) -> None:
+        """The map is what makes an unexpected segment *unexpected*; a leaf kind
+        missing from it would raise on lookup instead of rejecting cleanly."""
+        leaves = get_args(get_args(VisualLeaf)[0])
+        assert {leaf.model_fields["kind"].default for leaf in leaves} == set(_LEAF_KEYS)
 
     def test_an_ambiguous_column_label_is_refused_rather_than_guessed(self) -> None:
         """Two columns with one name make that name an address for two things.

@@ -25,6 +25,7 @@ import { useEffect, useId, useRef, useState, type RefObject } from "react";
 
 import { nameOrIndex } from "../plan/anchors";
 import type {
+  AnchorSegment,
   ChartLeaf,
   ChartSeries,
   CodeDiffLeaf,
@@ -43,6 +44,7 @@ import {
   Part,
   SvgPart,
   useAnnotation,
+  useNoted,
   type VisualAnnotation,
 } from "./annotate";
 import { layerNodes, logTicks, matchLines, minimumGap, niceTicks, scale } from "./layout";
@@ -143,6 +145,13 @@ function TableView({ leaf, at }: { leaf: TableLeaf } & LeafAt) {
   // column, else by its index — `nameOrIndex` is the whole of that decision.
   const labels = leaf.columns.map((column) => column.label);
   const pickable = usePickable();
+  const noted = useNoted();
+  const rowPath = (r: number): AnchorSegment[] => ["leaf", at, "row", r];
+  // The handle column is a column of the table, so it is present or absent for
+  // the *whole* table — a `<td>` on only the noted rows would shift every other
+  // row's cells one place left. It earns its place when the rows are pickable,
+  // and it keeps it while any row still carries a note.
+  const handleCol = pickable || leaf.rows.some((_, r) => noted(rowPath(r)));
   return (
     <figure className="wb-vis-leaf">
       <LeafTitle text={leaf.title} />
@@ -150,9 +159,9 @@ function TableView({ leaf, at }: { leaf: TableLeaf } & LeafAt) {
         <table className="wb-vis-table">
           <thead>
             <tr>
-              {pickable && (
+              {handleCol && (
                 <th scope="col" className="wb-vis-pick-col">
-                  <span className="u-sr-only">Annotate row</span>
+                  <span className="u-sr-only">{pickable ? "Annotate row" : "Row notes"}</span>
                 </th>
               )}
               {leaf.columns.map((column, c) => (
@@ -166,14 +175,19 @@ function TableView({ leaf, at }: { leaf: TableLeaf } & LeafAt) {
           <tbody>
             {leaf.rows.map((row, r) => (
               <tr key={r} className={roleClass(rowRole.get(r) ?? "neutral").trim() || undefined}>
-                {pickable && (
+                {handleCol && (
                   <td className="wb-vis-pick-col">
-                    <Part
-                      path={["leaf", at, "row", r]}
-                      label={partLabel(leaf.title, "table", `row ${String(r + 1)}`)}
-                    >
-                      <span aria-hidden="true">¶</span>
-                    </Part>
+                    {/* The handle itself is only drawn where it means
+                        something: a pilcrow on an unnoted row of a settled card
+                        is a control that does nothing. */}
+                    {(pickable || noted(rowPath(r))) && (
+                      <Part
+                        path={rowPath(r)}
+                        label={partLabel(leaf.title, "table", `row ${String(r + 1)}`)}
+                      >
+                        <span aria-hidden="true">¶</span>
+                      </Part>
+                    )}
                   </td>
                 )}
                 {row.map((cell, c) => {
@@ -235,8 +249,15 @@ function extent(values: number[]): [number, number] {
   return [Math.min(...values), Math.max(...values)];
 }
 
+/** One point of one series, as the strip lists it. */
+interface PointRef {
+  series: number;
+  index: number;
+}
+
 /**
- * Picking a *point* on a chart, without 2,400 tab stops.
+ * Picking a *point* on a chart, without 2,400 tab stops — and, once the mode is
+ * off, the only place a point's note can show itself.
  *
  * A chart may legally hold six series of four hundred points; making every one
  * a focusable target would be both a DOM the budget cannot afford and a
@@ -245,6 +266,12 @@ function extent(values: number[]): [number, number] {
  * with the axis's real x — on a time grid that is the market's own clock, which
  * is the label the user is actually reading the chart by. Both steps are plain
  * buttons, so both work from the keyboard with nothing added.
+ *
+ * The picker is annotate mode's, so it goes when the mode does. The *strip*
+ * does not: with the mode off it lists exactly the points that carry a note,
+ * inert, so a decided card still shows where the reader pointed. A point drawn
+ * on the plot is 2.5px of circle with no room for a glyph, which is why the
+ * marker lives here rather than on the geometry.
  */
 function PointStrip({
   leaf,
@@ -252,43 +279,66 @@ function PointStrip({
   labels,
 }: { leaf: ChartLeaf; labels: string[] } & LeafAt) {
   const [open, setOpen] = useState<number | null>(null);
+  const pickable = usePickable();
+  const noted = useNoted();
   const longest = Math.max(...leaf.series.map((s) => s.values.length));
   const grid = leaf.x.kind === "time" ? resolveGrid(leaf.x, longest) : null;
   const ticks = grid === null ? null : gridLabels(grid);
   const pointLabel = (index: number): string => ticks?.[index] ?? `#${String(index + 1)}`;
-  const series = open === null ? null : leaf.series[open];
+  const pointPath = (point: PointRef): AnchorSegment[] => [
+    "leaf",
+    at,
+    "series",
+    nameOrIndex(labels, point.series),
+    "point",
+    point.index,
+  ];
+  // Annotate mode shows the one series the reader opened; off, the notes.
+  const shown: PointRef[] = leaf.series.flatMap((series, s) =>
+    series.values
+      .map((_, index) => ({ series: s, index }))
+      .filter((point) => (pickable ? s === open : noted(pointPath(point)))),
+  );
+  if (!pickable && shown.length === 0) return null;
+  const opened = open === null ? null : leaf.series[open];
   return (
     <div className="wb-vis-points">
-      <div className="wb-vis-points-pick">
-        <span className="u-label">Points</span>
-        {leaf.series.map((candidate, index) => (
-          <button
-            key={index}
-            type="button"
-            className={"wb-btn wb-btn-ghost wb-btn-sm" + (open === index ? " is-active" : "")}
-            aria-expanded={open === index}
-            onClick={() => {
-              setOpen(open === index ? null : index);
-            }}
-          >
-            {candidate.label}
-          </button>
-        ))}
-      </div>
-      {series !== null && open !== null && (
-        <div className="wb-vis-points-list" role="group" aria-label={`Points of ${series.label}`}>
-          {series.values.map((value, index) => (
-            <Part
+      {pickable && (
+        <div className="wb-vis-points-pick">
+          <span className="u-label">Points</span>
+          {leaf.series.map((candidate, index) => (
+            <button
               key={index}
-              path={["leaf", at, "series", nameOrIndex(labels, open), "point", index]}
+              type="button"
+              className={"wb-btn wb-btn-ghost wb-btn-sm" + (open === index ? " is-active" : "")}
+              aria-expanded={open === index}
+              onClick={() => {
+                setOpen(open === index ? null : index);
+              }}
+            >
+              {candidate.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {shown.length > 0 && (
+        <div
+          className="wb-vis-points-list"
+          role="group"
+          aria-label={opened === null ? "Noted points" : `Points of ${opened.label}`}
+        >
+          {shown.map((point) => (
+            <Part
+              key={`${String(point.series)}:${String(point.index)}`}
+              path={pointPath(point)}
               label={partLabel(
                 leaf.title,
                 "chart",
-                series.label,
-                `${pointLabel(index)}, ${String(value)}`,
+                leaf.series[point.series].label,
+                `${pointLabel(point.index)}, ${String(leaf.series[point.series].values[point.index])}`,
               )}
             >
-              <span className="u-tabular">{pointLabel(index)}</span>
+              <span className="u-tabular">{pointLabel(point.index)}</span>
             </Part>
           ))}
         </div>
@@ -299,7 +349,6 @@ function PointStrip({
 
 function ChartView({ leaf, at }: { leaf: ChartLeaf } & LeafAt) {
   const clipId = useId();
-  const pickable = usePickable();
   const seriesLabels = leaf.series.map((series) => series.label);
   const [host, width] = useDrawWidth(CHART_W, CHART_FLOOR);
   const isTime = leaf.x.kind === "time";
@@ -517,7 +566,9 @@ function ChartView({ leaf, at }: { leaf: ChartLeaf } & LeafAt) {
           <span className="wb-vis-grid-caption">{leaf.x.label}</span>
         )}
       </figcaption>
-      {pickable && <PointStrip leaf={leaf} at={at} labels={seriesLabels} />}
+      {/* Self-gating: it is the strip that knows whether it has anything to
+          show, and it renders nothing at all when it does not. */}
+      <PointStrip leaf={leaf} at={at} labels={seriesLabels} />
     </figure>
   );
 }

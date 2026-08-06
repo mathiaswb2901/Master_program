@@ -136,6 +136,19 @@ test("annotate mode: point at a cell and a chart point, then decide", async ({ p
     await expect(card).not.toContainText("Delivery hours look right.");
   });
 
+  await test.step("a whole row is a target, with no column named", async () => {
+    // The row handle: the anchor for "this row is wrong", not one cell of it.
+    // It is also the anchor kind that used to disappear the moment the mode
+    // went off — asserted below, after the decision settles the card.
+    const handle = visual.getByRole("button", { name: "Annotate After, row 2", exact: true });
+    await expect(handle).toHaveAttribute("data-anchor", '["part","scene","leaf",3,"row",1]');
+    await handle.click();
+    await expect(editing).toBeFocused();
+    await page.keyboard.type("This whole row is the fold-1 hour.");
+    await page.keyboard.press("Escape");
+    await expect(rows).toHaveCount(4);
+  });
+
   await test.step("the notes travel with the verdict, in one response", async () => {
     await card.getByRole("button", { name: "Approve" }).click();
     await expect(card.locator(".wb-plan-verdict")).toHaveText("Approved");
@@ -151,6 +164,8 @@ test("annotate mode: point at a cell and a chart point, then decide", async ({ p
     await expect(echo).toContainText(
       "scene/leaf/1/series/SE3 day-ahead/point/12=Negative here is real, keep it.",
     );
+    // A row with no column named: the anchor stops at the row.
+    await expect(echo).toContainText("scene/leaf/3/row/1=This whole row is the fold-1 hour.");
     // The range: offsets into the caveat's *source* string, not the page.
     await expect(echo).toContainText("caveat/from/48/to/87=Say which curve, by name.");
     // …and the removed one did not travel.
@@ -160,5 +175,27 @@ test("annotate mode: point at a cell and a chart point, then decide", async ({ p
   await test.step("the settled card is read-only, mode and all", async () => {
     await expect(card).not.toHaveClass(/is-annotating/);
     await expect(toggle).toHaveCount(0);
+  });
+
+  await test.step("every note keeps its marker on the settled card", async () => {
+    // A note you can only see by turning a mode back on is a note you will not
+    // act on — and the mode cannot come back once the card is decided. So every
+    // anchor kind keeps its ✎ in place, inert. The two that used to vanish with
+    // the mode are a *row* (whose handle column was drawn only for pickers) and
+    // a *chart point* (whose whole strip was), so both are asserted here.
+    const noted = (anchor: string) => visual.locator(`[data-anchor='${anchor}']`);
+    for (const anchor of [
+      '["part","scene","leaf",3,"row",1]',
+      '["part","scene","leaf",1,"series","SE3 day-ahead","point",12]',
+      '["part","scene","leaf",3,"row",1,"col","Price"]',
+    ]) {
+      await expect(noted(anchor)).toHaveCount(1);
+      await expect(noted(anchor)).toHaveClass(/is-noted/);
+      await expect(noted(anchor).locator(".wb-vis-pin")).toBeVisible();
+    }
+    // Inert, not merely restyled: nothing left to click or tab into.
+    await expect(visual.locator("button")).toHaveCount(0);
+    // …and the picker itself is gone — the strip that survives is the notes.
+    await expect(visual.locator(".wb-vis-points-pick")).toHaveCount(0);
   });
 });

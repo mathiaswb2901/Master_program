@@ -167,7 +167,9 @@ export function anchorLabel(anchor: AnnotationAnchor, plan: PlanArtifact): strin
     const at = new Map(pairs(anchor.path));
     const from = Number(at.get("from") ?? 0);
     const to = Number(at.get("to") ?? 0);
-    const text = node !== undefined && "text" in node ? node.text.slice(from, to) : "";
+    // Code points, like the offsets themselves — a `.slice` here would name
+    // different characters than the server and the agent do.
+    const text = node !== undefined && "text" in node ? sliceCodePoints(node.text, from, to) : "";
     return text === "" ? `${nodeName} — characters ${from}–${to}` : `“${text}”`;
   }
   const leaf = anchoredLeaf(anchor, plan);
@@ -237,6 +239,40 @@ function firstWords(text: string, limit = 42): string {
 // ---- text ranges ------------------------------------------------------------
 
 /**
+ * A range offset counts **Unicode code points**, not JavaScript string units.
+ *
+ * The offsets in a range anchor are read by a Python process: the server checks
+ * them against `len(text)` (`services/plan_anchors.py`) and the agent slices
+ * `text[from:to]` out of the string it is holding. Python indexes code points;
+ * JavaScript indexes UTF-16, where a character outside the BMP — `"🔋"` — is
+ * two units rather than one. Counting units would shift the phrase the server
+ * names by one for every such character before it, and shift it *silently*:
+ * both ends stay in range, so the anchor validates and simply points at the
+ * wrong words. That is the exact failure this whole design exists to prevent,
+ * so the client counts the way the reader of the number counts.
+ */
+function codePointOffsets(text: string): number[] {
+  // One entry per string unit, plus the end: `offsets[i]` is the code-point
+  // offset of unit `i`. Both halves of a surrogate pair map to the same code
+  // point, so an offset landing mid-pair still names the whole character.
+  const offsets: number[] = [];
+  let point = 0;
+  for (let unit = 0; unit < text.length; ) {
+    const size = (text.codePointAt(unit) ?? 0) > 0xffff ? 2 : 1;
+    for (let half = 0; half < size; half++) offsets.push(point);
+    unit += size;
+    point += 1;
+  }
+  offsets.push(point);
+  return offsets;
+}
+
+/** `String.prototype.slice`, in the units a range anchor is written in. */
+export function sliceCodePoints(text: string, start: number, end: number): string {
+  return [...text].slice(start, end).join("");
+}
+
+/**
  * A text node split into the phrases a user can point at, as offsets into the
  * **source string** — which is what makes a range anchor exact.
  *
@@ -249,6 +285,8 @@ function firstWords(text: string, limit = 42): string {
  */
 export function textSegments(text: string): { start: number; end: number; text: string }[] {
   const out: { start: number; end: number; text: string }[] = [];
+  // The regex reports UTF-16 positions; the anchor is written in code points.
+  const points = codePointOffsets(text);
   // Sentence ends, or a line break — a markdown list item is a phrase too.
   const pattern = /[^\n]*?(?:[.!?](?=\s|$)|\n|$)/g;
   for (const match of text.matchAll(pattern)) {
@@ -259,7 +297,11 @@ export function textSegments(text: string): { start: number; end: number; text: 
     // the gaps between them.
     const leading = match[0].length - match[0].trimStart().length;
     const trailing = match[0].length - match[0].trimEnd().length;
-    out.push({ start: start + leading, end: end - trailing, text: match[0].trim() });
+    out.push({
+      start: points[start + leading],
+      end: points[end - trailing],
+      text: match[0].trim(),
+    });
     if (end >= text.length) break;
   }
   return out;

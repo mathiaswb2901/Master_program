@@ -50,6 +50,26 @@ _TEXT_NODES = (MarkdownNode, QuestionNode)
 #: already guaranteed string keys, pairs, and no key twice.
 Segments = dict[str, AnchorSegment]
 
+#: The segment keys each leaf kind is addressed by — every key its own validator
+#: below actually reads. Which of them are *required* is that validator's
+#: business; this map answers the other question, and the grammar cannot: which
+#: are meaningless here.
+#:
+#: A validator reads the keys it knows and ignores the rest, so ``series "SE3"
+#: row 999`` on a chart used to resolve clean with the ``row`` dropped on the
+#: floor. That is the exact failure anchors exist to prevent: the note then
+#: attaches to what the *understood* half names, which is not what anybody
+#: pointed at. Mixing two leaves' keys is a client (or an agent SDK) that has
+#: confused two leaves, and the half we understand is not the half to trust —
+#: so the anchor is malformed, and the decision carrying it is refused.
+_LEAF_KEYS: dict[str, frozenset[str]] = {
+    "table": frozenset({"row", "col"}),
+    "chart": frozenset({"series", "point"}),
+    "diagram": frozenset({"node", "edge"}),
+    "code_diff": frozenset({"side", "line"}),
+    "metrics": frozenset({"metric"}),
+}
+
 
 def _pairs(path: Sequence[AnchorSegment]) -> Segments:
     return {str(key): value for key, value in zip(path[::2], path[1::2], strict=True)}
@@ -124,6 +144,10 @@ def _chart_problem(leaf: ChartLeaf, at: Segments) -> str | None:
 
 
 def _diagram_problem(leaf: DiagramLeaf, at: Segments) -> str | None:
+    # Both keys address a diagram, so the key-set check above lets them through
+    # together; only here is it visible that they name two different things.
+    if "node" in at and "edge" in at:
+        return "a diagram part is a node or an edge, not both"
     if "node" in at:
         if at["node"] not in {node.id for node in leaf.nodes}:
             return f"no diagram node {at['node']!r}"
@@ -165,6 +189,12 @@ def _part_problem(node: PlanNode, path: Sequence[AnchorSegment]) -> str | None:
     if index is None or index >= len(leaves):
         return f"leaf {at.get('leaf')!r} is not one of this node's {len(leaves)} leaves"
     leaf = leaves[index]
+    # Before asking whether row 14 exists, ask whether "row" means anything on
+    # this leaf at all — a segment nobody reads is a segment nobody validates.
+    unexpected = sorted(set(at) - _LEAF_KEYS[leaf.kind] - {"leaf"})
+    if unexpected:
+        named = ", ".join(repr(key) for key in unexpected)
+        return f"{named} does not address a {leaf.kind} part"
     match leaf:
         case TableLeaf():
             return _table_problem(leaf, at)

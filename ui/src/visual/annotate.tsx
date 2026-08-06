@@ -45,6 +45,23 @@ export function useAnnotation(): VisualAnnotation | null {
   return useContext(AnnotateContext);
 }
 
+/**
+ * Whether a part carries a note — "should this exist" without building it.
+ *
+ * {@link Part} and {@link SvgPart} answer this for themselves inside
+ * {@link resolve}, and that is enough for every part whose *container* is drawn
+ * anyway. Two are not: a table's row-handle column and a chart's point strip
+ * exist only because parts do, so they decide before the part gets a say. Gating
+ * them on annotate mode alone deletes a note the moment the mode goes off — and
+ * on a settled card the mode never comes back, so the note is gone for good.
+ * They gate on "pickable **or** noted" instead, and this is that second half.
+ */
+export function useNoted(): (path: AnchorSegment[]) => boolean {
+  const annotation = useAnnotation();
+  if (annotation === null) return () => false;
+  return (path) => annotation.notes[anchorKey(partAnchor(annotation.nodeId, path))] !== undefined;
+}
+
 /** Everything a part needs to draw itself, or null when it should not exist. */
 interface Resolved {
   key: string;
