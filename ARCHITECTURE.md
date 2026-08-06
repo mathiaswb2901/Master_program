@@ -626,12 +626,13 @@ Three properties make that safe to open on a whim, and each is a constraint rath
 than a nicety. **Nothing writes.** A test watches every byte and mtime under the store
 across a browse and fails on any change; there is no delete path at all. **The cheap
 pass and the expensive one are separate.** Enumeration is one `os.scandir` per project
-directory — 22 directories and 80 transcripts measured at 2.3 ms — and yields
+directory — 17 directories and 80 transcripts measured at 1.8 ms — and yields
 everything ordering and counting need; reading a transcript for its title and turn
-count is a full pass (1.26 s for all 80, 397 MB, cold) and is therefore both bounded by
-`?limit=` (the newest N are read; the rest are *counted* and reported as withheld) and
+count is a full pass (1.28 s for all 80, 398 MB, cold) and is therefore both bounded by
+`?limit=` (the newest N are *read*; every conversation is still listed, with the unread
+ones carrying `read: false` — a limit that dropped rows would drop whole folders) and
 cached against each file's `(mtime_ns, size)`, so a second browse of an unchanged store
-is enumeration only (82 ms including folder resolution). Append-only transcripts are
+is enumeration only (93 ms including folder resolution). Append-only transcripts are
 what make that pair a sound invalidation. The scan runs in a thread; the router does
 nothing else. **What cannot be known is named.** `encode_project_dir` is lossy and not
 reversible (`C:\a\b` and `C:/a-b` collide), so a display path is *matched* against

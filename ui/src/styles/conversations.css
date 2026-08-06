@@ -140,6 +140,16 @@
   color: var(--text-tertiary);
 }
 
+/* Listed but not read: it fell outside this response's read budget, so there is
+   no title yet. Quieter than a read row and italic on the title, so a column of
+   placeholders reads as "waiting" rather than as a column of conversations all
+   named the same thing — and per DESIGN.md §7 the words say it too ("not read",
+   in the turn cell), because dimming is never the only signal. */
+.wb-conv-row.is-unread .wb-conv-title {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
 .wb-conv-title {
   flex: 1;
   min-width: 0;

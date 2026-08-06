@@ -131,7 +131,13 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
   return (
     <button
       type="button"
-      className={"wb-conv-row" + (blocked ? " is-blocked" : "") + (busy ? " is-busy" : "")}
+      className={
+        "wb-conv-row" +
+        (blocked ? " is-blocked" : "") +
+        (busy ? " is-busy" : "") +
+        // Listed but not read: it exists and it opens, it just has no title yet.
+        (conversation.read ? "" : " is-unread")
+      }
       onClick={open}
       // The reason travels with the control: a pointer user gets it on hover,
       // and a screen reader gets it as this button's description rather than as
@@ -140,7 +146,10 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
       title={
         blocked
           ? (group.reason ?? "")
-          : `${conversation.title} — ${relativeTimePhrase(conversation.updated_at)}`
+          : !conversation.read
+            ? "This conversation has not been read yet — “Read them all” fetches " +
+              `its title and turn count. Last active ${relativeTimePhrase(conversation.updated_at)}.`
+            : `${conversation.title} — ${relativeTimePhrase(conversation.updated_at)}`
       }
     >
       <span
@@ -199,7 +208,7 @@ export function ConversationsPanel(props: IDockviewPanelProps) {
 
   useEffect(() => {
     // One reading, shared: a second pane mounting while the first is loading
-    // must not start a second 400 MB scan.
+    // must not start a second 398 MB scan.
     if (useConversations.getState().store === null && !useConversations.getState().loading) {
       void useConversations.getState().load();
     }
@@ -388,6 +397,10 @@ function Footer({
         {query.trim() === ""
           ? `${String(shown)} of ${String(store.total_conversations)} conversations`
           : `${String(shown)} matching of ${String(store.returned_conversations)} read`}
+        {/* Every conversation is listed whatever the limit was; what a limit
+            withholds is the *reading*. Saying so is the difference between "you
+            have 217 more" and "217 of these rows do not have their title yet". */}
+        {withheld > 0 && ` · ${String(withheld)} not read yet`}
         {/* There is no watcher on Claude Code's storage, so the panel says how
             old this reading is instead of implying it is live. */}
         {` · read ${relativeTimePhrase(store.scanned_at, now / 1000)}`}
@@ -397,7 +410,10 @@ function Footer({
           type="button"
           className="wb-btn wb-btn-sm wb-btn-outline"
           onClick={() => void useConversations.getState().load(MAX_PAGE)}
-          title={`${String(withheld)} older conversations have not been read yet`}
+          title={
+            `${String(withheld)} conversations are listed but not read yet — this ` +
+            "fetches their titles and turn counts so they can be searched too."
+          }
         >
           Read {withheld} more
         </button>

@@ -24,12 +24,13 @@ async def conversations(
 
     Read-only: this reflects storage Claude Code owns and nothing here writes to
     it. ``limit`` bounds the *expensive* half only — every conversation that
-    exists is counted and reported, and the newest ``limit`` of them are read in
-    full for their title and turn count.
+    exists is listed, in the folder it ran in, and the newest ``limit`` of them
+    are additionally read in full for their title and turn count.
 
-    Handed to a thread: enumerating the store is fast (≈5 ms for 22 projects on
-    the author's machine) but a cold read of their transcripts is not (≈1.2 s for
-    397 MB), and neither belongs on the event loop.
+    Handed to a thread: enumerating the store is fast (**1.8 ms** for 17 project
+    folders on the author's machine) but a cold read of their transcripts is not
+    (**1.28 s** for 398 MB), and neither belongs on the event loop. Same
+    measurement as ``services/conversations.py`` cites, deliberately.
     """
     browser: ConversationBrowser = request.app.state.conversations
     manager: SessionManager = request.app.state.session_manager

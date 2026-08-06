@@ -8,6 +8,7 @@ off.
 
 import json
 import os
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from workbench_server.services.conversations import (
 from workbench_server.services.session_index import (
     SessionIndex,
     encode_project_dir,
+    first_user_text,
     scan_transcript,
 )
 from workbench_server.services.titles import derive_title
@@ -209,6 +211,89 @@ def test_turn_count_is_a_floor_when_the_byte_budget_is_hit(tmp_path: Path) -> No
     assert facts.truncated is True
     assert 0 < facts.turns < 50
     assert facts.first_user_text == "message 0"
+
+
+# ---- the bound that has to hold *while* reading, not after -------------------
+
+#: Comfortably over the cap these tests pass, and comfortably over the peak they
+#: allow — so a read that buffers the record whole cannot pass by luck.
+_FAT = 4_000_000
+
+
+def _peak_of(work: Any) -> tuple[Any, int]:
+    """Run ``work``, and say the most memory Python held while it ran."""
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        result = work()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return result, peak
+
+
+def test_one_enormous_record_is_bounded_rather_than_buffered(tmp_path: Path) -> None:
+    """The budget has to bound what is *read*, not notice afterwards.
+
+    ``for line in fh`` buffers everything up to the next newline before the loop
+    body runs, so a budget checked in that body never bounded the case it exists
+    for: a transcript holding one 4 MB record. That is not an adversarial file —
+    a ``tool_result`` carrying a ``cat`` of a large file is exactly this shape —
+    and ``browse()`` holds one process-wide lock for its whole scan, so reading
+    it is every other pane's ``/api/conversations`` request waiting behind it.
+    """
+    transcript = tmp_path / "huge.jsonl"
+    with transcript.open("wb") as fh:
+        fh.write(json.dumps(user("first")).encode() + b"\n")
+        fh.write(json.dumps(tool_result("x" * _FAT)).encode() + b"\n")
+        fh.write(json.dumps(user("last")).encode() + b"\n")
+
+    facts, peak = _peak_of(lambda: scan_transcript(transcript, max_line_bytes=256 * 1024))
+
+    assert peak < 1_000_000, f"held {peak} bytes to read a 4 MB record"
+    # Dropped unparsed — and the read carries on past it, so the records either
+    # side of the runaway one are still counted.
+    assert facts.first_user_text == "first"
+    assert facts.turns == 2
+    assert facts.truncated is True, "a dropped record must make the count a floor"
+
+
+def test_a_transcript_whose_last_record_never_ends_is_still_bounded(tmp_path: Path) -> None:
+    """The same trap wearing a different hat: no newline to stop at.
+
+    A transcript being appended to right now ends mid-record, and a corrupt one
+    can end mid-record and never resume. The line iterator reads to EOF looking
+    for a newline that is not there — which is unbounded by definition.
+    """
+    transcript = tmp_path / "cut.jsonl"
+    with transcript.open("wb") as fh:
+        fh.write(json.dumps(user("hello")).encode() + b"\n")
+        fh.write(b'{"type":"user","message":{"role":"user","content":"' + b"y" * _FAT)
+
+    facts, peak = _peak_of(lambda: scan_transcript(transcript, max_line_bytes=256 * 1024))
+
+    assert peak < 1_000_000, f"held {peak} bytes for an unterminated tail"
+    assert facts.first_user_text == "hello"
+    assert facts.turns == 1
+    assert facts.truncated is True
+
+
+def test_the_title_read_is_bounded_by_the_same_rule(tmp_path: Path) -> None:
+    """``first_user_text`` is the other traversal, and it had the same hole.
+
+    It is the one the *per-folder* session list calls, once per transcript in a
+    folder — so a runaway record there stalls a folder listing rather than a
+    browse. Same fix, and it must still find the first real message afterwards.
+    """
+    transcript = tmp_path / "huge.jsonl"
+    with transcript.open("wb") as fh:
+        fh.write(json.dumps(tool_result("x" * _FAT)).encode() + b"\n")
+        fh.write(json.dumps(user("the actual first thing")).encode() + b"\n")
+
+    text, peak = _peak_of(lambda: first_user_text(transcript, max_line_bytes=256 * 1024))
+
+    assert peak < 1_000_000, f"held {peak} bytes to find a title"
+    assert text == "the actual first thing"
 
 
 # ---- what it cannot read -----------------------------------------------------
@@ -464,6 +549,7 @@ def test_the_cache_forgets_transcripts_that_are_gone(
 def test_the_limit_bounds_the_reading_and_says_what_it_withheld(
     browser: ConversationBrowser, projects: Path, workspace: Path
 ) -> None:
+    """The limit is a *reading* budget. Every conversation is still listed."""
     for i in range(10):
         write_transcript(projects, workspace, f"sess-{i}", [user(f"m{i}")], 1_000.0 + i)
 
@@ -472,12 +558,73 @@ def test_the_limit_bounds_the_reading_and_says_what_it_withheld(
     assert store.total_conversations == 10
     assert store.returned_conversations == 3
     assert store.limit == 3
-    # The newest three, not the first three the filesystem handed back.
-    assert [c.session_id for c in store.projects[0].conversations] == [
-        "sess-9",
-        "sess-8",
-        "sess-7",
-    ]
+    rows = store.projects[0].conversations
+    assert [c.session_id for c in rows] == [f"sess-{i}" for i in range(9, -1, -1)]
+    # The newest three were read — not the first three the filesystem handed
+    # back — and the other seven say they were not, rather than borrowing a
+    # title or claiming zero turns as a fact.
+    assert [c.session_id for c in rows if c.read] == ["sess-9", "sess-8", "sess-7"]
+    assert rows[0].title == "m9"
+    assert rows[3].read is False
+    assert rows[3].title == "(not read yet)"
+
+
+def test_a_folder_outside_the_read_budget_is_still_a_folder(
+    browser: ConversationBrowser, projects: Path, workspace: Path
+) -> None:
+    """The bug the single-folder limit test could never catch.
+
+    Truncating the entry list *before* grouping does not drop some of a folder's
+    conversations — it drops the folder. Every conversation in ``old`` here is
+    older than every conversation in ``new``, so with a read budget of 2 the
+    whole ``old`` group fell off the end of the world while ``total_projects``
+    went on counting it, and nothing in the payload or the panel said a folder
+    was missing. Certain for anyone whose history outgrows one page, which is
+    the user this feature is for.
+    """
+    (workspace / "new").mkdir()
+    (workspace / "old").mkdir()
+    for i in range(2):
+        write_transcript(projects, workspace / "new", f"new-{i}", [user(f"n{i}")], 9_000.0 + i)
+    for i in range(3):
+        write_transcript(projects, workspace / "old", f"old-{i}", [user(f"o{i}")], 1_000.0 + i)
+
+    store = browser.browse(limit=2)
+
+    assert [group.workspace_relative for group in store.projects] == ["new", "old"]
+    assert store.total_projects == 2
+    assert store.total_projects == len(store.projects), "a folder was counted but not shown"
+    assert store.total_conversations == 5
+    assert store.returned_conversations == 2
+    old = next(group for group in store.projects if group.workspace_relative == "old")
+    assert len(old.conversations) == 3
+    assert [c.read for c in old.conversations] == [False, False, False]
+    # And the group still resolved, so it can be opened even before it is read.
+    assert old.openable is True
+
+
+def test_widening_the_window_reads_what_was_only_listed(
+    browser: ConversationBrowser, projects: Path, workspace: Path
+) -> None:
+    """The unread rows are what "Read them all" is for — and it sticks.
+
+    A row a wide read already paid for keeps its title when the window narrows
+    again: the cache is keyed by ``(mtime_ns, size)``, so re-reading it would buy
+    nothing.
+    """
+    for i in range(5):
+        write_transcript(projects, workspace, f"sess-{i}", [user(f"m{i}")], 1_000.0 + i)
+
+    narrow = browser.browse(limit=1)
+    assert [c.read for c in narrow.projects[0].conversations] == [True, False, False, False, False]
+
+    wide = browser.browse(limit=5)
+    assert all(c.read for c in wide.projects[0].conversations)
+    assert [c.title for c in wide.projects[0].conversations] == ["m4", "m3", "m2", "m1", "m0"]
+
+    again = browser.browse(limit=1)
+    assert all(c.read for c in again.projects[0].conversations)
+    assert again.returned_conversations == 5
 
 
 def test_browsing_writes_nothing_to_somebody_elses_storage(
@@ -555,9 +702,11 @@ def test_the_scan_costs_one_listing_per_project_and_no_reread(
     """Budget against a realistically sized store: 25 folders, 200 conversations.
 
     Measured on the author's *real* store (17 project folders, 80 conversations,
-    397 MB) on 2026-08-06: enumeration **2.3 ms**, a cold browse **1.26 s** (every
-    transcript read once), a warm browse **82 ms** (nothing read). The counts
-    below are what those milliseconds are made of.
+    398 MB) on 2026-08-06: enumeration **1.8 ms**, a cold browse **1.28 s** (every
+    transcript read once), a warm browse **93 ms** (nothing read). The counts
+    below are what those milliseconds are made of — and they are the same run
+    ``services/conversations.py``, the router, ``ARCHITECTURE.md`` and
+    ``ROADMAP.md`` quote.
     """
     folders = [workspace / f"project-{i:02d}" for i in range(25)]
     for i, folder in enumerate(folders):
@@ -627,6 +776,36 @@ async def test_the_endpoint_answers_with_groups(
     assert inside["conversations"][0]["title"] == "in the workspace"
     outside = next(g for g in body["projects"] if not g["openable"])
     assert outside["reason"]
+
+
+async def test_the_endpoint_lists_every_folder_however_small_the_limit(
+    app_client: AsyncClient, projects: Path, workspace: Path
+) -> None:
+    """The dropped-folder bug, through the real app and the real serializer.
+
+    Two folders, and every conversation in ``old`` is older than every
+    conversation in ``new``; with ``?limit=1`` the ``old`` group used to be
+    absent from the response entirely while ``total_projects`` still said 2.
+    Asserted on the wire because that is where a user meets it — and because a
+    field the model gained is only real once it survives serialization.
+    """
+    (workspace / "new").mkdir()
+    (workspace / "old").mkdir()
+    write_transcript(projects, workspace / "new", "n1", [user("the recent thing")], 9_000.0)
+    write_transcript(projects, workspace / "old", "o1", [user("the older thing")], 1_000.0)
+
+    body = (await app_client.get("/api/conversations?limit=1")).json()
+
+    assert body["total_projects"] == 2
+    assert len(body["projects"]) == 2, "a folder was counted but never sent"
+    assert body["total_conversations"] == 2
+    assert body["returned_conversations"] == 1
+    old = next(g for g in body["projects"] if g["workspace_relative"] == "old")
+    assert old["conversations"][0]["read"] is False
+    assert old["conversations"][0]["title"] == "(not read yet)"
+    new = next(g for g in body["projects"] if g["workspace_relative"] == "new")
+    assert new["conversations"][0]["read"] is True
+    assert new["conversations"][0]["title"] == "the recent thing"
 
 
 async def test_the_endpoint_refuses_an_unbounded_limit(app_client: AsyncClient) -> None:

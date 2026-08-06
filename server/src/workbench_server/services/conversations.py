@@ -9,15 +9,21 @@ folder where it can, and answers with groups a panel can render.
 
 1. **Read-only.** This is Claude Code's storage, not ours. Nothing here opens a
    transcript for writing, and there is no code path that deletes one.
-2. **Cheap enough to open on a whim.** Two passes with very different costs:
-   enumeration (`os.scandir` per project directory — 22 directories and 80
-   transcripts measured at **5.2 ms** on the author's machine) tells us what
-   exists and when it changed; reading a transcript for its title and turn count
-   costs a full pass (**1.24 s for all 80, 397 MB** cold) and is therefore
-   (a) bounded by ``limit`` — only the newest N conversations are read — and
-   (b) cached against each file's ``(mtime_ns, size)``, so a second browse of an
-   unchanged store is enumeration only. Transcripts are append-only, which is
-   what makes that pair a sound invalidation and not a hope.
+2. **Cheap enough to open on a whim.** Two passes with very different costs.
+   Enumeration (`os.scandir` per project directory) tells us what exists and
+   when it changed; reading a transcript for its title and turn count costs a
+   full pass, and is therefore (a) bounded by ``limit`` — only the newest N
+   conversations are *read*, though every one is still listed — and (b) cached
+   against each file's ``(mtime_ns, size)``, so a second browse of an unchanged
+   store is enumeration only. Transcripts are append-only, which is what makes
+   that pair a sound invalidation and not a hope.
+
+   Measured on the author's store on 2026-08-06 — **17 project folders, 80
+   conversations, 398 MB** — enumeration is **1.8 ms**, a cold browse **1.28 s**,
+   a warm one **93 ms**. Those three numbers are cited in ``ARCHITECTURE.md``,
+   ``ROADMAP.md``, the router's docstring and the budget test, and they are the
+   same run: a cost argument made of numbers that disagree with each other is
+   not a cost argument.
 3. **Honest about what it cannot know.** ``encode_project_dir`` is lossy and not
    reversible, so a display path is *matched against directories that exist* and
    the raw encoded key is shown when nothing matches — never a guessed path. A
@@ -29,6 +35,7 @@ import os
 import threading
 import time
 from collections.abc import Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 
 import structlog
@@ -63,6 +70,9 @@ MAX_LIMIT = 2000
 MAX_RESOLVE_VISITS = 400
 
 _TITLE_UNREADABLE = "(unreadable transcript)"
+#: A row that exists but has not been read yet — it fell outside this response's
+#: read budget. Not the same as unreadable, and the panel must not say it is.
+_TITLE_UNREAD = "(not read yet)"
 
 
 class _CachedFacts:
@@ -120,19 +130,30 @@ class ConversationBrowser:
         with self._lock:
             started = time.perf_counter()
             entries = self._enumerate()
-            # Newest first, globally: the limit then cuts the *oldest*
-            # conversations rather than whichever project happened to sort last.
+            # Newest first, globally: the read budget then falls on the *oldest*
+            # conversations rather than on whichever project happened to sort
+            # last.
             entries.sort(key=lambda e: e.mtime, reverse=True)
-            taken = entries[: max(limit, 0)]
+            budget = {entry.path for entry in entries[: max(limit, 0)]}
             self._prune_cache(entries)
-            groups = self._group(taken, live)
+            # Every entry is grouped. ``limit`` bounds *reading*, never listing,
+            # and the difference is a whole folder: cutting the list first threw
+            # away every project whose conversations all fell outside the newest
+            # N, so `projects` lost a folder that `total_projects` still counted
+            # and nothing on screen said a folder was missing. A store larger
+            # than one page is the case this feature exists for.
+            groups = self._group(entries, live, budget)
             store = ConversationStore(
                 projects=groups,
                 projects_root=str(self._root),
                 root_exists=self._root.is_dir(),
-                total_projects=len({entry.key for entry in entries}),
+                total_projects=len(groups),
                 total_conversations=len(entries),
-                returned_conversations=len(taken),
+                # What is *known*, which is what the panel offers to widen —
+                # cached facts count, because a wider read already paid for them.
+                returned_conversations=sum(
+                    1 for group in groups for row in group.conversations if row.read
+                ),
                 limit=limit,
                 scanned_at=time.time(),
             )
@@ -197,16 +218,44 @@ class ConversationBrowser:
 
     # ---- reading (expensive: one full pass per transcript, cached) ---------
 
-    def _facts_for(self, entry: _Entry) -> TranscriptFacts:
+    def _remembered(self, entry: _Entry) -> TranscriptFacts | None:
+        """Facts an earlier browse already paid for, if they still apply.
+
+        Append-only files, so ``(mtime_ns, size)`` is a sound identity rather
+        than a hope. Checked separately from reading because a row *outside* the
+        read budget may still be known: a wider ``limit`` read it once, and
+        forgetting that when the window narrows again would replace a real title
+        with a placeholder for no gain.
+        """
         cached = self._facts.get(entry.path)
         if cached is not None and cached.matches(entry.mtime_ns, entry.size):
             return cached.facts
+        return None
+
+    def _facts_for(self, entry: _Entry) -> TranscriptFacts:
+        remembered = self._remembered(entry)
+        if remembered is not None:
+            return remembered
         facts = scan_transcript(entry.path)
         self._facts[entry.path] = _CachedFacts(entry.mtime_ns, entry.size, facts)
         return facts
 
-    def _row(self, entry: _Entry, live: Mapping[str, str]) -> ConversationInfo:
-        facts = self._facts_for(entry)
+    def _row(self, entry: _Entry, live: Mapping[str, str], may_read: bool) -> ConversationInfo:
+        facts = self._facts_for(entry) if may_read else self._remembered(entry)
+        if facts is None:
+            # Outside the read budget and not already known. The conversation
+            # exists, so it gets its row — with the two things enumeration knows
+            # for certain (it is there, and when it last changed) and no title,
+            # because inventing one is the failure mode this whole module is
+            # built against. ``read`` is what the panel renders instead.
+            return ConversationInfo(
+                session_id=entry.session_id,
+                title=_TITLE_UNREAD,
+                updated_at=entry.mtime,
+                turns=0,
+                read=False,
+                live_session_id=live.get(entry.session_id),
+            )
         title = (
             derive_title(facts.first_user_text)
             if facts.first_user_text is not None
@@ -224,7 +273,12 @@ class ConversationBrowser:
 
     # ---- grouping ----------------------------------------------------------
 
-    def _group(self, entries: Iterable[_Entry], live: Mapping[str, str]) -> list[ProjectGroup]:
+    def _group(
+        self,
+        entries: Iterable[_Entry],
+        live: Mapping[str, str],
+        budget: AbstractSet[Path],
+    ) -> list[ProjectGroup]:
         by_key: dict[str, list[_Entry]] = {}
         for entry in entries:
             by_key.setdefault(entry.key, []).append(entry)
@@ -232,7 +286,7 @@ class ConversationBrowser:
         # directory would otherwise list it twenty times, which is most of what
         # resolution costs.
         listings: dict[Path, list[Path]] = {}
-        groups = [self._project(key, rows, live, listings) for key, rows in by_key.items()]
+        groups = [self._project(key, rows, live, listings, budget) for key, rows in by_key.items()]
         # Newest folder first — "what was I doing" order, not alphabetical.
         groups.sort(key=lambda group: group.updated_at, reverse=True)
         return groups
@@ -243,10 +297,11 @@ class ConversationBrowser:
         entries: list[_Entry],
         live: Mapping[str, str],
         listings: dict[Path, list[Path]],
+        budget: AbstractSet[Path],
     ) -> ProjectGroup:
         folder = self._resolve(key, listings)
         relative = None if folder is None else self._workspace_relative(folder)
-        conversations = [self._row(entry, live) for entry in entries]
+        conversations = [self._row(entry, live, entry.path in budget) for entry in entries]
         conversations.sort(key=lambda row: row.updated_at, reverse=True)
         return ProjectGroup(
             key=key,

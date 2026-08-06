@@ -29,6 +29,12 @@ class ConversationInfo(BaseModel):
     turns: int
     #: The scan hit its byte budget, so ``turns`` is a floor. Rendered as "120+".
     turns_capped: bool = False
+    #: This transcript was read for its title and turn count. False when it fell
+    #: outside the response's read budget (``limit``): the conversation exists
+    #: and is listed — every one always is — but ``title`` is a placeholder and
+    #: ``turns`` is 0 until a wider ``limit`` reads it. Listing is cheap and
+    #: reading is not, and the row says which of the two it got.
+    read: bool = True
     #: Local id of the live session in this process that continues this
     #: transcript, or None. Resuming an already-resumed conversation would fork
     #: it into a second session; with this the browser focuses the pane the
@@ -74,12 +80,22 @@ class ConversationStore(BaseModel):
     difference is the honest part: a store bigger than ``limit`` says so, and
     names the argument that widens the window rather than silently showing a
     prefix.
+
+    ``limit`` bounds only that second number. **Every** conversation that exists
+    is listed, in the folder it ran in, whatever the limit is — the unread ones
+    carry ``read=False`` rather than being left out. Dropping rows would drop
+    whole folders with them (a project whose conversations are all older than
+    the newest N would disappear entirely), and a browser that silently omits a
+    folder is worse than one that admits it has not read it yet.
     """
 
     projects: list[ProjectGroup] = Field(default_factory=list)
     #: Where these came from, so an empty result can say where it looked.
     projects_root: str
     root_exists: bool
+    #: Folders in the store. Always ``len(projects)`` — the two disagreeing was
+    #: the shape of a bug (a folder counted here but never sent), so they are now
+    #: the same number by construction rather than by coincidence.
     total_projects: int = 0
     total_conversations: int = 0
     returned_conversations: int = 0

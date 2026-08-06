@@ -35,6 +35,7 @@ const conversation = (over: Partial<ConversationInfo> = {}): ConversationInfo =>
   updated_at: 1_000,
   turns: 4,
   turns_capped: false,
+  read: true,
   live_session_id: null,
   problem: null,
   ...over,
@@ -119,6 +120,17 @@ describe("search", () => {
     expect(matches(src, bids, "   ")).toBe(true);
   });
 
+  // A row outside the read budget is listed with a placeholder title. Searching
+  // the placeholder would file every unread conversation under "not" and
+  // "read"; its folder is real and is still searchable.
+  it("does not search the placeholder title of a row it has not read", () => {
+    const unread = conversation({ session_id: "s9", title: "(not read yet)", read: false });
+    const folder = group({ workspace_relative: "src/forecast", conversations: [unread] });
+    expect(matches(folder, unread, "read")).toBe(false);
+    expect(matches(folder, unread, "forecast")).toBe(true);
+    expect(matches(folder, unread, "")).toBe(true);
+  });
+
   it("drops a folder whose every row was filtered out, and keeps the rest", () => {
     const other = group({
       key: "other",
@@ -175,6 +187,12 @@ describe("turn counts", () => {
   it("marks a count the byte budget cut short", () => {
     expect(turnLabel(conversation({ turns: 120, turns_capped: true }))).toBe("120+ turns");
   });
+
+  // `turns` is 0 on a row nobody read, and "0 turns" is a number we never
+  // counted — the one thing this panel must not do is state a fact it made up.
+  it("says a row was not read rather than reporting zero turns", () => {
+    expect(turnLabel(conversation({ turns: 0, read: false }))).toBe("not read");
+  });
 });
 
 // ---- opening -----------------------------------------------------------------
@@ -225,6 +243,48 @@ describe("opening a conversation", () => {
     expect(await openConversation(group(), c)).toEqual({
       kind: "resumed",
       sessionId: "local-b",
+    });
+    expect(resumeConversation).toHaveBeenCalledTimes(2);
+  });
+
+  // `resumedHere` is written only *after* the resume resolves, so for the whole
+  // round trip it is empty and the row still says "not live". Two Conversations
+  // panes on overlapping folders — one scoped to a project, one unscoped, which
+  // is this feature's headline scenario — each have their own `busy` flag, so
+  // one click in each inside that flight both passed the guard and both
+  // resumed: one history, two sessions, two panes.
+  it("joins a resume already in flight instead of forking a second one", async () => {
+    let settle: (id: string | null) => void = () => undefined;
+    resumeConversation.mockReturnValue(
+      new Promise<string | null>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    const c = conversation({ session_id: "sdk-9" });
+
+    // Both panes click before either round trip has come back.
+    const first = openConversation(group(), c);
+    const second = openConversation(group(), c);
+    settle("local-new");
+
+    expect(await first).toEqual({ kind: "resumed", sessionId: "local-new" });
+    // Focus, not resumed: by the time this settles the pane exists, and this
+    // click is not what made it.
+    expect(await second).toEqual({ kind: "focus", sessionId: "local-new" });
+    expect(resumeConversation).toHaveBeenCalledTimes(1);
+  });
+
+  // The flight has to end whatever happened to it, or a resume that failed
+  // would leave the row joined forever to a promise that never produced a pane.
+  it("lets a row be clicked again after a resume in flight failed", async () => {
+    resumeConversation.mockResolvedValueOnce(null);
+    const c = conversation({ session_id: "sdk-9" });
+    expect((await openConversation(group(), c)).kind).toBe("failed");
+
+    resumeConversation.mockResolvedValueOnce("local-2");
+    expect(await openConversation(group(), c)).toEqual({
+      kind: "resumed",
+      sessionId: "local-2",
     });
     expect(resumeConversation).toHaveBeenCalledTimes(2);
   });

@@ -728,11 +728,13 @@ because other sections and five running lanes reference these numbers.
     session id, opening the same conversation twice **focuses that pane rather than
     cloning it**. Both risks the plan named were real and are answered on the measured
     numbers rather than by assertion. **Cost**: enumeration and reading are split — one
-    `os.scandir` per project directory (22 dirs, 80 transcripts: **2.3 ms**) orders and
-    counts everything, while titles and turn counts cost a full pass (**1.26 s** for 397 MB
-    cold) and are therefore bounded by `?limit=` and cached against each transcript's
-    `(mtime_ns, size)`; a warm browse is **82 ms**, the scan runs off the event loop, and
-    nothing scans until the panel is opened, so startup is untouched. **The lossy key**:
+    `os.scandir` per project directory (17 dirs, 80 transcripts: **1.8 ms**) orders,
+    counts and *lists* everything, while titles and turn counts cost a full pass
+    (**1.28 s** for 398 MB cold) and are therefore bounded by `?limit=` and cached against
+    each transcript's `(mtime_ns, size)`; a warm browse is **93 ms**, the scan runs off
+    the event loop, and nothing scans until the panel is opened, so startup is untouched.
+    A limit bounds *reading*, never listing — every conversation gets its row, the unread
+    ones saying so, because dropping rows drops whole folders. **The lossy key**:
     resolved by matching against directories that exist (workspace first, then home, then
     the anchors, pruned by the file tree's ignore rules) and shown as the raw stored key
     when nothing matches — never a reconstructed path. Two more properties this shipped

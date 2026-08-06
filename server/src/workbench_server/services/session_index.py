@@ -22,8 +22,10 @@ at different places and the difference is the whole cost:
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 import structlog
 
@@ -32,12 +34,27 @@ from workbench_server.services.titles import derive_title
 
 log = structlog.get_logger()
 
-#: Bytes of one transcript :func:`scan_transcript` will read before giving up.
-#: Generous — the largest transcript on the author's machine is 49 MB and the
-#: median is 0.9 MB — but finite, so one pathological file cannot wedge a scan
-#: over hundreds of them. A file that hits it reports ``truncated``; its turn
-#: count is then a floor and says so on screen rather than being quietly wrong.
+#: Bytes of one transcript a traversal will read before giving up. Generous —
+#: the largest transcript on the author's machine is 49 MB and the median is
+#: 0.8 MB — but finite, so one pathological file cannot wedge a scan over
+#: hundreds of them. A file that hits it reports ``truncated``; its turn count
+#: is then a floor and says so on screen rather than being quietly wrong.
 SCAN_BYTE_BUDGET = 64 * 1024 * 1024
+
+#: Bytes of a *single* JSONL record a traversal will hold in memory. Generous
+#: for the same reason: a real record regularly embeds a whole tool output (a
+#: file dump, a long ``grep``), and that is not pathological, it is Tuesday.
+#: What it rules out is the case where one record *is* the file — a corrupt
+#: tail with no newline in it, or a tool result that ran away. A record past
+#: this is dropped unparsed and the pass reports ``truncated``; an over-long
+#: record is virtually always a ``tool_result``, which is never a turn, so the
+#: count that follows is a floor rather than wrong.
+MAX_LINE_BYTES = 8 * 1024 * 1024
+
+#: Bytes pulled off disk at a time. Small enough that it is noise next to
+#: ``MAX_LINE_BYTES``, big enough that a 49 MB transcript is not 49 million
+#: syscalls.
+_CHUNK_BYTES = 64 * 1024
 
 #: Session ids are uuids. Anything else is rejected before a path is built from
 #: it — this string arrives from the wire.
@@ -45,7 +62,7 @@ _SESSION_ID = re.compile(r"[A-Za-z0-9-]+")
 
 #: Cheap pre-filter for :func:`scan_transcript`: a line that cannot be a user
 #: record is skipped without parsing it, which is most of what a full pass over
-#: a 400 MB store costs.
+#: a 398 MB store costs.
 #:
 #: Deliberately the *loose* marker rather than ``b'"type":"user"'``. A user
 #: record always carries both ``"type": "user"`` and ``"role": "user"``, so this
@@ -119,17 +136,87 @@ class TranscriptFacts:
     #: they carry no text block, which is what keeps this number the one a
     #: person recognises ("I said twelve things") rather than a file statistic.
     turns: int
-    #: The byte budget was reached: ``turns`` is a floor, not a count.
+    #: Something was not looked at — the byte budget ran out, or one record was
+    #: too large to hold — so ``turns`` is a floor, not a count.
     truncated: bool
     #: Why this transcript is not fully knowable, in words, or None.
     problem: str | None
 
 
-def first_user_text(transcript: Path) -> str | None:
+class _BoundedRead:
+    """A transcript walked in chunks, so neither bound is checked too late.
+
+    ``for line in fh`` buffers everything up to the next newline *before* the
+    loop body runs, which makes a budget checked in that body useless against
+    the case it exists for: a record megabytes long (a ``tool_result`` carrying
+    a whole file dump — ordinary, not adversarial), or a corrupt tail with no
+    newline in it at all. Either is read whole first, and
+    :meth:`~workbench_server.services.conversations.ConversationBrowser.browse`
+    holds one process-wide lock for its entire scan, so every other pane's
+    request queues behind that read.
+
+    So the chunking is ours. A fixed ``_CHUNK_BYTES`` read, split here, with the
+    total budget bounding what is *asked for* and the size of one record checked
+    as it accumulates: memory is bounded by ``max_line_bytes`` plus a chunk no
+    matter what is on disk, and so is the time to find that out.
+    """
+
+    __slots__ = ("_budget", "_fh", "_max_line", "truncated")
+
+    def __init__(self, fh: IO[bytes], byte_budget: int, max_line_bytes: int) -> None:
+        self._fh = fh
+        self._budget = byte_budget
+        self._max_line = max_line_bytes
+        #: Something was skipped: the budget ran out, or a record was dropped
+        #: for being too long. A count taken from this read is then a floor.
+        self.truncated = False
+
+    def lines(self) -> Iterator[bytes]:
+        read = 0
+        line = bytearray()
+        dropping = False  # inside a record already known to be too long
+        while read < self._budget:
+            chunk = self._fh.read(min(_CHUNK_BYTES, self._budget - read))
+            if not chunk:
+                # EOF. A last record with no newline after it is still a record
+                # — and a transcript being appended to right now ends that way.
+                if line and not dropping:
+                    yield bytes(line)
+                return
+            read += len(chunk)
+            start = 0
+            while (newline := chunk.find(b"\n", start)) >= 0:
+                if dropping:
+                    dropping = False  # the over-long record ends here
+                else:
+                    line += chunk[start:newline]
+                    yield bytes(line)
+                line.clear()
+                start = newline + 1
+            if dropping:
+                continue
+            line += chunk[start:]
+            if len(line) > self._max_line:
+                self.truncated = True
+                dropping = True
+                line.clear()
+        # The budget ran out. Whether that actually hid anything is one byte
+        # away, and the difference is "120+ turns" versus "120 turns".
+        if self._fh.read(1):
+            self.truncated = True
+        elif line and not dropping:
+            yield bytes(line)
+
+
+def first_user_text(
+    transcript: Path,
+    byte_budget: int = SCAN_BYTE_BUDGET,
+    max_line_bytes: int = MAX_LINE_BYTES,
+) -> str | None:
     """First user message of a stored transcript; None when absent/unreadable."""
     try:
         with transcript.open("rb") as fh:
-            for line in fh:
+            for line in _BoundedRead(fh, byte_budget, max_line_bytes).lines():
                 entry = parse_line(line)
                 if entry is not None and entry.role == "user":
                     return entry.text
@@ -138,7 +225,11 @@ def first_user_text(transcript: Path) -> str | None:
     return None
 
 
-def scan_transcript(transcript: Path, byte_budget: int = SCAN_BYTE_BUDGET) -> TranscriptFacts:
+def scan_transcript(
+    transcript: Path,
+    byte_budget: int = SCAN_BYTE_BUDGET,
+    max_line_bytes: int = MAX_LINE_BYTES,
+) -> TranscriptFacts:
     """Title and turn count in one pass, with everything it cannot know named.
 
     Deliberately tolerant: a line that does not parse is skipped rather than
@@ -148,15 +239,11 @@ def scan_transcript(transcript: Path, byte_budget: int = SCAN_BYTE_BUDGET) -> Tr
     """
     first: str | None = None
     turns = 0
-    read = 0
     truncated = False
     try:
         with transcript.open("rb") as fh:
-            for line in fh:
-                read += len(line)
-                if read > byte_budget:
-                    truncated = True
-                    break
+            bounded = _BoundedRead(fh, byte_budget, max_line_bytes)
+            for line in bounded.lines():
                 if _USER_MARK not in line:
                     continue
                 entry = parse_line(line)
@@ -165,6 +252,7 @@ def scan_transcript(transcript: Path, byte_budget: int = SCAN_BYTE_BUDGET) -> Tr
                 turns += 1
                 if first is None:
                     first = entry.text
+            truncated = bounded.truncated
     except OSError:
         log.warning("session_index.unreadable", path=str(transcript))
         return TranscriptFacts(None, 0, False, "This transcript could not be read.")

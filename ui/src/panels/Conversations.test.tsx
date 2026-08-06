@@ -31,6 +31,7 @@ const conversation = (over: Partial<ConversationInfo> = {}): ConversationInfo =>
   updated_at: Date.now() / 1000 - 120,
   turns: 4,
   turns_capped: false,
+  read: true,
   live_session_id: null,
   problem: null,
   ...over,
@@ -205,6 +206,37 @@ describe("what it did not read", () => {
 
   it("offers nothing to read when everything was read", () => {
     expect(show(store())).not.toContain("more");
+  });
+
+  // The row is there — `limit` bounds reading, not listing — and it says which
+  // of the two it got rather than showing a placeholder as if it were a title.
+  it("lists a conversation it has not read, and marks it as unread", () => {
+    const html = show(
+      store({
+        projects: [
+          group({
+            conversations: [
+              conversation({ title: "Fix the DST bug" }),
+              conversation({
+                session_id: "s2",
+                title: "(not read yet)",
+                turns: 0,
+                read: false,
+              }),
+            ],
+          }),
+        ],
+        total_conversations: 2,
+        returned_conversations: 1,
+      }),
+    );
+    expect(html).toContain("(not read yet)");
+    expect(html).toContain("is-unread");
+    // Words, not only a dimmer colour (DESIGN.md §7) — and never "0 turns",
+    // which is a count nobody took.
+    expect(html).toContain("not read");
+    expect(html).not.toContain("0 turns");
+    expect(html).toContain("1 not read yet");
   });
 
   // Nobody watches Claude Code's storage, so a list that looked live would be a

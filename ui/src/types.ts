@@ -600,6 +600,11 @@ export interface ConversationInfo {
   turns: number;
   /** The scan hit its byte budget, so `turns` is a floor — rendered as "120+". */
   turns_capped: boolean;
+  /** This transcript was read for its title and turn count. False when it fell
+   * outside the response's read budget (`limit`): the conversation exists and
+   * is listed — every one always is — but `title` is a placeholder and `turns`
+   * is 0 until a wider `limit` reads it. */
+  read: boolean;
   /** Local id of the live session continuing this transcript, or null. Opening
    * such a row focuses the pane it is already in instead of forking it. */
   live_session_id: string | null;
@@ -631,9 +636,12 @@ export interface ConversationStore {
   projects_root: string;
   root_exists: boolean;
   total_projects: number;
+  /** Every conversation that exists, in every folder — `limit` bounds reading,
+   * never listing, so this is also how many rows `projects` holds. */
   total_conversations: number;
   /** How many were read in full (title + turns). Less than
-   * `total_conversations` means the rest were withheld by `limit`. */
+   * `total_conversations` means the rest are listed with `read: false` and are
+   * waiting for a wider `limit`. */
   returned_conversations: number;
   limit: number;
   /** When the scan ran. There is no watcher on somebody else's storage. */
