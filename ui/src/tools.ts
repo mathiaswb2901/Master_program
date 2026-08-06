@@ -13,6 +13,7 @@
 
 import type { WorkbenchTool } from "./registry";
 
+import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
@@ -38,6 +39,7 @@ export const TOOLS: readonly WorkbenchTool[] = [
   officeTool,
   scratchpadTool,
   usageTool,
+  activityTool,
   // After every capability it describes, and before the two that arrange them:
   // its reference is a rendering of everything above, and its status chip sits
   // just inside the layout chip at the bar's outer edge.

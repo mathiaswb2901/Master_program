@@ -23,6 +23,15 @@ What one user message produces, in order:
   when the turn ended;
 * ``use tool``       — a ``Read`` of a real file in the session folder: a
   tool-use note and, separately, its result;
+* ``slow tool``      — the same ``Read``, with the hold *between* the
+  announcement and the result. The only way a UI test can observe a call that
+  is **in flight**, which is the whole claim of the live activity feed; ``stay
+  busy`` deliberately holds elsewhere (before the reply, or after the result),
+  and moving that hold would change what journey 4 proves;
+* ``tool storm``     — :data:`STORM_TOOL_CALLS` ``Grep`` calls back to back
+  with nothing between them, which is what a Grep-heavy turn looks like on the
+  wire. It exists so the fleet-wide activity feed's coalescing is measured
+  against a burst rather than argued about (``services/activity.py``);
 * ``write file``     — a ``Write`` of a real file in the session folder: the
   note first, *then* the bytes hit disk, exactly as a real tool call orders
   them, so the provenance correlator sees the claim before the watcher event
@@ -99,6 +108,8 @@ log = structlog.get_logger()
 #: Triggers, matched case-insensitively anywhere in the user's message.
 BUSY_TRIGGER = "stay busy"
 TOOL_TRIGGER = "use tool"
+SLOW_TOOL_TRIGGER = "slow tool"
+STORM_TRIGGER = "tool storm"
 WRITE_TRIGGER = "write file"
 REFUSED_WRITE_TRIGGER = "refuse write"
 PERMISSION_TRIGGER = "ask permission"
@@ -113,9 +124,23 @@ USAGE_TRIGGER = "usage please"
 #: in fake mode — the tests never sleep, they wait on the app's signals.
 BUSY_HOLD_S = 1.5
 
+#: How long ``slow tool`` keeps a call in flight. Longer than ``BUSY_HOLD_S``
+#: because what has to be observed here is a *live* state rather than a settled
+#: one: a journey asserting "this agent is running Read right now" has to arrive
+#: inside the window, and it pays a coalescing window plus a socket round trip to
+#: get there. Three seconds leaves that margin on a loaded CI runner.
+SLOW_TOOL_HOLD_S = 3.0
+
 #: Cap on the excerpt a fake ``Read`` returns; the session caps again on the way
 #: out (``TOOL_EXCERPT_LIMIT``), this keeps the pretend tool result small too.
 READ_EXCERPT_CHARS = 400
+
+#: Tool calls one ``tool storm`` fires, announced and settled with nothing in
+#: between. Comfortably above the activity window's per-session cap (8), so the
+#: burst also exercises eviction — and large enough that "one frame per tool
+#: call" and "a handful of coalesced frames" are numbers no rounding can
+#: confuse. A real Grep-heavy turn is this shape.
+STORM_TOOL_CALLS = 40
 
 #: The command the scripted permission prompt asks about. Never executed —
 #: nothing in this module runs anything.
@@ -550,6 +575,16 @@ class FakeAgentClient:
                 yield message
             if busy:
                 await asyncio.sleep(BUSY_HOLD_S)
+        if SLOW_TOOL_TRIGGER in lowered:
+            # Announce, hold, settle — a call that is genuinely *in flight* for
+            # long enough that a UI can be asserted on it.
+            announced, settled = self._read_a_file()
+            yield announced
+            await asyncio.sleep(SLOW_TOOL_HOLD_S)
+            yield settled
+        if STORM_TRIGGER in lowered:
+            for message in self._tool_storm():
+                yield message
         if WRITE_TRIGGER in lowered:
             call_id = f"fake-tool-{uuid.uuid4().hex[:8]}"
             # The note goes out first and the bytes land after it, which is the
@@ -605,6 +640,23 @@ class FakeAgentClient:
             AssistantMessage([ToolUseBlock("Read", {"file_path": target.name}, call_id)]),
             UserMessage([ToolResultBlock(call_id, excerpt, is_error=failed)]),
         ]
+
+    def _tool_storm(self) -> list[Any]:
+        """:data:`STORM_TOOL_CALLS` announced-and-settled ``Grep`` calls, in one
+        run with nothing between them.
+
+        ``Grep`` rather than ``Read`` on purpose: it writes nothing, so the
+        provenance correlator ignores every one of them and the burst measures
+        the fleet feed alone. Nothing touches disk here.
+        """
+        messages: list[Any] = []
+        for index in range(STORM_TOOL_CALLS):
+            call_id = f"fake-storm-{index}-{uuid.uuid4().hex[:6]}"
+            messages.append(
+                AssistantMessage([ToolUseBlock("Grep", {"pattern": f"needle-{index}"}, call_id)])
+            )
+            messages.append(UserMessage([ToolResultBlock(call_id, f"{index} matches")]))
+        return messages
 
     def _write_a_file(self) -> tuple[str, bool]:
         """Really write to disk — the whole point of the trigger is that the

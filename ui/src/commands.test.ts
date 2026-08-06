@@ -152,6 +152,7 @@ describe("command registry", () => {
       "office.detachHost",
       "scratchpad.open",
       "usage.open",
+      "activity.open",
       "keys.open",
       "keys.welcome",
       // The two tools that arrange panels rather than being one, in the order
