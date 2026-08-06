@@ -32,6 +32,7 @@ from workbench_server.routers import (
 from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.conversations import ConversationBrowser
+from workbench_server.services.documents import DocumentService
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
@@ -157,6 +158,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fake=settings.office_fake,
         channel=host_channel,
     )
+    # Blank-document creation (M5 item 16). Stateless and workspace-agnostic: it
+    # provides bundled templates and is handed the live `Workspace` per call, so
+    # it copies no root of its own and owes no `set_workspace_root`.
+    document_service = DocumentService()
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
     # this list is the *only* place a switch is coordinated — a service added
@@ -240,6 +245,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.usage = usage_service
     app.state.activity = activity_service
     app.state.workspaces = workspace_service
+    app.state.documents = document_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
