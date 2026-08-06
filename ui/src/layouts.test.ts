@@ -320,7 +320,12 @@ describe("a layout with several panes of the same tool", () => {
   // ships, and this is what ties the two halves of this file together.
   it("is derived from the real registry", () => {
     const real = paneVocabulary(TOOLS);
-    expect([...real.plural].sort()).toEqual(["agent", "editors", "terminal"]);
+    expect([...real.plural].sort()).toEqual([
+      "agent",
+      "conversations",
+      "editors",
+      "terminal",
+    ]);
     expect(real.components.has("files")).toBe(true);
     expect(real.plural.has("files")).toBe(false);
   });

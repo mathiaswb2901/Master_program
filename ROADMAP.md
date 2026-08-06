@@ -525,7 +525,9 @@ because other sections and five running lanes reference these numbers.
    `shortcuts.md`), with per-workspace layout and session history. Supersedes the
    first-run picker in the OSS bar item 3. Also unlocks **half B of item 12**: opening a
    session whose folder is outside the current workspace needs this (or the multi-root
-   jail from item 6), which is why the session browser ships its read half first.
+   jail from item 6), which is why the session browser ships its read half first — that
+   half has landed, and every such conversation is already listed and visibly refused
+   with its reason, so what this unlocks is exactly the click.
 6. ~~**Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
    dirty-slot `needs_review` protection)~~ — **the pool is done**
    (`services/worktrees.py`, `models/worktrees.py`, `routers/worktrees.py`, landed
@@ -729,29 +731,39 @@ because other sections and five running lanes reference these numbers.
     between-turns reader means restructuring `AgentSession` around a single reader loop
     that dispatches to the current turn. That is its own PR, and until it lands the
     figures update when you next talk to an agent — which the UI says plainly.
-12. **Session browser — every conversation, grouped by folder** (registers as a tool,
-    plural: one browser can be scoped to a project while another watches everything). The
-    Claude Code resume list, natively: folder groups → session rows (title, relative time,
-    live/disk dot), searchable. Opening a row does **not** open a chat inside the browser
-    — it opens an agent *instance* beside or in place of the focused pane, which is the
-    composability principle paying rent: one browser drives ten agent panes. The read half
-    exists (`services/session_index.py` reads `~/.claude/projects/<encoded-cwd>/*.jsonl`,
-    derives titles, dedupes live against on-disk by SDK id, and `GET
-    /api/agents/sessions` already returns `FolderSessions` groups) — this is a
-    presentation gap, not a capability gap, so **the AgentPanel's folder list becomes this
-    browser's compact form rather than a parallel implementation**. Two real risks:
-    `list_sessions()` takes one folder at a time, so browsing means walking
-    `projects_root` itself, and `encode_project_dir()` is **lossy and not reversible**
-    (`C:\a\b` and `C:/a-b` collide) — so a display path is resolved by matching candidates
-    against real directories and the raw encoded key is shown when it cannot be, never a
-    guessed path; and a `projects` dir with hundreds of folders means hundreds of
-    glob+stat+first-line reads per refresh, so it needs an mtime-gated cache and
-    pagination or it becomes the thing that makes startup slow. **Split on an honest
-    dependency**: half A — browse, search and resume anything readable, including projects
-    outside this workspace — ships alone and is complete; half B — *opening* a session
-    whose folder is outside the workspace jail — waits for item 5. Exit criterion: every
-    project under `~/.claude/projects/` is listed with a resolved-or-honestly-encoded
-    folder name, and a row opens as its own agent pane next to the focused one.
+12. ~~**Session browser — every conversation, grouped by folder**~~ — **half A done**
+    (`ui/src/panels/Conversations.tsx`, `services/conversations.py`,
+    `models/conversations.py`, `routers/conversations.py`; `GET /api/conversations`).
+    The owner's ask, in his words: *"For Claude I also need to have an overview like we do
+    in Claude Code with which chats belong to which folder."* Registered as a tool and
+    **plural, bound to a project key** — `conversations` watches everything,
+    `conversations#<encoded-key>` watches one folder — so one browser can be scoped to a
+    project while another sees the lot, and the scope survives a restart because the key
+    *is* the pane id. Opening a row does not open a chat inside the browser: it resumes
+    into an agent pane beside the focused one, and because a pane's identity is its
+    session id, opening the same conversation twice **focuses that pane rather than
+    cloning it**. Both risks the plan named were real and are answered on the measured
+    numbers rather than by assertion. **Cost**: enumeration and reading are split — one
+    `os.scandir` per project directory (17 dirs, 80 transcripts: **1.8 ms**) orders,
+    counts and *lists* everything, while titles and turn counts cost a full pass
+    (**1.28 s** for 398 MB cold) and are therefore bounded by `?limit=` and cached against
+    each transcript's `(mtime_ns, size)`; a warm browse is **93 ms**, the scan runs off
+    the event loop, and nothing scans until the panel is opened, so startup is untouched.
+    A limit bounds *reading*, never listing — every conversation gets its row, the unread
+    ones saying so, because dropping rows drops whole folders. **The lossy key**:
+    resolved by matching against directories that exist (workspace first, then home, then
+    the anchors, pruned by the file tree's ignore rules) and shown as the raw stored key
+    when nothing matches — never a reconstructed path. Two more properties this shipped
+    with: it is **read-only** (a test watches every byte and mtime under the store across a
+    browse; there is no delete path), and it is **honest about what it withheld** — a store
+    bigger than the page says how many were not read and offers the wider window.
+    **Carried to half B, and only this**: *opening* a conversation whose folder is outside
+    the workspace jail. It is listed, searchable and visibly refused with its reason today
+    — hiding it would be the worse answer — and it becomes openable when item 5's
+    workspace switcher (or item 6's multi-root roots) lands. The AgentPanel's folder list
+    is deliberately still there: it is the compact form for the folders *this* workspace
+    contains, and merging the two is a presentation change worth doing on top of a landed
+    browser rather than inside it.
 13. **Pop-out — panes on a second monitor** (was item 2's deferral note and M7's
     "unclaimed" line; the owner's "full screen sharing mode" and "no limits" claims it).
     dockview supports floating groups and popped-out windows; with panes in place this is
@@ -865,8 +877,11 @@ lanes hold these files and a second edit is pure conflict. **2.** **Item 11 usag
 nothing to visible, and independent of panes, the watcher rewrite and Office, so it can
 run in parallel with step 1. **3.** **Item 10 activity** — the first new panel that panes
 makes worth having (you want to split it beside your editor and maximize it), and the feed
-Mission Control should render. **4.** **Item 12 session browser, half A** — after item 10
-because they share a row shape and building the live one first means the browser reuses it.
+Mission Control should render. **4.** ~~**Item 12 session browser, half A**~~ — **landed**.
+It went ahead of item 10 rather than after it: the shared "row shape" turned out to be a
+title, an age and a count, which is a stylesheet rather than a component, and waiting
+would have parked the owner's own request behind an unrelated lane. Half B stays with
+item 5.
 **5.** Moat track in parallel throughout, in its existing order, ending in the
 side-by-side Office proof. **6.** **Item 13 pop-out**, after panes and after the Office
 composition PR, which is what makes its native-window decision necessary. **7.** Then

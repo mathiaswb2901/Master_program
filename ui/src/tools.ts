@@ -15,6 +15,7 @@ import type { WorkbenchTool } from "./registry";
 
 import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
+import { conversationsTool } from "./panels/Conversations";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { keyboardTool } from "./panels/Keyboard";
@@ -30,6 +31,9 @@ export const TOOLS: readonly WorkbenchTool[] = [
   filesTool,
   editorTool,
   agentTool,
+  // After the Agent, because it is a way *into* one: a row here opens an agent
+  // pane, and the two read as one capability seen from two distances.
+  conversationsTool,
   terminalTool,
   // Before the OnlyOffice tool, and that is the registration: `documentViewFor`
   // takes the first enabled tool offering a view for a kind, so the native host
