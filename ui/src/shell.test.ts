@@ -7,6 +7,7 @@ import {
   isTauri,
   onCloseRequested,
   setAttention,
+  setCaptionTint,
 } from "./shell";
 
 afterEach(() => {
@@ -34,6 +35,14 @@ describe("browser mode", () => {
   it("no-ops the attention badge", async () => {
     await expect(setAttention(true)).resolves.toBeUndefined();
     await expect(setAttention(false)).resolves.toBeUndefined();
+  });
+
+  // A browser tab has no window frame to paint, so this is inert by contract —
+  // App.tsx calls it on mount and on every theme flip, in both hosts.
+  it("no-ops the caption tint", async () => {
+    await expect(
+      setCaptionTint({ caption: "#14161a", text: "#a8b0bc", border: "#3d4450" }),
+    ).resolves.toBeUndefined();
   });
 
   it("no-ops both close paths", async () => {
