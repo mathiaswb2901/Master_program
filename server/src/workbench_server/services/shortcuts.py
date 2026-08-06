@@ -20,6 +20,17 @@ an arrangement the user themselves saved. It moves panels and nothing else: no
 text reaches a shell or an agent, no file is touched, and a name nobody saved is
 a no-op with a toast. Its body is constrained to a single printable line no
 longer than a layout name, so it cannot smuggle a payload for a future consumer.
+
+The fourth kind, ``command``, is what lets a file bind *anything the registry
+knows* without a parser change for each capability (ROADMAP M5 item 4, from
+tmux's ".tmux.conf rebinds every command"). Its body is a registered command id
+— a short single-line token this parser bounds and keeps printable, exactly as
+``layout`` bounds a name. The parser cannot know the registry, so it does not
+decide *which* command is meant or whether it is safe: the UI resolves the id and
+refuses one that is unknown or that declared itself unbindable from a file (a
+command reaching a filesystem path or re-pointing the jail — ``workspace.open``
+is the named one, ROADMAP item 5). What lands here is only ever a request, never
+execution, which is the same bar every other kind clears.
 """
 
 import asyncio
@@ -35,6 +46,7 @@ from workbench_server.models.files import FileChangedEvent
 from workbench_server.models.layouts import MAX_NAME_CHARS as MAX_LAYOUT_NAME_CHARS
 from workbench_server.models.shortcuts import (
     MAX_BODY_CHARS,
+    MAX_COMMAND_ID_CHARS,
     MAX_DETAIL_CHARS,
     MAX_FILE_BYTES,
     MAX_NAME_CHARS,
@@ -136,7 +148,7 @@ _META_RE = re.compile(r"^(?:[-*]\s+)?(?P<key>[A-Za-z][A-Za-z0-9_-]*)\s*:\s*(?P<v
 _FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})\s*(?P<info>\S*)")
 
 _META_KEYS = frozenset({"type", "keys", "detail"})
-_KINDS: frozenset[str] = frozenset({"shell", "prompt", "layout"})
+_KINDS: frozenset[str] = frozenset({"shell", "prompt", "layout", "command"})
 
 # C0 controls + DEL. Printable text is what a shell body may be, and nothing else.
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -308,10 +320,19 @@ def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile
 
         declared = _resolve_kind(raw)
         if declared not in _KINDS:
-            reject(name, f"unknown type {declared!r} (expected shell, prompt or layout) — skipped")
+            reject(
+                name,
+                f"unknown type {declared!r} (expected shell, prompt, layout or command) — skipped",
+            )
             continue
         kind: ShortcutKind = (
-            "prompt" if declared == "prompt" else "layout" if declared == "layout" else "shell"
+            "prompt"
+            if declared == "prompt"
+            else "layout"
+            if declared == "layout"
+            else "command"
+            if declared == "command"
+            else "shell"
         )
         if kind == "shell" and (control := _CONTROL_RE.search(body)) is not None:
             # Control bytes are key events in a live PTY, not characters: \n and
@@ -331,6 +352,20 @@ def parse_shortcuts(text: str, source: ShortcutSource, label: str) -> ParsedFile
                 reject(
                     name,
                     f"layout name longer than {MAX_LAYOUT_NAME_CHARS} characters — skipped",
+                )
+                continue
+        if kind == "command":
+            # The body is a registered command *id*, nothing else — a short,
+            # single-line, printable token. Whether that id is known and whether
+            # it is safe to bind from a file are the UI's to decide (only it holds
+            # the registry); the parser guarantees the shape and nothing more.
+            if _CONTROL_RE.search(body) is not None:
+                reject(name, "command body must be a single line naming a command — skipped")
+                continue
+            if len(body) > MAX_COMMAND_ID_CHARS:
+                reject(
+                    name,
+                    f"command id longer than {MAX_COMMAND_ID_CHARS} characters — skipped",
                 )
                 continue
 

@@ -182,6 +182,42 @@ export interface StatusContribution {
 export type ToolCommand = Omit<Command, "keys">;
 
 /**
+ * Command ids a `shortcuts.md` `command` entry must never bind, named here
+ * because the tool that owns them lives in a module this layer does not edit
+ * (`ui/src/panels/Workspaces.tsx`). The forward-looking mechanism is the
+ * descriptor's `unsafeFromFile`, which a command declares on itself the day it
+ * registers; this denylist is the safety net for the already-registered ones
+ * that reach a filesystem path or re-point the path jail and cannot yet set the
+ * flag at their source. `workspace.open` is ROADMAP item 5's named example:
+ * a binding for it in a project's own `.workbench/shortcuts.md` would move the
+ * path jail on one keystroke. `workspace.switch` and the dynamic
+ * `workspace.open.<path>` recents are the same hazard.
+ *
+ * When those descriptors adopt `unsafeFromFile`, this set can shrink to empty
+ * without touching `isBindableFromFile`'s contract.
+ */
+const UNSAFE_FROM_FILE_IDS: ReadonlySet<string> = new Set(["workspace.open", "workspace.switch"]);
+
+/** Prefix of a dynamic command family that is unsafe as a whole — the workspace
+ * recents (`workspace.open.<path>`), each of which re-points the jail. */
+const UNSAFE_FROM_FILE_PREFIXES: readonly string[] = ["workspace.open."];
+
+/**
+ * Whether a `shortcuts.md` `command` entry is allowed to bind this command.
+ *
+ * The bar is ROADMAP item 4's: a workspace file is untrusted input, so a command
+ * that could reach a file must be unbindable from one. A command is refused if it
+ * declares `unsafeFromFile`, is named in the denylist, or belongs to an unsafe
+ * dynamic family; everything else — the overwhelming majority — is bindable, so a
+ * newly registered safe command is bindable the day it registers, no code change.
+ */
+export function isBindableFromFile(command: Command): boolean {
+  if (command.unsafeFromFile === true) return false;
+  if (UNSAFE_FROM_FILE_IDS.has(command.id)) return false;
+  return !UNSAFE_FROM_FILE_PREFIXES.some((prefix) => command.id.startsWith(prefix));
+}
+
+/**
  * Commands that come and go while the app runs — one per saved layout today,
  * one per recent workspace tomorrow. Kept separate from `commands` because the
  * static list is built once (it is read on every keystroke) and because a chord

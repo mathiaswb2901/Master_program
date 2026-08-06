@@ -15,6 +15,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
+import type { Command } from "./commands";
 import { parseChord } from "./keys";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import {
@@ -25,6 +26,7 @@ import {
   documentViews,
   dynamicCommandsKey,
   heldAcrossWorkspaceSwitch,
+  isBindableFromFile,
   notifyDockReady,
   openToolPanel,
   panelComponents,
@@ -611,5 +613,43 @@ describe("the registered tools", () => {
   it("host both shortcut kinds", () => {
     expect(shortcutHost(TOOLS, "shell")).toBe("terminal");
     expect(shortcutHost(TOOLS, "prompt")).toBe("agent");
+  });
+});
+
+// The untrusted-input bar a `shortcuts.md` `command` entry must clear (M5 item 4).
+describe("isBindableFromFile", () => {
+  const command = (id: string, over: Partial<Command> = {}): Command => ({
+    id,
+    title: id,
+    run: () => undefined,
+    ...over,
+  });
+
+  it("binds an ordinary command the day it registers, with no annotation", () => {
+    expect(isBindableFromFile(command("view.toggleTheme"))).toBe(true);
+    expect(isBindableFromFile(command("layout.save"))).toBe(true);
+    expect(isBindableFromFile(command("pane.split.right"))).toBe(true);
+  });
+
+  it("refuses a command that declares itself unsafe from a file", () => {
+    expect(isBindableFromFile(command("some.future.tool", { unsafeFromFile: true }))).toBe(false);
+  });
+
+  it("refuses the denylisted workspace commands and their dynamic recents", () => {
+    for (const id of ["workspace.open", "workspace.switch", "workspace.open.C:\\proj"]) {
+      expect(isBindableFromFile(command(id)), id).toBe(false);
+    }
+  });
+
+  // The real registry must agree: every workspace command the app ships is one a
+  // file cannot bind, whether it set the flag or is caught by the denylist.
+  it("refuses every registered workspace command", () => {
+    const workspaceCommands = toolCommands(TOOLS).filter((registered) =>
+      registered.id.startsWith("workspace."),
+    );
+    expect(workspaceCommands.length).toBeGreaterThan(0);
+    for (const registered of workspaceCommands) {
+      expect(isBindableFromFile(registered), registered.id).toBe(false);
+    }
   });
 });
