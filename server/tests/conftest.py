@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.services import shortcuts as shortcuts_service
+from workbench_server.services import workspaces as workspaces_service
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +46,21 @@ def global_shortcuts_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     path = tmp_path.parent / f"{tmp_path.name}-home" / ".workbench" / "shortcuts.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(shortcuts_service, "global_shortcuts_path", lambda: path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def app_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point machine-local state (the recent-workspaces list) at a throwaway dir.
+
+    Autouse for the same reason ``global_shortcuts_file`` is: the recents store
+    falls back to the real ``%LOCALAPPDATA%\\Workbench`` when nothing names a
+    directory, so without this a test run would read — and *rewrite* — the
+    developer's own list of projects. Outside the workspace root, like the real
+    one, because that is the property the feature depends on.
+    """
+    path = tmp_path.parent / f"{tmp_path.name}-appdata"
+    monkeypatch.setattr(workspaces_service, "app_data_dir", lambda: path)
     return path
 
 

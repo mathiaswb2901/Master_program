@@ -520,14 +520,53 @@ because other sections and five running lanes reference these numbers.
    tmux theirs. Exit: a newly registered command is bindable from `shortcuts.md` the day
    it is registered, with no parser change; the untrusted-input bar above still holds,
    which is what makes "bind anything" safe rather than a shell in a markdown file.
-5. **Workspace switcher** — the workspace is currently whatever directory the server
+   **And it is what the switcher ran into first** (item 5): "bind anything" cannot mean
+   *every* registered command, because `workspace.open` takes a filesystem root, and a
+   binding for it in a project's own `.workbench/shortcuts.md` would re-point the path
+   jail. Whatever this item builds needs a way for a command to say it is not bindable
+   from an untrusted file — the bar above, expressed on the descriptor rather than in
+   a parser case.
+5. ~~**Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
-   `shortcuts.md`), with per-workspace layout and session history. Supersedes the
-   first-run picker in the OSS bar item 3. Also unlocks **half B of item 12**: opening a
-   session whose folder is outside the current workspace needs this (or the multi-root
-   jail from item 6), which is why the session browser ships its read half first — that
-   half has landed, and every such conversation is already listed and visibly refused
-   with its reason, so what this unlocks is exactly the click.
+   `shortcuts.md`), with per-workspace layout and session history.~~ **done** —
+   `services/workspaces.py` + `models/workspaces.py` + `routers/workspaces.py`, and a
+   registered capability with no panel (`ui/src/panels/Workspaces.tsx`: a status chip
+   that is a control, a QuickBar picker of recents, the OS folder dialog through
+   `shell.ts`, one line in `tools.ts`). The owner was blocked on this — "I need to be
+   able to access files on my computer to test" — because trying the app against real
+   work meant killing the server and restarting it with an env var.
+   **The design decision that carries it**: everything rooted in the workspace either
+   holds the `Workspace` object (and follows for free, because `root` is now mutable and
+   there is one of it) or copied the path and owes a `set_workspace_root` — and the list
+   of the second kind lives in exactly one function, so a service added later that is not
+   on it is a service still serving the project the user left. The jail is unchanged: the
+   same `safe_path` asks the same question about a different root, asserted by a test
+   that reaches for a file in the *old* workspace and is refused.
+   **What deliberately keeps running**: terminals and live agent sessions. A PTY is a
+   shell that was never inside the jail, and an agent may be mid-turn holding an edit —
+   killing either because the user opened a folder is silent loss of running work. A live
+   session outside the new root is relabelled with its absolute path so it cannot be
+   filed under a same-named folder of the new project. Dirty editor buffers **block** the
+   switch with the dirty-close confirm; a buffer left dirty by another window's switch
+   survives as an orphan that cannot be saved.
+   **Deliberately not done, with a reason**: a `shortcuts.md` `workspace` kind. Item 4's
+   bar is that an entry may not reach a file, because a workspace file is untrusted
+   input — and a kind whose body is a *root path* would let a hostile `.workbench/`
+   file point the path jail at `C:\` on one keystroke. That is a wider hole than any
+   `layout` entry can open, so the switcher is reachable from the status chip and the
+   QuickBar and from nowhere a project can write to. Also not done: no `Alt` chord (the
+   Scratchpad's reasoning — a registered chord is one the user's own file cannot have,
+   and this is not a reflex).
+   **Covers the workspace-picker half of OSS-bar item 3** (first-run experience): with
+   no `WORKBENCH_WORKSPACE_ROOT` the app now *says* it is showing the directory the
+   server was launched from — a dashed chip that stays until a folder is chosen, plus
+   one hint the first time — rather than presenting a default as a decision. The
+   Claude-login and Office-detection walkthroughs are still open there.
+   Still unlocks **half B of item 12**: opening a session whose folder is outside the
+   current workspace, which now has an answer (switch to it) short of the multi-root
+   jail from item 6. The session browser's read half has landed, so every such
+   conversation is already listed and visibly refused with its reason — what this
+   unlocks is exactly the click.
 6. ~~**Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
    dirty-slot `needs_review` protection)~~ — **the pool is done**
    (`services/worktrees.py`, `models/worktrees.py`, `routers/worktrees.py`, landed
@@ -911,10 +950,21 @@ without forking — the difference between a fixed app and an instrument.
 
 ### M7 — Premium & Public (identity + OSS release)
 
-- The logged "frontend is too plain" change request executed in full: aggressive
+- The logged "frontend is too plain" change request executed in full. **Its colour half
+  landed early, on 2026-08-06**: six directions were drafted against a measured
+  crispness bar and the owner chose **ANVIL** — true black, achromatic neutrals, one
+  hot amber, an inverted surface ramp (chrome lighter than the wells it frames) and a
+  document mat that makes a docked Word page read as paper. `DESIGN.md` §2 is rewritten
+  to it and `ui/e2e/palette.test.ts` gates every published figure. **It stops at the
+  webview edge**: the native window frame is still Tauri's default decoration, which
+  follows the OS-wide light/dark setting rather than these tokens. What remains
+  here is everything the palette does not decide — aggressive
   ui-ux-pro-max design overhaul on top of the now-complete structural layer —
   distinctive welcome surface, branded empty states, micro-interactions, Monaco
-  enrichment, content search (Ctrl+Shift+F), settings UI. (Layout persistence and
+  enrichment, content search (Ctrl+Shift+F), settings UI, and the one piece of ANVIL
+  that lives outside `ui/`: tinting the native chrome from the current tokens, which
+  carries `desktop/src-tauri/src/host/class.rs`'s `PANEL_SURFACE` with it.
+  (Layout persistence and
   dockview maximize moved to M5 item 2 and **landed** there; ~~floating and popped-out
   panels are still unclaimed — dockview supports both and nothing has asked yet~~ —
   claimed 2026-08-05, now M5 item 13.) The redesign now has substantially more structure
@@ -924,10 +974,12 @@ without forking — the difference between a fixed app and an instrument.
   forward; it all ships in current tokens and gets restyled here.
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
-- Remaining OSS product bar: first-run experience — the *setup* half only, since the
-  find-what-exists half (a welcome surface and a complete keyboard reference) landed as
-  M5 item 14: workspace picker, Claude-login and Office/OnlyOffice detection
-  walkthroughs; cross-platform PTY + 3-OS CI matrix,
+- Remaining OSS product bar: first-run experience — the find-what-exists half (a welcome
+  surface and a complete keyboard reference) landed as M5 item 17, and the **workspace
+  picker half is done** too (M5 item 5: the app says which folder it is showing and whether
+  anybody chose it, and every way to open another is in the app), leaving only the
+  Claude-login and Office/OnlyOffice detection walkthroughs; cross-platform PTY + 3-OS CI
+  matrix,
   CONTRIBUTING/templates, versioned Tauri releases with signed installers,
   zero-telemetry README stance, and the real product name.
 - Exit criterion: a stranger on a fresh Windows machine reaches a working, secured,
@@ -1280,8 +1332,48 @@ Build for real external users, not just the author. Consequences, tracked as wor
   concept that names them), and **a config that can bind anything** (folded into item 4
   — `.tmux.conf` rebinds all of tmux, and "bind anything the registry knows" is the
   version of that which survives our untrusted-workspace-file rule). The look is a
-  separate problem with a separate answer: three visual directions, rendered rather than
-  described, for the owner to choose between — see the M7 change request.
+  separate problem with a separate answer: visual directions, rendered rather than
+  described, for the owner to choose between — six of them were, and ANVIL was
+  chosen the same day (see the M7 change request below).
+
+- 2026-08-06 — **ANVIL: the visual identity, chosen and built** (owner, on the third
+  telling: "too plain, reads as a generic VS Code clone", then "it still feels like a
+  cheap VS Code editor", then "the program still looks superold"). The look was treated
+  as a measurement problem rather than a taste one, because three rejections in a row
+  say the previous passes were arguing about taste. What the old palette actually
+  measured: five dark surfaces spanning **1.31:1** end to end, two of them 1.10:1 apart
+  — one grey field, not a window with panels in it; `--border-subtle` at **1.17:1** on
+  panel, below the threshold at which a 1px edge is perceived *at all*, while
+  `DESIGN.md` §1.4 elects hairlines to carry every piece of structure and forbids
+  shadows as the fallback — which is the mechanical reason no panel read as an object;
+  `--text-tertiary` at **4.24:1** under 11px text, a live WCAG failure against §7's own
+  rule; and a steel-blue accent at 220° on a 220° graphite base, i.e. VS Code's and
+  GitHub's.
+  **Six directions were drafted against that measured crispness bar** — surface spread,
+  hairline visibility, text contrast, and how far the accent sits from the base hue —
+  rather than described in prose, and the owner chose **ANVIL** on 2026-08-06: a
+  true-black instrument with zero colour in its neutrals (Lab C\* = 0.00 on all twenty
+  greys) and exactly one hot amber, spent only on *where I am* and *what is changing
+  right now*. Measured: surface ramp 0.0 / 6.3 / 12.3 / 18.0 / 24.0 / 29.7 L\* (adjacent
+  steps 5.8–6.3, end to end 29.7), `--border-subtle` 2.51:1 on panel, primary text
+  14.94:1, no text pair below 4.55:1 and only one below 5:1.
+  The ramp is **inverted**: `--surface-app` is now *lighter* than `--surface-panel`, so
+  the chrome frames darker content wells instead of panels sitting on a darker app.
+  Shipped in `DESIGN.md` §1–§2, §6.1 and §7, gated by `ui/e2e/palette.test.ts`, which
+  re-derives every published figure from `tokens.css`. Two consequences worth recording:
+  the light theme is **derived from ANVIL's four rules rather than inverted from its
+  values** (and states the one thing that could not survive the crossing — the hot amber
+  is 1.33:1 on a light panel, so light marks with a deep amber and keeps the hot one for
+  filled areas); and **ANVIL stops at the webview edge**. Nothing in `desktop/src-tauri/`
+  changed, and the honest reading of that is a gap rather than a win: the window is
+  created with Tauri's default `decorations: true` and no `theme`, so the native caption
+  is whatever the OS-wide light/dark setting says — it does not read `tokens.css`, and it
+  does not follow the app's own theme toggle either. Tinting it takes a real
+  `DwmSetWindowAttribute` call (`DWMWA_CAPTION_COLOR` / `DWMWA_TEXT_COLOR`) driven from
+  the current `--surface-app` / `--text-primary`, and no such call exists yet. That is M7
+  work, and it carries `host/class.rs`'s `PANEL_SURFACE` with it — still the retired
+  graphite `#1A1D22`, and now *more* visible than before, since the launch flash shows
+  against the paper mat's pale surround rather than against dark chrome.
 
 - 2026-08-06 — **"I am not sure how to use these features"** (user), after a day of
   features landing. Read as a product failure rather than a user failure: we had shipped

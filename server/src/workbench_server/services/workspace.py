@@ -32,7 +32,29 @@ def content_hash(data: bytes) -> str:
 
 
 class Workspace:
+    """The jail, and every operation that happens inside it.
+
+    ``root`` is **mutable** as of M5's workspace switcher: the workspace is no
+    longer fixed at launch. That is deliberately expressed as one attribute on
+    one object rather than as a value copied into each caller — every router
+    reaches the jail through ``app.state.workspace``, so re-pointing this object
+    re-roots all of them at once and nothing can be left holding the old root by
+    forgetting to be told. A service that copies ``workspace.root`` into a field
+    of its own owes a ``set_workspace_root`` (``services/workspaces.py`` calls
+    every one of them); a service that keeps the ``Workspace`` owes nothing.
+
+    The invariant itself does not move: every path from the wire still goes
+    through :meth:`safe_path`, and a path is inside the jail or it is not. What a
+    switch changes is *which* root that question is asked about — so a path from
+    the workspace you just left is refused by the same rule that always refused
+    ``../``.
+    """
+
     def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+
+    def set_root(self, root: Path) -> None:
+        """Re-root the jail. See the class docstring for why this is one write."""
         self.root = root.resolve()
 
     def safe_path(self, relative: str) -> Path:

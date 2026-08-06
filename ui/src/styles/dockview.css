@@ -20,7 +20,12 @@
 
   --dv-tab-divider-color: transparent;
   --dv-tabs-container-scrollbar-color: var(--border-strong);
-  --dv-separator-border: var(--border-subtle);
+  /* The sash hairline is drawn in the `--dv-background-color` gap, not on a
+   * panel, so `--border-subtle` — tuned to 2.51:1 against `--surface-panel` —
+   * lands at 1.78:1 there and disappears. The grid line between two panes is
+   * the most structural hairline in the window (§1.4); it gets the weight that
+   * makes it visible where it actually sits. */
+  --dv-separator-border: var(--border-strong);
   --dv-paneview-active-outline-color: var(--focus-ring);
   --dv-drag-over-background-color: var(--accent-muted);
   --dv-drag-over-border-color: var(--accent);
@@ -32,12 +37,37 @@
   --dv-overlay-z-index: 50;
 }
 
-/* Focused panel group: 1px accent top edge on its tab strip only (§6.1) —
- * the one place chrome uses accent structurally. Not animated: it is a
- * `box-shadow`, which is off the allowlist (DESIGN.md §5), and a focus
- * indicator that arrives late is a focus indicator that lies. */
+/* THE LIVE RULE (DESIGN.md §6.1) — the app's signature and its real focus
+ * indicator: a 2px full-bleed amber rule across the top of the focused pane's
+ * tab strip, and nowhere else. One pane wears it at a time, so "where am I"
+ * is answered from across the room without reading a single label.
+ *
+ * 2px, not the 1px this used to be: a 1px hairline is structure (§1.4 gives
+ * every hairline in the window to structure), and a focus mark that borrows
+ * structure's weight is a focus mark you have to look for. Full-bleed because
+ * the pane is what is focused, not the tab.
+ *
+ * Not animated: it is a `box-shadow`, which is off the allowlist (§5), and a
+ * focus indicator that arrives late is a focus indicator that lies. */
 .dockview-theme-workbench .dv-active-group > .dv-tabs-and-actions-container {
-  box-shadow: inset 0 1px 0 0 var(--accent);
+  position: relative;
+}
+
+/* An overlay, not an `inset` box-shadow. The shadow paints on the container's
+ * own background and the tabs are children with backgrounds of their own, so it
+ * was occluded across the whole width of the active tab — the rule appeared to
+ * *start* after the tab instead of crossing the pane. Caught by looking at the
+ * running window at 3x, which is the only way that reads. A border-top would
+ * also cross, but `box-sizing: border-box` would take the 2px out of the 34px
+ * strip and make the tab row jump every time focus moved. */
+.dockview-theme-workbench .dv-active-group > .dv-tabs-and-actions-container::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: var(--accent);
+  z-index: 5; /* over the tabs; under dockview's own overlays at 50 */
+  pointer-events: none;
 }
 
 /* Tab activation (DESIGN.md §5, reversed from "never animates"). The tab's own

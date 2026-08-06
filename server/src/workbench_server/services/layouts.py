@@ -60,6 +60,13 @@ class LayoutsService:
     def path(self) -> Path:
         return self._path
 
+    def set_workspace_root(self, root: Path) -> None:
+        """Point at the new workspace's document. Nothing else to do: this
+        service holds no cache and no open handle, so the next `load` reads the
+        arrangement that belongs to the project the user just opened — which is
+        the whole reason the file lives *in* the workspace."""
+        self._path = root.resolve() / Path(LAYOUTS_PATH)
+
     def load(self) -> LayoutsResponse:
         """The persisted document, or the empty one plus the reason it is empty."""
         try:

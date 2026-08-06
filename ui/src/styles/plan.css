@@ -127,7 +127,11 @@
   color: var(--text-primary);
 }
 
-/* The one accented mark in the card body (DESIGN.md principle 3). */
+/* Demoted from accent (DESIGN.md §2.4 audit). "Recommended" is a standing
+   property of an option — it is true before you open the card and still true
+   after — so it cannot wear the colour that means *now*. An outlined neutral
+   pill says the same thing and leaves the card's amber to `is-selected`, which
+   is where you are. */
 .wb-plan-rec {
   flex: none;
   padding: 0 var(--space-4);
@@ -135,8 +139,8 @@
   display: inline-flex;
   align-items: center;
   border-radius: var(--radius-full);
-  background: var(--accent-muted);
-  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
   font-size: var(--type-xs-size);
   line-height: var(--type-xs-line);
   font-weight: var(--weight-medium);
@@ -230,7 +234,7 @@
 }
 
 .wb-plan-file:hover {
-  color: var(--accent);
+  color: var(--text-primary);
   border-color: var(--border-strong);
 }
 
