@@ -37,7 +37,8 @@ vi.mock("./monaco", () => ({
   disposeModel: () => undefined,
   setModelContent: () => null,
   defineWorkbenchTheme: () => undefined,
-  initMonaco: () => undefined,
+  loadMonaco: () => Promise.resolve({}),
+  prefetchMonaco: () => undefined,
 }));
 
 vi.mock("./store", () => ({
