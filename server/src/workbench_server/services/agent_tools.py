@@ -32,13 +32,16 @@ before a design one.
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
 from workbench_server.models.agents import UiState
+from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
 from workbench_server.models.plans import PlanArtifact, plan_input_schema
 from workbench_server.services.agent_sessions import PlanAlreadyPendingError, SessionBridge
+from workbench_server.services.office_host.a1 import cell_ref, column_letter, parse_cell
+from workbench_server.services.office_host.document_bridge import DocumentBridgeError
 
 #: How a tool's result reaches the model. ``compact-json`` means no indent and
 #: no pretty separators. Measured on the representative payload the tests use
@@ -218,9 +221,213 @@ async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> di
     return text_result(response.model_dump_json())
 
 
+# ---- office_read ------------------------------------------------------------
+
+#: Server-side window bounds, applied before the read reaches the bridge so a
+#: single call can never return the whole of a large document. The model may ask
+#: for fewer characters but not more; the cell budget is not the model's to set.
+#: These bound the window's *shape* — characters of Word body, count of Excel
+#: cells, and (threaded through as ``max_chars``) the aggregate text of an Excel
+#: window so one long cell cannot fill it. They do **not** bound the serialized
+#: *byte* size: non-ASCII body (Norwegian æ/ø/å, denser diacritics, emoji) runs
+#: to several bytes per character, so 6000 chars can exceed ``max_result_bytes``.
+#: ``handle_office_read`` clamps the final text to that byte ceiling as the
+#: backstop these char/cell caps cannot be. A 2000-row sheet (16k cells) never
+#: fits, which is the point of windowing rather than streaming.
+OFFICE_READ_MAX_CHARS = 6_000
+OFFICE_READ_MAX_CELLS = 600
+
+
+class OfficeDocumentReader(Protocol):
+    """The narrow read surface the ``office_read`` tool needs — implemented by
+    ``OfficeHostService`` and threaded in so this module never imports it."""
+
+    async def document_structure(self, path: str) -> DocStructure: ...
+
+    async def read_document(
+        self,
+        path: str,
+        *,
+        max_chars: int,
+        max_cells: int,
+        sheet: str | None = None,
+        a1_range: str | None = None,
+        start_paragraph: int = 0,
+    ) -> WordText | CellWindow: ...
+
+
+OFFICE_READ = AgentToolSpec(
+    name="office_read",
+    description=(
+        "Read the LIVE Office document Workbench has docked in a panel — only "
+        "documents Workbench opened, named by workspace-relative path. Word: the "
+        "body windowed by start_paragraph and max_chars, with a 'paragraphs X-Y "
+        "of N' footer. Excel: a TSV grid with an A1 corner header and a 'rows X-Y "
+        "of N, cols A-H of Z; pass range=A1:H50 for more' footer; omit sheet to "
+        "list the sheets, or pass range to pick a corner. An empty document says "
+        "so. Reads include unsaved on-screen edits. If the document is not docked, "
+        "it says so and how to open it."
+    ),
+    # Text, not JSON: an Excel range is list-heavy, and a TSV grid the model can
+    # read directly is cheaper than the same cells wrapped in JSON arrays — the
+    # one place among these tools where the AXI list-payload argument bites.
+    output_format="text",
+    # A full window is bounded server-side (the two constants above), so this is
+    # sized to the widest one plus the header and footer, not to a whole
+    # document: ~6 kB of Word body or a few kB of TSV, never a 2000-row sheet.
+    # Raising it means widening those bounds, which is the diff to justify.
+    max_result_bytes=8_192,
+    # Five small properties, one required. Measured near 640 bytes; 900 leaves
+    # room to reword a description-in-schema without letting a sixth argument in
+    # unmeasured — the schema is paid on every request whether the tool runs.
+    max_schema_bytes=900,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative path of the docked document.",
+            },
+            "sheet": {
+                "type": "string",
+                "description": "Excel only: which worksheet. Omit to list the sheets.",
+            },
+            "range": {
+                "type": "string",
+                "description": "Excel only: A1 range or corner, e.g. A1:H50 or A51.",
+            },
+            "start_paragraph": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Word only: zero-based first paragraph to read.",
+            },
+            "max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Word only: cap on characters returned (bounded server-side).",
+            },
+        },
+        "required": ["path"],
+    },
+)
+
+
+def _office_read_refusal(error: DocumentBridgeError, path: str) -> str:
+    """Turn a read refusal into a sentence the agent can act on (AXI shape 3)."""
+    if error.reason == "document_not_hosted":
+        return (
+            f"{path} is not docked in Workbench. Open it first (the Office panel or "
+            "the office host), then read it."
+        )
+    if error.reason == "document_gone":
+        return f"{path} was closed before it could be read; re-open it to read it again."
+    if error.reason == "range_invalid":
+        return str(error)
+    return f"{path} cannot be read right now: {error}"
+
+
+def _format_word(word: WordText, path: str) -> str:
+    """Word body plus the 'paragraphs X-Y of N' footer, or an explicit 'empty'."""
+    if word.total_paragraphs == 0:
+        return f"{path} (Word) is empty — it has no paragraphs."
+    returned = word.text.count("\n\n") + 1 if word.text else 0
+    end = word.start_paragraph + returned  # exclusive, one-based at the boundary
+    shown = f"paragraphs {word.start_paragraph + 1}-{end} of {word.total_paragraphs}"
+    if end < word.total_paragraphs:
+        footer = f"[{shown}; pass start_paragraph={end} for the next, or a larger max_chars.]"
+    else:
+        footer = f"[{shown} — end of document.]"
+    return f"{word.text}\n\n{footer}"
+
+
+def _format_sheet_list(structure: DocStructure, path: str) -> str:
+    """The 'omit sheet to list the sheets' answer (AXI shape 3: what to do next)."""
+    sheets = structure.sheets or []
+    if not sheets:
+        return f"{path} (Excel) has no sheets."
+    lines = [f"{path} (Excel), {len(sheets)} sheet(s):"]
+    for sheet in sheets:
+        size = "empty" if sheet.rows == 0 else f"{sheet.rows} rows x {sheet.cols} cols"
+        lines.append(f"  {sheet.name}: {size}")
+    lines.append("Pass sheet=<name> (and optionally range=A1:H50) to read one.")
+    return "\n".join(lines)
+
+
+def _format_excel(window: CellWindow, path: str) -> str:
+    """A TSV grid with an A1 corner header and a windowing footer, or 'empty'."""
+    if window.total_rows == 0:
+        return f"{path} (Excel) sheet {window.sheet!r} is empty — it has no cells."
+    corner = window.a1_range.split(":", 1)[0]
+    first_row, first_col = parse_cell(corner)
+    header = "\t".join([window.sheet, *(column_letter(first_col + j) for j in range(window.cols))])
+    lines = [header]
+    for offset, row in enumerate(window.cells):
+        lines.append("\t".join([str(first_row + 1 + offset), *row]))
+    last_col = first_col + window.cols - 1
+    rows_shown = f"rows {first_row + 1}-{first_row + window.rows} of {window.total_rows}"
+    cols_shown = (
+        f"cols {column_letter(first_col)}-{column_letter(last_col)} "
+        f"of {column_letter(window.total_cols - 1)}"
+    )
+    if first_row + window.rows < window.total_rows or last_col < window.total_cols - 1:
+        nxt = cell_ref(first_row + window.rows, first_col)
+        footer = f"[{rows_shown}, {cols_shown}; pass range={nxt}: for more.]"
+    else:
+        footer = f"[{rows_shown}, {cols_shown} — whole sheet.]"
+    return f"{window.sheet}!{window.a1_range}\n" + "\n".join(lines) + f"\n{footer}"
+
+
+async def handle_office_read(reader: OfficeDocumentReader, args: dict[str, Any]) -> dict[str, Any]:
+    """The office_read tool body, free of SDK imports so it is directly testable.
+
+    Structure first, then the read: the structure call is cheap and it is what
+    lets an Excel request with no sheet answer with the *list* of sheets rather
+    than a refusal. Word ignores sheet/range; Excel ignores start_paragraph. The
+    read window is bounded here, before the bridge sees it, so no single call can
+    return a whole large document.
+    """
+    path = args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return error_result("office_read needs a workspace-relative 'path' to a docked document.")
+    sheet = args.get("sheet") if isinstance(args.get("sheet"), str) else None
+    a1_range = args.get("range") if isinstance(args.get("range"), str) else None
+    raw_start = args.get("start_paragraph", 0)
+    start_paragraph = raw_start if isinstance(raw_start, int) and raw_start >= 0 else 0
+    raw_max = args.get("max_chars")
+    max_chars = (
+        min(raw_max, OFFICE_READ_MAX_CHARS)
+        if isinstance(raw_max, int) and raw_max > 0
+        else OFFICE_READ_MAX_CHARS
+    )
+    try:
+        structure = await reader.document_structure(path)
+        if structure.kind == "excel" and sheet is None:
+            return text_result(_format_sheet_list(structure, path))
+        result = await reader.read_document(
+            path,
+            max_chars=max_chars,
+            max_cells=OFFICE_READ_MAX_CELLS,
+            sheet=sheet,
+            a1_range=a1_range,
+            start_paragraph=start_paragraph,
+        )
+    except DocumentBridgeError as error:
+        return error_result(_office_read_refusal(error, path))
+    text = (
+        _format_word(result, path) if isinstance(result, WordText) else _format_excel(result, path)
+    )
+    # The two server-side caps bound the window's *shape* (characters of Word body,
+    # count of Excel cells), not its byte size: non-ASCII body (Norwegian æ/ø/å,
+    # denser diacritics or emoji) runs to several bytes per character, so a full
+    # window can serialize past ``max_result_bytes`` even though it is within the
+    # char/cell caps. Clamp is the byte backstop the caps cannot be — office_read
+    # is text the model reads, never JSON it parses, so truncating it is safe.
+    return text_result(clamp_result(text, OFFICE_READ.max_result_bytes))
+
+
 # ---- the registry -----------------------------------------------------------
 
-AGENT_TOOLS: tuple[AgentToolSpec, ...] = (GET_WORKSPACE_STATE, PRESENT_PLAN)
+AGENT_TOOLS: tuple[AgentToolSpec, ...] = (GET_WORKSPACE_STATE, PRESENT_PLAN, OFFICE_READ)
 
 
 def allowed_tool_names() -> list[str]:

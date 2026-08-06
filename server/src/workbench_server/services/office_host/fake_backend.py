@@ -97,6 +97,12 @@ class FakeHostBackend:
         self._pids = itertools.count(FIRST_FAKE_PID)
         self._windows = itertools.count(FIRST_FAKE_WINDOW)
         self._alive: dict[int, bool] = {}
+        #: The document each launched pid opened, for the fake *document* bridge
+        #: to mint in-memory content from — the counterpart of a real COM read
+        #: reaching into the live instance this pid names. Kept here because the
+        #: backend is the only thing that knows which pid opened which document;
+        #: the bridge shares this map rather than being told twice.
+        self.launched_paths: dict[int, str] = {}
         # The branch chosen at launch, kept per pid: the document name is not an
         # argument to embed() or poll(), and a real backend has the same
         # amnesia — whatever it knows after launch, it knows from the handle.
@@ -122,6 +128,7 @@ class FakeHostBackend:
         )
         self._alive[pid] = True
         self._branches[pid] = branch
+        self.launched_paths[pid] = str(path)
         log.debug("office_host.fake_launch", path=str(path), kind=kind, pid=pid)
         return handle
 
@@ -162,3 +169,8 @@ class FakeHostBackend:
         """Make the next poll report this instance gone — the fake equivalent of
         the user quitting Word from its own File menu."""
         self._alive[pid] = False
+
+    def is_alive(self, pid: int) -> bool:
+        """Whether this pid's instance is still up — read by the fake document
+        bridge to raise ``DocGoneError`` for a read that races a close."""
+        return self._alive.get(pid, False)
