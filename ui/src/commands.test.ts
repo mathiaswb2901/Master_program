@@ -386,12 +386,21 @@ describe("shortcuts.md command kind", () => {
     expect(mocks.state.pushToast.mock.calls[0]?.[1]).toContain("cannot be bound");
   });
 
-  it("refuses each unsafe workspace command, including a dynamic recent", () => {
-    for (const id of ["workspace.switch", "workspace.open", "workspace.open.C:\\proj"]) {
+  // Each registered unsafe command is refused through the *bindability* branch,
+  // not merely "some toast fired": asserting the wording is what tells the
+  // refusal path apart from the unknown-command path, so this would fail if the
+  // denylist were deleted rather than passing on a coincidental toast. The
+  // dynamic recents (`workspace.open.<path>`) are unregistered in this node
+  // context — the recents store is empty and never seeded here — so their
+  // refusal by prefix is proven directly in registry.test.ts against
+  // `isBindableFromFile`, not through this end-to-end wiring.
+  it("refuses each registered unsafe workspace command with a bindability message", () => {
+    for (const id of ["workspace.switch", "workspace.open"]) {
       mocks.state.pushToast.mockClear();
       mocks.state.shortcuts = [entry({ name: "Nope", kind: "command", body: id })];
       runByTitle("Nope");
       expect(mocks.state.pushToast, id).toHaveBeenCalledTimes(1);
+      expect(mocks.state.pushToast.mock.calls[0]?.[1], id).toContain("cannot be bound");
     }
   });
 

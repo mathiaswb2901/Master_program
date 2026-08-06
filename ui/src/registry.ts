@@ -198,9 +198,20 @@ export type ToolCommand = Omit<Command, "keys">;
  */
 const UNSAFE_FROM_FILE_IDS: ReadonlySet<string> = new Set(["workspace.open", "workspace.switch"]);
 
-/** Prefix of a dynamic command family that is unsafe as a whole — the workspace
- * recents (`workspace.open.<path>`), each of which re-points the jail. */
-const UNSAFE_FROM_FILE_PREFIXES: readonly string[] = ["workspace.open."];
+/**
+ * Prefixes of dynamic command *families* that are unsafe as a whole, because the
+ * tool that mints them lives in a module this layer does not edit and so cannot
+ * yet set `unsafeFromFile` at the source. Each family is denylisted rather than
+ * each member, because the members come and go while the app runs:
+ *  - `workspace.open.<path>` — the workspace recents, each of which re-points the
+ *    path jail (`ui/src/panels/Workspaces.tsx`).
+ *  - `layout.delete.<name>` — one per saved layout, and `deleteLayout` removes the
+ *    named entry and `PUT`s `layouts.json`, an on-disk mutation
+ *    (`ui/src/panels/Layouts.tsx`). Its sibling `layout.apply.<name>` is *not*
+ *    here: switching a layout only moves panels — the same act the `layout`
+ *    shortcut kind is deliberately allowed to carry out — so it stays bindable.
+ */
+const UNSAFE_FROM_FILE_PREFIXES: readonly string[] = ["workspace.open.", "layout.delete."];
 
 /**
  * Whether a `shortcuts.md` `command` entry is allowed to bind this command.

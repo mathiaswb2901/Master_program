@@ -629,14 +629,28 @@ describe("isBindableFromFile", () => {
     expect(isBindableFromFile(command("view.toggleTheme"))).toBe(true);
     expect(isBindableFromFile(command("layout.save"))).toBe(true);
     expect(isBindableFromFile(command("pane.split.right"))).toBe(true);
+    // Switching a saved layout only moves panels — the same act the `layout`
+    // shortcut kind is allowed to carry out — so the `layout.apply.*` dynamic
+    // family stays bindable even though its `layout.delete.*` sibling does not.
+    expect(isBindableFromFile(command("layout.apply.default"))).toBe(true);
+    expect(isBindableFromFile(command("layout.apply.saved.My layout"))).toBe(true);
   });
 
   it("refuses a command that declares itself unsafe from a file", () => {
     expect(isBindableFromFile(command("some.future.tool", { unsafeFromFile: true }))).toBe(false);
   });
 
-  it("refuses the denylisted workspace commands and their dynamic recents", () => {
-    for (const id of ["workspace.open", "workspace.switch", "workspace.open.C:\\proj"]) {
+  it("refuses the denylisted commands and their dynamic families", () => {
+    for (const id of [
+      "workspace.open",
+      "workspace.switch",
+      // The workspace recents and the per-layout delete rows are dynamic — one
+      // per recent folder / saved layout — so each family is denylisted by
+      // prefix, not member by member. Both reach a file: `workspace.open.<path>`
+      // re-points the path jail, `layout.delete.<name>` `PUT`s layouts.json.
+      "workspace.open.C:\\proj",
+      "layout.delete.My layout",
+    ]) {
       expect(isBindableFromFile(command(id)), id).toBe(false);
     }
   });
@@ -651,5 +665,22 @@ describe("isBindableFromFile", () => {
     for (const registered of workspaceCommands) {
       expect(isBindableFromFile(registered), registered.id).toBe(false);
     }
+  });
+
+  /**
+   * The guard the original denylist missed: it audited only `workspace.*` and
+   * left `layout.delete.<name>` — also produced by `toolDynamicCommands(TOOLS)`
+   * and also reaching a file — bindable. Every *destructive* dynamic-command
+   * family a tool can emit must be refused, and every safe one must stay
+   * bindable, so a future family with side effects fails here instead of
+   * shipping silently exposed. Both real families are pinned by a representative
+   * id (the stores are empty in this unit context, so `toolDynamicCommands`
+   * builds nothing to walk live).
+   */
+  it("classifies every dynamic-command family: destructive refused, safe bindable", () => {
+    const destructive = ["workspace.open.C:\\proj", "layout.delete.Review"];
+    const safe = ["layout.apply.default", "layout.apply.review", "layout.apply.saved.Review"];
+    for (const id of destructive) expect(isBindableFromFile(command(id)), id).toBe(false);
+    for (const id of safe) expect(isBindableFromFile(command(id)), id).toBe(true);
   });
 });

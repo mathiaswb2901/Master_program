@@ -37,7 +37,8 @@ This is a rule, not a default:
   your file reach *anything the registry knows* — a command is bindable the day it is
   added, with no change here. Its safety is the same bar `layout` clears, drawn one place
   tighter: a command that could **reach a file or move the workspace** — opening a folder
-  is the one — declares itself off-limits to a shortcuts file, because your project's own
+  and deleting a saved layout are the ones — declares itself off-limits to a shortcuts
+  file, because your project's own
   `.workbench/shortcuts.md` is untrusted input. An entry naming such a command, or a
   command that does not exist, is refused with a message and never runs.
 - The QuickBar shows a shell entry's **actual snippet** next to its name, a layout
@@ -68,8 +69,9 @@ Names are matched without case.
 
 A `command` body is a registered command's id. The QuickBar's command mode
 (`Ctrl+Shift+P`) is the catalogue: every row there is a command you can bind by id. Most
-are bindable; the few that open a folder or move the workspace are not, and an entry
-naming one — or an id that does not exist — becomes a message rather than a binding.
+are bindable; the few that open a folder, move the workspace, or delete a saved layout
+are not, and an entry naming one — or an id that does not exist — becomes a message
+rather than a binding.
 
 `Alt` is the only modifier a shortcuts file may take, and it is the one that works:
 plain keys are never intercepted, and inside the terminal or editor only `Alt` and
@@ -147,7 +149,8 @@ the app toasts the first problem with a count of the others. Common ones:
 | `chord … is a built-in shortcut` | pick another chord; built-ins win |
 | `duplicate name in this file` | two `##` headings with the same text |
 
-A `command` entry naming an unknown command, or one that opens a folder or moves the
-workspace, loads fine but shows its refusal when you run it (`no command "…"`, or
+A `command` entry naming an unknown command, or one that opens a folder, moves the
+workspace, or deletes a saved layout, loads fine but shows its refusal when you run it
+(`no command "…"`, or
 `"…" cannot be bound from a shortcuts file`) — the file is never the place those decide
 what runs, so the row is inert rather than silently missing.
