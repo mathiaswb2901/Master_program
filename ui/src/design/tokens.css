@@ -161,6 +161,13 @@
   --quickbar-width: 640px;
   --chat-max-width: 760px;
   --tree-indent: 16px;
+  /* The Agent session picker's list area, which is *reserved* rather than sized
+     by its rows (DESIGN.md §1.9, §6.12). Arithmetic, not a round number: one
+     folder-group label (`--space-3` + label line + `--space-1`) and four
+     `--row-height` rows, so changing either token moves this with it. */
+  --sessions-list-height: calc(
+    var(--space-3) + var(--type-xs-line) + var(--space-1) + 4 * var(--row-height)
+  );
 
   /* ---- Radii ------------------------------------------------------------ */
   --radius-xs: 3px;   /* badges, keycaps */

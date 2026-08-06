@@ -304,6 +304,23 @@ criterion), the terminal's renderer and frame coalescing, and a virtualised file
 the last two now the largest things left in the entry chunk (xterm 285 kB, dockview-core
 423 kB attributed) as well as the reason a *row* still costs ~900 ms.
 
+**The picker that moved the pane** (landed): the launch layout-shift budget existed to
+catch a webfont swap and caught something better. Measured 2026-08-06 on the pinned
+fixture: an empty workspace shifts **0.003**, a workspace with one agent session
+**0.064** — 3x the ceiling, on every launch, for everyone who had ever run an agent. The
+session picker was sized by its rows (`flex: none; max-height: 40%`), so
+`GET /api/agents/sessions` answering after first paint pushed the chat down the pane. Its
+list area is now *reserved* — one folder label and four rows, rows scrolling inside it,
+`--sessions-list-height` — which is **0.003 with six sessions seeded**. Two things came
+with it: the lane only ever launched into an *empty* workspace, so the case every
+returning user is in is now its own budget (untagged, so it blocks — a shift score is
+geometry, not wall-clock); and `instrument.ts` now records **which nodes moved**, so the
+next one names itself instead of sending someone to a trace. The general rule is
+DESIGN.md principle 1.9, and it has one known outstanding violation: the file tree's
+centred "Loading workspace…" swaps for a toolbar 322 px higher, which is the 0.003 that
+remains and is what priced the picker's 19.5 px at 0.064 (a shift entry takes its
+distance from the largest mover in the frame).
+
 **Motion, and a hard interlock.** The track is not only speed: an instrument that moves
 *well* reads as fast even when it is not. The **motion vocabulary** — the durations,
 easings and transition primitives, as `DESIGN.md` tokens — must land **before** the
