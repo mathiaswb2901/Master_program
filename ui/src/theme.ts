@@ -45,7 +45,7 @@ export function toHex(cssColor: string): string {
   return hex;
 }
 
-/** Computed token value as hex, e.g. hexVar("--accent") -> "#5C9CE6". */
+/** Computed token value as hex, e.g. hexVar("--accent") -> "#FBBF24". */
 export const hexVar = (name: string): string => toHex(cssVar(name));
 
 /** xterm.js theme built from the current tokens (DESIGN.md §2.7 / §6.6). */

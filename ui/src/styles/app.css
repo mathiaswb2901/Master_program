@@ -111,15 +111,20 @@ input {
   color: var(--text-disabled);
 }
 
+/* The one action the app is waiting on — Allow, Approve. It fills, so it takes
+   `--accent-fill`: the hot amber, which is the same value in both themes
+   because a filled amber area carrying near-black text works on either ground
+   (DESIGN.md §2.4). `--accent` is the *marking* amber and would be a deep
+   bronze in the light theme, i.e. a brown button. */
 .wb-btn-primary {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--text-on-accent);
 }
 .wb-btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-fill-hover);
 }
 .wb-btn-primary:active:not(:disabled) {
-  background: var(--accent-active);
+  background: var(--accent-fill-active);
 }
 .wb-btn-primary:disabled {
   background: var(--surface-elevated);

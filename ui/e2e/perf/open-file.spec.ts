@@ -24,10 +24,11 @@
  * records them and the counts in `bundle.spec.ts` are what blocks a merge.
  */
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
 import { installTelemetry, mark, readTelemetry, record, round } from "./instrument";
+import { test } from "./window";
 
 /**
  * Measured 2026-08-05 on the author's machine (Win11, production build served

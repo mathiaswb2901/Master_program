@@ -1,16 +1,48 @@
 /**
- * The webview's half of the native Office host: units and the DPI boundary.
+ * The webview's half of the native Office host: units, the DPI boundary, and
+ * what the store owes a workspace switch.
  *
- * The page is a courier here — it turns a `HostCommand` into a Tauri call and
- * acks it — so what is worth testing is exactly that translation, and the one
- * place two coordinate systems meet. Everything else about hosting is a real
- * window in another process, and is verified by running it.
+ * The page is a courier for the first two — it turns a `HostCommand` into a
+ * Tauri call and acks it — so what is worth testing is exactly that
+ * translation, and the one place two coordinate systems meet. Everything else
+ * about hosting is a real window in another process, and is verified by running
+ * it.
+ *
+ * The third is here because `hosts` is keyed by workspace-*relative* path, and
+ * that key is only safe while the workspace stands still.
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cssRect, hostAppKind, physicalRect, runCommand, shellCallFor } from "./officeHost";
-import type { HostCommand, PanelRect } from "./types";
+import {
+  cssRect,
+  hostAppKind,
+  physicalRect,
+  runCommand,
+  shellCallFor,
+  useOfficeHostStore,
+} from "./officeHost";
+import type { HostCommand, OfficeHostInfo, PanelRect } from "./types";
+
+/** The office half of `api.ts`, as a script the tests below write. Hoisted
+ * because `vi.mock` factories run before anything else in the module. */
+const office = vi.hoisted(() => ({
+  closed: [] as string[],
+  answer: (_hostId: string): Promise<unknown> => Promise.resolve({}),
+}));
+
+vi.mock("./api", () => ({
+  ApiError: class ApiError extends Error {},
+  getOfficeCapabilities: () => Promise.resolve({}),
+  openOfficeHost: () => Promise.resolve({}),
+  setOfficeHostBounds: () => Promise.resolve({}),
+  setOfficeHostVisible: () => Promise.resolve({}),
+  detachOfficeHost: (hostId: string) => office.answer(hostId),
+  closeOfficeHost: (hostId: string) => {
+    office.closed.push(hostId);
+    return office.answer(hostId);
+  },
+}));
 
 const command = (over: Partial<HostCommand>): HostCommand => ({
   type: "host_command",
@@ -163,5 +195,103 @@ describe("which application opens a document", () => {
     expect(hostAppKind("deck.pptx")).toBe("powerpoint");
     expect(hostAppKind("readme.md")).toBeNull();
     expect(hostAppKind("no-extension")).toBeNull();
+  });
+});
+
+// ---- the store, across a workspace switch -----------------------------------
+
+function hostInfo(hostId: string, over: Partial<OfficeHostInfo> = {}): OfficeHostInfo {
+  return {
+    host_id: hostId,
+    path: `${hostId}.docx`,
+    kind: "word",
+    state: "embedded",
+    reason: null,
+    pid: 900001,
+    since: 0,
+    close_failed: false,
+    ...over,
+  };
+}
+
+/** Seed `hosts` directly: these assert what the store does *with* a host, and
+ * getting one there through `open` would be asserting on the mock. */
+function seedHosts(...hosts: OfficeHostInfo[]): void {
+  useOfficeHostStore.setState({
+    hosts: Object.fromEntries(hosts.map((host) => [host.path, host])),
+  });
+}
+
+beforeEach(() => {
+  office.closed = [];
+  office.answer = (hostId) => Promise.resolve(hostInfo(hostId, { state: "closed" }));
+  useOfficeHostStore.setState({ hosts: {} });
+});
+
+describe("closing what a workspace switch would strand", () => {
+  it("counts every non-terminal state as a document still open", () => {
+    // `detached` included: the window is back on the desktop, but Word still
+    // has the document, and the workspace it belongs to is about to go away.
+    seedHosts(
+      hostInfo("a", { path: "a.docx", state: "embedded" }),
+      hostInfo("b", { path: "b.docx", state: "detached" }),
+      hostInfo("c", { path: "c.docx", state: "launching" }),
+      hostInfo("d", { path: "d.docx", state: "closed" }),
+      hostInfo("e", { path: "e.docx", state: "failed" }),
+    );
+    expect(useOfficeHostStore.getState().live()).toEqual(["a.docx", "b.docx", "c.docx"]);
+  });
+
+  it("names the file Office would not close, and only that one", async () => {
+    seedHosts(
+      hostInfo("fine", { path: "notes/fine.docx" }),
+      hostInfo("wedged", { path: "reports/wedged.docx" }),
+    );
+    office.answer = (hostId) =>
+      Promise.resolve(hostInfo(hostId, { state: "closed", close_failed: hostId === "wedged" }));
+
+    // The *file name*, not the relative path: this string goes into a sentence
+    // the user reads, next to the name on their own tab.
+    expect(await useOfficeHostStore.getState().closeLive()).toEqual(["wedged.docx"]);
+    expect(office.closed).toEqual(["fine", "wedged"]);
+  });
+
+  it("says nothing to settle when nothing is open, so a switch goes straight through", async () => {
+    expect(await useOfficeHostStore.getState().closeLive()).toEqual([]);
+    expect(office.closed).toEqual([]);
+  });
+
+  it("does not ask twice about a host that has already settled", async () => {
+    seedHosts(hostInfo("gone", { path: "gone.docx", state: "closed" }));
+    await useOfficeHostStore.getState().close("gone.docx");
+    expect(office.closed).toEqual([]);
+  });
+});
+
+describe("forgetting the workspace that is gone", () => {
+  it("waits for a close nobody awaited before clearing the map", async () => {
+    // The bug this exists for: an unmounting panel fires `close()` and does not
+    // wait for it. Clearing first lets that response put `report.docx` — a path
+    // in the project we just left — back into a map that is meant to be empty,
+    // where it goes on to back the *new* workspace's file of the same name.
+    let land = (): void => undefined;
+    office.answer = (hostId) =>
+      new Promise((resolve) => {
+        land = () => resolve(hostInfo(hostId, { state: "closed" }));
+      });
+    seedHosts(hostInfo("report", { path: "report.docx" }));
+
+    const unmount = useOfficeHostStore.getState().close("report.docx");
+    const reset = useOfficeHostStore.getState().resetForWorkspace();
+    land();
+    await Promise.all([unmount, reset]);
+
+    expect(useOfficeHostStore.getState().hosts).toEqual({});
+  });
+
+  it("clears when there is nothing in flight to wait for", async () => {
+    seedHosts(hostInfo("old", { path: "old.docx", state: "closed" }));
+    await useOfficeHostStore.getState().resetForWorkspace();
+    expect(useOfficeHostStore.getState().hosts).toEqual({});
   });
 });

@@ -59,6 +59,10 @@ export default defineConfig({
   // on `beforeEach` coming from the wrong runner. `.spec.ts` is Playwright's,
   // `.test.ts` is vitest's (`vitest.config.ts` claims exactly the other half).
   testMatch: "**/*.spec.ts",
+  // One at a time, because a budget measured next to another budget is not a
+  // measurement. The cost of that is a workspace every spec shares in file
+  // order, and the app persists the window arrangement into it — so what a spec
+  // starts in is reset per test rather than inherited. See `e2e/perf/window.ts`.
   fullyParallel: false,
   workers: 1,
   forbidOnly: process.env.CI !== undefined,

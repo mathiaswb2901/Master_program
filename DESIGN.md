@@ -4,27 +4,58 @@ Binding spec for all UI in Workbench (Tauri + React, dockview layout, Monaco, xt
 OnlyOffice, agent chat, QuickBar). Every color/size named here exists as a CSS custom
 property in `ui/src/design/tokens.css`. Components consume tokens — never raw hex.
 
-Style direction: **Swiss-modern precision workbench** — strict grid, hairline borders,
-one accent, zero decoration, dark-first graphite chrome. Chosen because the app hosts
-three "loud" embedded surfaces (Monaco, xterm, white Office documents); the chrome must
-be a calm neutral frame that makes each content surface look deliberate, and because the
-audience (energy/finance analysts) reads density and restraint as quality. Deliberately
-rejected: OLED-black + neon (dev toy), glassmorphism (GPU cost in a many-panel window),
-blue-navy bases (clash with white document paper).
+Style direction: **ANVIL — a true-black instrument with exactly one hot amber.**
+
+The window is a machined frame with content cut into it. Chrome is the *lighter*
+surface and every buffer is a well sunk below it, six achromatic steps from #393939
+chrome down to a pure-black terminal — the inverse of every graphite editor, and the
+reason a panel here reads as an object instead of as more window. Nothing in the
+neutrals carries a hue: Lab C\* is **0.00** on all twenty-three of them, no blue-grey, no warm
+grey, no tint at all. Against that, one amber, and it means two things only: *where I am*
+and *this is changing right now*. So the only chromatic pixel in the chrome is always the
+one worth looking at.
+
+Chosen 2026-08-06 from six directions rendered against a measured crispness bar
+(ROADMAP change request). It is the one that answers what was actually wrong, which was
+measurable rather than a matter of taste: five surfaces spanning 1.31:1 end to end (one
+grey field), a `--border-subtle` at 1.17:1 on panel — below the threshold at which an
+edge is perceived at all, while §1.4 elects hairlines to carry every piece of structure —
+`--text-tertiary` at 4.24:1 under 11px text (a live WCAG failure against §7's own rule),
+and a steel-blue accent at 220° on a 220° graphite base, which is VS Code's and GitHub's.
+
+Deliberately rejected: the graphite-and-steel-blue frame this replaces; glassmorphism
+(GPU cost in a many-panel window); any neutral carrying a hue; and a light theme derived
+by inverting these values rather than re-deriving them from the same four rules (§2.8).
 
 ---
 
 ## 1. Principles
 
-1. **Chrome recedes, content owns the light.** Panel chrome is low-contrast graphite;
-   the brightest things on screen are the user's document, code, and data — never our UI.
-2. **Paper is a first-class surface.** A white OnlyOffice canvas inside a dark window is
-   a feature, not a bug: document panels are framed as "paper" with a rim
-   (`--border-paper-rim`) and a dedicated surround color, in both themes.
-3. **One accent, spent sparingly.** `--accent` marks exactly: focus, selection, the
-   primary action, and "agent working". If everything glows, nothing does.
+1. **The chrome frames; the content is sunk into it.** Value states depth, and the
+   deepest thing on screen is what you are working in. Chrome is one or two steps
+   *lighter* than the panel it holds, and the panel is lighter than the buffer inside
+   it — `#393939` frame, `#202020` panel, `#141414` code, `#000000` terminal. The rule
+   is direction-free, so it survives the light theme intact: content sits at the end of
+   the value scale and every layer of frame steps one notch toward the middle (§2.1).
+2. **Paper is a first-class surface, and paper needs a mat.** A white Office page inside
+   this window is a feature, not a bug — but dropped straight onto chrome it reads as a
+   hole. Document panels get a mat: a mid-grey surround (`--surface-paper-surround`, a
+   full 6.9:1 below the page in dark), the page inset into it, a rim
+   (`--border-paper-rim`) and the tab strip painted at the mat value, so the frame is one
+   continuous surface from tab to page edge. Both themes.
+3. **One amber, and it only ever means two things.** `--accent` marks **where I am**
+   (the focused pane's live rule, selection, the field you are typing in, the drop
+   target under the pointer) and **this is changing right now** (an agent working, a
+   value moving, the one action the app is blocked on). Nothing standing, nothing
+   decorative, nothing that is still true when you look away. Everything else in the
+   chrome is achromatic, which is what makes a single amber pixel carry information at a
+   glance instead of being a colour scheme.
 4. **Hairlines, not shadows, define structure.** Panels separate with 1px borders and
    surface steps. Shadows exist only on things that float (menus, QuickBar, tooltips).
+   A corollary that had been left implicit and cost the app its structure: if a hairline
+   is the *only* thing carrying a boundary, it has to be visible. `--border-subtle` is
+   2.51:1 on `--surface-panel` in both themes, and `ui/e2e/palette.test.ts` fails the
+   build if it drifts below.
 5. **Density is respect.** 13px base UI, 26px rows, 34px bars. Analysts want more on
    screen, not bigger buttons. Minimum hit target 24×24px (desktop, WCAG 2.2).
 6. **Motion is continuous, and it is restrained by damping rather than by absence.**
@@ -40,67 +71,141 @@ blue-navy bases (clash with white document paper).
 
 ## 2. Color system
 
-Graphite ramp at hue ≈ 220°, saturation 8–12% — near-neutral, faintly cool. Accent is a
-calm steel blue. Semantic hues are battle-tested dark/light pairs (≥ 4.5:1 against their
-text surfaces, ≥ 3:1 as UI indicators).
+**ANVIL.** Two rules produce almost all of it, and both are measured rather than
+asserted — `ui/e2e/palette.test.ts` re-derives every figure below from `tokens.css` and
+fails the build when one drifts.
+
+1. **The neutrals have no hue.** Every grey in the system is Lab C\* = **0.00** — the
+   surfaces, the text, the borders, the ANSI black/white slots, the shadows and the
+   scrim. The palette this replaces sat at hue 220° with C\* 2.2–4.1, which is why the
+   accent had to be a blue to look like it belonged.
+2. **Value states depth, and the content is the deepest thing on screen.** Six surfaces,
+   adjacent steps 5.8–6.3 L\*, 29.7 L\* end to end. Chrome is *lighter* than the panel it
+   frames; the panel is lighter than the buffer inside it.
+
+Against that: one amber, spent only on *where I am* and *what is changing right now*
+(§2.4). Semantic colours keep the hues everyone already reads (green/orange/red) and one
+orchid for "needs you", all ≥ 4.5:1 as text on their own surfaces and ≥ 3:1 as
+indicators.
 
 ### 2.1 Surfaces
 
-| Token | Dark | Light | Use |
-|---|---|---|---|
-| `--surface-app` | `#14161A` | `#ECEEF1` | Window chrome: title bar, dock tab strips, activity/status bars |
-| `--surface-panel` | `#1A1D22` | `#F7F8FA` | Panel bodies: file tree, chat, editor gutter background |
-| `--surface-elevated` | `#21252C` | `#FFFFFF` | Cards, inputs, user chat bubble, hovered dropzones |
-| `--surface-overlay` | `#262B33` | `#FFFFFF` | QuickBar, menus, popovers, tooltips (always + `--shadow-3`) |
-| `--surface-terminal` | `#111317` | `#FFFFFF` | xterm.js background (deepest dark surface) |
-| `--surface-paper` | `#FFFFFF` | `#FFFFFF` | Document canvas ("paper") — identical in both themes |
-| `--surface-paper-surround` | `#262B33` | `#E4E7EB` | Area around the page inside a document panel |
-| `--surface-hover` | `rgba(255,255,255,0.05)` | `rgba(17,19,23,0.05)` | Hover wash on rows/tabs/buttons |
-| `--surface-active` | `rgba(255,255,255,0.08)` | `rgba(17,19,23,0.08)` | Pressed wash |
-| `--surface-selected` | `rgba(92,156,230,0.14)` | `rgba(46,111,208,0.10)` | Selected row/tab/list item |
-| `--backdrop` | `rgba(0,0,0,0.45)` | `rgba(15,18,23,0.30)` | Modal/QuickBar scrim |
+The ramp, deepest well first. `L*` is the dark value; light's is in brackets.
+
+| Token | Dark | Light | L\* | Use |
+|---|---|---|---|---|
+| `--surface-terminal` | `#000000` | `#FFFFFF` | 0.0 [100.0] | xterm ground — the deepest well |
+| `--surface-code` | `#141414` | `#F3F3F3` | 6.3 [95.8] | Monaco buffer + gutter, chat code blocks, tool output, diffs |
+| `--surface-panel` | `#202020` | `#E8E8E8` | 12.3 [92.0] | Panel bodies: file tree, chat, usage, nested tab strips |
+| `--surface-elevated` | `#2C2C2C` | `#DDDDDD` | 18.0 [88.1] | Cards, inputs, user chat bubble, keycaps |
+| `--surface-app` | `#393939` | `#D1D1D1` | 24.0 [83.8] | Window chrome: pane tab strips, status bar, the dock's own background |
+| `--surface-overlay` | `#464646` | `#C6C6C6` | 29.7 [79.9] | Everything that floats: QuickBar, modal, menus, popovers, toasts, tooltips |
+| `--surface-paper` | `#FFFFFF` | `#FFFFFF` | 100.0 | Document canvas ("paper") — identical in both themes |
+| `--surface-paper-surround` | `#5A5A5A` | `#A5A5A5` | 38.2 [67.7] | The mat a docked page sits on (§6.1). 6.90:1 [2.46:1] below the page |
+| `--surface-hover` | `rgba(255,255,255,0.06)` | `rgba(0,0,0,0.06)` | — | Hover wash on rows/tabs/buttons |
+| `--surface-active` | `rgba(255,255,255,0.10)` | `rgba(0,0,0,0.10)` | — | Pressed wash |
+| `--surface-selected` | `rgba(251,191,36,0.18)` | `rgba(251,191,36,0.48)` | — | Selected row/tab/list item — an amber wash, in both themes |
+| `--backdrop` | `rgba(0,0,0,0.60)` | `rgba(0,0,0,0.35)` | — | Modal/QuickBar scrim |
+
+**`--surface-app` is lighter than `--surface-panel`, and that is the whole direction.**
+The chrome is a frame with wells cut into it. Three consequences you apply without
+asking, because a token swap alone puts them the wrong way round:
+
+- **A nested tab strip is painted `--surface-panel`, not `--surface-app`.** The editor's
+  file strip and the terminal's shell strip live *inside* a pane whose own strip is
+  already `--surface-app`; painting them at chrome value would put the lightest surface
+  in the window underneath the pane's dark active tab and break the fusion that is the
+  active indicator (§6.1). The window descends `#393939` pane → `#202020` strip →
+  `#141414` buffer, or `#000000` for a terminal.
+- **A tab fuses with the surface immediately below it**, which for the editor's file
+  strip is `--surface-code`, for the terminal's is `--surface-terminal`, and for a
+  document is the mat.
+- **The sash hairline is `--border-strong`, not `--border-subtle`.** It is drawn in the
+  dock's `--surface-app` gap rather than on a panel, where the subtle hairline's 2.51:1
+  becomes 1.78:1 and disappears. Same rule, measured where it actually sits.
 
 ### 2.2 Text
 
-| Token | Dark | Light | Use |
-|---|---|---|---|
-| `--text-primary` | `#E6E9EE` | `#1B1F26` | Headings, active tab, primary content |
-| `--text-secondary` | `#A8B0BC` | `#4B5563` | Body in panels, inactive-but-relevant |
-| `--text-tertiary` | `#78808D` | `#6E7781` | Metadata, timestamps, inactive tabs, placeholders |
-| `--text-disabled` | `#545B66` | `#9AA1AB` | Disabled controls only |
-| `--text-on-accent` | `#FFFFFF` | `#FFFFFF` | Text on accent-filled buttons |
-| `--text-on-paper` | `#1B1F26` | `#1B1F26` | Our chrome drawn over paper surfaces (both themes) |
+Contrast on `--surface-panel`; both themes are within 0.03 of each other.
+
+| Token | Dark | Light | On panel | Use |
+|---|---|---|---|---|
+| `--text-primary` | `#F5F5F5` | `#151515` | 14.94:1 [14.90] | Headings, active tab, primary content |
+| `--text-secondary` | `#D6D6D6` | `#2D2D2D` | 11.21:1 [11.24] | Body in panels, inactive-but-relevant |
+| `--text-tertiary` | `#B4B4B4` | `#454545` | 7.86:1 [7.83] | Metadata, timestamps, inactive tabs, placeholders |
+| `--text-disabled` | `#858585` | `#6A6A6A` | 4.42:1 [4.41] | Disabled controls only (exempt from §7's floor) |
+| `--text-on-accent` | `#141414` | `#141414` | 11.04:1 on `--accent-fill` | Text on amber-filled buttons |
+| `--text-on-paper` | `#141414` | `#141414` | 18.1:1 on paper | Our chrome drawn over paper surfaces |
+
+`--text-tertiary` is the token the diagnosis turned on: it was 4.24:1 under 11px text,
+which §7 forbids and which is most of why the window read as washed out. It now carries
+the same 7.86:1 in both themes.
 
 ### 2.3 Borders
 
-| Token | Dark | Light | Use |
+Structure lives here (§1.4), so these are contrast figures, not shades.
+
+| Token | Dark | Light | On panel | Use |
+|---|---|---|---|---|
+| `--border-subtle` | `#5E5E5E` | `#939393` | 2.51:1 | Panel-to-panel hairlines, row separators |
+| `--border-default` | `#6E6E6E` | `#818181` | 3.20:1 [3.18] | Inputs, cards, buttons |
+| `--border-strong` | `#8C8C8C` | `#646464` | 4.85:1 [4.83] | Hover/active borders, sash hairlines, dividers needing weight |
+| `--border-paper-rim` | `#9E9E9E` | `#555555` | 6.08:1 | 1px rim framing document ("paper") panels |
+| `--focus-ring` | `#FBBF24` | `#856000` | 9.76:1 [4.67] | 2px focus outline everywhere |
+
+The old `--border-subtle` was **1.17:1** on panel — below the threshold at which a 1px
+edge is perceived at all. That single number is the mechanical reason no panel read as an
+object, and it is why §1.4 now carries a contrast floor rather than only a preference.
+
+### 2.4 Accent — the amber, and where it is allowed
+
+| Token | Dark | Light | What it is |
 |---|---|---|---|
-| `--border-subtle` | `#262A31` | `#E4E7EB` | Panel-to-panel hairlines, row separators |
-| `--border-default` | `#2E333C` | `#D7DBE1` | Inputs, cards, buttons |
-| `--border-strong` | `#3D4450` | `#B9C0C9` | Hover/active borders, dividers needing weight |
-| `--border-paper-rim` | `#3D4450` | `#D7DBE1` | 1px rim framing document ("paper") panels |
-| `--focus-ring` | `#5C9CE6` | `#2E6FD0` | 2px focus outline everywhere |
+| `--accent` | `#FBBF24` | `#856000` | The amber that **marks**: rules, text, borders, dots, the focus ring |
+| `--accent-hover` | `#FFD24D` | `#6E5000` | Its hover |
+| `--accent-active` | `#E0A413` | `#5A4100` | Its press |
+| `--accent-muted` | `rgba(251,191,36,0.16)` | `rgba(251,191,36,0.42)` | The amber **wash** — carries `--text-primary`, never amber text |
+| `--accent-fill` | `#FBBF24` | `#FBBF24` | The amber **area** a label sits on. One value for both themes |
+| `--accent-fill-hover` | `#FFD24D` | `#FFD24D` | |
+| `--accent-fill-active` | `#E0A413` | `#E0A413` | |
 
-### 2.4 Accent
+`--accent` is 9.76:1 on `--surface-panel` (dark) and 4.67:1 (light) — usable as text in
+both — and ≥ 3:1 on every chrome surface, which is what a 2px rule needs (WCAG 1.4.11).
 
-| Token | Dark | Light |
+**The two meanings, and nothing else.** *Where I am*: the focused pane's live rule
+(§6.1), a selected row, the field you are typing in, the drop target under the pointer,
+the sash you are dragging, the focus ring. *Changing right now*: an agent working, a
+meter filling, focus mode holding the window, the one action the app is blocked on
+(`Allow`, `Approve` — `--accent-fill`).
+
+**Demoted when ANVIL landed**, each because it was still true when you looked away:
+
+| Was amber | Now | Why |
 |---|---|---|
-| `--accent` | `#5C9CE6` | `#2E6FD0` |
-| `--accent-hover` | `#75ADEC` | `#275FB5` |
-| `--accent-active` | `#4A8AD4` | `#21519B` |
-| `--accent-muted` | `rgba(92,156,230,0.15)` | `rgba(46,111,208,0.12)` |
+| Links in chat and the provenance bar | `--text-primary` + underline | Navigation, not motion. The underline is also the non-colour signal §7 asks for |
+| Tool-call and plan-file hover | `--text-primary` | A hover is answered by the wash; it does not need the one colour that means "live" |
+| The QuickBar input's focus underline | `--border-strong` | The bar being open already says focus is in it; the selected row's amber edge is the mark that matters inside a 640px overlay |
+| The plan card's *Recommended* pill | Outlined neutral | A standing property of an option — true before you opened the card |
+| The "this really is Word" dot | `--success` | True for as long as the window is docked. A permanent amber dot is how amber stops meaning anything |
+| Every live shell tab's dot (§6.6) | `--success` | Found by *looking at the running app*, not by reading the stylesheet: it is set from `terminal.alive`, so a shell sitting at a prompt all afternoon wore the one "right now" colour, on every terminal tab at once |
 
-`--accent` on `--surface-panel` ≈ 6.0:1 (dark) and 4.9:1 on white (light) — usable as
-link/text color, not just fills.
+**Kept, deliberately**: the scene-graph `accent` role in visual artifacts
+(`.is-accent` on a table row, a node, a metric). That is the model saying *this is the
+number that matters in this artifact* — content, not chrome, and the one place amber is
+allowed to be a standing mark.
 
 ### 2.5 Semantic
 
-| Token | Dark | Light | Tinted bg (dark / light) |
-|---|---|---|---|
-| `--success` | `#3FB950` | `#1A7F37` | `rgba(63,185,80,0.14)` / `rgba(26,127,55,0.10)` |
-| `--warn` | `#D29922` | `#9A6700` | `rgba(210,153,34,0.14)` / `rgba(154,103,0,0.10)` |
-| `--error` | `#F85149` | `#CF222E` | `rgba(248,81,73,0.14)` / `rgba(207,34,46,0.10)` |
-| `--info` | `#58A6FF` | `#0969DA` | `rgba(88,166,255,0.14)` / `rgba(9,105,218,0.10)` |
+| Token | Dark | Light | On panel | Tinted bg (both) |
+|---|---|---|---|---|
+| `--success` | `#22C55E` | `#03722C` | 7.15:1 [4.97] | `--success-bg` at 16% |
+| `--warn` | `#FF7A18` | `#A44804` | 6.24:1 [4.89] | `--warn-bg` at 16% |
+| `--error` | `#FF4D4D` | `#C70505` | 4.98:1 [4.96] | `--error-bg` at 16% |
+| `--info` | `#E879F9` | `#A905C2` | 6.62:1 [4.91] | `--info-bg` at 16% |
+
+Hues are identical across themes (142° / 25° / 0° / 292°); only the value moves. `--warn`
+is the nearest neighbour to the amber by construction — orange beside amber — and is
+held ≥ ΔE 25 from it, tested. It is also rare: a conflict bar, a usage warning.
 
 ### 2.6 Agent status
 
@@ -109,35 +214,81 @@ meaning is different and may diverge later).
 
 | Token | Dark | Light | Meaning |
 |---|---|---|---|
-| `--agent-working` | `#5C9CE6` | `#2E6FD0` | Agent running — dot pulses (see §6) |
-| `--agent-attention` | `#D29922` | `#9A6700` | Needs permission / user input — dot steady |
-| `--agent-idle` | `#78808D` | `#6E7781` | Session open, nothing running |
-| `--agent-done` | `#3FB950` | `#1A7F37` | Finished since last viewed |
-| `--agent-error` | `#F85149` | `#CF222E` | Failed / crashed |
+| `--agent-working` | `#FBBF24` | `#856000` | Agent running — dot pulses (§5.4). The canonical "changing right now" |
+| `--agent-attention` | `#E879F9` | `#A905C2` | Needs permission / user input — dot steady |
+| `--agent-idle` | `#7A7A7A` | `#6A6A6A` | Session open, nothing running |
+| `--agent-done` | `#22C55E` | `#03722C` | Finished since last viewed |
+| `--agent-error` | `#FF4D4D` | `#C70505` | Failed / crashed |
+
+`--agent-attention` is **not** amber, and the swap is deliberate: a session waiting on
+you is a standing state that can sit on screen for an hour, and a standing amber spends
+the one colour that has to mean motion. Orchid is unmistakable beside a green, an orange
+and a red, and it is the same hue as `--info`.
 
 ### 2.7 Terminal ANSI palette
 
-Harmonized 16-color set (tokens `--ansi-*` in tokens.css). Dark: black `#2A2E37`, red
-`#F47067`, green `#57AB5A`, yellow `#C69026`, blue `#6CB6FF`, magenta `#B083F0`, cyan
-`#39C5CF`, white `#A8B0BC`; brights `#545B66 #FF938A #6BC46D #DAAA3F #96D0FF #DCBDFB
-#56D4DD #E6E9EE`. Light: black `#1B1F26`, red `#CF222E`, green `#1A7F37`, yellow
-`#9A6700`, blue `#0969DA`, magenta `#8250DF`, cyan `#1B7C83`, white `#6E7781`; brights
-`#4B5563 #A40E26 #116329 #7D5400 #218BFF #A475F9 #3192AA #8C959F`. Feed these to
-xterm.js `theme` and to the Monaco theme's token colors so terminal, editor, and chrome
+Retuned for a `#000000` ground — the previous set was chosen against `#111317` and its
+darkest slots simply vanished on true black. Three rules, all tested:
+
+1. Every slot is ≥ 4.5:1 on `--surface-code`, which is where Monaco reads them; the dim
+   `black` slot is ≥ 2:1 on `--surface-terminal` (it is a background, never body text).
+2. `black`, `white`, `bright-black` and `bright-white` are pure greys (C\* = 0).
+3. **No slot comes within ΔE 25 of `--accent`.** The yellow is the one this binds: it is
+   pushed to hue 57° (dark) / 72° (light), ΔE 26.8 / 29.5, because a warm yellow at
+   terminal scale reads as the focus rule and then amber has stopped meaning anything.
+
+Dark: black `#4D4D4D`, red `#FF6B60`, green `#3ECF7F`, yellow `#D8D24F`, blue `#6BB6FF`,
+magenta `#C68BF5`, cyan `#45D6DE`, white `#C8C8C8`; brights `#8A8A8A #FF9A90 #6FE3A4
+#EDE783 #9CD1FF #DFB6FB #7FE8EE #F5F5F5`. Light: black `#2D2D2D`, red `#B02419`, green
+`#0E6B36`, yellow `#556B00`, blue `#14539E`, magenta `#7A2E9E`, cyan `#12666E`, white
+`#545454`; brights `#454545 #8A1A11 #0A5028 #404E0A #0D3E78 #5C2277 #0D4B52 #151515`.
+
+`bright-black` moved furthest (`#545B66` → `#8A8A8A`): Monaco maps `comment` to it, so it
+is body text and was failing at 2.9:1. It is now 5.34:1 on the buffer. Feed these to
+xterm.js `theme` and to the Monaco theme's token colors so terminal, editor and chrome
 read as one system.
 
-### 2.8 Monaco / OnlyOffice harmonization
+### 2.8 Deriving the light theme, and harmonizing Monaco / OnlyOffice
 
-- **Monaco:** define custom themes `workbench-dark` / `workbench-light` based on
-  `vs-dark` / `vs` with: `editor.background` = `--surface-panel`,
+**The light theme is derived, not inverted.** ANVIL is a dark direction; light re-applies
+its four rules to a white ground:
+
+- *Achromatic neutrals* — C\* = 0.00 on all twenty-three, shadows and scrim included.
+- *Content at the end of the scale* — so the chrome is **darker** than the wells here.
+  Same sentence, opposite direction; §2.1's three consequences hold unchanged.
+- *Visible edges* — `--border-subtle` is 2.51:1 on panel, dark's exact figure, because
+  the threshold is a ratio and not a value.
+- *One amber* — with the one real problem in the whole exercise, stated rather than
+  papered over.
+
+**The hot amber cannot be a mark on a light ground.** `#FBBF24` is 1.33:1 on
+`--surface-panel` in light: not text, not a rule, not a border, not even close to the 3:1
+a UI indicator needs. It is a *light* colour, and the value scale has no room above it.
+The lightest amber at that hue which clears 4.5:1 as text is `#856000`, and that is what
+light spends on every mark. The hot amber survives where it is a **filled area** —
+`--accent-fill`, carrying `#141414` text at 11.04:1 — which is why `--accent-fill` is one
+value in both themes and `.wb-btn-primary` reads for it rather than for `--accent`.
+
+The one honest difference between the themes: light's surface steps are ~4 L\* against
+dark's ~6, and 20.1 end to end against 29.7. A light ramp starts at 100 and has nowhere
+to go but down; matching dark's spread would land the chrome in mid-grey and it would
+stop being a light theme. Light pays it back in its borders, which are far easier to see
+against a bright field.
+
+- **Monaco:** custom themes `workbench-dark` / `workbench-light` on `vs-dark` / `vs`
+  with `editor.background` and `editorGutter.background` = **`--surface-code`** (the
+  buffer is a well, one step below the panel and the tree beside it),
   `editor.lineHighlightBackground` = `--surface-hover`, `editorLineNumber.foreground` =
   `--text-tertiary`, `editorCursor.foreground` = `--accent`, selection =
-  `--surface-selected`, syntax colors drawn from the ANSI palette above.
+  `--surface-selected`, syntax colors drawn from §2.7.
 - **OnlyOffice:** the iframe is left light ("paper" doctrine). The hosting panel body is
-  `--surface-paper-surround` with a 1px `--border-paper-rim`; our loading spinner /
-  empty state inside a document panel uses `--text-on-paper` colors so nothing dark-mode
-  flashes against the white canvas. Pass OnlyOffice `uiTheme: "theme-light"` always;
-  never attempt to dark-skin the document itself.
+  `--surface-paper-surround` with the page inset into it behind a 1px
+  `--border-paper-rim`; our loading spinner / empty state inside a document panel uses
+  `--text-on-paper` colors so nothing dark-mode flashes against the white canvas. Pass
+  OnlyOffice `uiTheme: "theme-light"` always; never attempt to dark-skin the document.
+  The native Office host takes the same inset, and its rim is an *outset* ring rather
+  than a border — the host sizes the real Word window from that element's border box, so
+  a 1px border would be underneath the window and invisible.
 
 ---
 
@@ -401,12 +552,31 @@ through the token file and fails the build if a colour-only one lands on a sprin
 ## 6. Component specs
 
 ### 6.1 Dockview tab bar + panel chrome
+- **THE LIVE RULE — the signature.** The pane the keyboard is in wears a **2px
+  full-bleed `--accent` rule across the top of its tab strip**, and exactly one pane in
+  the window wears it. This is the app's focus indicator and the single most-seen use of
+  the amber; everything else about a pane's chrome is neutral. Full-bleed because the
+  *pane* is what is focused, not a tab. 2px rather than the 1px this used to be: §1.4
+  gives every hairline in the window to structure, so a 1px focus mark borrows
+  structure's weight and becomes something you have to look for. Implemented as a
+  `::before` overlay on `.dv-active-group`'s tab container, and never animated — a focus
+  indicator that arrives late is a focus indicator that lies. **Not** an `inset`
+  box-shadow: that paints on the container's own background and the tabs are children
+  with backgrounds of their own, so it is occluded across the whole width of the active
+  tab and the rule appears to *start* after the tab instead of crossing the pane. Not a
+  `border-top` either, which would cross but would take its 2px out of the 34px strip
+  and jump the tab row every time focus moved.
 - Tab strip: height **34px**, bg `--surface-app`, bottom hairline `--border-subtle`.
+- **A nested strip is `--surface-panel`, not `--surface-app`** (§2.1). The editor's file
+  strip and the terminal's shell strip sit inside a pane that already has a strip; they
+  are one step further in, and painting them at chrome value would put the window's
+  lightest surface under the pane's dark active tab.
 - Tab: 12px/500 text, padding 0 12px, min-width 90px, max-width 200px with truncation.
   Inactive: `--text-tertiary`, transparent bg; hover: `--text-secondary` +
-  `--surface-hover`. Active: `--text-primary`, bg `--surface-panel`, **no bottom
-  border** (tab merges into panel body) — this fusion is the active indicator; no
-  underline, no accent bar.
+  `--surface-hover`. Active: `--text-primary`, bg = **the surface immediately below it**
+  (`--surface-panel` for a pane tab, `--surface-code` for a file tab, `--surface-terminal`
+  for a shell tab, the mat for a document), **no bottom border** — this fusion is the
+  active indicator; no underline, no accent bar.
 - Dirty dot: 6px `--text-secondary` circle replacing close button until hover.
 - Close button: 16px glyph in 20px hit area, visible on hover/active only.
 - **Panel** (not document) tabs are chrome: title, the tool's optional 14px glyph, and
@@ -415,17 +585,36 @@ through the token file and fails the build if a colour-only one lands on a sprin
   button in an 18px hit area, always visible, because it is the only way back and a
   hover-only affordance on the one closable tab is a dead end. Which panels those are
   is a registry fact (`openByDefault: false`), never a list in the tab component.
-- Focused panel (keyboard focus lives inside it): its tab text `--text-primary` and a
-  1px `--accent` top edge on the tab strip of that group only — the one place chrome
-  uses accent structurally.
-- Drop hints during drag: overlay `--accent-muted` fill + 1px `--accent` border.
-- Document (Office) panels: body `--surface-paper-surround`; page shadow `--shadow-1`;
-  rim `--border-paper-rim`.
+- Focused panel (keyboard focus lives inside it): its tab text `--text-primary`, plus
+  the live rule above.
+- Drop hints during drag: overlay `--accent-muted` fill + 1px `--accent` border. Amber
+  is right here — it is the target under the pointer *now*.
+- **Document (Office) panels get a mat, not a background** (§1.2). Four parts, and all
+  four are needed:
+  1. **Mat** — the panel body is `--surface-paper-surround`, a mid-grey 6.90:1 below the
+     page in dark and 2.46:1 in light. Not a shade of the chrome: a page on chrome reads
+     as a hole punched in the window.
+  2. **Inset** — the page is inset `--space-5` on all sides, so it is a sheet *laid on*
+     the mat rather than a panel that happens to be white.
+  3. **Rim and lift** — 1px `--border-paper-rim` plus `--shadow-1`. On the native host
+     the rim is an outset ring, because the real Word window covers the border box.
+  4. **The tab strip is painted at the mat value** — this
+     is the part usually forgotten, and it is what makes the frame one continuous
+     surface from the tab down past the page edge instead of two unrelated greys
+     meeting. The active document's tab fuses into the mat like any other tab fuses into
+     what is below it. Driven by `is-document` on the editor frame, which follows the
+     *active view* (`documentViewFor`), never a list of file extensions.
+     Its labels are `--text-primary`/`--text-secondary`, **not** `--text-on-paper`: the
+     mat is a mid-grey (L* 38 dark, 68 light), the one surface in the system where the
+     app's text pair works (6.33:1 / 4.75:1) and the paper pair does not (2.67:1, worse
+     than the failure this palette exists to fix). `--text-tertiary` is 3.33:1 there and
+     is never used on the mat.
 - Bars above the buffer (conflict, provenance): one line, 12px, 6px/12px padding,
   bottom hairline `--border-subtle`, background = the status wash for what they mean
   (`--warn-bg` for a conflict, `--agent-done-bg` for an agent change). Actions on the
-  right as 24px ghost/outline buttons; a link inside the sentence is `--accent` text
-  (§2.4), never a filled control. A tab whose file an agent changed carries the same 6px `--agent-done` dot
+  right as 24px ghost/outline buttons; a link inside the sentence is `--text-primary`
+  with an underline (§2.4 — links were demoted off the amber), never a filled control.
+  A tab whose file an agent changed carries the same 6px `--agent-done` dot
   as the tree row until the tab is brought forward.
 - The provenance bar is **not** an unread marker and does not clear on open — the two
   dots do that. It answers "who wrote what I am reading", so it stands for as long as
@@ -460,14 +649,17 @@ through the token file and fails the build if a colour-only one lands on a sprin
 - **User message:** bubble on `--surface-elevated`, `--radius-lg`, padding 8px 12px,
   right-aligned, max-width 85%.
 - **Assistant message:** no bubble — full-width text on `--surface-panel` (documents
-  read better than chat toys). 8px between blocks; code blocks on `--surface-terminal`
-  with `--radius-md` + `--border-subtle`, mono 13px.
+  read better than chat toys). 8px between blocks; code blocks and tool output on
+  `--surface-code` with `--radius-md` + `--border-subtle`, mono 13px — one step
+  below the column, not the terminal's black, which would be a 12 L* drop where the
+  ramp calls for 6.
 - **Tool-call row:** collapsed height 28px, mono 12px `--text-secondary`; 2px left
   border in status color (`--agent-working` pulses via the dot, border steady;
   `--success` / `--error` when settled); chevron expands to output block (instant).
 - **Permission prompt:** card on `--surface-elevated`, 1px `--warn`-tinted border
   (`--warn-bg` background wash at header). Buttons 28px height, `--radius-sm`, 13px/500:
-  *Allow* = filled `--accent` / `--text-on-accent`; *Allow always* = outline
+  *Allow* = filled `--accent-fill` / `--text-on-accent` (§2.4 — the one action the app
+  is blocked on); *Allow always* = outline
   `--border-default` text `--text-primary`; *Deny* = ghost `--text-secondary`, hover
   `--error` text. Never a red filled button — denying is safe, not destructive.
 - Session header per agent: 11px uppercase label + status badge (§6.4), sticky.
@@ -519,8 +711,10 @@ through the token file and fails the build if a colour-only one lands on a sprin
 - ANSI palette from §2.7; cursor `--accent`, block, blink off by default; selection
   `--surface-selected`. Scrollbar: 10px overlay, thumb `--border-strong`, transparent
   track.
-- Terminal tabs reuse §6.1 at the same 34px; a running-process dot uses
-  `--agent-working` steady (no pulse — pulse is reserved for agents).
+- Terminal tabs reuse §6.1 at the same 34px, on a `--surface-panel` nested strip
+  (§2.1); a live-shell dot is `--success`, steady. **Not** `--agent-working`: it is set
+  from "the PTY has not exited", which is true all afternoon, and a standing dot cannot
+  wear the colour that means *now* (§2.4).
 
 ### 6.7 Status bar
 - Height **24px**, bg `--surface-app`, 1px `--border-subtle` top hairline, 11px text.
@@ -637,8 +831,8 @@ arrangement belongs to the user. The whole system is one capability
   On the focused pane only: chrome recedes (§1.1), and a control on all six tab strips in
   a full window is five controls nobody is looking at — where the keyboard is, is where
   the mouse path belongs. Panel tabs themselves gain nothing (§6.1 stands).
-- **Pane focus** is stated exactly as it already was: the focused group's tab strip
-  carries the 1px `--accent` top edge (§6.1). Splitting, swapping and directional
+- **Pane focus** is the live rule: the focused group's tab strip carries the 2px
+  full-bleed `--accent` rule (§6.1). Splitting, swapping and directional
   movement all leave that mark on the pane you ended up in — it is the only feedback the
   keyboard commands produce, and it must never be ambiguous, so **exactly one** pane
   carries it.
@@ -674,8 +868,35 @@ arrangement belongs to the user. The whole system is one capability
 
 ## 7. Accessibility
 
-- Contrast: body text ≥ 4.5:1 on its surface; large text (≥18.66px/600) and UI glyphs
-  ≥ 3:1. The token pairs in §2 meet this — verify any new pair before adding it.
+- **Contrast**: body text ≥ 4.5:1 on its surface; large text (≥18.66px/600) and UI
+  glyphs ≥ 3:1. The pairs in §2 are *measured*, and the measurement is a gate:
+  `ui/e2e/palette.test.ts` re-derives every figure below from `tokens.css` and fails the
+  build on drift. Verify any new pair there, not by eye.
+
+  | Pair | Dark | Light | Floor |
+  |---|---|---|---|
+  | `--text-primary` on `--surface-panel` | 14.94:1 | 14.90:1 | 4.5 |
+  | `--text-secondary` on `--surface-panel` | 11.21:1 | 11.24:1 | 4.5 |
+  | `--text-tertiary` on `--surface-panel` | 7.86:1 | 7.83:1 | 4.5 |
+  | `--text-tertiary` on `--surface-app` (status bar, 11px) | 5.57:1 | 6.28:1 | 4.5 |
+  | `--text-tertiary` on `--surface-overlay` (QuickBar, 11px) | **4.55:1** | 5.61:1 | 4.5 |
+  | `--text-primary` on `--surface-terminal` | 19.26:1 | 18.26:1 | 4.5 |
+  | `--text-on-accent` on `--accent-fill` | 11.04:1 | 11.04:1 | 4.5 |
+  | `--accent` as text on `--surface-panel` | 9.76:1 | 4.67:1 | 4.5 |
+  | `--accent` as the live rule on `--surface-app` | 6.92:1 | 3.75:1 | 3.0 |
+  | `--border-subtle` on `--surface-panel` | 2.51:1 | 2.51:1 | — (§1.4) |
+  | every `--ansi-*` on `--surface-code` (bar the dim `black`) | ≥ 5.34:1 | ≥ 5.42:1 | 4.5 |
+  | `--text-primary` on `--surface-paper-surround` (document tabs) | 6.33:1 | 7.41:1 | 4.5 |
+  | `--text-secondary` on `--surface-paper-surround` | 4.75:1 | 5.59:1 | 4.5 |
+
+  Every text pair on the six ramp surfaces is ≥ 5:1 except one, named here rather than
+  rounded away: `--text-tertiary` on `--surface-overlay` in dark, at 4.55:1 — above the
+  floor, and the test pins it so it cannot quietly become the second. (The mat is not a
+  ramp surface; it is a mid-grey by design and `--text-tertiary` is 3.33:1 on it, which is
+  why §6.1 forbids tertiary there.) `--text-disabled` (4.42:1)
+  is exempt under WCAG 1.4.3; a disabled row that reads as enabled is the worse failure.
+  `--accent` is not text-capable on light chrome and is never used as text there — §2.8
+  says why, and it is the reason `--accent-fill` exists.
 - Focus: 2px `--focus-ring` outline, offset 2px (inset for list rows), on **every**
   focusable element. Never `outline: none` without a replacement in the same rule.
 - Hit targets ≥ 24×24px (desktop pointer, WCAG 2.2); rows may be 26px tall but must be

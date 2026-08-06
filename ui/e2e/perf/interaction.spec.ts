@@ -17,10 +17,11 @@
  * so it blocks in CI while the frame numbers are recorded.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
 import { installTelemetry, readTelemetry, record, round, sampleFrames } from "./instrument";
+import { test } from "./window";
 
 /**
  * Measured 2026-08-05 on the author's machine, expanding the 2,000-file folder

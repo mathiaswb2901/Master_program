@@ -716,12 +716,6 @@ export function FileTreePanel(_props: IDockviewPanelProps) {
   );
 }
 
-/** Left end of the status bar: which workspace this window is looking at. */
-function WorkspaceStatus() {
-  const workspace = useStore((s) => s.workspaceName);
-  return <span className="wb-status-workspace u-truncate">{workspace}</span>;
-}
-
 export const filesTool: WorkbenchTool = {
   id: "files",
   title: "Files",
@@ -729,5 +723,8 @@ export const filesTool: WorkbenchTool = {
     component: FileTreePanel,
     defaultLocation: { area: "left", size: 240 },
   },
-  statusContributions: [{ region: "left", component: WorkspaceStatus }],
+  // The workspace name used to be this tool's status item, as a label. It moved
+  // to the Workspaces tool in M5 item 5, where it is a *control*: the workspace
+  // is no longer "the folder this tree happens to show" but something the user
+  // changes, and two workspace names in one status bar would be one too many.
 };

@@ -29,13 +29,15 @@ import { NOTES_FILE } from "./workspace";
 /** Vite names the dynamic chunk after its entry module (`monacoBundle.ts`). */
 const MONACO_CHUNK = "**/assets/monacoBundle-*.js";
 
-/** `--surface-panel` of the theme on screen, as the browser's own `rgb(…)`
- * string — the exact form a computed background reads back in. */
-function panelToken(page: Page): Promise<string> {
+/** `--surface-code` of the theme on screen, as the browser's own `rgb(…)`
+ * string — the exact form a computed background reads back in. That is the
+ * token Monaco's `editor.background` is built from: the buffer is a content
+ * well one step below the panel around it (DESIGN.md §2.1). */
+function codeToken(page: Page): Promise<string> {
   return page.evaluate(() => {
     const probe = document.createElement("div");
     probe.style.backgroundColor = getComputedStyle(document.documentElement)
-      .getPropertyValue("--surface-panel")
+      .getPropertyValue("--surface-code")
       .trim();
     document.body.append(probe);
     const value = getComputedStyle(probe).backgroundColor;
@@ -91,11 +93,11 @@ test("a theme toggled while Monaco is still loading still themes the first file"
     await test.step("the first file opens in the theme that is on screen", async () => {
       await treeItem(page, NOTES_FILE).click();
       await expect(editor(page)).toBeVisible();
-      // Not "some workbench theme": the buffer's background is the panel token
-      // of the theme the rest of the window is wearing. Before the fix this
-      // read Monaco's built-in fallback, because the name the editor asked for
-      // had never been defined.
-      await expect.poll(() => editorBackground(page)).toBe(await panelToken(page));
+      // Not "some workbench theme": the buffer's background is the code-well
+      // token of the theme the rest of the window is wearing. Before the fix
+      // this read Monaco's built-in fallback, because the name the editor asked
+      // for had never been defined.
+      await expect.poll(() => editorBackground(page)).toBe(await codeToken(page));
     });
 
     await test.step("and toggling back is still correct", async () => {
@@ -106,7 +108,7 @@ test("a theme toggled while Monaco is still loading still themes the first file"
       await quickbar.locator(".wb-qb-input").fill(">Toggle theme");
       await quickbar.locator(".wb-qb-row", { hasText: "Toggle theme" }).first().click();
       await expect.poll(() => documentTheme(page)).toBe(before);
-      await expect.poll(() => editorBackground(page)).toBe(await panelToken(page));
+      await expect.poll(() => editorBackground(page)).toBe(await codeToken(page));
     });
   } finally {
     // A failure above must not leave the route handler awaiting forever.
