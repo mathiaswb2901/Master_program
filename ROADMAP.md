@@ -1187,3 +1187,26 @@ Build for real external users, not just the author. Consequences, tracked as wor
   version of that which survives our untrusted-workspace-file rule). The look is a
   separate problem with a separate answer: three visual directions, rendered rather than
   described, for the owner to choose between — see the M7 change request.
+
+- 2026-08-06 — **Scope freeze** (owner: "continue with our plan and add stuff
+  afterwards"). M5 grew from seven items to fifteen in a single day — every addition
+  was good, which is exactly how a project becomes permanently 80% done. The list is
+  now closed: no new items are added to M5, M6 or M7 until M7 ships, and a good idea
+  arriving before then is recorded under **Deferred ideas** rather than scheduled. The
+  test of the plan from here is not what it contains but that it ends. Two consequences
+  worth stating: an idea that arrives with a measurement behind it still waits, and the
+  bar for reopening the list is a defect or a decision the owner makes, not a better
+  idea. (The author of this entry is the party most likely to break it.)
+
+## Deferred ideas
+
+Recorded, not scheduled. Nothing here is worked on until M7 ships — see the scope
+freeze above.
+
+- Voice input (local faster-whisper push-to-talk with a domain vocabulary) — was M7
+  item; deferred out with the freeze since it is additive rather than shipping work.
+- TOON output format for agent-facing tools, if a list-heavy tool ever ships (rejected
+  with a measurement in the axi entry; the measurement is what would change).
+- A sanitized OfficeCLI fork, only if the COM bridge leaves real fidelity gaps.
+- Folder-level rollup for provenance markers, and provenance surviving a restart.
+- Plan artifacts persisted to `.workbench/` and re-rendered when resuming a transcript.
