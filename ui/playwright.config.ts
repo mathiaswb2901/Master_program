@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, devices } from "@playwright/test";
 
-import { E2E_WORKSPACE, projectsDirFor, WORKSPACE_ENV } from "./e2e/workspace";
+import { E2E_WORKSPACE, projectsDirFor, WORKSPACE_ENV, worktreeRootFor } from "./e2e/workspace";
 
 // The E2E harness is deliberately outside the `tsc -b` program (tsconfig.json
 // covers `src` + the two vite configs), so node's globals need no types
@@ -63,9 +63,29 @@ for (const key of Object.keys(process.env)) {
  * which would escape the closing quote of the command below on Windows). */
 const REPO_ROOT = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 
-/** Dedicated ports so a running dev server (8787/5173) never collides. */
-const SERVER_PORT = 8788;
-const UI_PORT = 4173;
+/**
+ * Dedicated ports so a running dev server (8787/5173) never collides.
+ *
+ * Overridable because this repo's own workflow runs several lanes at once, each
+ * in its own worktree — and two suites are otherwise a port collision that
+ * refuses to start (`reuseExistingServer: false`, correctly: a suite that
+ * attached to *another lane's* server would assert against another lane's code).
+ * Each run already gets its own temp workspace, so a second pair of ports is the
+ * only thing standing between two lanes and a clean parallel run:
+ *
+ *     WB_E2E_SERVER_PORT=8790 WB_E2E_UI_PORT=4175 npm run e2e
+ *
+ * Defaults are unchanged, so CI and a plain `npm run e2e` behave exactly as
+ * before. These are `WB_E2E_*` — the suite's own knobs, deliberately outside the
+ * `WORKBENCH_*` prefix stripped above, which is the server's configuration.
+ */
+const port = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed < 65_536 ? parsed : fallback;
+};
+const SERVER_PORT = port("WB_E2E_SERVER_PORT", 8788);
+const UI_PORT = port("WB_E2E_UI_PORT", 4173);
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
 export default defineConfig({
@@ -116,6 +136,12 @@ export default defineConfig({
         // unread, and keeping it out of the workspace is what stops journey
         // 11's fixture becoming a folder in journey 1's file tree.
         WORKBENCH_CLAUDE_PROJECTS_DIR: projectsDirFor(E2E_WORKSPACE),
+        // Another sibling, and for the same two reasons: a pooled worktree
+        // inside the workspace would appear in journey 1's file tree, and the
+        // shipped default (`%LOCALAPPDATA%`) would leave a real checkout per
+        // E2E run on the developer's machine. Mission Control's workers each
+        // borrow a slot from here (journey 12).
+        WORKBENCH_WORKTREE_ROOT: worktreeRootFor(E2E_WORKSPACE),
         WORKBENCH_LOG_LEVEL: "warning",
       },
       url: `${SERVER_URL}/api/health`,

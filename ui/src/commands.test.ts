@@ -170,6 +170,8 @@ describe("command registry", () => {
       "scratchpad.open",
       "usage.open",
       "activity.open",
+      // Mission Control after both, because it is the board *over* them.
+      "mission.open",
       // The two tools that arrange panels rather than being one, in the order
       // `tools.ts` lists them: Panes splits the window, Layouts remembers it.
       "pane.split.right",

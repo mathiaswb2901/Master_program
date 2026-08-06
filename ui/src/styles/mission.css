@@ -1,0 +1,425 @@
+/* Mission Control: the fleet board, its permission chips and the status reading.
+
+   Tokens only, no literal colours. The dot and every tint come from the §2.6
+   agent-status ramp through `statusVisual`, exactly as the session rows, the
+   status chips and the activity cards do — so four agents read the same here as
+   they do everywhere else, and the ANVIL lane's palette lands underneath this
+   file without touching it.
+
+   One layout at both sizes, the same rule the activity panel proved: a single
+   column in a 400px dock and as many columns as fit when the pane is maximized
+   (`Alt+M`), because `auto-fill` over `min(280px, 100%)` reflows instead of
+   scrolling sideways. The card is wider than the activity card by 20px because
+   it carries a three-figure row (turns, cost, worktree) the other one does not.
+
+   The one visual weight this board spends is on a *blocked* card: it earns an
+   attention rim, because an agent waiting on a decision nobody can see is the
+   failure the whole feature exists to fix. Colour is never the only signal — the
+   card also sorts to the top and the chip says how long it has waited (§7). */
+
+.wb-mission {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface-panel);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-mission-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.wb-mission-summary {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-mission-note {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}
+
+.wb-mission-source {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ---- the fleet ------------------------------------------------------------- */
+
+.wb-mission-fleet {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: var(--space-5);
+  align-content: start;
+}
+
+.wb-mission-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  min-width: 0;
+}
+
+.wb-mission-card.is-blocked {
+  border-color: var(--agent-attention);
+  background: var(--agent-attention-bg);
+}
+
+.wb-mission-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.wb-mission-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  transition: color var(--motion-tint);
+}
+
+.wb-mission-title:hover {
+  color: var(--accent);
+}
+
+.wb-mission-title:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.wb-mission-kind {
+  flex: 0 0 auto;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-tertiary);
+  background: var(--surface-hover);
+}
+
+.wb-mission-kind.is-orchestrator {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.wb-mission-kind.is-worker {
+  color: var(--agent-working);
+  background: var(--agent-working-bg);
+}
+
+.wb-mission-where {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-mission-age {
+  color: var(--text-disabled);
+}
+
+.wb-mission-now,
+.wb-mission-then {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.wb-mission-phase {
+  flex: 0 0 auto;
+  width: 48px;
+  color: var(--text-disabled);
+}
+
+.wb-mission-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  color: var(--text-secondary);
+}
+
+.wb-mission-quiet {
+  flex: 1 1 auto;
+  color: var(--text-disabled);
+}
+
+.wb-mission-quiet.is-failed {
+  color: var(--agent-error);
+}
+
+.wb-mission-outcome {
+  flex: 0 0 auto;
+  font-size: var(--type-xs-size);
+  color: var(--text-disabled);
+}
+
+/* ---- the three figures ----------------------------------------------------- */
+
+.wb-mission-figures {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: var(--space-2) 0 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-mission-figures dt {
+  color: var(--text-disabled);
+}
+
+.wb-mission-figures dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--type-sm-size);
+}
+
+/* ---- permission chips ------------------------------------------------------ */
+/* The point of the board. Answerable here, for a session this window has never
+   opened a chat socket for. */
+
+.wb-mission-prompts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wb-mission-prompt {
+  padding: var(--space-4);
+  border: 1px solid var(--agent-attention);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wb-mission-prompt-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.wb-mission-prompt-tool {
+  font-size: var(--type-xs-size);
+  font-weight: 600;
+  color: var(--agent-attention);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.wb-mission-prompt-wait {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-mission-prompt-detail {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.wb-mission-prompt-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.wb-mission-allow,
+.wb-mission-deny,
+.wb-mission-stop,
+.wb-mission-start {
+  padding: var(--space-2) var(--space-5);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--type-xs-size);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-tint),
+    border-color var(--motion-tint);
+}
+
+/* Allow carries the weight: granting a shell command an agent asked for
+   unattended is the consequential half of this decision, not denying it. */
+.wb-mission-allow {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.wb-mission-allow:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.wb-mission-deny:hover,
+.wb-mission-stop:hover,
+.wb-mission-start:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.wb-mission-allow:focus-visible,
+.wb-mission-deny:focus-visible,
+.wb-mission-stop:focus-visible,
+.wb-mission-start:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* The empty state's one action, at the size a zero-state affordance earns. */
+.wb-mission-start {
+  padding: var(--space-3) var(--space-6);
+  font-size: var(--type-sm-size);
+}
+
+/* ---- the crew and its ceilings --------------------------------------------- */
+
+.wb-mission-crews {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.wb-mission-crew {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wb-mission-crew-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.wb-mission-crew-count {
+  flex: 1 1 auto;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* A ceiling that bound, with the setting that raises it — never a dead button. */
+.wb-mission-refusal {
+  margin: 0;
+  padding: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--text-secondary);
+  font-size: var(--type-xs-size);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.wb-mission-refusal-label {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.wb-mission-refusal-ratio {
+  color: var(--text-primary);
+}
+
+.wb-mission-refusal-detail {
+  flex: 1 1 100%;
+}
+
+.wb-mission-refusal-hint {
+  flex: 1 1 100%;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+/* ---- empty state (DESIGN.md §6.10) ----------------------------------------- */
+
+.wb-mission-empty {
+  margin: auto;
+  max-width: 40ch;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.wb-mission-empty-icon {
+  color: var(--text-disabled);
+  line-height: 0;
+}
+
+.wb-mission-empty-title {
+  margin: 0;
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  color: var(--text-secondary);
+}
+
+/* ---- status bar ------------------------------------------------------------ */
+/* Renders only when something is waiting on you (§6.7: counts hide at zero). */
+
+.wb-mission-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  height: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--type-xs-size);
+  color: var(--agent-attention);
+  cursor: pointer;
+  transition: background-color var(--motion-tint);
+}
+
+.wb-mission-status:hover {
+  background: var(--surface-hover);
+}
+
+.wb-mission-status:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.wb-mission-status-icon {
+  line-height: 0;
+}

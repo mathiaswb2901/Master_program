@@ -54,6 +54,7 @@ const NEVER: UsageSnapshot = {
   observed_at: null,
   age_s: null,
   session_cost: EMPTY_COST,
+  sessions: [],
 };
 
 const FRESH: UsageSnapshot = {
@@ -77,6 +78,7 @@ const FRESH: UsageSnapshot = {
   observed_at: OBSERVED,
   age_s: 5,
   session_cost: EMPTY_COST,
+  sessions: [],
 };
 
 describe("the panel with no plan usage at all", () => {

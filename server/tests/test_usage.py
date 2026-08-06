@@ -114,6 +114,7 @@ def test_turn_cost_is_the_whole_degraded_view() -> None:
     usage — ``buckets`` stays empty, which is what the UI labels it on."""
     usage, bus, clock = service()
     usage.note_turn(
+        session_id="s1",
         cost_usd=0.0125,
         model_usage={
             "claude-opus-5": {"costUSD": 0.01, "inputTokens": 1200, "outputTokens": 300},
@@ -121,7 +122,9 @@ def test_turn_cost_is_the_whole_degraded_view() -> None:
         },
     )
     clock.advance(30)
-    usage.note_turn(cost_usd=0.005, model_usage={"claude-opus-5": {"costUSD": 0.005}})
+    usage.note_turn(
+        session_id="s1", cost_usd=0.005, model_usage={"claude-opus-5": {"costUSD": 0.005}}
+    )
 
     snapshot = usage.snapshot()
     assert snapshot.buckets == []
@@ -141,7 +144,7 @@ def test_a_turn_that_reports_nothing_is_not_counted() -> None:
     """A turn with neither a cost nor model usage tells us nothing, so counting
     it would inflate ``turns`` — the one number the degraded card leans on."""
     usage, bus, _ = service()
-    usage.note_turn(cost_usd=None)
+    usage.note_turn(session_id="s1", cost_usd=None)
     assert usage.snapshot().session_cost.turns == 0
     assert bus.usage_events() == []
 
@@ -149,7 +152,9 @@ def test_a_turn_that_reports_nothing_is_not_counted() -> None:
 def test_per_model_totals_are_bounded() -> None:
     usage, _, _ = service()
     for index in range(MAX_MODELS + 5):
-        usage.note_turn(cost_usd=0.001, model_usage={f"model-{index}": {"costUSD": 0.001}})
+        usage.note_turn(
+            session_id="s1", cost_usd=0.001, model_usage={f"model-{index}": {"costUSD": 0.001}}
+        )
     assert len(usage.snapshot().session_cost.models) == MAX_MODELS
 
 
@@ -319,7 +324,11 @@ def test_the_service_offers_no_way_to_ask_for_a_value() -> None:
     """Caveat 2, as an API property: there is nothing to poll. The only inputs
     are the two the message stream pushes."""
     inputs = {name for name in vars(UsageService) if not name.startswith("_")}
-    assert inputs == {"note_rate_limit", "note_turn", "snapshot"}
+    # ``session_entry`` is a *read*, not a poll: it answers from what the stream
+    # already pushed. It exists so Mission Control's per-worker budget is
+    # enforced against the same figure this panel renders rather than a second
+    # accumulator that could disagree with it.
+    assert inputs == {"note_rate_limit", "note_turn", "session_entry", "snapshot"}
 
 
 # ---- the tables the service and the schema share ---------------------------
@@ -420,6 +429,9 @@ def test_a_workspace_that_never_talks_to_an_agent_serves_the_empty_snapshot(
             "models": [],
             "observed_at": None,
         },
+        # No session has finished a turn, so there is nothing per-session either:
+        # absent, never a row of measured zeroes.
+        "sessions": [],
     }
 
 

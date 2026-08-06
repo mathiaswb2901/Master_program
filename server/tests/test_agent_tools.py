@@ -24,8 +24,10 @@ from workbench_server.models.plans import (
 )
 from workbench_server.services.agent_tools import (
     AGENT_TOOLS,
+    ALL_AGENT_TOOLS,
     GET_WORKSPACE_STATE,
     MAX_DESCRIPTION_CHARS,
+    ORCHESTRATOR_TOOLS,
     PRESENT_PLAN,
     allowed_tool_names,
     clamp_result,
@@ -48,6 +50,9 @@ class _Bridge:
     100 bytes of structure before a word is typed) and a budget measured on the
     shape we no longer send is a budget that cannot fail.
     """
+
+    #: The orchestrator toolset acts *as* a session, so the bridge names one.
+    session_id = "stub-session"
 
     async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
         return True
@@ -134,8 +139,20 @@ class TestRegistry:
             assert spec.max_schema_bytes > 0
             assert isinstance(spec.input_schema, dict)
 
+    def test_the_orchestrator_toolset_is_measured_like_every_other(self) -> None:
+        """Mission Control's five tools are a *separate* tuple, so they could
+        have shipped unmeasured. ``ALL_AGENT_TOOLS`` is what the budgets below
+        iterate, and this is what fails if a third tuple ever appears."""
+        assert ALL_AGENT_TOOLS == AGENT_TOOLS + ORCHESTRATOR_TOOLS
+        for spec in ORCHESTRATOR_TOOLS:
+            # Text, not JSON: these results are read by the model, not parsed —
+            # an id and a sentence beats an object with three keys of quoting.
+            assert spec.output_format == "text"
+            assert spec.max_result_bytes > 0
+            assert spec.max_schema_bytes > 0
+
     def test_names_are_unique(self) -> None:
-        names = [spec.name for spec in AGENT_TOOLS]
+        names = [spec.name for spec in ALL_AGENT_TOOLS]
         assert len(set(names)) == len(names)
 
     def test_the_allow_list_is_derived_from_the_registry(self) -> None:
@@ -146,6 +163,17 @@ class TestRegistry:
             "mcp__workbench__present_plan",
         ]
 
+    def test_a_chat_session_pays_nothing_for_the_orchestrator_toolset(self) -> None:
+        """The reason the two tuples are separate, as a number.
+
+        A schema rides along with **every request**, used or not. Five tools a
+        chat session can never call would be that cost on every message every
+        user of the app ever sends.
+        """
+        assert not any("worker" in name for name in allowed_tool_names("chat"))
+        extra = sum(spec.schema_bytes + len(spec.description) for spec in ORCHESTRATOR_TOOLS)
+        assert extra > 1_000, "if this got small, the split stops being worth its complexity"
+
     def test_a_session_allows_every_registered_tool(self) -> None:
         """Asserted against the options a real session is built with, so the
         registry and the SDK wiring cannot drift apart silently."""
@@ -153,16 +181,24 @@ class TestRegistry:
         assert set(allowed_tool_names()) <= set(options.allowed_tools)
         assert set(options.mcp_servers) == {"workbench"}
 
+    def test_an_orchestrator_session_allows_its_own_five_and_no_shell(self) -> None:
+        options = build_agent_options(
+            UiStateStore(), Settings(), Path.cwd(), None, _Bridge(), "orchestrator"
+        )
+        assert set(allowed_tool_names("orchestrator")) <= set(options.allowed_tools)
+        # The permission story, on the object the SDK is actually handed.
+        assert not any("Bash" in name for name in options.allowed_tools)
+
 
 class TestDescriptionBudget:
     def test_each_description_fits_the_ceiling(self) -> None:
-        for spec in AGENT_TOOLS:
+        for spec in ALL_AGENT_TOOLS:
             assert len(spec.description) <= MAX_DESCRIPTION_CHARS, spec.name
 
     def test_descriptions_are_one_paragraph_of_plain_text(self) -> None:
         """No markdown scaffolding, no examples block: the cheapest description
         that still says what the tool does and what its result means."""
-        for spec in AGENT_TOOLS:
+        for spec in ALL_AGENT_TOOLS:
             assert "\n" not in spec.description, spec.name
             assert "```" not in spec.description, spec.name
 
@@ -177,7 +213,7 @@ class TestSchemaBudget:
     """
 
     def test_each_input_schema_fits_its_ceiling(self) -> None:
-        for spec in AGENT_TOOLS:
+        for spec in ALL_AGENT_TOOLS:
             over = f"{spec.name}: {spec.schema_bytes} bytes of schema"
             assert spec.schema_bytes <= spec.max_schema_bytes, over
 

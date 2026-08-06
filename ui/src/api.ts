@@ -21,7 +21,10 @@ import type {
   OfficeStatus,
   OkResponse,
   OpenHostRequest,
+  OrchestratorSnapshot,
   PanelRect,
+  PermissionAnswer,
+  PermissionsSnapshot,
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
@@ -31,6 +34,7 @@ import type {
   TreeNode,
   UiState,
   UsageSnapshot,
+  WorktreePool,
   WriteRequest,
   WriteResponse,
 } from "./types";
@@ -96,6 +100,29 @@ export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provena
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 
 export const getActivity = (): Promise<ActivitySnapshot> => request("/api/activity");
+
+export const getOrchestrators = (): Promise<OrchestratorSnapshot> => request("/api/orchestrator");
+
+/** The worktree pool. First UI reader: Mission Control, which shows which slot
+ * each worker holds (the pool shipped backend-only in #46). */
+export const getWorktrees = (): Promise<WorktreePool> => request("/api/worktrees");
+
+export const stopOrchestrator = (id: string): Promise<OrchestratorSnapshot> =>
+  request(`/api/orchestrator/sessions/${encodeURIComponent(id)}/stop`, { method: "POST" });
+
+export const getPendingPermissions = (): Promise<PermissionsSnapshot> =>
+  request("/api/agents/permissions");
+
+/** Answer a permission prompt without holding that session's chat socket — the
+ * whole point of Mission Control's inline chips. */
+export const answerPermission = (
+  sessionId: string,
+  body: PermissionAnswer,
+): Promise<SessionInfo> =>
+  request(
+    `/api/agents/sessions/${encodeURIComponent(sessionId)}/permission`,
+    jsonInit("POST", body),
+  );
 
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
 

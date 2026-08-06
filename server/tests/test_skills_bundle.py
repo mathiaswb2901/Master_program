@@ -36,6 +36,9 @@ EXPECTED_REFERENCES = {"plan-visual/reference/visual.md"}
 class StubBridge:
     """SessionBridge stub — the factory only stores the callbacks."""
 
+    #: The orchestrator toolset acts *as* a session, so the bridge names one.
+    session_id = "stub-session"
+
     async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
         return True
 

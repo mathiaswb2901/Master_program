@@ -19,6 +19,7 @@ import { conversationsTool } from "./panels/Conversations";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { layoutsTool } from "./panels/Layouts";
+import { missionTool } from "./panels/MissionControl";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
@@ -43,6 +44,10 @@ export const TOOLS: readonly WorkbenchTool[] = [
   scratchpadTool,
   usageTool,
   activityTool,
+  // After Activity and Usage, because it is the board *over* them: it renders
+  // their rows rather than deriving its own, so it reads as the wide view of
+  // the two capabilities above it.
+  missionTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its

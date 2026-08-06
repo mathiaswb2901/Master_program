@@ -98,3 +98,10 @@ ignore_missing_imports = true
 testpaths = ["server/tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+markers = [
+    # Per-test knobs for the `fleet` fixture in test_orchestrator.py: the budget,
+    # the pool size, the session cap and the scripted worker's behaviour. A
+    # marker rather than a parametrized fixture because each test wants exactly
+    # one of them changed and the rest left at the shipped defaults.
+    "fleet: options for the Mission Control fleet fixture",
+]

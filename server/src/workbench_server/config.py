@@ -99,6 +99,22 @@ class Settings(BaseSettings):
         default=3600.0, ge=MIN_LEASE_SECONDS, le=MAX_LEASE_SECONDS
     )
 
+    # Mission Control (M5 item 7): the ceilings an orchestrator session's crew
+    # works under. Enforced in `services/orchestrator.py` *before* a worker is
+    # spawned, and every refusal names the variable below that raises it — a cap
+    # a user cannot see the way out of is the dead button the pane rules forbid.
+    #
+    # Defaults are deliberately modest. An orchestrator is the one capability
+    # here that can spend money without a human in the loop for each step, so
+    # the out-of-the-box numbers are ones a mistake can survive: four workers is
+    # the worktree pool's own default, and the dollar ceilings are roughly a
+    # morning's work rather than a plan's weekly limit.
+    orchestrator_max_workers: int = Field(default=4, ge=1, le=16)
+    orchestrator_worker_turns: int = Field(default=40, ge=1)
+    orchestrator_worker_cost_usd: float = Field(default=5.0, gt=0.0)
+    orchestrator_fleet_turns: int = Field(default=200, ge=1)
+    orchestrator_fleet_cost_usd: float = Field(default=20.0, gt=0.0)
+
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""
         root = self.workspace_root or Path.cwd()
