@@ -176,7 +176,9 @@
   border-bottom: 1px solid var(--border-paper-rim);
   font-size: var(--type-sm-size);
   line-height: var(--type-sm-line);
-  color: var(--text-on-paper);
+  /* On the mat, not on the page: the app's own text pair, not the paper one
+     (editor.css, "Text on the mat" — near-black is 2.67:1 on the dark mat). */
+  color: var(--text-primary);
 }
 
 .wb-office-note-msg {

@@ -16,7 +16,11 @@
   transform: translateX(-50%);
   width: 420px;
   max-width: calc(100vw - 32px);
-  background: var(--surface-elevated);
+  /* `--surface-overlay`, like every other floating thing (DESIGN.md §2.1): it
+     is a level-3 elevation with a scrim under it. `--surface-elevated` is a
+     *card in a panel* and now sits 11.7 L* below the app chrome, so a modal on
+     it would float in front of the window while reading as darker than it. */
+  background: var(--surface-overlay);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-3);

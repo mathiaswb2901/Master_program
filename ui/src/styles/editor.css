@@ -65,39 +65,41 @@
   border-bottom-color: var(--border-paper-rim);
 }
 
+/* Text on the mat is `--text-primary`/`--text-secondary`, NOT `--text-on-paper`.
+   The mat is a mid-grey (L* 38 dark, 68 light), so it is the one surface where
+   both themes' text works and the *paper* pair does not: near-black on the dark
+   mat measures 2.67:1, worse than the failure this whole palette exists to fix.
+   `--text-on-paper` is for chrome drawn over the page itself. On the mat:
+   primary 6.33:1 [7.41], secondary 4.75:1 [5.59]; tertiary is 3.33:1 and is
+   therefore never used here. */
 .wb-editor.is-document .wb-editor-tab {
-  color: var(--text-on-paper);
-  opacity: 0.66;
+  color: var(--text-secondary);
 }
 
 .wb-editor.is-document .wb-editor-tab:hover {
   background: none;
-  opacity: 0.85;
+  color: var(--text-primary);
 }
 
-/* The active document's tab fuses into the mat, not into a panel: same value,
-   full opacity, and the page below is what the eye lands on. */
+/* The active document's tab fuses into the mat, not into a panel, and the page
+   below it is what the eye lands on. */
 .wb-editor.is-document .wb-editor-tab.is-active {
   background: var(--surface-paper-surround);
   box-shadow: 0 1px 0 0 var(--surface-paper-surround);
-  color: var(--text-on-paper);
-  opacity: 1;
+  color: var(--text-primary);
 }
 
-/* The close glyph and the dirty dot are chrome colours, and chrome colours are
-   built for a dark panel: `--text-tertiary` on the mat is 2.2:1, below the 3:1
-   a control glyph needs (§7). On paper-side surfaces they use the paper pair. */
 .wb-editor.is-document .wb-tab-close {
-  color: var(--text-on-paper);
+  color: var(--text-secondary);
 }
 
 .wb-editor.is-document .wb-tab-close:hover {
-  background: var(--surface-paper);
-  color: var(--text-on-paper);
+  background: var(--surface-hover);
+  color: var(--text-primary);
 }
 
 .wb-editor.is-document .wb-dirty-dot {
-  background: var(--text-on-paper);
+  background: var(--text-secondary);
 }
 
 .wb-editor-tab-label {

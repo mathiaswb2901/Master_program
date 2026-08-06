@@ -99,7 +99,7 @@ The ramp, deepest well first. `L*` is the dark value; light's is in brackets.
 | `--surface-panel` | `#202020` | `#E8E8E8` | 12.3 [92.0] | Panel bodies: file tree, chat, usage, nested tab strips |
 | `--surface-elevated` | `#2C2C2C` | `#DDDDDD` | 18.0 [88.1] | Cards, inputs, user chat bubble, keycaps |
 | `--surface-app` | `#393939` | `#D1D1D1` | 24.0 [83.8] | Window chrome: pane tab strips, status bar, the dock's own background |
-| `--surface-overlay` | `#464646` | `#C6C6C6` | 29.7 [79.9] | QuickBar, menus, popovers, tooltips (always + `--shadow-3`) |
+| `--surface-overlay` | `#464646` | `#C6C6C6` | 29.7 [79.9] | Everything that floats: QuickBar, modal, menus, popovers, toasts, tooltips |
 | `--surface-paper` | `#FFFFFF` | `#FFFFFF` | 100.0 | Document canvas ("paper") — identical in both themes |
 | `--surface-paper-surround` | `#5A5A5A` | `#A5A5A5` | 38.2 [67.7] | The mat a docked page sits on (§6.1). 6.90:1 [2.46:1] below the page |
 | `--surface-hover` | `rgba(255,255,255,0.06)` | `rgba(0,0,0,0.06)` | — | Hover wash on rows/tabs/buttons |
@@ -592,12 +592,17 @@ through the token file and fails the build if a colour-only one lands on a sprin
      the mat rather than a panel that happens to be white.
   3. **Rim and lift** — 1px `--border-paper-rim` plus `--shadow-1`. On the native host
      the rim is an outset ring, because the real Word window covers the border box.
-  4. **The tab strip is painted at the mat value**, with `--text-on-paper` labels — this
+  4. **The tab strip is painted at the mat value** — this
      is the part usually forgotten, and it is what makes the frame one continuous
      surface from the tab down past the page edge instead of two unrelated greys
      meeting. The active document's tab fuses into the mat like any other tab fuses into
      what is below it. Driven by `is-document` on the editor frame, which follows the
      *active view* (`documentViewFor`), never a list of file extensions.
+     Its labels are `--text-primary`/`--text-secondary`, **not** `--text-on-paper`: the
+     mat is a mid-grey (L* 38 dark, 68 light), the one surface in the system where the
+     app's text pair works (6.33:1 / 4.75:1) and the paper pair does not (2.67:1, worse
+     than the failure this palette exists to fix). `--text-tertiary` is 3.33:1 there and
+     is never used on the mat.
 - Bars above the buffer (conflict, provenance): one line, 12px, 6px/12px padding,
   bottom hairline `--border-subtle`, background = the status wash for what they mean
   (`--warn-bg` for a conflict, `--agent-done-bg` for an agent change). Actions on the
@@ -638,14 +643,17 @@ through the token file and fails the build if a colour-only one lands on a sprin
 - **User message:** bubble on `--surface-elevated`, `--radius-lg`, padding 8px 12px,
   right-aligned, max-width 85%.
 - **Assistant message:** no bubble — full-width text on `--surface-panel` (documents
-  read better than chat toys). 8px between blocks; code blocks on `--surface-terminal`
-  with `--radius-md` + `--border-subtle`, mono 13px.
+  read better than chat toys). 8px between blocks; code blocks and tool output on
+  `--surface-code` with `--radius-md` + `--border-subtle`, mono 13px — one step
+  below the column, not the terminal's black, which would be a 12 L* drop where the
+  ramp calls for 6.
 - **Tool-call row:** collapsed height 28px, mono 12px `--text-secondary`; 2px left
   border in status color (`--agent-working` pulses via the dot, border steady;
   `--success` / `--error` when settled); chevron expands to output block (instant).
 - **Permission prompt:** card on `--surface-elevated`, 1px `--warn`-tinted border
   (`--warn-bg` background wash at header). Buttons 28px height, `--radius-sm`, 13px/500:
-  *Allow* = filled `--accent` / `--text-on-accent`; *Allow always* = outline
+  *Allow* = filled `--accent-fill` / `--text-on-accent` (§2.4 — the one action the app
+  is blocked on); *Allow always* = outline
   `--border-default` text `--text-primary`; *Deny* = ghost `--text-secondary`, hover
   `--error` text. Never a red filled button — denying is safe, not destructive.
 - Session header per agent: 11px uppercase label + status badge (§6.4), sticky.

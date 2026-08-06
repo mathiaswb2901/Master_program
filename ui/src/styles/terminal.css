@@ -140,7 +140,9 @@
   align-items: center;
   gap: var(--space-5);
   padding: var(--space-6) var(--space-8);
-  background: var(--surface-elevated);
+  /* Floating over the terminal, so overlay rather than elevated (§2.1) — and
+     `--surface-elevated` against a #000000 ground would read as part of it. */
+  background: var(--surface-overlay);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);

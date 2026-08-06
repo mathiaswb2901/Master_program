@@ -317,6 +317,15 @@ describe("hairlines carry structure, so they must be visible", () => {
       contrast(hex(theme, "--surface-paper"), hex(theme, "--surface-paper-surround")),
     ).toBeGreaterThanOrEqual(2.4);
   });
+
+  it.each(THEMES)("%s: the mat carries the app's text pair, not paper's", (_name, theme) => {
+    // The mat is mid-grey in both themes, so it is the one surface where the
+    // paper pair fails: `--text-on-paper` on the dark mat measures 2.67:1. The
+    // document tab strip is real 12px text and must clear 4.5:1 (§7).
+    const mat = hex(theme, "--surface-paper-surround");
+    expect(contrast(hex(theme, "--text-primary"), mat)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(hex(theme, "--text-secondary"), mat)).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 // ---- the one amber ----------------------------------------------------------
