@@ -22,7 +22,17 @@ class Settings(BaseSettings):
     log_level: Literal["debug", "info", "warning", "error"] = "info"
     log_format: Literal["console", "json"] = "console"
 
+    # The workspace the server starts on. No longer the last word on it: M5's
+    # switcher re-roots the running server (see services/workspaces.py), so this
+    # is the *initial* root and the only thing that makes it an explicit choice
+    # rather than "wherever the server happened to be launched".
     workspace_root: Path | None = None
+
+    # Where machine-local Workbench state lives — the recent-workspaces list, and
+    # anything else that is about the user rather than about a project. None = the
+    # OS's own app data dir (services/app_data.py). Set by the E2E lane so a test
+    # run never writes into the developer's real history; a user has no reason to.
+    app_data_root: Path | None = None
 
     # OnlyOffice Document Server (M2+). None = office editing disabled (degraded mode).
     onlyoffice_url: str | None = None

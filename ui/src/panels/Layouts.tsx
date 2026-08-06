@@ -412,6 +412,28 @@ async function restore(dock: DockviewApi): Promise<void> {
   persistenceArmed = true;
 }
 
+/**
+ * The workspace moved: this workspace's arrangements are a different file.
+ *
+ * `layouts.json` lives *in* the workspace — that is the whole design, so that
+ * different projects keep different windows — which makes a switch a complete
+ * re-read: the saved list, the current name, and the arrangement itself. Doing
+ * nothing here would be worse than showing the wrong names: persistence is
+ * armed, so the next sash drag would write *this* project's window into the
+ * new project's file.
+ *
+ * Disarmed first for exactly that reason, and re-armed by `restore` only once
+ * the new document has been read.
+ */
+function onWorkspaceChanged(_root: string): void {
+  const dock = dockApiHandle();
+  if (dock === null) return;
+  window.clearTimeout(saveTimer);
+  persistenceArmed = false;
+  useLayoutUi.setState({ saved: [], current: null, menu: "closed" });
+  void restore(dock);
+}
+
 function onDockReady(dock: DockviewApi | null): void {
   for (const listener of dockListeners) listener.dispose();
   dockListeners = [];
@@ -646,4 +668,5 @@ export const layoutsTool: WorkbenchTool = {
   shortcutActions: { layout: switchToLayout },
   statusContributions: [{ region: "right", component: LayoutStatus }],
   onDockReady,
+  onWorkspaceChanged,
 };

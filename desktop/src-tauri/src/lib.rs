@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 
 use close_guard::{CloseGuard, Decision};
 
@@ -109,6 +110,33 @@ fn cancel_close() {
     GUARD.cancel();
 }
 
+/// Pick a folder with the OS's own directory dialog. `None` = the user cancelled.
+///
+/// The third thing a browser tab cannot do, and it belongs here for the same
+/// reason the other two do: there is no web API that returns a *filesystem path*
+/// for a directory (`showDirectoryPicker` hands back a sandboxed handle, and the
+/// server needs a path it can `resolve`). The UI's fallback outside the shell is
+/// therefore not a degraded dialog but an honest one — type or paste a path —
+/// which is what `ui/src/shell.ts` and the workspace picker do.
+///
+/// `async fn` on purpose. Tauri runs an async command on its runtime rather than
+/// on the main thread, and the callback form of the dialog is used rather than
+/// `blocking_pick_folder` precisely so nothing waits on a modal from a thread
+/// that has a message loop to pump.
+#[tauri::command]
+async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
+    let (tx, mut rx) = tauri::async_runtime::channel(1);
+    app.dialog()
+        .file()
+        .set_title("Open a folder as the workspace")
+        .pick_folder(move |folder| {
+            // The receiver is dropped only if this command was cancelled, which
+            // is the one case where nobody is waiting for the answer.
+            let _ = tx.blocking_send(folder);
+        });
+    rx.recv().await.flatten().map(|folder| folder.to_string())
+}
+
 /// Give every hosted guest back to the desktop and reap what we launched.
 ///
 /// Idempotent, and a no-op on a build or platform with no hosting. Called from
@@ -123,6 +151,11 @@ fn release_hosted_windows(app: &tauri::AppHandle) {
 
 pub fn run() {
     let builder = tauri::Builder::default()
+        // The OS directory dialog, and nothing else from it. Registered in Rust
+        // and reached only through our own `pick_directory` command, so the
+        // webview is never granted the plugin's JS surface (no `dialog:*`
+        // capability is added) and the UI still names exactly one shell command.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Before anything worth logging happens: a release build is a GUI
             // subsystem app with no stderr, so the file is the only copy.
@@ -210,6 +243,7 @@ pub fn run() {
         set_attention,
         confirm_close,
         cancel_close,
+        pick_directory,
         host::commands::host_embed,
         host::commands::host_set_bounds,
         host::commands::host_set_visible,
@@ -229,6 +263,7 @@ pub fn run() {
         set_attention,
         confirm_close,
         cancel_close,
+        pick_directory,
         host::commands::host_embed,
         host::commands::host_set_bounds,
         host::commands::host_set_visible,
@@ -245,7 +280,8 @@ pub fn run() {
         backend_ready,
         set_attention,
         confirm_close,
-        cancel_close
+        cancel_close,
+        pick_directory
     ]);
 
     builder
