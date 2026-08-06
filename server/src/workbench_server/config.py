@@ -8,7 +8,10 @@ the only setting most users ever touch.
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from workbench_server.models.worktrees import MAX_LEASE_SECONDS, MIN_LEASE_SECONDS
 
 
 class Settings(BaseSettings):
@@ -72,6 +75,29 @@ class Settings(BaseSettings):
 
     def resolved_projects_dir(self) -> Path:
         return self.claude_projects_dir or (Path.home() / ".claude" / "projects")
+
+    # Managed worktree pool (M5): borrowed git worktrees so parallel agents get
+    # one writer per checkout. The pool root is deliberately NOT under the
+    # workspace — see services/worktrees.py — so the file tree and the watcher
+    # never see a slot. None = the machine-local app data dir.
+    worktree_root: Path | None = None
+    # How many slots the pool may grow to. Slots are created on demand and never
+    # destroyed, so this is the ceiling on borrowed checkouts, not a count that
+    # is allocated up front.
+    worktree_pool_size: int = 4
+    # Default lease, in seconds. One of the two idle signals: a slot is
+    # reclaimable only when the lease has expired *and* its owner process is
+    # gone. Long enough that an agent working unattended keeps its slot.
+    #
+    # Bounded by the *same* constants as AcquireWorktreeRequest.ttl_seconds and
+    # RenewWorktreeRequest.ttl_seconds, and for the same reason: a floor keeps
+    # the next sweep from reclaiming a slot out from under its holder, and a
+    # ceiling keeps a typo from parking one for a year. Bounding only the
+    # explicit override would have protected the rare path and left the common
+    # one open — most callers never send a ttl_seconds and land here.
+    worktree_lease_seconds: float = Field(
+        default=3600.0, ge=MIN_LEASE_SECONDS, le=MAX_LEASE_SECONDS
+    )
 
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""

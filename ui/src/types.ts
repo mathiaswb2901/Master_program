@@ -102,6 +102,7 @@ export type WorkspaceEvent =
   | ShortcutsChangedEvent
   | FileProvenanceEvent
   | OfficeHostEvent
+  | WorktreeChangedEvent
   | UsageEvent;
 
 // ---- provenance.py ----------------------------------------------------------
@@ -885,4 +886,105 @@ export interface OfficeCapabilities {
   onlyoffice: boolean;
   fallback: "native" | "onlyoffice" | "preview";
   detail: string;
+}
+
+// ---- worktrees.py -----------------------------------------------------------
+// The managed worktree pool: borrowed git worktrees so parallel agents get one
+// writer per checkout. Slots live OUTSIDE the workspace (under the machine's
+// app data dir), which is why `path` here is absolute while every other path on
+// this wire is workspace-relative.
+
+/** `free` is the only state a slot can be handed out from. `dirty` holds
+ * uncommitted work and is never reclaimed without an explicit override;
+ * `needs_review` is the pool refusing to claim a slot it could not put back. */
+export type WorktreeState = "free" | "leased" | "dirty" | "needs_review";
+
+/** Who holds a slot, and the two independent reasons they still do: a slot is
+ * reclaimable only when the deadline has passed AND the owner process is gone. */
+export interface WorktreeLease {
+  lease_id: string;
+  /** Free text naming the holder — a session id, a task, a worker. */
+  holder: string;
+  /** null when the caller named no process; the deadline is then the only signal. */
+  owner_pid: number | null;
+  /** Unix seconds. Renewable — a lease that cannot be renewed is a timeout. */
+  expires_at: number;
+  acquired_at: number;
+  /** Invented while rebuilding the pool from disk after the state file was
+   * lost. Nothing is known about who was working here, so the slot is held. */
+  recovered: boolean;
+}
+
+export interface WorktreeInfo {
+  /** Stable id and the directory name under the pool root ("slot-01"). */
+  slot: string;
+  /** Absolute — a pooled worktree is deliberately outside the workspace. */
+  path: string;
+  state: WorktreeState;
+  /** The detached commit the slot sits on. A pooled worktree has no branch. */
+  head: string | null;
+  /** Present exactly when state === "leased". */
+  lease: WorktreeLease | null;
+  /** Paths `git status --porcelain` reported; ignored files (node_modules,
+   * .venv, build caches) are not among them, so a warm slot reads as clean. */
+  dirty_files: number;
+  created_at: number;
+  updated_at: number;
+  /** One line for a human, on `dirty` and `needs_review`. */
+  detail: string | null;
+}
+
+/** GET /api/worktrees — the whole pool, capped small enough to send whole. */
+export interface WorktreePool {
+  root: string;
+  /** null when the workspace is not inside a git repository. Not an error. */
+  repo: string | null;
+  capacity: number;
+  slots: WorktreeInfo[];
+  /** Why there is no pool, or why it had to be rebuilt from disk. */
+  problem: string | null;
+}
+
+/** Broadcast on /ws/events whenever a slot changes state. */
+export interface WorktreeChangedEvent {
+  type: "worktree_changed";
+  worktree: WorktreeInfo;
+}
+
+export interface AcquireWorktreeRequest {
+  holder: string;
+  /** Any commit-ish; defaults to the repository's HEAD. */
+  base?: string | null;
+  owner_pid?: number | null;
+  ttl_seconds?: number | null;
+}
+
+export interface ReleaseWorktreeRequest {
+  lease_id: string;
+  /** Throw uncommitted work away instead of parking the slot as `dirty`. */
+  discard_changes?: boolean;
+}
+
+export interface RenewWorktreeRequest {
+  lease_id: string;
+  ttl_seconds?: number | null;
+}
+
+export interface PruneRequest {
+  /** Also reclaim slots holding uncommitted work. Never implied. */
+  force?: boolean;
+}
+
+/** A slot a sweep deliberately left alone — the half that answers "why is the
+ * pool full" without reading a log. */
+export interface KeptSlot {
+  slot: string;
+  reason: "leased" | "owner_alive" | "dirty" | "needs_review" | "reset_failed";
+  detail: string | null;
+}
+
+export interface PruneResult {
+  reclaimed: string[];
+  kept: KeptSlot[];
+  pool: WorktreePool;
 }
