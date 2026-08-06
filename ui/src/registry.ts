@@ -142,6 +142,31 @@ export interface DocumentViewContribution {
   keepMounted?: boolean;
 }
 
+/**
+ * A tool's answer to "the workspace is about to move — are you holding
+ * anything?", in two halves so the user is asked before anything is done.
+ */
+export interface WorkspaceSwitchGuard {
+  /**
+   * What this tool is holding, named the way the user would name it (a file
+   * name, not a path). Empty means nothing to settle, and is the answer that
+   * lets a switch go straight through without a prompt.
+   *
+   * Read synchronously and possibly on every keystroke-driven re-render of the
+   * confirm dialog, so it must be a cheap look at state already in memory.
+   */
+  held: () => string[];
+  /**
+   * Settle it, and resolve with what could **not** be settled.
+   *
+   * A non-empty result cancels the switch: the window stays where it is, with
+   * the panel that can explain the failure still mounted. Resolving with `[]`
+   * — including when there was nothing to do — lets the switch proceed. This
+   * never rejects; a tool that cannot settle something says so by naming it.
+   */
+  settle: () => Promise<string[]>;
+}
+
 export type StatusRegion = "left" | "center" | "right";
 
 export interface StatusContribution {
@@ -213,6 +238,42 @@ export interface WorkbenchTool {
    * goes away. Everything else should be reaching for `openToolPanel`.
    */
   onDockReady?: (api: DockviewApi | null) => void;
+  /**
+   * The workspace root moved (M5 item 5): drop whatever this tool cached about
+   * the project that is gone, and read the new one.
+   *
+   * The seam exists so the switcher never has to know which capabilities keep
+   * workspace-scoped state. The Layouts tool is the first user — the arrangement
+   * lives in `<workspace>/.workbench/layouts.json`, so a switch means a
+   * different file — and every later tool that reads something out of the
+   * workspace (saved artifacts, a session browser's scope) implements it rather
+   * than being wired into the switcher by hand.
+   *
+   * Called **after** the app-wide reset (`store.adoptWorkspace`), so the tree,
+   * the sessions and the editors are already the new workspace's. `root` is
+   * absolute and in the OS's own form.
+   */
+  onWorkspaceChanged?: (root: string) => void;
+  /**
+   * Live work this tool holds that a workspace switch would strand, and the way
+   * to settle it — the other half of `onWorkspaceChanged`, asked *before* the
+   * root moves rather than after.
+   *
+   * `onWorkspaceChanged` is for state a tool can simply re-read. This is for
+   * state it cannot: a resource outside the browser that is still holding the
+   * user's edits. The native Office host is the case that motivated it — a real
+   * Word window with an unsaved paragraph in it is not a buffer this app can
+   * save or discard, and it is not visible to the dirty-buffer check either,
+   * because an `office` open file is never marked dirty (Word owns that
+   * question, not Monaco). Left alone, the switch would unmount the panel, fire
+   * a close nobody waited for, and take away the only surface that could have
+   * said the close had failed.
+   *
+   * The switcher asks every tool rather than naming this one, for the same
+   * reason it does not name Layouts: a capability that holds something across a
+   * switch declares it, and the switcher stays a switcher.
+   */
+  workspaceSwitchGuard?: WorkspaceSwitchGuard;
   /**
    * A control at the right end of **every pane's** tab strip, for a tool that
    * acts on panes rather than living in one — the split affordance is the one
@@ -321,6 +382,50 @@ export function notifyDockReady(
   api: DockviewApi | null,
 ): void {
   for (const tool of tools.filter(isEnabled)) tool.onDockReady?.(api);
+}
+
+/** Tell every tool the workspace root moved. One tool throwing must not stop
+ * the next from being told — a half-adopted window is the state where one panel
+ * shows the new project and another still shows the old. */
+export function notifyWorkspaceChanged(tools: readonly WorkbenchTool[], root: string): void {
+  for (const tool of tools.filter(isEnabled)) {
+    try {
+      tool.onWorkspaceChanged?.(root);
+    } catch (err) {
+      console.error(`${tool.id} failed to adopt the new workspace`, err);
+    }
+  }
+}
+
+/** Everything the enabled tools are holding that a switch would strand, for the
+ * sentence that asks the user about it. */
+export function heldAcrossWorkspaceSwitch(tools: readonly WorkbenchTool[]): string[] {
+  return tools.filter(isEnabled).flatMap((tool) => tool.workspaceSwitchGuard?.held() ?? []);
+}
+
+/**
+ * Settle every guard, and report what would not settle.
+ *
+ * Sequential, not `Promise.all`: settling means closing real applications, and
+ * two of them being asked to quit at once is how a "Save changes?" dialog ends
+ * up behind another one where nobody sees it. A guard that throws counts as one
+ * that could not settle — an exception is not consent to move the workspace.
+ */
+export async function settleBeforeWorkspaceSwitch(
+  tools: readonly WorkbenchTool[],
+): Promise<string[]> {
+  const stranded: string[] = [];
+  for (const tool of tools.filter(isEnabled)) {
+    const guard = tool.workspaceSwitchGuard;
+    if (guard === undefined) continue;
+    try {
+      stranded.push(...(await guard.settle()));
+    } catch (err) {
+      console.error(`${tool.id} could not settle before the workspace switch`, err);
+      stranded.push(...guard.held());
+    }
+  }
+  return stranded;
 }
 
 /** The panel a `shortcuts.md` entry of this kind is typed into, or null if no

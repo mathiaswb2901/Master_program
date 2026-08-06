@@ -520,14 +520,53 @@ because other sections and five running lanes reference these numbers.
    tmux theirs. Exit: a newly registered command is bindable from `shortcuts.md` the day
    it is registered, with no parser change; the untrusted-input bar above still holds,
    which is what makes "bind anything" safe rather than a shell in a markdown file.
-5. **Workspace switcher** — the workspace is currently whatever directory the server
+   **And it is what the switcher ran into first** (item 5): "bind anything" cannot mean
+   *every* registered command, because `workspace.open` takes a filesystem root, and a
+   binding for it in a project's own `.workbench/shortcuts.md` would re-point the path
+   jail. Whatever this item builds needs a way for a command to say it is not bindable
+   from an untrusted file — the bar above, expressed on the descriptor rather than in
+   a parser case.
+5. ~~**Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
-   `shortcuts.md`), with per-workspace layout and session history. Supersedes the
-   first-run picker in the OSS bar item 3. Also unlocks **half B of item 12**: opening a
-   session whose folder is outside the current workspace needs this (or the multi-root
-   jail from item 6), which is why the session browser ships its read half first — that
-   half has landed, and every such conversation is already listed and visibly refused
-   with its reason, so what this unlocks is exactly the click.
+   `shortcuts.md`), with per-workspace layout and session history.~~ **done** —
+   `services/workspaces.py` + `models/workspaces.py` + `routers/workspaces.py`, and a
+   registered capability with no panel (`ui/src/panels/Workspaces.tsx`: a status chip
+   that is a control, a QuickBar picker of recents, the OS folder dialog through
+   `shell.ts`, one line in `tools.ts`). The owner was blocked on this — "I need to be
+   able to access files on my computer to test" — because trying the app against real
+   work meant killing the server and restarting it with an env var.
+   **The design decision that carries it**: everything rooted in the workspace either
+   holds the `Workspace` object (and follows for free, because `root` is now mutable and
+   there is one of it) or copied the path and owes a `set_workspace_root` — and the list
+   of the second kind lives in exactly one function, so a service added later that is not
+   on it is a service still serving the project the user left. The jail is unchanged: the
+   same `safe_path` asks the same question about a different root, asserted by a test
+   that reaches for a file in the *old* workspace and is refused.
+   **What deliberately keeps running**: terminals and live agent sessions. A PTY is a
+   shell that was never inside the jail, and an agent may be mid-turn holding an edit —
+   killing either because the user opened a folder is silent loss of running work. A live
+   session outside the new root is relabelled with its absolute path so it cannot be
+   filed under a same-named folder of the new project. Dirty editor buffers **block** the
+   switch with the dirty-close confirm; a buffer left dirty by another window's switch
+   survives as an orphan that cannot be saved.
+   **Deliberately not done, with a reason**: a `shortcuts.md` `workspace` kind. Item 4's
+   bar is that an entry may not reach a file, because a workspace file is untrusted
+   input — and a kind whose body is a *root path* would let a hostile `.workbench/`
+   file point the path jail at `C:\` on one keystroke. That is a wider hole than any
+   `layout` entry can open, so the switcher is reachable from the status chip and the
+   QuickBar and from nowhere a project can write to. Also not done: no `Alt` chord (the
+   Scratchpad's reasoning — a registered chord is one the user's own file cannot have,
+   and this is not a reflex).
+   **Covers the workspace-picker half of OSS-bar item 3** (first-run experience): with
+   no `WORKBENCH_WORKSPACE_ROOT` the app now *says* it is showing the directory the
+   server was launched from — a dashed chip that stays until a folder is chosen, plus
+   one hint the first time — rather than presenting a default as a decision. The
+   Claude-login and Office-detection walkthroughs are still open there.
+   Still unlocks **half B of item 12**: opening a session whose folder is outside the
+   current workspace, which now has an answer (switch to it) short of the multi-root
+   jail from item 6. The session browser's read half has landed, so every such
+   conversation is already listed and visibly refused with its reason — what this
+   unlocks is exactly the click.
 6. ~~**Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
    dirty-slot `needs_review` protection)~~ — **the pool is done**
    (`services/worktrees.py`, `models/worktrees.py`, `routers/worktrees.py`, landed
@@ -881,8 +920,10 @@ without forking — the difference between a fixed app and an instrument.
   forward; it all ships in current tokens and gets restyled here.
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
-- Remaining OSS product bar: first-run experience (workspace picker, Claude-login and
-  Office/OnlyOffice detection walkthroughs), cross-platform PTY + 3-OS CI matrix,
+- Remaining OSS product bar: first-run experience — the **workspace picker half is
+  done** (M5 item 5: the app says which folder it is showing and whether anybody chose
+  it, and every way to open another is in the app), leaving the Claude-login and
+  Office/OnlyOffice detection walkthroughs; cross-platform PTY + 3-OS CI matrix,
   CONTRIBUTING/templates, versioned Tauri releases with signed installers,
   zero-telemetry README stance, and the real product name.
 - Exit criterion: a stranger on a fresh Windows machine reaches a working, secured,

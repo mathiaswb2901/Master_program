@@ -230,7 +230,17 @@ export interface QuickPick {
   /** Accessible name of the dialog, e.g. "Split this pane". */
   label: string;
   placeholder: string;
-  rows: () => QuickPickRow[];
+  /**
+   * The rows to show, given what has been typed.
+   *
+   * Most pickers ignore the query and let the QuickBar's own fuzzy filter do
+   * the work (the split picker does). It is passed because one kind of row
+   * cannot be enumerated in advance: the workspace picker offers "open the path
+   * you just pasted", which exists only because it was typed. A picker that
+   * takes no argument still satisfies this — TypeScript accepts a function with
+   * fewer parameters — so nothing else had to change for it.
+   */
+  rows: (query: string) => QuickPickRow[];
 }
 
 interface WorkbenchStore {
@@ -244,6 +254,17 @@ interface WorkbenchStore {
   expandedDirs: ReadonlySet<string>;
   /** The workspace folder's own name, from the root listing. */
   workspaceName: string;
+  /**
+   * Paths whose buffer belongs to a workspace this window has left.
+   *
+   * Only reachable when *another* window switched the root out from under a
+   * dirty buffer (the switcher blocks on its own dirty buffers first). Saving is
+   * refused for these, because the same relative path in the new workspace is a
+   * different file and writing to it would be the "data in the wrong project"
+   * failure the switch exists to avoid. The buffer stays on screen so the edits
+   * can be copied out — closing it would be the data loss.
+   */
+  orphanedPaths: ReadonlySet<string>;
   /** The *search index*: the whole workspace in one walk, for the QuickBar's
    * fuzzy file search and the chat's tool-row file links. Null until something
    * asks for it — the file tree never does, and no watcher event fetches it. */
@@ -327,6 +348,20 @@ interface WorkbenchStore {
   reconcileTree: () => Promise<void>;
   /** Fetch the search index if it is missing or stale. On demand only. */
   ensureFileIndex: () => Promise<void>;
+  /**
+   * Everything this window holds about a workspace, thrown away and re-read.
+   *
+   * Called after the server has re-rooted (`ui/src/panels/Workspaces.tsx`) — by
+   * the window that asked for the switch and by any other window that hears
+   * about it. Every piece of state below is keyed by a workspace-relative path
+   * or by a folder of the old project, so keeping any of it would show data from
+   * the wrong workspace: a tree of folders that are not there, a provenance mark
+   * on a file nobody touched, a session group under a same-named folder.
+   *
+   * A dirty buffer is the one thing that is *not* thrown away — see
+   * `orphanedPaths`.
+   */
+  adoptWorkspace: () => Promise<void>;
   openFile: (path: string) => Promise<void>;
   /** Guarded close: dirty buffers get a confirm modal instead of silent discard. */
   requestCloseFile: (path: string) => void;
@@ -549,6 +584,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     dirs: {},
     expandedDirs: new Set<string>(),
     workspaceName: "workspace",
+    orphanedPaths: new Set<string>(),
     tree: null,
     openFiles: [],
     activePath: null,
@@ -773,6 +809,56 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       await fileIndexPending;
     },
 
+    adoptWorkspace: async () => {
+      const before = get();
+      // Clean buffers close; dirty ones stay and stop being savable. Monaco
+      // models for the closed ones go with them — a model keyed by a path that
+      // now means a different file is worse than no model at all.
+      const orphaned = new Set<string>();
+      for (const file of before.openFiles) {
+        if (file.dirty) orphaned.add(file.path);
+        else disposeModel(file.path);
+      }
+      set((s) => ({
+        openFiles: s.openFiles.filter((f) => f.dirty),
+        activePath: null,
+        dirs: {},
+        expandedDirs: new Set<string>(),
+        tree: null,
+        provenance: {},
+        provenanceDismissed: {},
+        folders: [],
+        sessionStates: {},
+        sessionFlags: {},
+        transcriptView: null,
+        orphanedPaths: orphaned,
+      }));
+      persistDismissed({});
+      fileIndexStale = true;
+      for (const path of orphaned) {
+        patchFile(path, {
+          conflict:
+            "This buffer belongs to the workspace you left — copy your changes out; " +
+            "saving here would write to a different project.",
+        });
+      }
+      if (orphaned.size > 0) {
+        get().pushToast(
+          "warn",
+          `The workspace changed while ${String(orphaned.size)} file(s) had unsaved edits. ` +
+            "They are still open and cannot be saved here.",
+        );
+      }
+      // Re-read, in the order the window fills in: the tree first, because it is
+      // what the user is looking at.
+      await get().loadDir("");
+      await Promise.all([
+        get().refreshSessions(),
+        get().refreshShortcuts(),
+        get().refreshProvenance(),
+      ]);
+    },
+
     openFile: async (path) => {
       // Opening it IS seeing it: half of the acknowledge rule (the other half
       // is dismissing the bar). Fires even for an already-open tab, because
@@ -883,7 +969,15 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         if (activePath === path) {
           activePath = openFiles[Math.min(index, openFiles.length - 1)]?.path ?? null;
         }
-        return { openFiles, activePath };
+        // Orphanhood is a property of *this* buffer, not of the path: it says
+        // "these bytes came from the workspace you left". Closing it ends that,
+        // and the entry has to go with it — otherwise opening the new
+        // workspace's own `src/main.py` would inherit the refusal meant for the
+        // old one's, and Ctrl+S would silently do nothing.
+        if (!s.orphanedPaths.has(path)) return { openFiles, activePath };
+        const orphanedPaths = new Set(s.orphanedPaths);
+        orphanedPaths.delete(path);
+        return { openFiles, activePath, orphanedPaths };
       });
     },
 
@@ -960,6 +1054,15 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     saveFile: async (path) => {
       const file = get().openFiles.find((f) => f.path === path);
       if (!file || file.loadError !== null) return;
+      // The buffer's workspace is gone. The relative path still resolves — into
+      // *another project* — so this is the one save that must not be attempted.
+      if (get().orphanedPaths.has(path)) {
+        get().pushToast(
+          "warn",
+          `${file.name} belongs to the workspace you left — copy your changes out instead.`,
+        );
+        return;
+      }
       if (file.kind === "office") {
         // Fire-and-forget flush of pending edits to disk; a subtle "Saved"
         // acknowledgment shows on success (the editor autosaves regardless).
