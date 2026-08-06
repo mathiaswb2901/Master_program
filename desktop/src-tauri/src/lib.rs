@@ -13,6 +13,11 @@
 //! * **Attention badge.** `document.title` does not reach a native title bar or
 //!   the taskbar, so `set_attention` retitles the window instead.
 //!
+//! The same argument later claimed the frame's *colours*: it is drawn by the
+//! window manager, outside the document, so no stylesheet can reach it — and it
+//! read as a stock grey Windows caption above a graphite app. `set_caption_tint`
+//! paints it in the UI's own design tokens; see [`caption`].
+//!
 //! Backend supervision runs on a worker thread and the window opens
 //! immediately: it can take seconds for a spawned server to bind, and a
 //! double-click that shows nothing at all for that long reads as a failed
@@ -24,6 +29,7 @@
 //! It is proven here against a synthetic guest process; see that module.
 
 mod backend;
+mod caption;
 mod close_guard;
 /// Public only so the synthetic guest binary (`src/bin/workbench-guest.rs`) can
 /// share the handful of constants it and the host must agree on. Nothing
@@ -90,6 +96,16 @@ fn backend_ready() -> bool {
 #[tauri::command]
 fn set_attention(window: tauri::Window, on: bool) -> tauri::Result<()> {
     window.set_title(if on { TITLE_ATTENTION } else { TITLE })
+}
+
+/// Paint the native caption in the UI's own design tokens.
+///
+/// Returns nothing, deliberately: the caption is decoration, and a Windows
+/// build that has no such attributes must cost the user a log line rather than
+/// an error. The UI calls this on startup and on every theme flip.
+#[tauri::command]
+fn set_caption_tint(window: tauri::Window, tint: caption::CaptionTint) {
+    caption::apply_and_log(&window, &tint);
 }
 
 /// The user answered the dirty-close prompt with "close" — close for real.
@@ -241,6 +257,7 @@ pub fn run() {
         close_ack,
         backend_ready,
         set_attention,
+        set_caption_tint,
         confirm_close,
         cancel_close,
         pick_directory,
@@ -261,6 +278,7 @@ pub fn run() {
         close_ack,
         backend_ready,
         set_attention,
+        set_caption_tint,
         confirm_close,
         cancel_close,
         pick_directory,
@@ -279,6 +297,7 @@ pub fn run() {
         close_ack,
         backend_ready,
         set_attention,
+        set_caption_tint,
         confirm_close,
         cancel_close,
         pick_directory
@@ -289,8 +308,17 @@ pub fn run() {
         .expect("failed to start the Workbench shell")
         .run(|app, event| match event {
             // The window is up. Everything that needs one starts here.
-            #[cfg(all(windows, debug_assertions))]
-            RunEvent::Ready => host::start_demo_if_asked(app),
+            RunEvent::Ready => {
+                // Before the webview has finished loading, let alone mounted:
+                // the caption wears the last run's colours from the first
+                // frame instead of being stock grey until the UI can speak.
+                // Returns at once — this arm is the event loop, so the cache
+                // is read on a thread of its own and only the painting is
+                // posted back here.
+                caption::restore_tint(app);
+                #[cfg(all(windows, debug_assertions))]
+                host::start_demo_if_asked(app);
+            }
             // Last line of defence: every close path above already released,
             // but a path nobody thought of must not leave an orphan either.
             RunEvent::Exit => release_hosted_windows(app),

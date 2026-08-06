@@ -65,4 +65,6 @@ windows = { version = "0.61", features = [
     # RegisterClassExW needs an HINSTANCE, and the guest fixture paints.
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
+    # Caption tint: DwmSetWindowAttribute + the DWMWA_* attribute ids.
+    "Win32_Graphics_Dwm",
 ] }

@@ -47,7 +47,7 @@ One Python process, one webview window, one optional local Office engine.
 
 Not packaging polish — a **requirement**. Real Word/Excel/PowerPoint windows are
 reparented into panels (`SetParent`), and a browser tab has no HWND to parent
-them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns four things:
+them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns five things:
 
 | Concern | Why it cannot live in the UI |
 |---|---|
@@ -55,6 +55,7 @@ them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns four things:
 | Backend supervision (`backend.rs`) | Nothing in a webview can start or outlive a process |
 | Close guard | WebView2 ignores `beforeunload`, so a native close silently discarded dirty buffers |
 | Attention badge | `document.title` never reaches a native title bar or the taskbar |
+| Caption tint (`caption.rs`) | The frame is drawn by the window manager, outside the document and outside the process — no stylesheet can reach it |
 
 **Backend supervision.** One probe of `GET /api/health` decides: if a *Workbench*
 backend is already listening the shell **attaches** — a developer's own `uv run
@@ -108,6 +109,54 @@ backend too:
   it looks like. Only the *ack* is on that clock; once the modal is up the user
   has as long as they like. The state machine and all of its transitions are
   unit-tested in `close_guard.rs`.
+
+**Caption tint** (`caption.rs`, `ui/src/captionTint.ts`). The frame was the one
+part of the product that looked like every other Windows program — a stock grey
+caption above a graphite app — and it is unreachable from CSS, being drawn by
+the window manager in another process entirely. Windows 11 lets an app change
+what that frame is painted *with* while leaving it to paint it:
+`DWMWA_CAPTION_COLOR` (35), `DWMWA_TEXT_COLOR` (36) and `DWMWA_BORDER_COLOR`
+(34). **Tinting rather than replacing is the whole decision.** Dragging,
+snapping, double-click-to-maximise, Aero Shake, the snap-layouts flyout, the
+system menu and the three window buttons keep working because they are still
+the real ones; a custom frame reimplements every one of them (M7 — see
+`ROADMAP.md`, and note that *what* such a frame would carry depends on a visual
+direction not yet chosen).
+
+Three consequences the design turns on:
+
+- **The colours belong to the UI.** `tokens.css` is the single source of truth
+  for colour, so the shell is *told* three resolved tokens — `--surface-app`,
+  `--text-secondary`, `--border-strong` — through the same `shell.ts` seam that
+  carries the attention badge, on startup and on every theme flip. A hex
+  constant in Rust would be a second palette no theme toggle could reach.
+- **The window buttons are not text.** `DWMWA_TEXT_COLOR` reaches the title and
+  nothing else; DWM draws the minimise/maximise/close glyphs from the window's
+  immersive light/dark mode. So the shell derives that flag from the caption's
+  own **relative luminance** — from the colour, not from the theme's name, so a
+  palette change carries it — and the title/caption pair is held to DESIGN.md
+  §7's 4.5:1 by a test that reads `tokens.css` itself
+  (`ui/e2e/captionContrast.test.ts`: 8.3:1 dark, 6.5:1 light today).
+- **"On startup" has to mean startup.** The UI cannot send a tint until its
+  bundle has mounted, so the caption was stock for the first moments of every
+  launch — the exact pixel this exists to fix. The last tint is therefore
+  cached in the app config dir and re-applied from `RunEvent::Ready`, the first
+  instant a window exists. It is a cache of the UI's own value, never a second
+  authority: a first-ever run has none, and anything but three parseable
+  colours means no pre-tint. `Ready` runs on the event loop, so the *read* is
+  on a thread of its own and only the painting is posted back — the config
+  directory can be a roaming profile or a network share, and a window that will
+  not repaint while one resolves is worse than the flash being removed.
+
+Degrading is silent in every direction. Windows 10 has no attributes 34–36 and
+refuses them (`E_INVALIDARG`) — one log line, and the caption stays the
+system's; the older immersive-dark-mode flag is still attempted, because a dark
+system caption over a dark app beats a light one. `DwmGetWindowAttribute` cannot
+read these back (measured: `E_INVALIDARG` on 26200), so the evidence a tint
+landed is the set's `HRESULT` plus the shell log, and the evidence it broke
+nothing is the window state read back afterwards — style bits, `WM_NCHITTEST`
+over the caption, the system menu — which is what `caption.rs`'s window tests
+assert against a real window.
 
 **Both hosts, always.** `ui/src/shell.ts` is the only module importing
 `@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
