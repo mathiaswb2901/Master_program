@@ -56,6 +56,14 @@ async function setDismissed(page: Page, dismissed: boolean): Promise<void> {
   expect(response.ok(), "the welcome flag was written").toBe(true);
 }
 
+/** Run a QuickBar command by its row title — the keyboard path to anything. */
+async function runCommand(page: Page, title: string): Promise<void> {
+  await page.keyboard.press("Control+Shift+P");
+  const quickbar = page.getByRole("dialog", { name: "Quick open" });
+  await quickbar.locator(".wb-qb-row", { hasText: title }).first().click();
+  await expect(quickbar).toBeHidden();
+}
+
 /** A window nobody has arranged: no saved layout, no dismissal. */
 async function firstRun(page: Page): Promise<void> {
   await page.request.put("/api/layouts", {
@@ -127,17 +135,22 @@ test("a new window says what it is, and the reference teaches the chords", async
     await page.reload();
     await workspaceReady(page);
     await launchSettled(page);
-    // Nothing auto-opens any more, and the window is the plain four again —
-    // this is what "a user who has used it for a month never sees the
-    // scaffolding again" has to mean.
+    // The scaffolding is what must not come back — this is what "a user who has
+    // used it for a month never sees it again" has to mean. Whether the *panel*
+    // is still on screen is the layout system's business and deliberately not
+    // asserted: it was open when the arrangement was saved, so a restore
+    // bringing it back is correct, and the debounced autosave makes which of
+    // the two happened a matter of milliseconds.
     await expect(welcome(page)).toBeHidden();
-    expect(await panels(page)).toEqual(DEFAULT_PANELS);
   });
 
   await test.step("Alt+K opens the reference from anywhere", async () => {
-    // Pressed from inside the terminal, which is the pass-through rule the
-    // panel itself explains: Alt is what reaches Workbench from a surface that
-    // owns its own keyboard.
+    // Back to the plain window first, so the chord is unambiguously what put
+    // the panel there. Then pressed from inside the terminal, which is the
+    // pass-through rule the panel itself explains: Alt is what reaches
+    // Workbench from a surface that owns its own keyboard.
+    await runCommand(page, "Switch to the Default layout");
+    expect(await panels(page)).toEqual(DEFAULT_PANELS);
     await expect(reference(page)).toBeHidden();
     await page.locator(".wb-terminal:not(.is-hidden) .xterm-screen").click();
     await page.keyboard.press("Alt+K");
@@ -197,10 +210,7 @@ test("a new window says what it is, and the reference teaches the chords", async
   });
 
   await test.step("reset leaves the workspace as the next journey expects it", async () => {
-    await page.keyboard.press("Control+Shift+P");
-    const quickbar = page.getByRole("dialog", { name: "Quick open" });
-    await quickbar.locator(".wb-qb-row", { hasText: "Switch to the Default layout" }).first().click();
-    await expect(quickbar).toBeHidden();
+    await runCommand(page, "Switch to the Default layout");
     expect(await panels(page)).toEqual(DEFAULT_PANELS);
     // Wait for the debounced autosave, so the last thing written to disk is the
     // arrangement above rather than the one with a Keyboard pane in it.
