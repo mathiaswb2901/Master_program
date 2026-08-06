@@ -16,7 +16,6 @@ import type { ConversationInfo, ConversationStore, ProjectGroup } from "../types
 
 // The two imports that would otherwise pull in dockview's runtime, Monaco and
 // the app store. Nothing here clicks anything.
-vi.mock("../dock", () => ({ openPanel: () => undefined }));
 vi.mock("./Panes", () => ({ revealPane: () => undefined }));
 vi.mock("../store", () => ({
   useStore: Object.assign(() => undefined, {
