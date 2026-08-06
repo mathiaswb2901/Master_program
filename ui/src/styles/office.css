@@ -21,6 +21,18 @@
   background: var(--surface-paper-surround);
 }
 
+/* THE MAT (DESIGN.md §6.1, document panels). `--surface-paper-surround` is a
+   mid-grey field now (#5A5A5A dark / #A5A5A5 light) rather than a shade of the
+   chrome, which is what lets a white page read as a sheet of paper laid on
+   something instead of a hole cut in the window. Three parts, and all three are
+   needed — a surround with no inset is a background, not a mat:
+
+     inset  --space-5 of mat all round the page, so the sheet floats
+     rim    1px --border-paper-rim, visible against both mat and paper
+     lift   --shadow-1, the page shadow §6.1 already specified
+
+   The inset is what the native Office host measures its window rect from, so
+   the real Word window lands inside the mat too — nothing extra to do there. */
 .wb-office-body {
   position: relative;
   flex: 1;
@@ -30,8 +42,10 @@
 /* Host for the imperative DocsAPI mount node (replaced by the editor iframe). */
 .wb-office-frame {
   position: absolute;
-  inset: 0;
+  inset: var(--space-5);
   border: 1px solid var(--border-paper-rim);
+  box-shadow: var(--shadow-1);
+  background: var(--surface-paper);
 }
 
 .wb-office-frame iframe {
@@ -116,13 +130,22 @@
 /* ---- Native host: a real Word/Excel window in the panel ------------------- */
 
 /* The docked surface is a deliberate hole in the page — a rectangle for a
-   native window to sit in front of. It paints the paper surround so the moment
-   before the window arrives (and any moment the window is gone) is the same
-   calm surface as every other document state, not a flash of app chrome. */
+   native window to sit in front of. It paints paper so the moment before the
+   window arrives (and any moment the window is gone) is a blank sheet on the
+   mat rather than a flash of app chrome, and it takes the same inset, rim and
+   lift as the OnlyOffice frame: the host measures its window rect from this
+   element, so the real Word window lands on the mat, not over it. */
 .wb-office-native {
   position: absolute;
-  inset: 0;
-  background: var(--surface-paper-surround);
+  inset: var(--space-5);
+  background: var(--surface-paper);
+  /* The rim is an *outset* ring rather than a border, because the host sizes
+     the real Word window from this element's border box — a 1px border would
+     be underneath the native window and invisible. A ring drawn outside it
+     survives. */
+  box-shadow:
+    0 0 0 1px var(--border-paper-rim),
+    var(--shadow-1);
 }
 
 /* Native hosting falls back to the OnlyOffice panel in place; the wrapper is
@@ -140,17 +163,22 @@
 }
 
 /* A statement about the document, not a warning about a failure: the calm
-   surround rather than --warn-bg, which the reopen bar below keeps. */
+   surround rather than --warn-bg, which the reopen bar below keeps. It is
+   painted at the *mat* value rather than on app chrome, because it sits between
+   the mat tab strip and the mat itself — a dark band there cuts the one
+   continuous surface the mat is (§6.1). Found by looking at the running app. */
 .wb-office-note {
   display: flex;
   align-items: center;
   flex: none;
   padding: var(--space-3) var(--space-5);
-  background: var(--surface-elevated);
-  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-paper-surround);
+  border-bottom: 1px solid var(--border-paper-rim);
   font-size: var(--type-sm-size);
   line-height: var(--type-sm-line);
-  color: var(--text-secondary);
+  /* On the mat, not on the page: the app's own text pair, not the paper one
+     (editor.css, "Text on the mat" — near-black is 2.67:1 on the dark mat). */
+  color: var(--text-primary);
 }
 
 .wb-office-note-msg {
@@ -180,11 +208,15 @@
   pointer-events: none;
 }
 
+/* Demoted from accent (DESIGN.md §2.4 audit): "this really is Word" is true
+   for as long as the window is docked, and a permanent amber dot on screen is
+   exactly how amber stops meaning "right now". A healthy standing state is
+   --success. */
 .wb-office-hosted-dot {
   width: 6px;
   height: 6px;
   border-radius: var(--radius-full);
-  background: var(--accent);
+  background: var(--success);
   flex: none;
 }
 

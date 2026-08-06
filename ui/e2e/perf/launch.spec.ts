@@ -14,7 +14,7 @@
  * has not launched.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
 import {
@@ -25,6 +25,7 @@ import {
   record,
   round,
 } from "./instrument";
+import { test } from "./window";
 
 /**
  * Measured 2026-08-05 on the author's machine (Win11, production build served
@@ -80,6 +81,22 @@ import {
  * something that got 4x faster: what a *row* costs is still dominated by
  * `GET /api/files/tree` walking 5,005 files and by rendering them
  * unvirtualised, and two queued Feel items own that. This one owns the paint.
+ *
+ * **What the lane was doing to this number, 2026-08-06.** Until `./window`
+ * landed, the window this test launched into was whatever the spec before it had
+ * saved — a launch measured against no fixed starting point at all. Same machine,
+ * pinned `WB_PERF_WORKSPACE`, `.workbench/` wiped, full lane, before and after
+ * that change: tree rows **714.9 → 686.6 ms**, FCP **700 → 672 ms**, DCL
+ * **68.4 → 64.1 ms** — inside this box's noise, which is the point twice over.
+ * The starting window is now stated, and stating it cost this measurement
+ * nothing: the reset is one PUT on an API context before the page navigates.
+ *
+ * One number it did *not* fix is below. And when comparing runs, compare
+ * like-for-like on the *server*, not just the workspace: the first page load
+ * after `vite preview` starts pays for a module graph nothing has requested yet
+ * (measured on this box the same afternoon: FCP **1,384 ms** as the run's first
+ * navigation, **156 ms** as its second), so a spec run alone is not comparable
+ * with the same spec seventh in a lane.
  */
 const LAUNCH_CEILING_MS = 1_500;
 

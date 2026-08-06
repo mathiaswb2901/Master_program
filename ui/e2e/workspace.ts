@@ -72,6 +72,15 @@ export const DOCX_FILE = "sample.docx";
  */
 export const DOCX_ALREADY_OPEN = "sample-already-open.docx";
 export const DOCX_REFUSES_EMBED = "sample-refuse-embed.docx";
+/**
+ * The document that docks and then will not quit — the `close_failed` window,
+ * sitting on the desktop with an unsaved edit in it.
+ *
+ * Journey 10 uses it: a workspace switch has to *stop* for this, because the
+ * only surface that can say a real Word window was left behind is the panel the
+ * switch would have unmounted.
+ */
+export const DOCX_REFUSES_CLOSE = "sample-refuse-close.docx";
 /** A deck, for the one application v1 deliberately does not dock. */
 export const PPTX_FILE = "slides.pptx";
 /** Body of the working shell shortcut; the terminal journey asserts this text
@@ -240,7 +249,13 @@ function seed(root: string): void {
   // backend with no Document Server configured, so nothing ever reads a byte of
   // these — three of them are named to choose a branch of the host lifecycle,
   // and the fourth is the application v1 will not dock.
-  for (const name of [DOCX_FILE, DOCX_ALREADY_OPEN, DOCX_REFUSES_EMBED, PPTX_FILE]) {
+  for (const name of [
+    DOCX_FILE,
+    DOCX_ALREADY_OPEN,
+    DOCX_REFUSES_EMBED,
+    DOCX_REFUSES_CLOSE,
+    PPTX_FILE,
+  ]) {
     fs.writeFileSync(path.join(root, name), "not a real document\n", "utf-8");
   }
   fs.mkdirSync(path.join(root, ".workbench"));
@@ -296,6 +311,11 @@ function ensureWorkspace(): string {
   return root;
 }
 
+/** True in the runner, false in every worker it hands the seeded path to.
+ * Read *before* `ensureWorkspace()` publishes the path, because publishing it
+ * is what makes the two indistinguishable afterwards. */
+const IS_RUNNER = (process.env[ACTIVE_ENV] ?? "") === "";
+
 export const E2E_WORKSPACE = ensureWorkspace();
 
 /** Claude Code's project key for the seeded `src/` conversations — which is
@@ -304,6 +324,98 @@ export const E2E_WORKSPACE = ensureWorkspace();
 export const CONV_SRC_PROJECT_KEY = encodeProject(
   path.join(fs.realpathSync.native(E2E_WORKSPACE), SRC_DIR),
 );
+
+/* ---- the second workspace, for the switcher journey ------------------------
+ *
+ * A *sibling* of the run's workspace, never a folder inside it: the switcher's
+ * whole claim is that the tree, the layout file and shortcuts follow the root,
+ * and a second project nested in the first would be visible from both — so the
+ * assertion "this file is not here any more" would prove nothing. Seeded with
+ * one file, one shortcut and one saved layout, each named so it cannot be
+ * confused with the first workspace's.
+ */
+
+/**
+ * Where the second workspace lives, and where machine-local state goes. Both
+ * siblings, on the same reasoning as the perf lane's `-projects` sibling.
+ *
+ * The second workspace's **folder name shares no substring with the first's**,
+ * and that is load-bearing rather than tidy. `${E2E_WORKSPACE}-second` reads
+ * better and cost an hour: the picker rows and the status chip are matched by
+ * text, so `workbench-e2e-21NheM` matched the row for
+ * `workbench-e2e-21NheM-second` first — the row for the workspace you are
+ * already in, which is deliberately not choosable. The suite already learned
+ * this once (`WORKSPACE_PREFIX` above, and `e2e-5` matching the directory it
+ * was running in); the answer both times is a name that cannot be a prefix.
+ */
+export const SECOND_WORKSPACE = path.join(
+  path.dirname(E2E_WORKSPACE),
+  `wb-other-${path.basename(E2E_WORKSPACE).slice(WORKSPACE_PREFIX.length)}`,
+);
+export const E2E_APP_DATA = `${E2E_WORKSPACE}-appdata`;
+
+/** Only in the second workspace — the file tree assertion, both ways. */
+export const SECOND_FILE = "only-in-second.md";
+/** Only in the second workspace's `.workbench/shortcuts.md`. */
+export const SECOND_SHORTCUT_NAME = "Second workspace only";
+/** Only in the second workspace's `.workbench/layouts.json`. */
+export const SECOND_LAYOUT_NAME = "Second view";
+
+const SECOND_SHORTCUTS_FILE = `# Second workspace shortcuts
+
+## ${SECOND_SHORTCUT_NAME}
+
+\`\`\`
+echo second-workspace-marker
+\`\`\`
+`;
+
+/**
+ * A layouts document whose *saved* list is the only thing under test.
+ *
+ * `current` is null on purpose, so nothing is applied to the dock on arrival:
+ * the claim is that this workspace's saved names are the ones on the menu, and
+ * applying a hand-written dockview grid would be testing dockview. The server
+ * stores the `state` verbatim (its shape belongs to a UI library), so `{}` is a
+ * legal document that the menu lists and nothing tries to restore.
+ */
+const SECOND_LAYOUTS_FILE = JSON.stringify({
+  current: null,
+  current_name: null,
+  saved: [{ name: SECOND_LAYOUT_NAME, state: {} }],
+});
+
+function seedSecondWorkspace(): void {
+  // Left behind between runs like the main workspace, so re-seeding must be
+  // idempotent rather than assume an empty directory.
+  fs.rmSync(SECOND_WORKSPACE, { recursive: true, force: true });
+  fs.mkdirSync(path.join(SECOND_WORKSPACE, ".workbench"), { recursive: true });
+  fs.writeFileSync(
+    path.join(SECOND_WORKSPACE, SECOND_FILE),
+    "# The other project\n\nNothing from the first workspace is here.\n",
+    "utf-8",
+  );
+  fs.writeFileSync(
+    path.join(SECOND_WORKSPACE, ".workbench", "shortcuts.md"),
+    SECOND_SHORTCUTS_FILE,
+    "utf-8",
+  );
+  fs.writeFileSync(
+    path.join(SECOND_WORKSPACE, ".workbench", "layouts.json"),
+    SECOND_LAYOUTS_FILE,
+    "utf-8",
+  );
+  // The recent-workspaces list is machine-local state, not a project's — so a
+  // run must not read or rewrite the developer's real one. Started empty each
+  // run, which is also what makes the recents assertions deterministic.
+  fs.rmSync(E2E_APP_DATA, { recursive: true, force: true });
+  fs.mkdirSync(E2E_APP_DATA, { recursive: true });
+}
+
+// Runner only. A worker re-seeding would wipe the recent list *after* the
+// server had already recorded its launch workspace in it, which is exactly the
+// row the journey asserts you can come back to.
+if (IS_RUNNER) seedSecondWorkspace();
 
 /** Absolute path of a workspace-relative file, for on-disk edits from a test. */
 export function workspacePath(relative: string): string {

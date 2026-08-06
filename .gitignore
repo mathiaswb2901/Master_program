@@ -32,6 +32,11 @@ workbench.toml
 # Per-user workspace data (shortcuts.md and anything else Workbench keeps here)
 .workbench/
 
+# Local agent tooling: the PR pipeline script and the worktrees lanes run in.
+# Machine-specific by nature (absolute paths, a local gh location), so it is
+# never committed — see the danger-zone rule in CLAUDE.md.
+.claude/
+
 # OS noise
 Thumbs.db
 .DS_Store

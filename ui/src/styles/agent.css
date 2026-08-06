@@ -237,17 +237,19 @@
 .wb-md code {
   font-family: var(--font-mono);
   font-size: var(--type-code-size);
-  background: var(--surface-terminal);
+  background: var(--surface-code);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   padding: 0 var(--space-2);
 }
 
-/* Fenced code blocks: --surface-terminal well, --radius-md, mono 13px (§6.3). */
+/* Fenced code blocks: --surface-code well, --radius-md, mono 13px (§6.3).
+   Not --surface-terminal: that is #000000 now, and a pure-black block inside a
+   #202020 chat column is a 12 L* drop where the ramp calls for 6. */
 .wb-md pre {
   margin: 0;
   padding: var(--space-4) var(--space-5);
-  background: var(--surface-terminal);
+  background: var(--surface-code);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   overflow-x: auto;
@@ -262,14 +264,18 @@
   white-space: pre;
 }
 
+/* Demoted from accent (DESIGN.md §2.4 audit). A link is navigation, not a
+   value changing right now; the underline carries the affordance and doubles
+   as the non-colour signal (§7). */
 .wb-md a {
-  color: var(--accent);
-  text-decoration: none;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
 }
 
 .wb-md a:hover {
-  color: var(--accent-hover);
-  text-decoration: underline;
+  text-decoration-color: currentcolor;
 }
 
 .wb-chat-cost {
@@ -348,7 +354,7 @@
   padding: var(--space-4) var(--space-5);
   max-height: 260px;
   overflow: auto;
-  background: var(--surface-terminal);
+  background: var(--surface-code);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   font-family: var(--font-mono);
@@ -372,7 +378,7 @@
 }
 
 .wb-tool-link:hover {
-  color: var(--accent);
+  color: var(--text-primary);
   text-decoration: underline;
 }
 

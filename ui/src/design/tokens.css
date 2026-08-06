@@ -12,79 +12,115 @@
 :root {
   color-scheme: dark;
 
-  /* ---- Surfaces ------------------------------------------------------- */
-  --surface-app: #14161A;            /* window chrome, tab strips, status bar */
-  --surface-panel: #1A1D22;          /* panel bodies, editor background */
-  --surface-elevated: #21252C;       /* cards, inputs, user chat bubble */
-  --surface-overlay: #262B33;        /* QuickBar, menus, popovers, tooltips */
-  --surface-terminal: #111317;       /* xterm background, chat code blocks */
+  /* ---- Surfaces -------------------------------------------------------
+     ANVIL's value ramp (DESIGN.md §2.1). Read it as one scale, not as a set
+     of names: the content sits at the end of the scale and every layer that
+     *frames* it steps one notch toward the middle. So the chrome is LIGHTER
+     than the panel it frames — inverted from every graphite editor, and the
+     reason a panel here reads as an object rather than as more window.
+
+       terminal  0.0   code  6.3   panel 12.3
+       elevated 18.0   app  24.0   overlay 29.7      L*, mat at 38.2
+
+     Adjacent steps 5.8–6.3 L*, end to end 29.7. Every one is a pure grey:
+     Lab C* = 0.00, so nothing in the neutrals competes with the amber. */
+  --surface-terminal: #000000;       /* xterm ground — the deepest well */
+  --surface-code: #141414;           /* Monaco buffer, chat code blocks */
+  --surface-panel: #202020;          /* panel bodies: tree, chat, usage */
+  --surface-elevated: #2C2C2C;       /* cards, inputs, user chat bubble */
+  --surface-app: #393939;            /* window chrome: tab strips, status bar */
+  --surface-overlay: #464646;        /* QuickBar, menus, popovers, tooltips */
   --surface-paper: #FFFFFF;          /* document canvas — same in both themes */
-  --surface-paper-surround: #262B33; /* around the page inside document panels */
-  --surface-hover: rgba(255, 255, 255, 0.05);
-  --surface-active: rgba(255, 255, 255, 0.08);
-  --surface-selected: rgba(92, 156, 230, 0.14);
-  --backdrop: rgba(0, 0, 0, 0.45);
+  --surface-paper-surround: #5A5A5A; /* the mat a docked page sits on (§6.1) */
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --surface-active: rgba(255, 255, 255, 0.1);
+  --surface-selected: rgba(251, 191, 36, 0.18);
+  --backdrop: rgba(0, 0, 0, 0.6);
 
-  /* ---- Text ------------------------------------------------------------ */
-  --text-primary: #E6E9EE;
-  --text-secondary: #A8B0BC;
-  --text-tertiary: #78808D;
-  --text-disabled: #545B66;
-  --text-on-accent: #FFFFFF;
-  --text-on-paper: #1B1F26;          /* chrome drawn over paper, both themes */
+  /* ---- Text ------------------------------------------------------------
+     14.94 / 11.21 / 7.86 / 4.42 : 1 on --surface-panel. Tertiary carries
+     11px metadata, so it is the one that had to move most (DESIGN.md §7). */
+  --text-primary: #F5F5F5;
+  --text-secondary: #D6D6D6;
+  --text-tertiary: #B4B4B4;
+  --text-disabled: #858585;
+  --text-on-accent: #141414;         /* on --accent-fill, both themes */
+  --text-on-paper: #141414;          /* chrome drawn over paper, both themes */
 
-  /* ---- Borders --------------------------------------------------------- */
-  --border-subtle: #262A31;          /* panel hairlines, row separators */
-  --border-default: #2E333C;         /* inputs, cards, buttons */
-  --border-strong: #3D4450;          /* hover/active borders, weighty dividers */
-  --border-paper-rim: #3D4450;       /* 1px rim framing document panels */
-  --focus-ring: #5C9CE6;
+  /* ---- Borders ---------------------------------------------------------
+     §1.4 elects hairlines to carry all structure and forbids shadows as the
+     fallback, so a hairline that cannot be seen is a structural failure, not
+     a subtlety. 2.51 / 3.20 / 4.85 / 6.08 : 1 on --surface-panel. */
+  --border-subtle: #5E5E5E;          /* panel hairlines, row separators */
+  --border-default: #6E6E6E;         /* inputs, cards, buttons */
+  --border-strong: #8C8C8C;          /* hover/active borders, weighty dividers */
+  --border-paper-rim: #9E9E9E;       /* 1px rim framing document panels */
+  --focus-ring: #FBBF24;
 
-  /* ---- Accent ---------------------------------------------------------- */
-  --accent: #5C9CE6;
-  --accent-hover: #75ADEC;
-  --accent-active: #4A8AD4;
-  --accent-muted: rgba(92, 156, 230, 0.15);
+  /* ---- Accent ----------------------------------------------------------
+     One hot amber, and it is the only chromatic pixel the chrome is allowed
+     (DESIGN.md §2.4). It means exactly two things: *where I am* and *this is
+     changing right now*. --accent marks (rule, text, border, dot);
+     --accent-fill is the amber *area* a label sits on, and is the same value
+     in both themes because a filled amber button works on either ground. */
+  --accent: #FBBF24;
+  --accent-hover: #FFD24D;
+  --accent-active: #E0A413;
+  --accent-muted: rgba(251, 191, 36, 0.16);
+  --accent-fill: #FBBF24;
+  --accent-fill-hover: #FFD24D;
+  --accent-fill-active: #E0A413;
 
   /* ---- Semantic -------------------------------------------------------- */
-  --success: #3FB950;
-  --success-bg: rgba(63, 185, 80, 0.14);
-  --warn: #D29922;
-  --warn-bg: rgba(210, 153, 34, 0.14);
-  --error: #F85149;
-  --error-bg: rgba(248, 81, 73, 0.14);
-  --info: #58A6FF;
-  --info-bg: rgba(88, 166, 255, 0.14);
+  --success: #22C55E;
+  --success-bg: rgba(34, 197, 94, 0.16);
+  --warn: #FF7A18;
+  --warn-bg: rgba(255, 122, 24, 0.16);
+  --error: #FF4D4D;
+  --error-bg: rgba(255, 77, 77, 0.16);
+  --info: #E879F9;
+  --info-bg: rgba(232, 121, 249, 0.16);
 
-  /* ---- Agent status (distinct from semantic — meanings may diverge) ---- */
-  --agent-working: #5C9CE6;
-  --agent-working-bg: rgba(92, 156, 230, 0.14);
-  --agent-attention: #D29922;
-  --agent-attention-bg: rgba(210, 153, 34, 0.14);
-  --agent-idle: #78808D;
-  --agent-idle-bg: rgba(120, 128, 141, 0.14);
-  --agent-done: #3FB950;
-  --agent-done-bg: rgba(63, 185, 80, 0.14);
-  --agent-error: #F85149;
-  --agent-error-bg: rgba(248, 81, 73, 0.14);
+  /* ---- Agent status (distinct from semantic — meanings may diverge) ----
+     "Working" is the amber, because a running agent is the app's canonical
+     "changing right now". "Attention" is deliberately NOT amber: a session
+     waiting on you is a standing state, and a standing amber would spend the
+     one colour that has to mean motion. */
+  --agent-working: #FBBF24;
+  --agent-working-bg: rgba(251, 191, 36, 0.16);
+  --agent-attention: #E879F9;
+  --agent-attention-bg: rgba(232, 121, 249, 0.16);
+  --agent-idle: #7A7A7A;
+  --agent-idle-bg: rgba(122, 122, 122, 0.16);
+  --agent-done: #22C55E;
+  --agent-done-bg: rgba(34, 197, 94, 0.16);
+  --agent-error: #FF4D4D;
+  --agent-error-bg: rgba(255, 77, 77, 0.16);
 
-  /* ---- Terminal ANSI (feed to xterm.js theme + Monaco token colors) ---- */
-  --ansi-black: #2A2E37;
-  --ansi-red: #F47067;
-  --ansi-green: #57AB5A;
-  --ansi-yellow: #C69026;
-  --ansi-blue: #6CB6FF;
-  --ansi-magenta: #B083F0;
-  --ansi-cyan: #39C5CF;
-  --ansi-white: #A8B0BC;
-  --ansi-bright-black: #545B66;
-  --ansi-bright-red: #FF938A;
-  --ansi-bright-green: #6BC46D;
-  --ansi-bright-yellow: #DAAA3F;
-  --ansi-bright-blue: #96D0FF;
-  --ansi-bright-magenta: #DCBDFB;
-  --ansi-bright-cyan: #56D4DD;
-  --ansi-bright-white: #E6E9EE;
+  /* ---- Terminal ANSI (feed to xterm.js theme + Monaco token colors) ----
+     Retuned for a #000000 ground: the previous set was picked against
+     #111317 and its darkest slots vanished on true black. Two rules beyond
+     legibility (DESIGN.md §2.7): black/white/bright-black/bright-white are
+     pure greys (C* = 0), and **no slot comes within ΔE 25 of --accent** —
+     the yellow is pushed to hue 57° so that amber keeps meaning focus.
+     Every slot clears 4.5:1 on --surface-code, which is where Monaco reads
+     them; bright-black is a comment colour and had to move furthest. */
+  --ansi-black: #4D4D4D;
+  --ansi-red: #FF6B60;
+  --ansi-green: #3ECF7F;
+  --ansi-yellow: #D8D24F;
+  --ansi-blue: #6BB6FF;
+  --ansi-magenta: #C68BF5;
+  --ansi-cyan: #45D6DE;
+  --ansi-white: #C8C8C8;
+  --ansi-bright-black: #8A8A8A;
+  --ansi-bright-red: #FF9A90;
+  --ansi-bright-green: #6FE3A4;
+  --ansi-bright-yellow: #EDE783;
+  --ansi-bright-blue: #9CD1FF;
+  --ansi-bright-magenta: #DFB6FB;
+  --ansi-bright-cyan: #7FE8EE;
+  --ansi-bright-white: #F5F5F5;
 
   /* ---- Typography ------------------------------------------------------ */
   --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
@@ -233,88 +269,127 @@
 
 /* ==========================================================================
    Light theme — [data-theme="light"] on <html>
+
+   ANVIL is a dark direction; this is its counterpart, derived from the same
+   four rules rather than inverted from its values (DESIGN.md §2.8):
+
+     1. Achromatic neutrals. Every grey below is Lab C* = 0.00, shadows and
+        scrims included — the old light theme's blue-grey was chroma nobody
+        asked for.
+     2. Content at the end of the scale, every frame layer one step toward
+        the middle. Dark's ground is #000000, light's is #FFFFFF, so the
+        chrome here is *darker* than the wells it frames. Same sentence,
+        opposite direction.
+     3. Visible edges. --border-subtle is 2.51:1 on --surface-panel — the
+        same figure as dark, because the threshold is a ratio, not a value.
+     4. One amber. But the hot amber is a *light* colour: 1.33:1 on this
+        panel, so it cannot be text, a rule or a border here. Light spends a
+        deep amber (#856000, 4.67:1 as text, 3.75:1 as a rule on chrome) for
+        every *mark*, and keeps the hot one for --accent-fill, where it is a
+        filled area carrying near-black text. That split is the whole answer
+        to "amber cannot clear 4.5:1 on white".
+
+   The one honest difference: light's steps are ~4 L* against dark's ~6, end
+   to end 20.1 against 29.7. A light ramp starts at 100 and has nowhere to go
+   but down, so matching dark's spread would land the chrome in mid-grey and
+   it would stop being a light theme. Light pays the difference back in its
+   borders, which are far easier to see against a bright field.
    ========================================================================== */
 [data-theme="light"] {
   color-scheme: light;
 
-  /* ---- Surfaces -------------------------------------------------------- */
-  --surface-app: #ECEEF1;
-  --surface-panel: #F7F8FA;
-  --surface-elevated: #FFFFFF;
-  --surface-overlay: #FFFFFF;
+  /* ---- Surfaces --------------------------------------------------------
+     100.0 / 95.8 / 92.0 / 88.1 / 83.8 / 79.9 L*, mat at 67.7. */
   --surface-terminal: #FFFFFF;
+  --surface-code: #F3F3F3;
+  --surface-panel: #E8E8E8;
+  --surface-elevated: #DDDDDD;
+  --surface-app: #D1D1D1;
+  --surface-overlay: #C6C6C6;
   --surface-paper: #FFFFFF;
-  --surface-paper-surround: #E4E7EB;
-  --surface-hover: rgba(17, 19, 23, 0.05);
-  --surface-active: rgba(17, 19, 23, 0.08);
-  --surface-selected: rgba(46, 111, 208, 0.10);
-  --backdrop: rgba(15, 18, 23, 0.30);
+  --surface-paper-surround: #A5A5A5;
+  --surface-hover: rgba(0, 0, 0, 0.06);
+  --surface-active: rgba(0, 0, 0, 0.1);
+  --surface-selected: rgba(251, 191, 36, 0.48);
+  --backdrop: rgba(0, 0, 0, 0.35);
 
-  /* ---- Text ------------------------------------------------------------ */
-  --text-primary: #1B1F26;
-  --text-secondary: #4B5563;
-  --text-tertiary: #6E7781;
-  --text-disabled: #9AA1AB;
-  --text-on-accent: #FFFFFF;
-  --text-on-paper: #1B1F26;
+  /* ---- Text ------------------------------------------------------------
+     14.90 / 11.24 / 7.83 / 4.41 : 1 on --surface-panel — dark's figures to
+     two decimals, which is what "a coherent counterpart" has to mean. */
+  --text-primary: #151515;
+  --text-secondary: #2D2D2D;
+  --text-tertiary: #454545;
+  --text-disabled: #6A6A6A;
+  --text-on-accent: #141414;
+  --text-on-paper: #141414;
 
-  /* ---- Borders --------------------------------------------------------- */
-  --border-subtle: #E4E7EB;
-  --border-default: #D7DBE1;
-  --border-strong: #B9C0C9;
-  --border-paper-rim: #D7DBE1;
-  --focus-ring: #2E6FD0;
+  /* ---- Borders ---------------------------------------------------------
+     2.51 / 3.18 / 4.83 / 6.08 : 1 on --surface-panel. */
+  --border-subtle: #939393;
+  --border-default: #818181;
+  --border-strong: #646464;
+  --border-paper-rim: #555555;
+  --focus-ring: #856000;
 
-  /* ---- Accent ---------------------------------------------------------- */
-  --accent: #2E6FD0;
-  --accent-hover: #275FB5;
-  --accent-active: #21519B;
-  --accent-muted: rgba(46, 111, 208, 0.12);
+  /* ---- Accent ----------------------------------------------------------
+     The deep amber marks; the hot amber fills. --accent-muted and
+     --surface-selected are washes of the *hot* one, so a selected row is
+     unmistakably amber — they carry --text-primary (12.8:1), never amber
+     text, which would land at 4.0:1 on its own wash. */
+  --accent: #856000;
+  --accent-hover: #6E5000;
+  --accent-active: #5A4100;
+  --accent-muted: rgba(251, 191, 36, 0.42);
 
-  /* ---- Semantic -------------------------------------------------------- */
-  --success: #1A7F37;
-  --success-bg: rgba(26, 127, 55, 0.10);
-  --warn: #9A6700;
-  --warn-bg: rgba(154, 103, 0, 0.10);
-  --error: #CF222E;
-  --error-bg: rgba(207, 34, 46, 0.10);
-  --info: #0969DA;
-  --info-bg: rgba(9, 105, 218, 0.10);
+  /* ---- Semantic --------------------------------------------------------
+     Same hues as dark (142 / 25 / 0 / 292), darkened to ~4.9:1 on panel. */
+  --success: #03722C;
+  --success-bg: rgba(3, 114, 44, 0.16);
+  --warn: #A44804;
+  --warn-bg: rgba(164, 72, 4, 0.16);
+  --error: #C70505;
+  --error-bg: rgba(199, 5, 5, 0.16);
+  --info: #A905C2;
+  --info-bg: rgba(169, 5, 194, 0.16);
 
   /* ---- Agent status ---------------------------------------------------- */
-  --agent-working: #2E6FD0;
-  --agent-working-bg: rgba(46, 111, 208, 0.12);
-  --agent-attention: #9A6700;
-  --agent-attention-bg: rgba(154, 103, 0, 0.10);
-  --agent-idle: #6E7781;
-  --agent-idle-bg: rgba(110, 119, 129, 0.10);
-  --agent-done: #1A7F37;
-  --agent-done-bg: rgba(26, 127, 55, 0.10);
-  --agent-error: #CF222E;
-  --agent-error-bg: rgba(207, 34, 46, 0.10);
+  --agent-working: #856000;
+  --agent-working-bg: rgba(251, 191, 36, 0.42);
+  --agent-attention: #A905C2;
+  --agent-attention-bg: rgba(169, 5, 194, 0.16);
+  --agent-idle: #6A6A6A;
+  --agent-idle-bg: rgba(106, 106, 106, 0.16);
+  --agent-done: #03722C;
+  --agent-done-bg: rgba(3, 114, 44, 0.16);
+  --agent-error: #C70505;
+  --agent-error-bg: rgba(199, 5, 5, 0.16);
 
-  /* ---- Terminal ANSI --------------------------------------------------- */
-  --ansi-black: #1B1F26;
-  --ansi-red: #CF222E;
-  --ansi-green: #1A7F37;
-  --ansi-yellow: #9A6700;
-  --ansi-blue: #0969DA;
-  --ansi-magenta: #8250DF;
-  --ansi-cyan: #1B7C83;
-  --ansi-white: #6E7781;
-  --ansi-bright-black: #4B5563;
-  --ansi-bright-red: #A40E26;
-  --ansi-bright-green: #116329;
-  --ansi-bright-yellow: #7D5400;
-  --ansi-bright-blue: #218BFF;
-  --ansi-bright-magenta: #A475F9;
-  --ansi-bright-cyan: #3192AA;
-  --ansi-bright-white: #8C959F;
+  /* ---- Terminal ANSI ---------------------------------------------------
+     On a #FFFFFF ground every slot has to be dark to be legible — and a dark
+     yellow *is* amber, which is exactly the collision this theme cannot
+     afford. So the yellow is pushed to hue 72° (olive) and clears the
+     accent by ΔE 29.5. All sixteen ≥ 4.5:1 on --surface-code. */
+  --ansi-black: #2D2D2D;
+  --ansi-red: #B02419;
+  --ansi-green: #0E6B36;
+  --ansi-yellow: #556B00;
+  --ansi-blue: #14539E;
+  --ansi-magenta: #7A2E9E;
+  --ansi-cyan: #12666E;
+  --ansi-white: #545454;
+  --ansi-bright-black: #454545;
+  --ansi-bright-red: #8A1A11;
+  --ansi-bright-green: #0A5028;
+  --ansi-bright-yellow: #404E0A;
+  --ansi-bright-blue: #0D3E78;
+  --ansi-bright-magenta: #5C2277;
+  --ansi-bright-cyan: #0D4B52;
+  --ansi-bright-white: #151515;
 
-  /* ---- Elevation (softer in light) -------------------------------------- */
-  --shadow-1: 0 1px 2px rgba(27, 31, 38, 0.08);
-  --shadow-2: 0 4px 12px rgba(27, 31, 38, 0.12);
-  --shadow-3: 0 16px 40px rgba(27, 31, 38, 0.18);
+  /* ---- Elevation (softer in light, and achromatic like everything else) - */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.1);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.14);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.2);
 }
 
 /* ==========================================================================
