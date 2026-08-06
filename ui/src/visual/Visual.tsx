@@ -23,7 +23,9 @@
 
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
 
+import { nameOrIndex } from "../plan/anchors";
 import type {
+  AnchorSegment,
   ChartLeaf,
   ChartSeries,
   CodeDiffLeaf,
@@ -37,8 +39,34 @@ import type {
   VisualNode,
   VisualRole,
 } from "../types";
+import {
+  AnnotateProvider,
+  Part,
+  SvgPart,
+  useAnnotation,
+  useNoted,
+  type VisualAnnotation,
+} from "./annotate";
 import { layerNodes, logTicks, matchLines, minimumGap, niceTicks, scale } from "./layout";
-import { gridCaption, resolveGrid, timeTicks } from "./timeAxis";
+import { gridCaption, gridLabels, resolveGrid, timeTicks } from "./timeAxis";
+
+/**
+ * Where a leaf sits in its node, flat over the blocks — the first segment of
+ * every anchor a leaf emits (`../plan/anchors.ts`). Passed down rather than
+ * derived inside each view so there is exactly one place the numbering is
+ * decided, and it is the same place `services/plan_anchors.py` counts from.
+ */
+type LeafAt = { at: number };
+
+/** Whether parts are pickable right now — annotate mode, in one word. */
+function usePickable(): boolean {
+  return useAnnotation()?.onPick != null;
+}
+
+/** How a part names itself out loud: `Before, row 2, column Price`. */
+function partLabel(title: string, kind: string, ...rest: string[]): string {
+  return [title === "" ? kind : title, ...rest].join(", ");
+}
 
 /** Role → the class that carries its token pair. Never a colour literal. */
 function roleClass(role: VisualRole): string {
@@ -105,7 +133,7 @@ function useDrawWidth(fallback: number, floor: number): [RefObject<HTMLDivElemen
 
 // ---- table -------------------------------------------------------------------
 
-function TableView({ leaf }: { leaf: TableLeaf }) {
+function TableView({ leaf, at }: { leaf: TableLeaf } & LeafAt) {
   // Row-level highlights first so a cell-level one can still win on top of it.
   const rowRole = new Map<number, VisualRole>();
   const cellRole = new Map<string, VisualRole>();
@@ -113,6 +141,17 @@ function TableView({ leaf }: { leaf: TableLeaf }) {
     if (highlight.column === null) rowRole.set(highlight.row, highlight.role);
     else cellRole.set(`${String(highlight.row)}:${String(highlight.column)}`, highlight.role);
   }
+  // A column is addressed by its label when that label addresses exactly one
+  // column, else by its index — `nameOrIndex` is the whole of that decision.
+  const labels = leaf.columns.map((column) => column.label);
+  const pickable = usePickable();
+  const noted = useNoted();
+  const rowPath = (r: number): AnchorSegment[] => ["leaf", at, "row", r];
+  // The handle column is a column of the table, so it is present or absent for
+  // the *whole* table — a `<td>` on only the noted rows would shift every other
+  // row's cells one place left. It earns its place when the rows are pickable,
+  // and it keeps it while any row still carries a note.
+  const handleCol = pickable || leaf.rows.some((_, r) => noted(rowPath(r)));
   return (
     <figure className="wb-vis-leaf">
       <LeafTitle text={leaf.title} />
@@ -120,6 +159,11 @@ function TableView({ leaf }: { leaf: TableLeaf }) {
         <table className="wb-vis-table">
           <thead>
             <tr>
+              {handleCol && (
+                <th scope="col" className="wb-vis-pick-col">
+                  <span className="u-sr-only">{pickable ? "Annotate row" : "Row notes"}</span>
+                </th>
+              )}
               {leaf.columns.map((column, c) => (
                 <th key={c} scope="col" className={`is-${column.type}`}>
                   <span className="wb-vis-th-label">{column.label}</span>
@@ -131,12 +175,37 @@ function TableView({ leaf }: { leaf: TableLeaf }) {
           <tbody>
             {leaf.rows.map((row, r) => (
               <tr key={r} className={roleClass(rowRole.get(r) ?? "neutral").trim() || undefined}>
+                {handleCol && (
+                  <td className="wb-vis-pick-col">
+                    {/* The handle itself is only drawn where it means
+                        something: a pilcrow on an unnoted row of a settled card
+                        is a control that does nothing. */}
+                    {(pickable || noted(rowPath(r))) && (
+                      <Part
+                        path={rowPath(r)}
+                        label={partLabel(leaf.title, "table", `row ${String(r + 1)}`)}
+                      >
+                        <span aria-hidden="true">¶</span>
+                      </Part>
+                    )}
+                  </td>
+                )}
                 {row.map((cell, c) => {
                   const role = cellRole.get(`${String(r)}:${String(c)}`) ?? "neutral";
                   return (
                     <td key={c} className={`is-${leaf.columns[c].type}${roleClass(role)}`}>
                       {role !== "neutral" && <span className="u-sr-only">{ROLE_WORD[role]}: </span>}
-                      {cell}
+                      <Part
+                        path={["leaf", at, "row", r, "col", nameOrIndex(labels, c)]}
+                        label={partLabel(
+                          leaf.title,
+                          "table",
+                          `row ${String(r + 1)}`,
+                          labels[c] === "" ? `column ${String(c + 1)}` : labels[c],
+                        )}
+                      >
+                        {cell}
+                      </Part>
                     </td>
                   );
                 })}
@@ -180,8 +249,107 @@ function extent(values: number[]): [number, number] {
   return [Math.min(...values), Math.max(...values)];
 }
 
-function ChartView({ leaf }: { leaf: ChartLeaf }) {
+/** One point of one series, as the strip lists it. */
+interface PointRef {
+  series: number;
+  index: number;
+}
+
+/**
+ * Picking a *point* on a chart, without 2,400 tab stops — and, once the mode is
+ * off, the only place a point's note can show itself.
+ *
+ * A chart may legally hold six series of four hundred points; making every one
+ * a focusable target would be both a DOM the budget cannot afford and a
+ * keyboard trap. So the picker is two steps: choose a series (six buttons at
+ * most, in the legend's own order), then choose a point from a strip labelled
+ * with the axis's real x — on a time grid that is the market's own clock, which
+ * is the label the user is actually reading the chart by. Both steps are plain
+ * buttons, so both work from the keyboard with nothing added.
+ *
+ * The picker is annotate mode's, so it goes when the mode does. The *strip*
+ * does not: with the mode off it lists exactly the points that carry a note,
+ * inert, so a decided card still shows where the reader pointed. A point drawn
+ * on the plot is 2.5px of circle with no room for a glyph, which is why the
+ * marker lives here rather than on the geometry.
+ */
+function PointStrip({
+  leaf,
+  at,
+  labels,
+}: { leaf: ChartLeaf; labels: string[] } & LeafAt) {
+  const [open, setOpen] = useState<number | null>(null);
+  const pickable = usePickable();
+  const noted = useNoted();
+  const longest = Math.max(...leaf.series.map((s) => s.values.length));
+  const grid = leaf.x.kind === "time" ? resolveGrid(leaf.x, longest) : null;
+  const ticks = grid === null ? null : gridLabels(grid);
+  const pointLabel = (index: number): string => ticks?.[index] ?? `#${String(index + 1)}`;
+  const pointPath = (point: PointRef): AnchorSegment[] => [
+    "leaf",
+    at,
+    "series",
+    nameOrIndex(labels, point.series),
+    "point",
+    point.index,
+  ];
+  // Annotate mode shows the one series the reader opened; off, the notes.
+  const shown: PointRef[] = leaf.series.flatMap((series, s) =>
+    series.values
+      .map((_, index) => ({ series: s, index }))
+      .filter((point) => (pickable ? s === open : noted(pointPath(point)))),
+  );
+  if (!pickable && shown.length === 0) return null;
+  const opened = open === null ? null : leaf.series[open];
+  return (
+    <div className="wb-vis-points">
+      {pickable && (
+        <div className="wb-vis-points-pick">
+          <span className="u-label">Points</span>
+          {leaf.series.map((candidate, index) => (
+            <button
+              key={index}
+              type="button"
+              className={"wb-btn wb-btn-ghost wb-btn-sm" + (open === index ? " is-active" : "")}
+              aria-expanded={open === index}
+              onClick={() => {
+                setOpen(open === index ? null : index);
+              }}
+            >
+              {candidate.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {shown.length > 0 && (
+        <div
+          className="wb-vis-points-list"
+          role="group"
+          aria-label={opened === null ? "Noted points" : `Points of ${opened.label}`}
+        >
+          {shown.map((point) => (
+            <Part
+              key={`${String(point.series)}:${String(point.index)}`}
+              path={pointPath(point)}
+              label={partLabel(
+                leaf.title,
+                "chart",
+                leaf.series[point.series].label,
+                `${pointLabel(point.index)}, ${String(leaf.series[point.series].values[point.index])}`,
+              )}
+            >
+              <span className="u-tabular">{pointLabel(point.index)}</span>
+            </Part>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChartView({ leaf, at }: { leaf: ChartLeaf } & LeafAt) {
   const clipId = useId();
+  const seriesLabels = leaf.series.map((series) => series.label);
   const [host, width] = useDrawWidth(CHART_W, CHART_FLOOR);
   const isTime = leaf.x.kind === "time";
   const longest = Math.max(...leaf.series.map((s) => s.values.length));
@@ -378,7 +546,14 @@ function ChartView({ leaf }: { leaf: ChartLeaf }) {
         {leaf.series.map((series, index) => (
           <span key={index} className={`wb-vis-key is-s${String((index % SERIES_COUNT) + 1)}`}>
             <span className={`wb-vis-swatch is-${series.style}`} aria-hidden="true" />
-            {series.label}
+            {/* The legend key *is* the series anchor: it is where a reader
+                already points when they mean "that line". */}
+            <Part
+              path={["leaf", at, "series", nameOrIndex(seriesLabels, index)]}
+              label={partLabel(leaf.title, "chart", series.label)}
+            >
+              {series.label}
+            </Part>
             {(series.axis === "right" ? leaf.y_right?.unit : leaf.y.unit) !== "" && (
               <span className="wb-vis-unit">
                 {series.axis === "right" ? leaf.y_right?.unit : leaf.y.unit}
@@ -391,6 +566,9 @@ function ChartView({ leaf }: { leaf: ChartLeaf }) {
           <span className="wb-vis-grid-caption">{leaf.x.label}</span>
         )}
       </figcaption>
+      {/* Self-gating: it is the strip that knows whether it has anything to
+          show, and it renders nothing at all when it does not. */}
+      <PointStrip leaf={leaf} at={at} labels={seriesLabels} />
     </figure>
   );
 }
@@ -405,8 +583,9 @@ const DIAGRAM_PAD = 8;
 /** Below this a box cannot hold a label, so the diagram scrolls instead. */
 const MIN_NODE_W = 108;
 
-function DiagramView({ leaf }: { leaf: DiagramLeaf }) {
+function DiagramView({ leaf, at }: { leaf: DiagramLeaf } & LeafAt) {
   const arrowId = useId();
+  const pickable = usePickable();
   const placed = layerNodes(leaf.nodes, leaf.edges);
   const byId = new Map(placed.map((node) => [node.id, node]));
   const layers = Math.max(...placed.map((node) => node.layer)) + 1;
@@ -431,7 +610,11 @@ function DiagramView({ leaf }: { leaf: DiagramLeaf }) {
           width={width}
           height={height}
           viewBox={`0 0 ${String(width)} ${String(height)}`}
-          role="img"
+          // `role="img"` gives the drawing one accessible name and makes its
+          // children presentational — right while the picture is a picture, and
+          // wrong the moment its boxes are things you can pick. In annotate
+          // mode it becomes a group so the parts inside are announced.
+          role={pickable ? "group" : "img"}
           aria-label={`${leaf.title || "Diagram"}: ${leaf.nodes
             .map((n) => roleLabel(n.label, n.role))
             .join(", ")}`}
@@ -459,7 +642,13 @@ function DiagramView({ leaf }: { leaf: DiagramLeaf }) {
             const y2 = boxY(to);
             const bend = Math.max(16, (y2 - y1) / 2);
             return (
-              <g key={index}>
+              <SvgPart
+                key={index}
+                className="wb-vis-edge-part"
+                path={["leaf", at, "edge", index]}
+                label={partLabel(leaf.title, "diagram", `arrow ${edge.source} to ${edge.target}`)}
+                markerAt={{ x: (x1 + x2) / 2 + 10, y: (y1 + y2) / 2 - 8 }}
+              >
                 <path
                   className="wb-vis-edge"
                   markerEnd={`url(#${arrowId})`}
@@ -470,19 +659,25 @@ function DiagramView({ leaf }: { leaf: DiagramLeaf }) {
                     {edge.label}
                   </text>
                 )}
-              </g>
+              </SvgPart>
             );
           })}
           {leaf.nodes.map((node) => {
-            const at = byId.get(node.id);
-            if (at === undefined) return null;
+            const box = byId.get(node.id);
+            if (box === undefined) return null;
             return (
-              <g key={node.id} className={`wb-vis-node${roleClass(node.role)}`}>
-                <rect x={boxX(at)} y={boxY(at)} width={nodeW} height={NODE_H} rx={4} />
-                <text x={boxX(at) + nodeW / 2} y={boxY(at) + NODE_H / 2}>
+              <SvgPart
+                key={node.id}
+                className={`wb-vis-node${roleClass(node.role)}`}
+                path={["leaf", at, "node", node.id]}
+                label={partLabel(leaf.title, "diagram", roleLabel(node.label, node.role))}
+                markerAt={{ x: boxX(box) + nodeW - 8, y: boxY(box) + 12 }}
+              >
+                <rect x={boxX(box)} y={boxY(box)} width={nodeW} height={NODE_H} rx={4} />
+                <text x={boxX(box) + nodeW / 2} y={boxY(box) + NODE_H / 2}>
                   {node.label}
                 </text>
-              </g>
+              </SvgPart>
             );
           })}
         </svg>
@@ -500,25 +695,55 @@ const DIFF_WORD: Record<string, string> = {
   del: "Removed",
 };
 
-function CodeDiffView({ leaf }: { leaf: CodeDiffLeaf }) {
+/**
+ * A diff line is anchored by the **side and line number of the payload**, not
+ * by its position in the rendered diff.
+ *
+ * `matchLines` is ours: it decides which before-line pairs with which
+ * after-line, and its output would change if that matcher ever improved. An
+ * anchor pointing into it would silently start meaning a different line. Side
+ * plus line number points into `before`/`after` — the strings the agent sent
+ * and still holds — which is also the only form `services/plan_anchors.py` can
+ * validate without re-implementing the matcher. A hunk is therefore addressed
+ * by the line it starts at; the payload has no hunks, and an anchor the server
+ * cannot check is exactly what anchors exist to avoid.
+ */
+function CodeDiffView({ leaf, at }: { leaf: CodeDiffLeaf } & LeafAt) {
   const lines = matchLines(leaf.before, leaf.after);
   return (
     <figure className="wb-vis-leaf">
       <LeafTitle text={leaf.title} />
       <pre className="wb-vis-diff" data-lang={leaf.language === "" ? undefined : leaf.language}>
         <code>
-          {lines.map((line, index) => (
-            <span key={index} className={`wb-vis-diff-line is-${line.kind}`}>
-              {/* The sign carries the meaning, so the diff survives without
-                  colour (DESIGN.md §7). */}
-              <span className="wb-vis-diff-sign" aria-hidden="true">
-                {DIFF_SIGN[line.kind]}
+          {lines.map((line, index) => {
+            // `matchLines` already carries which line of which side this is
+            // (1-based, null where absent). A `same` line exists on both; it is
+            // anchored to `after`, which is the state being proposed.
+            const side = line.kind === "del" ? "before" : "after";
+            const number = (line.kind === "del" ? line.beforeNo : line.afterNo) ?? 1;
+            return (
+              <span key={index} className={`wb-vis-diff-line is-${line.kind}`}>
+                {/* The sign carries the meaning, so the diff survives without
+                    colour (DESIGN.md §7). */}
+                <span className="wb-vis-diff-sign" aria-hidden="true">
+                  {DIFF_SIGN[line.kind]}
+                </span>
+                {line.kind !== "same" && <span className="u-sr-only">{DIFF_WORD[line.kind]}: </span>}
+                <Part
+                  path={["leaf", at, "side", side, "line", number - 1]}
+                  label={partLabel(
+                    leaf.title,
+                    "diff",
+                    `${side} line ${String(number)}`,
+                    line.text.trim(),
+                  )}
+                >
+                  {line.text}
+                </Part>
+                {"\n"}
               </span>
-              {line.kind !== "same" && <span className="u-sr-only">{DIFF_WORD[line.kind]}: </span>}
-              {line.text}
-              {"\n"}
-            </span>
-          ))}
+            );
+          })}
         </code>
       </pre>
     </figure>
@@ -527,7 +752,8 @@ function CodeDiffView({ leaf }: { leaf: CodeDiffLeaf }) {
 
 // ---- metrics -----------------------------------------------------------------
 
-function MetricsView({ leaf }: { leaf: MetricsLeaf }) {
+function MetricsView({ leaf, at }: { leaf: MetricsLeaf } & LeafAt) {
+  const labels = leaf.items.map((metric) => metric.label);
   return (
     <figure className="wb-vis-leaf">
       <LeafTitle text={leaf.title} />
@@ -538,7 +764,12 @@ function MetricsView({ leaf }: { leaf: MetricsLeaf }) {
               {metric.role !== "neutral" && (
                 <span className="u-sr-only">{ROLE_WORD[metric.role]}: </span>
               )}
-              {metric.label}
+              <Part
+                path={["leaf", at, "metric", nameOrIndex(labels, index)]}
+                label={partLabel(leaf.title, "metrics", roleLabel(metric.label, metric.role))}
+              >
+                {metric.label}
+              </Part>
             </dt>
             <dd>
               <span className="wb-vis-figure u-tabular">{metric.value}</span>
@@ -553,39 +784,59 @@ function MetricsView({ leaf }: { leaf: MetricsLeaf }) {
 
 // ---- blocks ------------------------------------------------------------------
 
-function LeafView({ leaf }: { leaf: VisualLeaf }) {
+function LeafView({ leaf, at }: { leaf: VisualLeaf } & LeafAt) {
   switch (leaf.kind) {
     case "table":
-      return <TableView leaf={leaf} />;
+      return <TableView leaf={leaf} at={at} />;
     case "chart":
-      return <ChartView leaf={leaf} />;
+      return <ChartView leaf={leaf} at={at} />;
     case "diagram":
-      return <DiagramView leaf={leaf} />;
+      return <DiagramView leaf={leaf} at={at} />;
     case "code_diff":
-      return <CodeDiffView leaf={leaf} />;
+      return <CodeDiffView leaf={leaf} at={at} />;
     case "metrics":
-      return <MetricsView leaf={leaf} />;
+      return <MetricsView leaf={leaf} at={at} />;
   }
 }
 
-function BlockView({ block }: { block: VisualBlock }) {
+function BlockView({ block, from }: { block: VisualBlock; from: number }) {
   return (
     <div className={`wb-vis-block is-${block.layout}`}>
       {block.items.map((leaf, index) => (
-        <LeafView key={index} leaf={leaf} />
+        <LeafView key={index} leaf={leaf} at={from + index} />
       ))}
     </div>
   );
 }
 
-/** A `visual` plan node, rendered inside the plan card. */
-export function VisualView({ node }: { node: VisualNode }) {
+/**
+ * A `visual` plan node, rendered inside the plan card.
+ *
+ * `annotation` is what turns the drawing into a surface you can point at. It is
+ * optional and defaults to nothing: a visual outside a plan card (a future
+ * panel, PR 4) renders identically with no anchors and no cost.
+ */
+export function VisualView({
+  node,
+  annotation,
+}: {
+  node: VisualNode;
+  annotation?: VisualAnnotation;
+}) {
+  // The flat leaf index every anchor starts from, accumulated once here so the
+  // numbering has a single home (`../plan/anchors.ts` mirrors it for lookups).
+  let from = 0;
+  const blocks = node.blocks.map((block, index) => {
+    const at = from;
+    from += block.items.length;
+    return <BlockView key={index} block={block} from={at} />;
+  });
   return (
-    <section className="wb-vis" aria-label={node.title === "" ? "Visual" : node.title}>
-      {node.title !== "" && <h3 className="wb-vis-heading">{node.title}</h3>}
-      {node.blocks.map((block, index) => (
-        <BlockView key={index} block={block} />
-      ))}
-    </section>
+    <AnnotateProvider value={annotation ?? null}>
+      <section className="wb-vis" aria-label={node.title === "" ? "Visual" : node.title}>
+        {node.title !== "" && <h3 className="wb-vis-heading">{node.title}</h3>}
+        {blocks}
+      </section>
+    </AnnotateProvider>
   );
 }

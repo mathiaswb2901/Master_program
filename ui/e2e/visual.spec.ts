@@ -34,13 +34,31 @@ test("visual artifact: drawn natively, DST-correct, inert, and answerable", asyn
   await openApp(page);
   await newSession(page);
 
+  // Workbench's own bookkeeping finishes *before* the window opens, rather than
+  // racing it. Opening a session is a dock change, and `Layouts.tsx` debounces a
+  // dock change to `PUT /api/layouts` 500 ms later — which lands a few hundred
+  // milliseconds into the recording below, so whether the suite saw it came down
+  // to whether the fake agent replied first. That is a coin toss, and it decided
+  // an assertion about the *renderer*: on a workspace with no saved arrangement
+  // the click changes nothing and no write follows, which is why this journey
+  // passed alone and failed after `layout.spec.ts` had put a layout on disk.
+  // Waiting for the write itself settles it in the one direction that keeps the
+  // claim below at "none at all". No write is also a pass — hence the bound.
+  await page
+    .waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/layouts",
+      { timeout: 3_000 },
+    )
+    .catch(() => undefined);
+
   // Every request the page makes, recorded from before the message that
   // produces the artifact until the artifact is on screen. The listener comes
   // off at that point on purpose: the window has to be *the render*, and the
   // seconds of inspection that follow are ordinary app life, in which Workbench's
-  // own control plane is entitled to talk (`Layouts.tsx` debounces an arrangement
-  // to `PUT /api/layouts` 500 ms after any dock change). Recording past the render
-  // would eventually catch one of those and call it an artifact fetching something.
+  // own control plane is entitled to talk. Recording past the render would
+  // eventually catch one of those and call it an artifact fetching something.
   const requests: string[] = [];
   const record = (request: Request): void => {
     requests.push(`${request.method()} ${request.url()}`);

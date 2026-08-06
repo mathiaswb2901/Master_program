@@ -37,6 +37,7 @@ from workbench_server.models.plans import (
     PlanResolved,
     PlanResponse,
 )
+from workbench_server.services.plan_anchors import annotation_problems
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.titles import FALLBACK_TITLE, derive_title
 
@@ -381,6 +382,23 @@ class AgentSession:
                 reason="approve_without_choices",
                 unchosen=unchosen,
             )
+            return
+        # Anchors are ours, not the agent's and not the user's prose: the
+        # renderer emits them and this is where they are proven to point into
+        # the artifact they claim. An anchor naming a row that is not there is a
+        # malformed decision, not a note we quietly drop — the agent would read
+        # it as being about something.
+        problems = annotation_problems(pending.artifact, response.annotations)
+        if problems:
+            log.warning(
+                "agent.plan_decision_ignored",
+                session=self.local_id,
+                reason="unresolvable_anchor",
+                problems=problems,
+            )
+            # Not silent: the client that sent this keeps showing a card it
+            # believes it answered, and the only honest thing is to say so.
+            self._emit(AgentError(message=f"Plan decision rejected — {problems[0]}"))
             return
         if not pending.future.done():
             pending.future.set_result(response)

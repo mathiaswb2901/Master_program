@@ -8,6 +8,7 @@ import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
 import type { SessionInfo, SessionState } from "../types";
 import { Chat, statusVisual, TranscriptView } from "./Chat";
+import { planCommands, planShortcuts } from "./PlanCard";
 
 function SessionRow({ session }: { session: SessionInfo }) {
   const state = useStore((s) => s.sessionStates[session.session_id] ?? session.state);
@@ -423,8 +424,11 @@ export const agentTool: WorkbenchTool = {
       run: () => void useStore.getState().createSessionIn(activeFolder()),
     },
     ...sessionJumps,
+    // The plan card lives inside this panel's chat, so its commands are this
+    // capability's — not a second tool for a thing with no panel of its own.
+    ...planCommands,
   ],
-  shortcuts: jumpChords,
+  shortcuts: { ...jumpChords, ...planShortcuts },
   statusContributions: [
     { region: "center", component: SessionChips },
     { region: "right", component: SessionCounts },

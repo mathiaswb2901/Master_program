@@ -24,7 +24,18 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("./store", () => ({
   useStore: Object.assign(() => undefined, { getState: () => mocks.state }),
-  emptyPlanDraft: () => ({ choices: {}, annotations: {}, comment: "", verdict: null }),
+  emptyPlanDraft: () => ({
+    choices: {},
+    notes: {},
+    comment: "",
+    verdict: null,
+    annotating: false,
+    editing: null,
+  }),
+  noteText: () => "",
+  // No session, so no card — which is what makes `plan.annotate` invisible in
+  // the assertion below rather than merely unbound.
+  pendingPlanId: () => null,
   unchosenOptionGroups: () => [],
 }));
 
@@ -133,6 +144,9 @@ describe("command registry", () => {
       "session.jump.7",
       "session.jump.8",
       "session.jump.9",
+      // The plan card's, contributed through the Agent's descriptor rather
+      // than as a tool of its own — a card is not a capability.
+      "plan.annotate",
       "terminal.new",
       "terminal.close",
       "office.detachHost",
@@ -191,6 +205,13 @@ describe("command registry", () => {
     const ids = visibleCommands().map((command) => command.id);
     expect(ids).toContain("session.new");
     expect(ids.some((id) => id.startsWith("session.jump."))).toBe(false);
+  });
+
+  // Same rule, one layer in: the chord and the row exist only while a card is
+  // actually waiting for an answer, so `Alt+A` is inert the rest of the time
+  // rather than opening a mode over nothing.
+  it("hides annotate while no plan is pending", () => {
+    expect(visibleCommands().map((command) => command.id)).not.toContain("plan.annotate");
   });
 });
 

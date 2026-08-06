@@ -16,6 +16,7 @@ from workbench_server import main
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.agents import (
+    AgentError,
     PermissionRequest,
     TextDelta,
     ToolSettled,
@@ -33,6 +34,7 @@ from workbench_server.models.plans import (
     PlanResponse,
     PlanStep,
     StepListNode,
+    node_anchor,
 )
 from workbench_server.services import agent_sessions
 from workbench_server.services.agent_sessions import (
@@ -395,7 +397,7 @@ async def test_plan_round_trip_returns_the_typed_response(tmp_path: Path) -> Non
             plan_id=presented.plan.plan_id,
             verdict="approve",
             choices={"approach": "local"},
-            annotations=[PlanAnnotation(node_id="steps", text="skip the backfill")],
+            annotations=[PlanAnnotation(anchor=node_anchor("steps"), text="skip the backfill")],
             comment="go",
         )
     )
@@ -496,6 +498,48 @@ async def test_approve_without_every_option_chosen_is_ignored(tmp_path: Path) ->
 
     session.resolve_plan(PlanResponse(plan_id="plan-1", verdict="revise", comment="split step 1"))
     assert (await task).verdict == "revise"
+
+
+async def test_an_anchor_that_names_nothing_makes_the_whole_decision_malformed(
+    tmp_path: Path,
+) -> None:
+    """Anchors are ours, not the agent's and not the user's prose. One that does
+    not point into the artifact would reach the agent as a note *about* a row
+    that is not there, so the decision is refused rather than half-delivered —
+    and refused audibly, because a client that believes it answered would
+    otherwise sit in front of a card that never settles."""
+    manager = SessionManager(tmp_path, make_factory([]), max_sessions=4)
+    session = manager.create("")
+    listener = session.subscribe()
+    task = asyncio.create_task(session.present_plan(sample_plan()))
+    await asyncio.sleep(0.05)
+
+    session.resolve_plan(
+        PlanResponse(
+            plan_id="plan-1",
+            verdict="revise",
+            annotations=[
+                PlanAnnotation(anchor=node_anchor("steps"), text="this one is fine"),
+                PlanAnnotation(anchor=node_anchor("ghost"), text="and this one is not"),
+            ],
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not task.done()  # the card stays answerable
+    error = (await drain(listener, AgentError))[-1]
+    assert isinstance(error, AgentError)
+    assert "no node 'ghost'" in error.message
+
+    # The same decision without the bad anchor goes through untouched.
+    session.resolve_plan(
+        PlanResponse(
+            plan_id="plan-1",
+            verdict="revise",
+            annotations=[PlanAnnotation(anchor=node_anchor("steps"), text="this one is fine")],
+        )
+    )
+    answer = await task
+    assert [note.text for note in answer.annotations] == ["this one is fine"]
 
 
 async def test_plan_resolution_is_broadcast_to_every_client(tmp_path: Path) -> None:
@@ -798,7 +842,12 @@ def test_ws_plan_decision_round_trip(settings: Settings, tmp_path: Path) -> None
                             "plan_id": plan["plan_id"],
                             "verdict": "revise",
                             "choices": {"approach": "utc"},
-                            "annotations": [{"node_id": "steps", "text": "add a rollback step"}],
+                            "annotations": [
+                                {
+                                    "anchor": {"kind": "node", "node_id": "steps"},
+                                    "text": "add a rollback step",
+                                }
+                            ],
                             "comment": "close, but split step 1",
                         },
                     }
@@ -810,7 +859,7 @@ def test_ws_plan_decision_round_trip(settings: Settings, tmp_path: Path) -> None
     answer = factory.created[0].plan_responses[0]
     assert answer.verdict == "revise"
     assert answer.choices == {"approach": "utc"}
-    assert answer.annotations[0].node_id == "steps"
+    assert answer.annotations[0].anchor.node_id == "steps"
     assert answer.comment == "close, but split step 1"
 
 

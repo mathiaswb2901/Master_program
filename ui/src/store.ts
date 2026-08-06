@@ -12,6 +12,7 @@ import {
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { withoutTransitions } from "./motion";
 import { isOfficePath, preloadDocsApi } from "./office";
+import { anchorKey, MAX_ANNOTATIONS } from "./plan/anchors";
 import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
 import { cancelShellClose, closeShellWindow } from "./shell";
 import { promptInsertText, shellInsertText } from "./shortcuts";
@@ -19,6 +20,7 @@ import { terminalHandle } from "./terminalInput";
 import { documentTheme, THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
+  AnnotationAnchor,
   FileChangedEvent,
   FileProvenanceEvent,
   FolderSessions,
@@ -118,6 +120,12 @@ export interface ChatState {
   items: ChatItem[];
 }
 
+/** One note the user attached to one part of a card, as it sits in the draft. */
+export interface AnchoredNote {
+  anchor: AnnotationAnchor;
+  text: string;
+}
+
 /** What the user has assembled for one plan card. `verdict` is null until the
  * card settles; once set the card renders read-only with their choices marked.
  *
@@ -128,18 +136,35 @@ export interface ChatState {
 export interface PlanDraft {
   /** node_id -> option_id */
   choices: Record<string, string>;
-  /** node_id -> free text (question answers and per-node notes alike) */
-  annotations: Record<string, string>;
+  /** `anchorKey(anchor)` -> the note. A whole-node note (and a question's
+   * answer) lives here under its node anchor's key, so the fallback and the
+   * pointed-at parts are one list — which is what makes them travel together
+   * in one `PlanResponse` rather than becoming a second channel. */
+  notes: Record<string, AnchoredNote>;
   comment: string;
   verdict: PlanVerdict | null;
+  /** Annotate mode, per card: clicking a part attaches a note to that part.
+   * Per card rather than one app-wide flag — two sessions can each hold a
+   * pending plan, and a mode that leaked between them would put a note on the
+   * wrong artifact. */
+  annotating: boolean;
+  /** `anchorKey` of the note whose editor is open, or null. */
+  editing: string | null;
 }
 
 export const emptyPlanDraft = (): PlanDraft => ({
   choices: {},
-  annotations: {},
+  notes: {},
   comment: "",
   verdict: null,
+  annotating: false,
+  editing: null,
 });
+
+/** The note on one anchor, or "" — the reader every note-bearing control uses. */
+export function noteText(draft: PlanDraft, anchor: AnnotationAnchor): string {
+  return draft.notes[anchorKey(anchor)]?.text ?? "";
+}
 
 /** Option groups the draft has not answered. A group without a `recommended`
  * option starts unselected (perfectly legal), so "approve" stays blocked until
@@ -148,6 +173,26 @@ export function unchosenOptionGroups(plan: PlanArtifact, draft: PlanDraft): stri
   return plan.nodes
     .filter((node) => node.kind === "option_group" && draft.choices[node.node_id] === undefined)
     .map((node) => node.node_id);
+}
+
+/**
+ * The card the active session is waiting on an answer for, or null.
+ *
+ * Derived rather than stored: a session holds at most one pending plan (the
+ * server enforces that), but the *window* can hold several, one per session, so
+ * an `activePlanId` field in the store would be exactly the singleton
+ * assumption CLAUDE.md warns about. This asks the active session instead, which
+ * is the only card a chord could sensibly mean.
+ */
+export function pendingPlanId(): string | null {
+  const state = useStore.getState();
+  const sessionId = state.activeSessionId;
+  if (sessionId === null) return null;
+  for (const item of [...(state.chats[sessionId]?.items ?? [])].reverse()) {
+    if (item.kind !== "plan") continue;
+    return (state.plans[item.plan.plan_id]?.verdict ?? null) === null ? item.plan.plan_id : null;
+  }
+  return null;
 }
 
 /** "Finished/failed since last viewed" markers layered over the server state. */
@@ -342,7 +387,16 @@ interface WorkbenchStore {
   sendChat: (text: string) => void;
   decidePermission: (requestId: string, allow: boolean) => void;
   setPlanChoice: (planId: string, nodeId: string, optionId: string) => void;
-  setPlanAnnotation: (planId: string, nodeId: string, text: string) => void;
+  /** Write (or clear, with "") the note on one anchor. */
+  setPlanNote: (planId: string, anchor: AnnotationAnchor, text: string) => void;
+  /** Open the editor for one anchor, creating an empty note if there is none —
+   * what clicking an anchorable part does. */
+  startPlanNote: (planId: string, anchor: AnnotationAnchor) => void;
+  /** Close whichever note editor is open; the note itself stays. */
+  stopPlanNote: (planId: string) => void;
+  removePlanNote: (planId: string, key: string) => void;
+  /** Enter or leave annotate mode for one card. */
+  setPlanAnnotating: (planId: string, on: boolean) => void;
   setPlanComment: (planId: string, text: string) => void;
   decidePlan: (planId: string, verdict: Exclude<PlanVerdict, "no_decision">) => void;
   interrupt: () => void;
@@ -1428,10 +1482,47 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       patchPlan(planId, { choices: { ...draft.choices, [nodeId]: optionId } });
     },
 
-    setPlanAnnotation: (planId, nodeId, text) => {
+    setPlanNote: (planId, anchor, text) => {
       const draft = get().plans[planId] ?? emptyPlanDraft();
       if (draft.verdict !== null) return;
-      patchPlan(planId, { annotations: { ...draft.annotations, [nodeId]: text } });
+      const key = anchorKey(anchor);
+      // A new note when the card is already at the server's cap would be
+      // written here and rejected there, so the cap is honoured on the way in.
+      // Editing one that already exists is always allowed.
+      if (draft.notes[key] === undefined && Object.keys(draft.notes).length >= MAX_ANNOTATIONS) {
+        return;
+      }
+      patchPlan(planId, { notes: { ...draft.notes, [key]: { anchor, text } } });
+    },
+
+    startPlanNote: (planId, anchor) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return;
+      const key = anchorKey(anchor);
+      const notes =
+        draft.notes[key] === undefined
+          ? { ...draft.notes, [key]: { anchor, text: "" } }
+          : draft.notes;
+      if (notes !== draft.notes && Object.keys(draft.notes).length >= MAX_ANNOTATIONS) return;
+      patchPlan(planId, { notes, editing: key });
+    },
+
+    stopPlanNote: (planId) => {
+      patchPlan(planId, { editing: null });
+    },
+
+    removePlanNote: (planId, key) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return;
+      const notes = { ...draft.notes };
+      delete notes[key];
+      patchPlan(planId, { notes, editing: draft.editing === key ? null : draft.editing });
+    },
+
+    setPlanAnnotating: (planId, on) => {
+      const draft = get().plans[planId] ?? emptyPlanDraft();
+      if (draft.verdict !== null) return; // a settled card is read-only
+      patchPlan(planId, { annotating: on, editing: on ? draft.editing : null });
     },
 
     setPlanComment: (planId, text) => {
@@ -1459,9 +1550,13 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       ) {
         return;
       }
-      const annotations: PlanAnnotation[] = Object.entries(draft.annotations)
-        .map(([nodeId, text]) => ({ node_id: nodeId, text: text.trim() }))
-        .filter((a) => a.text !== "");
+      // Every note the user attached — the whole-node ones and the pointed-at
+      // parts — travels with the verdict in this one response. There is no
+      // second channel to the agent, and PR 3 deliberately did not open one:
+      // sending notes *without* deciding is live refinement (PR 5).
+      const annotations: PlanAnnotation[] = Object.values(draft.notes)
+        .map((note) => ({ anchor: note.anchor, text: note.text.trim() }))
+        .filter((note) => note.text !== "");
       ensureAgentSocket(id).send({
         type: "plan_decision",
         response: {

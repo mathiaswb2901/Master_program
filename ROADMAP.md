@@ -456,7 +456,7 @@ because other sections and five running lanes reference these numbers.
    a raised `max_concurrent_sessions`, and preset switching that reconciles against the
    panes that already exist rather than rebuilding the dock over them.
 3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
-   (PRs 1–2 landed: the schema and its renderer). Asked for after watching an
+   (PRs 1–3 landed: the schema, its renderer, and annotation anchors). Asked for after watching an
    agentic-workflow video where the agent renders an interactive artifact instead of
    a wall of text. The third-party tool that does it (lavish-axi) **failed vetting**
    — undisclosed on-by-default telemetry, a skill that `npx`'s an unpinned package
@@ -476,8 +476,34 @@ because other sections and five running lanes reference these numbers.
    dates on both sides of the wire) and `step` as first-class, because a dispatch
    schedule drawn as a line is a lie; a **live workspace** artifact **yes**; and
    **persisting artifacts to `.workbench/` yes** — the latter two are *later PRs*,
-   not these. Still open: annotation anchors and annotate mode (PR 3), expanding an
-   artifact into a dockview panel (PR 4), live refinement and note batches (PR 5),
+   not these.
+   **PR 3 — annotation anchors and annotate mode — landed**, and it is the half
+   the owner actually asked for after the video: pointing *at* a part of an
+   artifact, saying what is wrong with that part, and deciding, without ever
+   going back to the chat box. A `PlanAnnotation` is now `{anchor, text}` with
+   four anchor kinds (the plan; a whole node — today's behaviour, unchanged, and
+   still the fallback; a part of a drawn leaf; a text range), and the decision
+   that carries the design is that **an anchor is a semantic path the renderer
+   emits, never a CSS selector**: `["leaf", 2, "row", 14, "col", "Price"]`
+   survives a re-render and a restyle because it names *data*, it is actionable
+   by the agent because it is the agent's own payload in the agent's own
+   vocabulary, and it is validated server-side against the artifact — an anchor
+   naming a row that does not exist is a **malformed decision**, refused and
+   reported over `agent_error`, never a silent no-op. Annotate mode (`Alt+A`
+   plus a QuickBar command, contributed through the Agent tool's descriptor
+   rather than as a new tool — a card is not a capability) turns every
+   anchorable part into a real button, shows notes in place, and is fully
+   keyboard-operable, which DESIGN.md §7 makes a requirement rather than a
+   nicety; a chart's points are reached in two steps rather than 2,400 tab
+   stops. Notes still travel **with the verdict in one `PlanResponse`** — no
+   second channel to the agent was opened. Two things deliberately smaller than
+   they sound: a diff *hunk* is addressed by the line it starts at (the payload
+   has no hunks, and an anchor into our own line matcher is one the server
+   cannot validate), and a text range is picked as a sentence of the **source**
+   string rather than by drag-selection (the rendered DOM is not the source, so
+   a selection offset would slice the wrong characters).
+   Still open: expanding an artifact into a dockview panel (PR 4), live
+   refinement and note batches — the "send notes without deciding" half — (PR 5),
    persistence (later), and component/design-system specimens (M7-gated, alongside
    the "design-system-faithful visual mockups" gap logged in M4).
 4. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: ~~bind a
