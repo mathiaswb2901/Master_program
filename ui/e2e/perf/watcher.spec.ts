@@ -25,10 +25,11 @@
  * which any correct implementation must still do.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 
 import { removeFixtureFile, writeFixtureFile } from "./fixture";
 import { record, round } from "./instrument";
+import { test } from "./window";
 
 /** Twenty single-file changes: the size of one agent turn, or one small rebase. */
 const CHANGES = 20;

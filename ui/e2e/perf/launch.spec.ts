@@ -14,7 +14,7 @@
  * has not launched.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
 import {
@@ -24,6 +24,7 @@ import {
   record,
   round,
 } from "./instrument";
+import { test } from "./window";
 
 /**
  * Measured 2026-08-05 on the author's machine (Win11, production build served
@@ -79,6 +80,22 @@ import {
  * something that got 4x faster: what a *row* costs is still dominated by
  * `GET /api/files/tree` walking 5,005 files and by rendering them
  * unvirtualised, and two queued Feel items own that. This one owns the paint.
+ *
+ * **What the lane was doing to this number, 2026-08-06.** Until `./window`
+ * landed, every spec here started in whatever window the spec before it had
+ * saved, so this test was timing a *restore* as often as a launch. Same machine,
+ * pinned `WB_PERF_WORKSPACE`, `.workbench/` wiped, full lane, before and after
+ * that change: tree rows **714.9 → 686.6 ms**, FCP **700 → 672 ms**, DCL
+ * **68.4 → 64.1 ms** — inside this box's noise, which is the point: the reset is
+ * one PUT on an API context before the page navigates, and it does not show up
+ * in what this file measures.
+ *
+ * One number it did *not* fix is below. And when comparing runs, compare
+ * like-for-like on the *server*, not just the workspace: the first page load
+ * after `vite preview` starts pays for a module graph nothing has requested yet
+ * (measured on this box the same afternoon: FCP **1,384 ms** as the run's first
+ * navigation, **156 ms** as its second), so a spec run alone is not comparable
+ * with the same spec seventh in a lane.
  */
 const LAUNCH_CEILING_MS = 1_500;
 
@@ -91,6 +108,22 @@ const LAUNCH_CEILING_MS = 1_500;
  * one sub-pixel shift from the status bar in both. This is the assertion that
  * keeps it that way: a layout whose height comes from text would start failing
  * here, and the fix would be `font-display`/`size-adjust`, not the gate again.
+ *
+ * **It is currently catching something else, and the something else is real.**
+ * A workspace that has *any* agent session shifts **0.064** here — 20x the
+ * measurement above and 3x the ceiling. The session picker is `flex: none;
+ * max-height: 40%` (`ui/src/styles/agent.css`), so its height is its content's:
+ * `GET /api/agents/sessions` answers after first paint, a row replaces the "No
+ * sessions yet" line, and everything below it in the pane moves. Measured
+ * 2026-08-06 on one commit, one fixture, one session apart — `launch` alone
+ * against a fresh backend **0.003**, `activity.spec.ts` then `launch` **0.064**.
+ * Every returning user is the second case, so this is a reflow the product owes
+ * a fix (reserve the picker's box), not a ceiling this file owes a raise.
+ *
+ * It is also the last ordering coupling in the lane: `./window` resets the saved
+ * *arrangement*, but a session lives in the backend the whole run shares and no
+ * spec can delete one. Run this spec alone when you need the launch number
+ * itself; leave the failure standing until the pane stops moving.
  */
 const LAYOUT_SHIFT_CEILING = 0.02;
 

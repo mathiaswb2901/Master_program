@@ -1387,6 +1387,22 @@ Format spec: `docs/shortcuts.md`.
    the symptom, and a file listing cannot answer either — only what is inside a
    chunk can.
 
+   **One workspace, walked in file order**, is the other cost of a single worker.
+   The app persists the window arrangement *into* the workspace it is being
+   measured in (`.workbench/layouts.json`, on a 500 ms debounce), so without a
+   reset a spec starts in whatever window the spec before it left and a budget
+   becomes a function of the alphabet: `panes.spec.ts` builds a 13-pane fleet on
+   purpose and sorts immediately before `watcher.spec.ts`, whose row then waited
+   30 s below the fold of a file tree a fraction of its former height — a spec
+   that passes in 4.5 s alone. Every perf spec therefore takes its `test` from
+   `ui/e2e/perf/window.ts`, which puts the empty layouts document back before the
+   page navigates; one PUT on an API context, so the launch timeline it must not
+   disturb still begins at `goto`, and an eslint rule makes that import the only
+   way to get a `test` in the directory. What the reset does **not** cover is
+   server-side state — agent sessions and PTYs outlive the page that made them,
+   and `launch.spec.ts`'s layout-shift budget can still read a session
+   `activity.spec.ts` created (see its docstring).
+
    The lane is **disk-neutral**, which is not free when the fixture is 5,105 files:
    a bare run builds it in a `mkdtemp` directory and removes it — along with the
    `-projects` sibling the backend puts next to it — from a `process.on("exit")`
