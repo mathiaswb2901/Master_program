@@ -790,6 +790,25 @@ because other sections and five running lanes reference these numbers.
     re-attached session should show what happened while you were away, not an empty pane.
     Sequenced after the workspace switcher (item 5), whose recents list is the same
     surface a session list wants to be.
+16. **New documents, not just new files** (owner, 2026-08-06; reopens the scope freeze
+    on the one ground it allows — an owner decision). The tree can create a *file*; it
+    cannot create a *document*. Wanted: `.docx`, `.xlsx`, `.pptx`, `.py`, `.txt`, `.md`,
+    `.ipynb`. Three of those are trivial (an empty file with the right extension) and
+    four are not: an empty `.docx` is not a zero-byte file but a zip with a required set
+    of OOXML parts, and an empty `.ipynb` is a JSON document with a required `nbformat`
+    skeleton. A zero-byte file with an Office extension is worse than no feature — Word
+    refuses it, and the user's first act in the new product is repairing a corrupt file.
+    Three ways to make a valid one, to be decided with evidence rather than taste:
+    **ship blank templates as package data** (a few KB each, zero dependencies, always
+    valid, works with no Office installed — the likely answer); **generate through the
+    COM bridge** (`Documents.Add` + `SaveAs`, guaranteed Office-native, but needs Office
+    and so needs a fallback anyway); or **add python-docx/openpyxl/python-pptx** (three
+    runtime dependencies for something a static file solves). The UI is the affordance
+    that is missing more than the format: a *New* action that offers document kinds by
+    name, from the tree context menu, the QuickBar, and the empty state — a user should
+    not have to know that a spreadsheet is spelled `.xlsx`. Exit: every listed kind is
+    created from inside the app, opens in its own editor or native host without a repair
+    prompt, and a `.ipynb` opens in the notebook view rather than as raw JSON.
 
 **Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
 infrastructure read as nothing produced, so the order below front-loads visible shape
@@ -1234,3 +1253,12 @@ freeze above.
 - A sanitized OfficeCLI fork, only if the COM bridge leaves real fidelity gaps.
 - Folder-level rollup for provenance markers, and provenance surviving a restart.
 - Plan artifacts persisted to `.workbench/` and re-rendered when resuming a transcript.
+
+- 2026-08-06 — **The scope freeze is reopened once, on its own terms** (owner: new
+  document types). The freeze entry above allows exactly two grounds for reopening — a
+  defect, or a decision the owner makes — and this is the second. Recorded rather than
+  waved through, because the value of the rule is that using it leaves a mark: M5 item
+  16 is added, and the freeze otherwise stands. Worth noting the item is closer to a
+  defect than to a feature: the tree offers *New file*, and a `.docx` created that way
+  is a zero-byte file Word refuses to open, so the affordance currently promises
+  something it does not deliver.
