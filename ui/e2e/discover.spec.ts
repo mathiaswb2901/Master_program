@@ -26,7 +26,7 @@
 import { expect, request, test, type Page } from "@playwright/test";
 
 import type { LayoutsResponse } from "../src/types";
-import { openApp, workspaceReady } from "./app";
+import { launchSettled, openApp, workspaceReady } from "./app";
 import { WELCOME_FILE } from "./workspace";
 
 const DEFAULT_PANELS = ["Agent", "Editor", "Files", "Terminal"];
@@ -64,6 +64,7 @@ async function firstRun(page: Page): Promise<void> {
   await setDismissed(page, false);
   await page.reload();
   await workspaceReady(page);
+  await launchSettled(page);
 }
 
 /**
@@ -85,9 +86,12 @@ test("a new window says what it is, and the reference teaches the chords", async
 
   await test.step("a used window shows no scaffolding", async () => {
     // The state every other journey runs in, asserted rather than assumed: this
-    // is what "never sees it again" has to mean a month later.
+    // is what "never sees it again" has to mean a month later. Deliberately not
+    // an assertion about the *arrangement* — this journey shares its workspace
+    // with the ones before it, and whether they left four panels or five is
+    // their business, not discoverability's.
     await expect(welcome(page)).toBeHidden();
-    expect(await panels(page)).toEqual(DEFAULT_PANELS);
+    await expect(reference(page)).toBeHidden();
   });
 
   await test.step("a window nobody has arranged opens with the welcome", async () => {
@@ -122,6 +126,7 @@ test("a new window says what it is, and the reference teaches the chords", async
     await expect(welcome(page)).toBeHidden();
     await page.reload();
     await workspaceReady(page);
+    await launchSettled(page);
     // Nothing auto-opens any more, and the window is the plain four again —
     // this is what "a user who has used it for a month never sees the
     // scaffolding again" has to mean.
@@ -212,6 +217,7 @@ test("a new window says what it is, and the reference teaches the chords", async
     await setDismissed(page, false);
     await page.reload();
     await workspaceReady(page);
+    await launchSettled(page);
     await expect(welcome(page)).toBeHidden();
     expect(await panels(page)).toEqual(DEFAULT_PANELS);
     await setDismissed(page, true);
