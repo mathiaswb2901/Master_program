@@ -514,6 +514,12 @@ because other sections and five running lanes reference these numbers.
    so each further kind is a parser case plus a handler, not a new mechanism. The bar
    every one of them has to clear is the one `layout` cleared: it may not run a command,
    send a prompt, or reach a file, because a workspace file is untrusted input.
+   **Extended (owner, 2026-08-06, from tmux):** a user's config should be able to bind
+   *anything the registry knows*, not only the kinds we thought to expose —
+   `.tmux.conf` can rebind all ~170 of tmux's commands, and that is why people can make
+   tmux theirs. Exit: a newly registered command is bindable from `shortcuts.md` the day
+   it is registered, with no parser change; the untrusted-input bar above still holds,
+   which is what makes "bind anything" safe rather than a shell in a markdown file.
 5. **Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history. Supersedes the
@@ -741,6 +747,33 @@ because other sections and five running lanes reference these numbers.
     window, which is exactly the class of bug the host ownership rules were written to
     prevent. Exit criterion: any pane pops out to a second monitor and restores to its
     group, and a native Office pane either follows or refuses with a reason on screen.
+14. **Commands the window does not own** (owner, 2026-08-06, from tmux). In tmux a key
+    binding is *only* a binding: every action is a named command, and the same command
+    can be fired from a shell (`tmux split-window`), from a script, or from another
+    program. Workbench has the registry — every capability already declares its commands
+    — but nothing outside the window can invoke one. Give the command list an external
+    entry point: a small CLI that talks to the running backend, and the same surface
+    exposed as an agent tool, so an agent can arrange the window it is working in
+    (`open this file beside the terminal`, `put a plan card in a pane of its own`)
+    instead of only describing what the user should click. Two constraints make this
+    safe rather than a remote-control hole: it reaches only *registered* commands, never
+    arbitrary code, and it inherits the localhost auth token from item 8 — which is why
+    it is sequenced after hardening, not before. Exit: a command registered today is
+    invocable from a shell and from an agent tomorrow with no per-command wiring, and a
+    request without the token is refused.
+15. **Detachable working sessions** (owner, 2026-08-06, from tmux). tmux's real magic is
+    not panes — it is that the *session* outlives the client: you detach, the work keeps
+    running, and you re-attach later, or from somewhere else entirely. Workbench already
+    has the pieces separately (layouts persist per workspace, the backend outlives the
+    window, agent sessions are server-side, the worktree pool holds a slot under a lease)
+    but no concept that ties them into one thing a user can name, leave and return to.
+    Make it one: a named session is a workspace + an arrangement + its live agents,
+    terminals and worktree leases; closing the window detaches rather than ends; opening
+    re-attaches. This is also what makes the app usable from a second machine later, and
+    it is the honest home for the transcript-after-reload gap PR #43 documented — a
+    re-attached session should show what happened while you were away, not an empty pane.
+    Sequenced after the workspace switcher (item 5), whose recents list is the same
+    surface a session list wants to be.
 
 **Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
 infrastructure read as nothing produced, so the order below front-loads visible shape
@@ -1139,3 +1172,18 @@ Build for real external users, not just the author. Consequences, tracked as wor
   a per-model weekly breakdown finer than the SDK reports, an unbounded fleet with no
   caps or reaping, native Office in a popped-out window before the parent-chain question
   is decided, and any part of the visual redesign moving out of M7.
+
+- 2026-08-06 — **Three things taken from tmux, and one thing not** (owner: "look at the
+  TMUX source code... for inspiration", after saying the app "still looks superold").
+  Read honestly: tmux is a C program that draws text in a terminal, so its *source* has
+  no visual design to borrow, and pretending otherwise would have been flattery. Its
+  *model* does, and three gaps were named and accepted: **commands the window does not
+  own** (M5 item 14 — in tmux a key binding is only a binding; every action is a named
+  command a shell or another program can fire, which is what makes it scriptable and
+  what would let an agent arrange the window it works in), **detachable working
+  sessions** (item 15 — the session outlives the client; we have every piece and no
+  concept that names them), and **a config that can bind anything** (folded into item 4
+  — `.tmux.conf` rebinds all of tmux, and "bind anything the registry knows" is the
+  version of that which survives our untrusted-workspace-file rule). The look is a
+  separate problem with a separate answer: three visual directions, rendered rather than
+  described, for the owner to choose between — see the M7 change request.
