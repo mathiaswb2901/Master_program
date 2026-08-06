@@ -1,8 +1,9 @@
-import type { IDockviewPanelProps } from "dockview";
-import { Fragment, lazy, Suspense, useEffect } from "react";
+import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
+import { Fragment, lazy, Suspense, useEffect, useRef } from "react";
 
 import { focusPanel } from "../dock";
 import { loadMonaco, prefetchMonaco } from "../monaco";
+import { paneInstance } from "../panes";
 import { documentViewFor, documentViews, type WorkbenchTool } from "../registry";
 import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
@@ -24,6 +25,14 @@ import { TOOLS } from "../tools";
  * theme are all configured before the first `<Editor>` mounts. It passes no
  * theme: which theme is current is a question only the moment the bundle lands
  * can answer, and `loadMonaco` asks it there (see `monaco.ts`).
+ *
+ * **Every Monaco instance in the app is mounted through this** — the tab
+ * strip's and every file pane's. One component rather than one shared options
+ * object is what keeps two editors the *same* editor rather than two that
+ * merely look alike, and it is what keeps `@monaco-editor/react` (and the CDN
+ * loader it drags with it) out of this module's imports, which is the whole
+ * point: a static import anywhere in this graph puts 3.3 MB back on the launch
+ * path (`ui/e2e/perf/bundle.spec.ts`).
  */
 const CodeEditor = lazy(async () => {
   await loadMonaco();
@@ -145,7 +154,116 @@ function ConflictBar({ file }: { file: OpenFile }) {
   );
 }
 
-export function EditorAreaPanel(_props: IDockviewPanelProps) {
+/**
+ * The Editor tool renders two ways, decided by the pane's id (`../panes.ts`).
+ *
+ *  - `editors` — the default pane: the tab strip over every open file. The
+ *    panel Workbench has always had, and still the home of the `keepMounted`
+ *    document views (an OnlyOffice instance is too expensive to tear down on a
+ *    tab switch);
+ *  - `editors#<path>` — a pane showing one file, side by side with another.
+ *    The path is workspace-relative, which is what makes a saved layout come
+ *    back on the same two files rather than on two empty editors.
+ */
+export function EditorAreaPanel(props: IDockviewPanelProps) {
+  const path = paneInstance(props.api.id);
+  return path === null ? <EditorTabs /> : <FilePane path={path} api={props.api} />;
+}
+
+/** One file, filling its pane. */
+function FilePane({ path, api }: { path: string; api: DockviewPanelApi }) {
+  const file = useStore((s) => s.openFiles.find((f) => f.path === path));
+
+  /**
+   * Open it **once**, when the pane appears — a pane restored from a layout
+   * names a file nothing has read yet.
+   *
+   * Once, and not "whenever it is missing": the tab strip can close this file
+   * too, and a pane that reopened whatever it lost would make that close button
+   * do nothing. Closed from elsewhere, the pane says so and offers it back.
+   */
+  const openedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (openedFor.current === path) return;
+    openedFor.current = path;
+    if (!useStore.getState().openFiles.some((f) => f.path === path)) {
+      void useStore.getState().openFile(path);
+    }
+  }, [path]);
+
+  // Ctrl+S saves the file you are looking at, so the focused pane decides which
+  // one that is — the same rule the session panes follow.
+  useEffect(() => {
+    if (api.isActive) useStore.getState().setActiveFile(path);
+    const subscription = api.onDidActiveChange((event) => {
+      if (event.isActive) useStore.getState().setActiveFile(path);
+    });
+    return () => subscription.dispose();
+  }, [api, path]);
+
+  if (file === undefined) {
+    return (
+      <div className="wb-pane-single">
+        <div className="wb-pane-note">
+          <span className="wb-pane-note-msg u-truncate">{path} is closed.</span>
+          <button
+            type="button"
+            className="wb-btn wb-btn-sm wb-btn-outline"
+            onClick={() => void useStore.getState().openFile(path)}
+          >
+            Reopen
+          </button>
+        </div>
+      </div>
+    );
+  }
+  const view = documentViewFor(TOOLS, file.kind);
+  return (
+    <div className="wb-pane-single">
+      {file.loadError !== null ? (
+        <div className="wb-editor-message">
+          Cannot open {file.name}: {file.loadError}
+        </div>
+      ) : view !== null ? (
+        // A view that must stay mounted is one instance per open file, owned by
+        // the tab strip (a second OnlyOffice editor on the same document is a
+        // co-editing session with yourself). Say so rather than opening one.
+        view.keepMounted === true ? (
+          <div className="wb-pane-note">
+            <span className="wb-pane-note-msg u-truncate">
+              {file.name} opens in the Editor pane.
+            </span>
+            <button
+              type="button"
+              className="wb-btn wb-btn-sm wb-btn-outline"
+              onClick={() => {
+                useStore.getState().setActiveFile(path);
+                focusPanel("editors");
+              }}
+            >
+              Show it
+            </button>
+          </div>
+        ) : (
+          <div className={view.hostClassName}>
+            <view.component file={file} />
+          </div>
+        )
+      ) : (
+        <div className="wb-editor-body">
+          {/* Same lazy surface the tab strip mounts, and the same fallback: a
+              pane split onto a file is often the *first* editor in the window,
+              so it has to be able to wait for the chunk too. */}
+          <Suspense fallback={<div className="wb-editor-message">Loading editor…</div>}>
+            <CodeEditor file={file} />
+          </Suspense>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EditorTabs() {
   const openFiles = useStore((s) => s.openFiles);
   const activePath = useStore((s) => s.activePath);
   const active = openFiles.find((f) => f.path === activePath) ?? null;
@@ -161,11 +279,22 @@ export function EditorAreaPanel(_props: IDockviewPanelProps) {
   // paint and the workspace listing arriving the main thread is *idle*, so
   // `requestIdleCallback` fires immediately and a 3.3 MB parse lands on top of
   // the tree render — a warm launch went from 662 ms to a clickable tree to
-  // 1,052 ms. The tree is the last thing the launch path waits for, so its
-  // arrival is the signal that the editor's bytes are now free to fetch. Two
-  // conditions, both necessary: this panel exists (a saved layout without an
-  // editor warms nothing) and the launch is over.
-  const workspaceLoaded = useStore((s) => s.tree !== null);
+  // 1,052 ms. The root listing is the last thing the launch path waits for, so
+  // its arrival is the signal that the editor's bytes are now free to fetch.
+  // Two conditions, both necessary: this panel exists (a saved layout without
+  // an editor warms nothing) and the launch is over.
+  //
+  // **The signal is `dirs[""]`, the same one the tree renders from**, and it
+  // has to be: `store.tree` is no longer the launch listing but the *search
+  // index*, which nothing fetches until the QuickBar asks for it. Warming on
+  // that is warming never — the chunk is not requested at all, and the whole
+  // cost lands back on the user's first click (the failure `ui/e2e/theme.spec.ts`
+  // and `ui/e2e/perf/open-file.spec.ts` both catch).
+  //
+  // The strip is also where the *only* prefetch lives: a file pane restored
+  // from a layout mounts an editor immediately, so it needs no warming, and
+  // `prefetchMonaco` is idempotent for the window where both happen.
+  const workspaceLoaded = useStore((s) => s.dirs[""] !== undefined);
   useEffect(() => {
     if (workspaceLoaded) prefetchMonaco();
   }, [workspaceLoaded]);
@@ -282,6 +411,25 @@ export const editorTool: WorkbenchTool = {
   panel: {
     component: EditorAreaPanel,
     defaultLocation: { area: "center" },
+    // Plural: two files side by side is the oldest reason anyone splits a
+    // window. The instance key is the workspace-relative path.
+    singleton: false,
+    instances: {
+      // Open files only. "Every file in the workspace" is what the QuickBar's
+      // own file search is for, and offering 5,000 rows here would bury the
+      // sessions and the terminals under them.
+      options: () =>
+        useStore
+          .getState()
+          .openFiles.map((file) => ({
+            id: `editors.${file.path}`,
+            title: file.name,
+            detail: file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "",
+            category: "Open files",
+            key: () => file.path,
+          })),
+      titleFor: (key) => key.split("/").pop() ?? key,
+    },
   },
   commands: [
     {

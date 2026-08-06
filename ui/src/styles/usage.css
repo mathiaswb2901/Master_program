@@ -1,0 +1,318 @@
+/* Plan-usage meters and the status reading.
+
+   Tokens only, no new colours: the semantic ramp (§2.5) already means
+   "approaching" and "at" a limit, and the bar reuses the surface steps and
+   hairlines every other card uses. Every state that spends a colour also
+   carries words (§7) — the colour is the emphasis, never the message.
+
+   The panel is one column in a 380px dock and as many as fit when maximized
+   (`auto-fill`), so the same meters read at both sizes without a second
+   layout. */
+
+.wb-usage {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface-panel);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+/* The stamp caveat 1 demands: how old these numbers are, in plain words. */
+.wb-usage-stamp {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-usage-stamp.is-stale {
+  color: var(--warn);
+}
+
+.wb-usage-warning {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-default);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+  color: var(--text-secondary);
+  font-size: var(--type-sm-size);
+}
+
+/* ---- meters ---------------------------------------------------------------- */
+
+.wb-usage-meters {
+  display: grid;
+  /* `min(220px, 100%)` and not a bare 220px: a dock dragged narrower than one
+     meter must reflow, never scroll sideways. */
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: var(--space-5);
+  max-width: 1080px;
+}
+
+.wb-usage-meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  min-width: 0;
+}
+
+.wb-usage-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.wb-usage-meter-label {
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.wb-usage-meter-value {
+  flex: none;
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-usage-track {
+  position: relative;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-hover);
+  overflow: hidden;
+}
+
+/* The fill's width changes instantly, on purpose. Width is not on either motion
+   channel (DESIGN.md §5.5 — animating it is animating layout), a meter is not a
+   row in §5.4's table, and the value only moves when a rate-limit event
+   arrives, which is minutes apart. Its *colour* is on the tint channel with the
+   rest of the chrome. */
+.wb-usage-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  transition: background-color var(--motion-tint);
+}
+
+.wb-usage-meter-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* The words that go with the colour (§7). */
+.wb-usage-meter-note {
+  font-weight: var(--weight-medium);
+}
+
+.wb-usage-meter-age {
+  margin-left: auto;
+}
+
+.wb-usage-meter.is-warning {
+  border-color: var(--warn);
+}
+
+.wb-usage-meter.is-warning .wb-usage-fill {
+  background: var(--warn);
+}
+
+.wb-usage-meter.is-warning .wb-usage-meter-note {
+  color: var(--warn);
+}
+
+.wb-usage-meter.is-critical {
+  border-color: var(--error);
+}
+
+.wb-usage-meter.is-critical .wb-usage-fill {
+  background: var(--error);
+}
+
+.wb-usage-meter.is-critical .wb-usage-meter-note {
+  color: var(--error);
+}
+
+/* ---- prose ----------------------------------------------------------------- */
+
+.wb-usage-note,
+.wb-usage-source {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-tertiary);
+}
+
+.wb-usage-source {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-4);
+}
+
+/* ---- the empty state (§6.10) ------------------------------------------------ */
+
+.wb-usage-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+}
+
+.wb-usage-empty-icon {
+  color: var(--text-tertiary);
+  display: flex;
+}
+
+.wb-usage-empty-title {
+  margin: 0;
+  font-size: var(--type-chat-size);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+/* ---- the degraded (session cost) section ------------------------------------ */
+
+.wb-usage-degraded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-usage-degraded h2 {
+  margin: 0;
+}
+
+.wb-usage-cost-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.wb-usage-cost-value {
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-usage-models {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-usage-model {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+  min-width: 0;
+}
+
+.wb-usage-model-name {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.wb-usage-model-figures {
+  flex: none;
+}
+
+/* ---- status bar (§6.7) ------------------------------------------------------ */
+
+/* Quiet by default: the same tertiary text as the rest of the bar, no fill.
+   A tint is spent only once a limit is actually approaching. */
+.wb-usage-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 18px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  cursor: pointer;
+  /* The status-chip row of DESIGN.md §5.4: tint only, because this changes
+     because an agent did, not because the user did. */
+  transition:
+    background-color var(--motion-tint),
+    border-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+/* Instant in, eased out (§5.1.5). */
+.wb-usage-status:hover {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  transition-duration: 0s;
+}
+
+.wb-usage-status:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.wb-usage-status-label {
+  font-weight: var(--weight-medium);
+}
+
+/* Colour never alone: at these levels the chip also carries the note. */
+.wb-usage-status-note {
+  font-weight: var(--weight-medium);
+}
+
+.wb-usage-status.is-warning {
+  background: var(--warn-bg);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.wb-usage-status.is-critical {
+  background: var(--error-bg);
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* A stale reading is not a current one, even in six characters. */
+.wb-usage-status.is-stale .wb-usage-status-value {
+  opacity: 0.75;
+  font-style: italic;
+}

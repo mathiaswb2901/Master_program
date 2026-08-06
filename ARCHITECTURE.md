@@ -195,7 +195,9 @@ contribute any of:
 | `dynamicCommands` | Rows whose *set* changes while the app runs — one per saved layout today. Re-derived only when the tool's `key()` changes, since the merged list is read on every keystroke, and never chord-bearing: a chord must be static to be pinned by a test and to win a `shortcuts.md` collision deterministically |
 | `statusContributions` | Items in the status bar's left/centre/right regions. The bar owns the regions and nothing that goes in them |
 | `shortcutKinds` / `shortcutActions` | Which `shortcuts.md` kinds this panel *hosts an insertion for* (the Terminal claims `shell`, the Agent `prompt`) and which it *carries out* (Layouts claims `layout`) — so `commands.ts` names neither a panel nor a kind |
-| `onDockReady` | The live `DockviewApi`, for a tool that operates on the dock rather than living in it. Exactly one does |
+| `panel.instances` | What a *second* pane of a plural tool is bound to — the rows the pane picker offers, and what such a pane calls itself. See "Panes" below |
+| `onDockReady` | The live `DockviewApi`, for a tool that operates on the dock rather than living in it. Two do: the layout system and the pane system |
+| `groupActions` | One control at the right end of every pane's tab strip, for a tool that acts on panes rather than living in one. The split affordance is the only one, and it is why `App.tsx` can mount it without knowing what it is |
 | `when` | A predicate that takes the whole tool out — panel, commands and status items together. **Boot-time**: it is asked once per tool and remembered, because the things it feeds are derived at different moments and a tool that enabled itself later would be half present |
 
 A panel's tab is closable exactly when it is *not* in the startup layout: one
@@ -232,6 +234,58 @@ modifier that file may use, so every chord a tool takes is one a user cannot
 have — a price the Terminal's `Alt+T` earns and a worked example does not.
 `docs/tools.md` is the walkthrough.
 
+## Panes
+
+The window is tiled, not fixed: any pane splits in two, anything registered goes
+in the new one, and there may be several panes of the same tool — four agent
+sessions, two shells, two files. The system is one capability
+(`ui/src/panels/Panes.tsx`, with the pure half in `ui/src/panes.ts`) that
+contributes no panel of its own.
+
+**A pane's identity is its dockview panel id, and that is the whole design.**
+The id is `toolId` or `toolId#instanceKey`, split on the first `#`. dockview
+serializes panel ids into `.workbench/layouts.json` and nothing else about a
+panel's contents, so the id *is* the persistence: whatever a pane is bound to has
+to be expressible in that string or it does not come back. `agent#<session_id>`
+restores that conversation, `editors#<workspace-relative path>` that file,
+`terminal#<n>` that pane and its number (with a fresh shell — the PTY dies with
+the socket and the server releases it, which no layout file can undo). There is
+no second store, no id map and no migration, and an instance key is therefore a
+**contract** exactly as a tool id is.
+
+`pruneLayout` vets pane ids as well as components: a pane carrying an instance
+key for a tool that is a singleton *today*, or one whose id and
+`contentComponent` disagree, is unaddressable by every pane command and is
+dropped with its own message. It deliberately does not vet the key itself —
+sessions and files load long after the layout does, so a pane bound to something
+that has not arrived yet must not be dropped for being early; the panel says so
+itself instead.
+
+Two seams keep the shell capability-free. The picker is the **QuickBar in pick
+mode**: a capability hands `store.ts` a list of rows, so there is one overlay
+language in the app and `QuickBar.tsx` still names no capability. The split
+affordance reaches the tab strip through `groupActions`, so `App.tsx` mounts a
+component without knowing what it draws.
+
+Focus is the selector: the focused pane is the session `Enter` and *Interrupt*
+mean, the file `Ctrl+S` saves, and the shell a `shortcuts.md` `shell` entry types
+into. That is why `Chat.tsx` could be mounted four times without a change — each
+pane makes its own session the active one when it takes focus.
+
+**A restored pane is a claim, and it acquires nothing until the claim is
+checked.** A layout outlives the resources it names — `SessionManager` holds its
+sessions in memory, so every `agent#<id>` in a saved layout is unknown to the
+next server process — and the pane that renders "this session is not running any
+more" must not be opening a socket behind that note. So the Agent pane waits for
+the session to appear *live* in the listing before it attaches, the discipline
+`openSession`/`openLiveSession` already followed, and `ReconnectingSocket`
+(`ui/src/ws.ts`) stops retrying when the server answers a close code in the
+4400s — a refusal, as against the dropped connection it exists to survive. The
+same rule in the other direction: a ceiling the tool can know *before* the
+gesture belongs on the picker row, so `New agent session` reads its cap from
+`GET /api/agents/limits` and greys itself with the number and the setting rather
+than spending a split on a round trip the server refuses.
+
 **Agent-facing tools** carry the ergonomics budget on both sides.
 `services/agent_tools.py` is the server registry the SDK actually reads: name,
 model-facing description, input schema, and a **required** `output_format`, so
@@ -258,14 +312,16 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host, usage, worktrees |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
+| `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
+| `routers/worktrees.py` | list/acquire/release/renew/prune the managed worktree pool |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
 | `services/workspace.py` | path jail, atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
 | `services/watcher.py` | watchfiles -> bus |
@@ -280,7 +336,9 @@ in-process calls where the model and the user dominate.
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 | `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
+| `services/worktrees.py` | the managed worktree pool: borrowed detached checkouts, leases, dirty protection |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
+| `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn cost; in-memory only |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
 ## The file tree
@@ -582,6 +640,73 @@ State is **in memory only** — a server restart forgets every attribution and
 `GET /api/provenance` comes back empty — and bounded: `MAX_TRACKED_PATHS` (500,
 LRU) entries and `MAX_PENDING_CLAIMS` (200) in-flight claims, so a long session
 cannot grow it without limit.
+
+## Plan usage
+
+Your Claude plan's own limits, inside the app (`services/usage.py`,
+`models/usage.py`, `routers/usage.py`, `ui/src/usage.ts`,
+`ui/src/panels/UsagePanel.tsx`).
+
+**The source, verified against the installed SDK** (claude-agent-sdk 0.2.129,
+bundled CLI 2.1.221), not assumed: the CLI emits a `rate_limit_event` frame
+which the SDK surfaces as `RateLimitEvent`, a member of the `Message` union — so
+it arrives on the same `receive_response()` stream as assistant text and tool
+results. It carries one `RateLimitInfo`: `status`
+(`allowed`/`allowed_warning`/`rejected`), `rate_limit_type`
+(`five_hour`/`seven_day`/`seven_day_opus`/`seven_day_sonnet`/`overage`, or
+`None`), `utilization` (0.0–1.0), `resets_at`, the three `overage_*` fields, and
+`raw`. `AgentSession._handle_sdk_message` translates it at the same seam it
+translates every other SDK message and hands it to `UsageService`, which
+publishes a whole `UsageSnapshot` on the shared bus (`usage` on `/ws/events`);
+`GET /api/usage` serves the same snapshot for initial load and reconnect.
+
+**One event describes one window.** This is the shape that decides the design:
+the five-hour figure and the weekly figures arrive as *separate* events, each
+when that window transitions. The snapshot is therefore accumulated a window at
+a time, and a window nobody has transitioned in is absent.
+
+**Four caveats, each with a rendering rather than a footnote:**
+
+1. **Stale until you talk to an agent.** The figures ride a live session's
+   stream, so they are as old as your last turn. Every bucket carries
+   `observed_at`, the snapshot carries a server-measured `age_s`, the panel
+   stamps both ("Updated 4m ago", "2h old" per meter), and past
+   `STALE_AFTER_S` (15 min) it says outright that the numbers are old. Age is
+   server age **plus local elapsed time** — never `Date.now() - observed_at`,
+   which would report clock skew as staleness.
+2. **It fires on transition, not on demand.** There is no query API: no `claude
+   usage` subcommand on the bundled CLI, `/usage` is TUI-only, and nothing in
+   the SDK reads current utilization. Hence no refresh button — the panel
+   explains the source instead of implying one would work.
+3. **An account may never emit it.** `buckets == []` is a first-class state with
+   its own designed surface, and the fallback is `UsageSessionCost` — what this
+   *process* has spent, from `ResultMessage.total_cost_usd`/`model_usage` —
+   labelled "Session cost — not plan usage", because it answers a different
+   question. The status-bar reading renders nothing at all in this state (§6.7:
+   counts hide at zero); the QuickBar command is how the panel stays reachable.
+4. **We report the buckets we are given.** No synthesized per-model weekly, no
+   extrapolated burn rate. A missing `utilization` renders as an em dash, never
+   as a zeroed bar; an event that named no window is reported as `unspecified`
+   rather than guessed at; an unrecognized `rate_limit_type` is logged and lands
+   there too, rather than being dropped. The only judgement on this side is the
+   display threshold at which a bar starts looking alarming (`WARN_AT` 75%,
+   `CRITICAL_AT` 90%) — and it defers to the SDK's own `status` first.
+
+State is **in memory only**, deliberately: this is live state about an
+*account*, not workspace data, so nothing is written to `.workbench/` and a
+restart reports "not known yet" — the same honest state as an account that never
+emits. Non-finite figures are dropped on the way in (NaN is not JSON, and one
+would fail the whole `/ws/events` fan-out), and the per-model cost map is
+bounded (`MAX_MODELS`).
+
+**The log counts as disk.** Writing no file of our own is only half of "in
+memory only": the desktop shell runs the backend as a child process and copies
+its stdout into `shell.log`, appended across restarts (`pump()` and `open_log()`
+in `desktop/src-tauri/src/backend.rs`), and structlog's default factory prints to
+stdout. Anything logged at or above `Settings.log_level` — `info` by default — is
+therefore on a packaged user's disk. Utilization and reset times are logged at
+`debug` only; the regression test asserts that at fd 1, which is the stream the
+shell actually reads.
 
 ## Office editing
 
@@ -908,6 +1033,146 @@ contributes **no panel**: commands, a status chip, a `shortcuts.md` kind and an
   uses `fromJSON(…, { reuseExistingPanels: true })`, which moves the panels that
   exist in both rather than recreating them.
 
+## The managed worktree pool
+
+`CLAUDE.md` has required "one writer per checkout, always" since M4, enforced by
+discipline. `services/worktrees.py` makes it a feature: a small pool of git
+worktrees a caller **borrows** a slot from, works in, and gives back. It is also
+the substrate Mission Control's workers need.
+
+```
+routers/worktrees.py ──► WorktreeService ──► git (asyncio.create_subprocess_exec)
+   REST                    slots by name          worktree add --detach
+   /ws/events ◄── WorktreeChangedEvent             status --porcelain
+                                                   reset --hard / clean -fd
+%LOCALAPPDATA%\Workbench\worktrees\<workspace-key>\
+   pool.json      the state document (atomic write, Windows-lock retry)
+   slot-01/ …     detached checkouts, kept warm, never removed
+```
+
+**Four decisions, implemented rather than described.**
+
+- **Detached HEAD.** Every slot is `git worktree add --detach`, so a pooled
+  worktree carries no branch and *"already checked out at …"* cannot happen —
+  the wall every fix-stage agent in this repo's own workflow hits when two lanes
+  want one branch. What a holder does inside its slot (branch, commit, push) is
+  the holder's business; what the pool hands out is a commit.
+- **Pool, never destroy.** There is no `git worktree remove` and no
+  `shutil.rmtree` in the module, asserted by watching every git argv a full
+  acquire→release→discard→prune cycle runs. A finished slot is reset and
+  returned, so `node_modules`, `.venv` and build caches stay with it: they are
+  *ignored* files and the only cleaning is `git clean -fd`, never `-x`. A cold
+  install is paid once per slot, not once per task. It also avoids a hazard
+  measured here — `git worktree remove` recurses through a Windows junction, so
+  any design that *links* dependencies into a slot can empty the checkout they
+  point at.
+- **Two idle signals.** A lease carries an `owner_pid` *and* an `expires_at`,
+  and `prune()` reclaims only when **both** say idle. The deadline holds a slot
+  for an agent working unattended with nothing of ours running; the pid holds it
+  past the deadline for an owner that is demonstrably still there. The liveness
+  probe is `OpenProcess` + `GetExitCodeProcess` and never `os.kill(pid, 0)` —
+  which on Windows CPython is `TerminateProcess`, i.e. a probe that kills what it
+  asks about. Its two imprecisions (a process that exited with code 259 reads as
+  alive, and so does a recycled pid) both hold a slot *longer*, which is the
+  direction that costs a wait rather than an agent's work.
+- **Fail safe on corrupt state.** A `pool.json` that is truncated, unreadable,
+  not JSON or from another version is not repaired — the pool is rebuilt from
+  what git reports on disk and **every** slot comes back `leased` under a
+  `recovered` lease. Assume in use; never assume free. A directory in the pool
+  root git does *not* know as a worktree becomes `needs_review` and is left
+  exactly where it is.
+
+**Dirty is sacred, and it outranks all four.** A slot whose `git status
+--porcelain` is non-empty is never handed out and never reclaimed without an
+explicit `force`; a status that *fails* is read as dirty, never as clean; and
+the disk beats the state file, so a slot recorded free with work in it is
+re-parked as `dirty` rather than given away. The one thing dirty protection is
+*not* is a one-way door: every sweep re-asks, and a slot git now reports clean is
+freed — which discards nothing, because there is nothing left to discard.
+
+**What Windows actually does, measured** (`test_worktrees.py`, with a real
+`CreateFile` share-mode-0 handle — Python's own `open()` shares everything and
+would prove nothing):
+
+| with an exclusive handle on a tracked file | result |
+|---|---|
+| `git status --porcelain` | reports it `M` — git cannot open it to compare, so it says changed |
+| `git reset --hard <other commit>` | `error: unable to unlink old 'model.py'` |
+| after the handle closes | status clean again, reset succeeds |
+
+So the dirty guard fires *before* any reset is attempted, which is the safest
+place for it to fire, and the reset failure sits behind it. Neither costs a
+byte. A reset that keeps failing is retried on a short bounded budget (the same
+shape `services/layouts.py` uses for `os.replace`) and then becomes
+`needs_review` — never `--force`, because git's reset is already forceful and
+the failure is the filesystem's.
+
+**The pool root is outside the workspace, and that is load-bearing.** It lives
+under `%LOCALAPPDATA%\Workbench\worktrees\<name>-<digest of the workspace path>`
+— *not* under `.workbench/`, because a worktree inside the workspace would be
+walked by `Workspace.tree()`, watched by the watcher and indexed as N more
+copies of the project: every file would appear `pool_size` times in the tree and
+every checkout would arrive as a watcher storm. The tests assert the property
+rather than assume it — `safe_path` refuses a slot, the tree does not list one,
+and a real `git worktree add` through the API produces no file event on
+`/ws/events`.
+
+**When the reset happens.** A clean slot is returned *as it is*; the reset that
+repurposes it runs at **acquire** time. Acquire is the only moment the pool
+knows which commit to reset *to*, and it is the moment nothing is running in the
+slot — whereas a release fires exactly as the holder's own processes are letting
+go of their handles, which is when a Windows reset is most likely to fail.
+Commits a holder made and did not push survive that reset: nothing here runs
+`gc`, `worktree remove` or `clean -x`, so they stay in the object database,
+reachable through the slot's own `HEAD` reflog.
+
+**And why that reset is `--keep`.** The dirty check and the reset behind it are
+two git processes, so there is a gap between them, and a slot that was clean
+when it was asked can be written to before the reset lands — by a build daemon
+the previous holder left running, a language server, an indexer: the same class
+of background writer the lock table above is about. Under `reset --hard` that
+write was overwritten with no `dirty`, no `needs_review`, no event and no log
+line, which is the one failure this service is not allowed to have. `--keep`
+refuses to overwrite a locally-modified file, so the decision and the
+destruction happen inside *one* git process rather than across a gap:
+
+| a write that lands in the gap | what happens now |
+|---|---|
+| to a file that **differs** between `HEAD` and the base | `--keep` aborts; status is re-read, the slot is parked `dirty`, the work is intact |
+| to a file the two commits **agree** on | `--keep` keeps it; the post-reset status check sees it and parks the slot `dirty` |
+| nothing raced | status is empty after the reset, and *only* then is the slot leased |
+
+The failed-reset path re-reads `git status` rather than matching a substring of
+git's stderr, because the two causes need different answers: a racing writer
+leaves the slot dirty and heals itself when the writer stops, a held handle
+leaves it clean and unresettable and wants a human. `--hard` survives only on
+the two paths where destruction is what the caller asked for by name —
+`release(discard_changes=True)` and `prune(force=True)` — and those now verify
+that the slot really is empty before reporting it `free`, since the `clean -fd`
+behind the reset is a second process with a gap of its own.
+
+**One writer per pool, enforced by the OS.** The service's `asyncio.Lock` is
+exactly as wide as one interpreter: it serialises concurrent requests to *one*
+server and nothing else. Two `workbench-server` processes pointed at the same
+workspace (a crashed server not yet reaped, two dev instances on one folder)
+share a pool root and a `pool.json`, and both could read one slot as free, both
+prepare it, both lease it, with the last save winning the state file — one
+checkout, two writers, the invariant the whole feature exists to provide. So
+`PoolLock` takes an exclusive byte-range lock on `<pool root>/pool.lock` for the
+life of the process (`msvcrt.locking` on Windows, `flock` elsewhere). A server
+that cannot take it serves no pool: `GET /api/worktrees` carries the reason,
+acquire is a 503, and everything else in that server starts normally. The lock
+is held by a **handle**, not by the existence of a file, so a killed server
+cannot leave a pool permanently unopenable — the OS drops it when the process
+dies, and a clean shutdown releases it explicitly so the next server does not
+have to wait to be lucky.
+
+**Not built yet** (ROADMAP M5 item 6 carries them): multi-root file and terminal
+access through a root registry, so a slot can be *opened* in the UI with the path
+jail preserved per root; worktree-bound agent sessions; and per-slot watchers.
+The pool is the substrate those need, and it stands alone without them — the
+endpoints are usable today by anything that can make an HTTP call.
+
 ## Shortcuts
 
 `<workspace>/.workbench/shortcuts.md` merged over `~/.workbench/shortcuts.md` (workspace
@@ -940,7 +1205,8 @@ Format spec: `docs/shortcuts.md`.
      streamed markdown reply, a `Read` of a real workspace file, a `Write` that really
      lands on disk (announced before the bytes, as a real tool call is), a second `Write`
      that is announced and then *fails* with nothing written, a permission
-     prompt, a fixed `PlanArtifact` — through the *same* factory and `SessionBridge` seams the
+     prompt, a fixed `PlanArtifact`, and three `RateLimitEvent`s (one per window,
+     the shape the CLI really sends) — through the *same* factory and `SessionBridge` seams the
      real SDK plugs into. Nothing else changes: the session state machine, both
      WebSocket fan-outs and every typed frame stay production code. This is what lets
      layer 4 exercise chat, tool rows, permissions and plan cards with no Claude login
@@ -952,7 +1218,7 @@ Format spec: `docs/shortcuts.md`.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
-   launched in a per-run temp workspace with fake-agent mode on. Nine journeys: file
+   launched in a per-run temp workspace with fake-agent mode on. Ten journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
    ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
    tool reaching the user through the registry alone), chat streaming and
@@ -962,7 +1228,14 @@ Format spec: `docs/shortcuts.md`.
    in a real browser), status chips and the attention badge, office degraded
    mode, and provenance (an agent write is marked, attributed, opened, acknowledged,
    and links back to its session — *and* the negative half: an announced-but-failed
-   write followed by the user's own change, and the user's own saves, mark nothing).
+   write followed by the user's own change, and the user's own saves, mark nothing),
+   and **plan usage** (the empty state *first*, because it is the likeliest one an
+   account really shows, then the meters a rate-limit transition produces, their
+   stamps, the words next to the near-cap colour, the status reading that was
+   silent a moment earlier, and a reload proving the load path agrees with the
+   socket). The one state no browser journey can reach in time — a quarter-hour-old
+   snapshot — is a `renderToStaticMarkup` test instead
+   (`ui/src/panels/UsagePanel.test.tsx`).
    Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.
 5. **Perf lane** (`cd ui && npm run perf` — `ui/playwright.perf.config.ts`, its own

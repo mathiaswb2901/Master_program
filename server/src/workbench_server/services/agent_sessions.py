@@ -117,6 +117,25 @@ class ToolUseObserver(Protocol):
     ) -> None: ...
 
 
+class UsageObserver(Protocol):
+    """Told what the SDK says about the account's limits, and what a turn cost.
+
+    Two signals from the same stream, and both belong to the *account* rather
+    than to this session — which is why they leave the session immediately
+    instead of becoming frames on ``/ws/agent/{id}``. The service fans the
+    resulting snapshot out on the shared bus, so every window sees the figure a
+    turn in any one session produced.
+
+    A direct call rather than a bus event for the same reason
+    :class:`ToolUseObserver` is one: this is an internal hand-off of raw SDK
+    values, not a payload a client acts on.
+    """
+
+    def note_rate_limit(self, info: Any) -> None: ...
+
+    def note_turn(self, *, cost_usd: float | None, model_usage: Any = None) -> None: ...
+
+
 ClientFactory = Callable[[Path, str | None, SessionBridge], SdkClient]
 
 
@@ -159,6 +178,7 @@ class AgentSession:
         resume_session_id: str | None = None,
         event_publisher: EventPublisher | None = None,
         tool_observer: ToolUseObserver | None = None,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
         self.local_id = local_id
         self.folder = folder
@@ -175,6 +195,7 @@ class AgentSession:
         self._factory = factory
         self._publisher = event_publisher
         self._tool_observer = tool_observer
+        self._usage_observer = usage_observer
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
@@ -458,16 +479,31 @@ class AgentSession:
                 # it cannot be credited with the next change to that path.
                 if self._tool_observer is not None:
                     self._tool_observer.note_tool_result(call_id=raw_id, ok=ok)
+        elif kind == "RateLimitEvent":
+            # The account's plan limits, as the CLI reports them when one of
+            # them *transitions*. Nothing about it belongs to this conversation,
+            # so it leaves here rather than becoming a frame on this session's
+            # socket; the usage service publishes the snapshot on the shared bus
+            # (services/usage.py).
+            if self._usage_observer is not None:
+                self._usage_observer.note_rate_limit(getattr(message, "rate_limit_info", None))
         elif kind == "ResultMessage":
             sdk_id = getattr(message, "session_id", None)
             if isinstance(sdk_id, str):
                 self.sdk_session_id = sdk_id
                 self.sdk_session_ids.add(sdk_id)
             cost = getattr(message, "total_cost_usd", None)
+            cost_usd = cost if isinstance(cost, int | float) else None
+            if self._usage_observer is not None:
+                # What the turn cost, and per model. The only usage figure an
+                # account that never emits a rate-limit event ever produces.
+                self._usage_observer.note_turn(
+                    cost_usd=cost_usd, model_usage=getattr(message, "model_usage", None)
+                )
             self._emit(
                 TurnDone(
                     session_id=self.local_id,
-                    cost_usd=cost if isinstance(cost, int | float) else None,
+                    cost_usd=cost_usd,
                     is_error=bool(getattr(message, "is_error", False)),
                 )
             )
@@ -544,6 +580,7 @@ class SessionManager:
         session_index: SessionIndex | None = None,
         event_publisher: EventPublisher | None = None,
         tool_observer: ToolUseObserver | None = None,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
         self._root = workspace_root
         self._factory = factory
@@ -551,15 +588,30 @@ class SessionManager:
         self._index = session_index
         self._publisher = event_publisher
         self._tool_observer = tool_observer
+        self._usage_observer = usage_observer
         self._sessions: dict[str, AgentSession] = {}
 
     @property
     def sessions(self) -> dict[str, AgentSession]:
         return self._sessions
 
+    @property
+    def max_concurrent(self) -> int:
+        """The ceiling ``create`` enforces (``WORKBENCH_MAX_CONCURRENT_SESSIONS``)."""
+        return self._max
+
+    def active_count(self) -> int:
+        """Sessions counted against that ceiling.
+
+        The rule is *working*, not *open*: an idle session costs nothing, so it
+        does not hold a slot. One definition, read by ``create`` below and by
+        ``GET /api/agents/limits`` — the UI greys "New agent session" off this
+        number, and two definitions would grey it at the wrong moment.
+        """
+        return sum(1 for s in self._sessions.values() if s.state != "idle")
+
     def create(self, folder_relative: str, resume_session_id: str | None = None) -> AgentSession:
-        live = sum(1 for s in self._sessions.values() if s.state != "idle")
-        if live >= self._max:
+        if self.active_count() >= self._max:
             raise TooManySessionsError(self._max)
         folder = (self._root / folder_relative).resolve()
         if folder != self._root and self._root not in folder.parents:
@@ -573,6 +625,7 @@ class SessionManager:
             resume_session_id=resume_session_id,
             event_publisher=self._publisher,
             tool_observer=self._tool_observer,
+            usage_observer=self._usage_observer,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.

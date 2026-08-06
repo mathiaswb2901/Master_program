@@ -157,6 +157,19 @@ export function setActiveEditor(editor: Monaco.editor.IStandaloneCodeEditor | nu
   activeEditor = editor;
 }
 
+/**
+ * Withdraw an editor that is going away — and *only* it.
+ *
+ * There is more than one editor in the window now (the tab strip's, plus one
+ * per `editors#<path>` pane), so "an editor unmounted" is not "there is no
+ * active editor": closing one pane must not cost the pane beside it the cursor
+ * and scroll restore that `setModelContent` does. A no-op unless the editor
+ * being dropped is the one currently registered.
+ */
+export function clearActiveEditor(editor: Monaco.editor.IStandaloneCodeEditor): void {
+  if (activeEditor === editor) activeEditor = null;
+}
+
 /** The model for a path, or null — including "the editor has not loaded yet",
  * which is indistinguishable from "no model" and means the same thing here. */
 function modelFor(path: string): Monaco.editor.ITextModel | null {

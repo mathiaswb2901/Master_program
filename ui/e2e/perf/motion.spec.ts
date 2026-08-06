@@ -80,11 +80,23 @@ const VENDOR_LEDGER: Record<string, string[]> = {
  */
 const WILL_CHANGE_CEILING = 12;
 
+/**
+ * **Every** stylesheet the build emits, concatenated — not the first one.
+ *
+ * There is more than one now: Monaco's CSS follows Monaco's chunk off the
+ * launch path (`ui/src/monaco.ts`), so the build writes `index-*.css` and
+ * `monacoBundle-*.css`. Both are shipped to the user, which is the standard
+ * this budget is written to; reading only whichever the directory listed first
+ * silently stopped scanning the editor, and the three Monaco entries in
+ * {@link VENDOR_LEDGER} went missing — a quarantine that had not been lifted,
+ * only stopped being looked at. Same reason the `will-change` count reads them
+ * both: a ceiling that ignores a shipped sheet is not a ceiling.
+ */
 function builtCss(): string {
   const assets = path.join(UI_ROOT, "dist", "assets");
-  const file = fs.readdirSync(assets).find((name) => name.endsWith(".css"));
-  expect(file, "the production build emitted a stylesheet").toBeDefined();
-  return fs.readFileSync(path.join(assets, String(file)), "utf-8");
+  const files = fs.readdirSync(assets).filter((name) => name.endsWith(".css"));
+  expect(files, "the production build emitted a stylesheet").not.toHaveLength(0);
+  return files.map((name) => fs.readFileSync(path.join(assets, name), "utf-8")).join("\n");
 }
 
 test.describe("the shipped bundle", () => {

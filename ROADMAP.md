@@ -423,6 +423,38 @@ because other sections and five running lanes reference these numbers.
    treats the panel key as opaque, so **the persisted layout format needs no change and
    every saved layout keeps working**; but `LAYOUT_PRESETS` name tool ids *as* panel ids,
    so no preset can currently express two of anything.
+2b. ~~**The pane system — tmux, not a four-panel IDE.**~~ **first PR landed** (item 9 is
+   the plan of record and stays open for the rest of it). The owner's central
+   complaint after item 2 was that it "still feels like a cheap VS Code editor… I want
+   something super modular like TMUX", and the registry (item 1) was the prerequisite
+   that made it buildable. What tmux actually gives its users, translated: **any pane
+   splits in two** (`Alt+S` / `Alt+Shift+S`, then a picker for what goes in it), **any
+   pane runs anything** (every registered tool, every live session, every open file,
+   a new shell), **the keyboard owns the window** (`Alt+←→↑↓` to move,
+   `Alt+Shift+←→↑↓` to swap, `Alt+O` to cycle, `Alt+X` to close), and **the arrangement
+   is yours** — four agent sessions in a 2×2 is now a thing you build in four keystrokes
+   rather than a thing the app does not have.
+   The idea that makes it survive a restart is the **pane id** (`ui/src/panes.ts`):
+   `toolId` or `toolId#instanceKey`, where the key is `agent#<session_id>`,
+   `editors#<path>`, `terminal#<n>`. dockview serializes panel ids into
+   `.workbench/layouts.json` and nothing else about a panel, so the id *is* the
+   persistence — no second store, no id map, and a saved layout brings back *those*
+   conversations rather than that many empty panes. `pruneLayout` gained the matching
+   vetting: an instance pane of a tool that is a singleton today, or one whose id and
+   component disagree, is dropped with its own sentence, while a key that has simply not
+   loaded yet is left alone (sessions arrive long after the layout does). The picker is
+   the QuickBar in a new **pick mode** rather than a second overlay — a capability hands
+   it rows, and `QuickBar.tsx` still names no capability. The split affordance reaches
+   the tab strip through a new `groupActions` registry contribution, so `App.tsx` still
+   names none either. Deliberately deferred: an editor pane for a `keepMounted` document
+   view (a second OnlyOffice editor on one file is a co-editing session with yourself —
+   the pane says where to open it instead); a live session's on-screen transcript is
+   still not replayed after a reload, which is the pre-existing agent-socket behaviour
+   and not something a pane id can fix; and swapping two panes resizes nothing but does
+   not preserve a *tab group's* internal order when a pane holds several tabs. Left to
+   item 9, not done here: hibernation, idle session reaping, `adopt(params)` tombstones,
+   a raised `max_concurrent_sessions`, and preset switching that reconciles against the
+   panes that already exist rather than rebuilding the dock over them.
 3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
    (PRs 1–2 landed: the schema and its renderer). Asked for after watching an
    agentic-workflow video where the agent renders an interactive artifact instead of
@@ -462,33 +494,69 @@ because other sections and five running lanes reference these numbers.
    first-run picker in the OSS bar item 3. Also unlocks **half B of item 12**: opening a
    session whose folder is outside the current workspace needs this (or the multi-root
    jail from item 6), which is why the session browser ships its read half first.
-6. **Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
-   dirty-slot `needs_review` protection, per-slot watchers), multi-root file/terminal
-   access through a root registry (path jail preserved per root), worktree-bound agent
-   sessions. Parallel projects that cannot step on each other.
+6. ~~**Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
+   dirty-slot `needs_review` protection)~~ — **the pool is done**
+   (`services/worktrees.py`, `models/worktrees.py`, `routers/worktrees.py`, landed
+   early and out of sequence because item 7 needs it). Still open in this item, and
+   deliberately: multi-root file/terminal access through a root registry (path jail
+   preserved per root), worktree-bound agent sessions, and per-slot watchers — the
+   pool stands alone without them and its endpoints are usable today. No UI yet
+   either: four UI lanes were live when it landed, so it shipped backend-only.
    **Four design decisions, taken from `kunchenguid/treehouse` (MIT, read 2026-08-05,
    not adopted as a dependency — a pool bound to agent sessions and inside our path
    jail has to be ours) and each of which we would otherwise have rediscovered the hard
-   way:**
+   way** — all four now **implemented**, each with a test named after it:
    - **Detached HEAD.** A pooled worktree carries no branch, so "already checked out in
      another worktree" cannot happen. Every fix-stage agent this session had to push
      from a differently-named local branch for exactly that reason; the whole class goes
-     away.
+     away. *Implemented* as `git worktree add --detach`; the test proves it the way it
+     bites, by watching `git checkout main` be refused *inside* a slot while the pool is
+     unbothered.
    - **Pool, never destroy.** A finished worktree is *reset and returned*, not removed —
      so `node_modules`, `.venv` and build caches stay with it and the cold install is
      paid once per slot rather than once per task. This is the honest answer to the
      problem PR #32 tried to solve by junctioning `node_modules` from the main checkout
      and had to be closed over: `git worktree remove` recurses *through* a Windows
      junction and would have emptied the main checkout. Never removing the worktree
-     removes the hazard along with the cost.
+     removes the hazard along with the cost. *Implemented*, and enforced on the commands
+     rather than in prose: a test watches every git argv a full
+     acquire→release→discard→prune cycle runs and fails on `worktree remove`, on
+     `clean -x` (which would delete the very caches this exists to keep) and on
+     `--force`. The reset itself runs at **acquire** time, which is the only moment the
+     pool knows what to reset *to* and the moment nothing is running in the slot.
    - **Two idle signals.** Process/owner exit *and* an explicit durable lease that
      survives with nothing running. Ours is cleaner than a subshell — a closed agent
      session or pane is an exact signal — but the lease is what stops a slot being
-     reaped while an agent is still working in it unattended.
+     reaped while an agent is still working in it unattended. *Implemented* as
+     `owner_pid` + `expires_at`, reclaimed only when **both** say idle, with a renewable
+     lease. The liveness probe is `OpenProcess` + `GetExitCodeProcess` and never
+     `os.kill(pid, 0)` — which on Windows CPython is `TerminateProcess`, i.e. a probe
+     that kills what it asks about. Its two imprecisions (exit code 259, a recycled pid)
+     both hold a slot *longer*, which is the direction that costs a wait rather than an
+     agent's work.
    - **Fail safe on corrupt state.** If the pool's state file is truncated or lost,
      rebuild from what is on disk and mark every slot **leased until verified** —
      assume in use, never assume free. Same instinct as the dirty-slot rule above, and
-     the right default for anything that can destroy work.
+     the right default for anything that can destroy work. *Implemented* for truncated,
+     unreadable, non-JSON *and* wrong-version documents; verified on a live server by
+     truncating `pool.json` and restarting, which came back with all three slots held
+     and the next acquire honestly refused.
+
+   **Dirty is sacred, and it outranks all four.** A slot with tracked changes or
+   untracked files is never handed out and never reclaimed without an explicit `force`,
+   a `git status` that *fails* counts as dirty, and the disk beats the state file.
+   What Windows really does was measured rather than assumed (a real `CreateFile`
+   share-mode-0 handle): an exclusively-held file reads as `M` to `git status`, so the
+   **dirty guard fires before any reset is attempted**, and the `reset --hard` behind it
+   fails with `unable to unlink`. Both are protective. The reset is retried on a bounded
+   budget and then becomes `needs_review` — never `--force`, because git's reset is
+   already forceful and the failure is the filesystem's. Dirty protection is not a
+   one-way door: every sweep re-asks, so a slot a transient lock parked comes back by
+   itself. The pool root is under the machine's app data dir and **not** in the
+   workspace, asserted three ways (the jail refuses it, the tree does not list it, a
+   real `worktree add` through the API produces no watcher event) — inside `.workbench/`
+   it would put N copies of the project in the file tree and turn every checkout into a
+   watcher storm.
 7. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
    (status, current activity, cost), inline permission chips answerable from the board;
    orchestrator session kind with a mission-control MCP toolset
@@ -502,8 +570,12 @@ because other sections and five running lanes reference these numbers.
    injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
    access and a workspace switcher all widen the unauthenticated localhost surface
    unacceptably.
-9. **Panes — split anything, and the principle it carries** — *in flight*
-   (`m5/split-anything`). This is the owner's "super modular like TMUX" ask and the
+9. **Panes — split anything, and the principle it carries** — *first PR landed*
+   (`m5/split-anything`, item 2b): splitting, the pane id, the plural seam, the picker
+   and the keyboard are in. Still open here: hibernation, idle session reaping,
+   `adopt(params)` tombstones, the raised cap, preset reconciliation, and the
+   instance-count perf budget — the exit criterion below is not met yet.
+   This is the owner's "super modular like TMUX" ask and the
    implementation of product principle 4: `paneId := toolId | toolId#instanceKey`, so
    `agent#<session_id>`, `editors#<path>` and `terminal#<n>` are panes that survive a
    restart because the pane id *is* the persistence. The registry gains the plural seam
@@ -572,36 +644,43 @@ because other sections and five running lanes reference these numbers.
     nor collides with the watcher-protocol rewrite in the Feel track. Exit criterion:
     four sessions working at once are legible from one pane, updating in place, with no
     measurable cost to the shared `/ws/events` socket under a Grep-heavy turn.
-11. **Native plan usage meters** (5-hour window, weekly per model) — the owner's ask to
-    see in the app what Claude Code shows in the terminal. **There is an honest source
-    and we checked before promising**: the installed `claude_agent_sdk` 0.2.129 defines
-    `RateLimitEvent`/`RateLimitInfo` with exactly the needed fields — `rate_limit_type`
-    (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `overage`),
-    `utilization` (0.0–1.0), `resets_at`, `status` (`allowed` / `allowed_warning` /
-    `rejected`) — and its parser already handles the frame. So this is a thin read, not
-    an integration: a fifth branch in `AgentSession._handle_sdk_message()` (which today
-    dispatches on four type names with no `else` and therefore **silently discards this
-    event**), a `UsageService` holding the last info per window, one Pydantic event on the
-    existing bus, `GET /api/usage` for load and reconnect, a fake frame in
-    `services/fake_agent.py` for E2E, and a no-panel registered tool contributing a status
-    chip plus an optional breakdown panel — the `Layouts.tsx` shape exactly. **Four
-    constraints that must be visible in the UI rather than papered over**, because a meter
-    that guesses is worse than no meter (the same discipline provenance committed to):
-    (1) there is **no query API** — no `claude usage` subcommand, `/usage` exists only as
-    an in-session slash command, and `~/.claude.json` caches no utilization; (2) it is
-    emitted on *transition* and only on a live session's message stream, so the meters are
-    **last known, labelled "as of HH:MM"** — a cold app or a fresh workspace reads "not
-    reported yet", never "0%"; (3) events arriving *between* turns are not read at all
-    today, so a between-turns read path is part of the work; (4) "weekly per model" is
-    only as granular as the SDK's three weekly types — we show exactly those and
-    **synthesize no per-model breakdown the source does not have**. If the CLI turns out
-    never to emit for an account, the surface degrades to what we can honestly show: the
-    per-turn `total_cost_usd` and `model_usage` already on `ResultMessage`, labelled as
-    session cost rather than plan usage — and it says so in the panel. Nothing leaves the
-    machine: this reads the local CLI's own frames, and the zero-telemetry stance holds.
-    Exit criterion: after one real turn the status chip shows a named window, its
-    utilization and its reset time; before any turn it shows "not reported yet" and
-    explains why.
+11. ~~**Native plan usage meters** (5-hour window, weekly per model)~~ **done** — the
+    owner's ask to see in the app what Claude Code shows in the terminal, and the four
+    constraints below are on screen rather than papered over. What landed:
+    `services/usage.py` + `models/usage.py` + `GET /api/usage`, captured at the SDK
+    seam (`AgentSession._handle_sdk_message` gained the `RateLimitEvent` branch it was
+    silently discarding), published as `UsageEvent` on the existing `/ws/events` bus,
+    and rendered by a registered tool (`ui/src/panels/UsagePanel.tsx` + `usage.ts`) —
+    a status-bar reading plus an on-demand panel of meters, one module and one line in
+    `tools.ts`. Nothing is persisted: live state about an *account* is not workspace
+    data, so a restart honestly reads "not reported yet".
+    **The plan's shape was wrong in one way and the code follows the source, not the
+    plan** (decisions log): `RateLimitEvent` carries a **single** `RateLimitInfo` — one
+    `rate_limit_type`, one `utilization` — so the windows arrive as *separate* events
+    and the snapshot is accumulated one window at a time. A window nobody has
+    transitioned in is **absent**, never zero.
+    The four constraints, each with a rendering: (1) **no query API** — confirmed
+    against the bundled CLI's own `--help` (no `usage` subcommand) — so there is no
+    refresh button, because none could work; (2) emitted on *transition*, on a live
+    session's stream, so every bucket carries `observed_at`, the snapshot carries a
+    server-measured `age_s`, each meter is stamped with its own age, and past 15
+    minutes the panel says the figures are old and why; (3) an account that never emits
+    gets a designed empty state that degrades to `total_cost_usd` + `model_usage` from
+    `ResultMessage`, labelled **"Session cost — not plan usage"** — and the status bar
+    shows *nothing* rather than a zero; (4) exactly the SDK's own weekly types, no
+    synthesized per-model breakdown, and a missing `utilization` renders as an em dash.
+    Nothing leaves the machine; the zero-telemetry stance holds — including the log,
+    which is the half that is easy to miss: the desktop shell copies the backend's
+    stdout into `shell.log` and keeps it across restarts, so utilization and reset
+    times are `debug`-only and the regression test asserts that at fd 1 rather than
+    only asserting that no file lands in `.workbench/`.
+    **Deferred, and why:** the between-turns read path. The SDK buffers messages in its
+    own receive channel, so an event that fires between turns is delivered at the start
+    of the next turn rather than lost — which is caveat 2 doing its job. Draining that
+    channel from a background task would *steal* the next turn's messages, so a true
+    between-turns reader means restructuring `AgentSession` around a single reader loop
+    that dispatches to the current turn. That is its own PR, and until it lands the
+    figures update when you next talk to an agent — which the UI says plainly.
 12. **Session browser — every conversation, grouped by folder** (registers as a tool,
     plural: one browser can be scoped to a project while another watches everything). The
     Claude Code resume list, natively: folder groups → session rows (title, relative time,
@@ -655,7 +734,8 @@ because they share a row shape and building the live one first means the browser
 side-by-side Office proof. **6.** **Item 13 pop-out**, after panes and after the Office
 composition PR, which is what makes its native-window decision necessary. **7.** Then
 the existing order, unchanged and better founded: item 4 → item 5 (which unlocks item
-12's half B) → item 6 → item 7 → item 8. **8.** M6 and M7 untouched — and every surface
+12's half B) → item 6's carried halves (its pool landed early and out of sequence,
+because item 7 needs it) → item 7 → item 8. **8.** M6 and M7 untouched — and every surface
 added above ships in current `DESIGN.md` tokens and gets restyled with everything else
 in M7. No lane invents a look.
 
@@ -910,6 +990,29 @@ without forking — the difference between a fixed app and an instrument.
   breakdown**. If it turns out an account never emits, the surface degrades to per-turn
   `total_cost_usd`/`model_usage` labelled as session cost — and says so. A meter that
   guesses is worse than no meter.
+
+- 2026-08-05 — **Plan usage: the SDK gives one window per event, and that shapes the
+  whole surface** (M5 item 9). The research pass described a usage event "carrying
+  five_hour, seven_day, per-model seven_day figures and any overage state". Read against
+  the installed SDK (claude-agent-sdk 0.2.129, bundled CLI 2.1.221), that is not the
+  shape: `RateLimitEvent` carries a **single** `RateLimitInfo` with one
+  `rate_limit_type` and one `utilization`, plus the `overage_*` fields riding along;
+  each window transitions — and is reported — on its own. So the snapshot is
+  *accumulated*, one window at a time, a window that has not transitioned is **absent**
+  rather than zero, and the per-model weeklies appear only if they arrive. Confirmed
+  with the rest of the research: there is no `usage` subcommand on the bundled CLI,
+  `/usage` is TUI-only, and nothing in the SDK reads current utilization — the
+  transition event is the entire supply.
+
+  **Consequence, taken as a product decision rather than a limitation to hide:** the
+  four caveats are rendered, not documented. Every figure is stamped with its own age
+  (server-measured, plus local elapsed — never a subtraction between two clocks); there
+  is no refresh button, because there is nothing to ask; the never-emitted account gets
+  a designed empty state that degrades to *session cost* under its own heading; and a
+  missing `utilization` renders as an em dash, because "not reported" and "0% used" are
+  different facts. The only judgement on our side is where a bar starts looking
+  alarming (75% / 90%), and it defers to the SDK's own `allowed_warning`/`rejected`
+  first. Nothing is persisted: live state about an account is not workspace data.
 
 ## Open-source product bar (standing directive, 2026-08-04)
 

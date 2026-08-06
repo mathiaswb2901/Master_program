@@ -23,10 +23,12 @@ import type {
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
+  SessionLimits,
   ShortcutsState,
   TranscriptResponse,
   TreeNode,
   UiState,
+  UsageSnapshot,
   WriteRequest,
   WriteResponse,
 } from "./types";
@@ -89,6 +91,8 @@ export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcu
 
 export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
 
+export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
+
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
 
 export const putLayouts = (body: LayoutsState): Promise<OkResponse> =>
@@ -98,6 +102,8 @@ export const acknowledgeProvenance = (body: AcknowledgeRequest): Promise<OkRespo
   request("/api/provenance/acknowledge", jsonInit("POST", body));
 
 export const getSessions = (): Promise<FolderSessions[]> => request("/api/agents/sessions");
+
+export const getSessionLimits = (): Promise<SessionLimits> => request("/api/agents/limits");
 
 export const createSession = (body: CreateSessionRequest): Promise<SessionInfo> =>
   request("/api/agents/sessions", jsonInit("POST", body));

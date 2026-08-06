@@ -1,0 +1,96 @@
+/* The pane system's own chrome (DESIGN.md §6.11): the split affordance on the
+ * focused pane's tab strip, and the one movement a pane makes. Tokens only. */
+
+.wb-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 100%;
+  padding: 0 var(--space-3);
+}
+
+/* 20px hit area around a 12px glyph — the tab strip is 34px and this must not
+ * change its rhythm. Tertiary until hovered: it is an affordance, not a state. */
+.wb-pane-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  transition: color var(--duration-1) var(--ease-standard),
+    background-color var(--duration-1) var(--ease-standard);
+}
+
+.wb-pane-action:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* A pane arriving — the one panel-level movement in the app (DESIGN.md §5:
+ * opacity and transform). On the **travel** channel, which is what a spring is
+ * for: the pane is moving, not tinting. Migrated off the legacy `--duration-2`
+ * / `--ease-standard` pair when the motion vocabulary landed — those alias onto
+ * the *tint* ease, which would have curved this like a colour change (tokens.css,
+ * "Legacy aliases"). The distance is a token so reduced motion can zero the
+ * travel and keep the fade without a branch here. */
+@keyframes wb-pane-in {
+  from {
+    opacity: 0;
+    transform: scale(var(--motion-zoom-in));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.wb-pane-new {
+  animation: wb-pane-in var(--motion-enter);
+}
+
+/* ---- what a pane bound to one thing renders ------------------------------ */
+
+/* An instance pane is the whole tool, without the tool's own tab strip: one
+ * session, one terminal, one file. It fills its pane. */
+.wb-pane-single {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-panel);
+}
+
+/* One line above a pane whose binding no longer resolves — the session stopped,
+ * the file will not open in a pane of its own. Same anatomy as the conflict and
+ * provenance bars (§6.1): one line, 12px, a hairline under it. */
+.wb-pane-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--warn-bg);
+  color: var(--text-secondary);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+}
+
+.wb-pane-note-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The tool's own body fills what is left of the pane. Each of these sets
+ * `height: 100%` for the panel it was written for, which overflows once a note
+ * bar shares the column with it — so inside a pane they are flex children. */
+.wb-pane-single > * {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.wb-pane-single > .wb-pane-note {
+  flex: none;
+}

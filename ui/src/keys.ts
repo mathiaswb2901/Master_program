@@ -147,6 +147,8 @@ const KEYCAP_LABELS: Record<string, string> = {
   escape: "Esc",
   arrowup: "↑",
   arrowdown: "↓",
+  arrowleft: "←",
+  arrowright: "→",
 };
 
 /** Chord text -> keycap labels for rendering (DESIGN.md §6.5). */
