@@ -214,7 +214,13 @@
   text-align: center;
 }
 
+/* §6.10: `--text-tertiary`. The 32px/1.5 sizing is on the element, not here —
+   the glyph is shared with the tab and the status bar, and CSS cannot resize an
+   SVG that carries its own width. `display: flex` for the same reason the usage
+   panel's does: an inline SVG otherwise sits on a text baseline and collects a
+   descender's worth of space under it. */
 .wb-activity-empty-icon {
+  display: flex;
   color: var(--text-tertiary);
 }
 

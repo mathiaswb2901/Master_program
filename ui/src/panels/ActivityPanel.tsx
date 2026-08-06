@@ -31,7 +31,7 @@
  */
 
 import type { IDockviewPanelProps } from "dockview";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 
 import {
   activeSessions,
@@ -68,15 +68,25 @@ function useNow(): number {
   return now;
 }
 
-function PulseIcon() {
+/**
+ * The glyph, at the size its surface calls for.
+ *
+ * One shape, three surfaces, and they do not agree on size: the tab and the
+ * status bar want a 14px mark at the weight of the text beside them, while
+ * DESIGN.md §6.10 fixes an empty state's icon at **32px, 1.5px stroke**. Sizing
+ * is therefore a prop rather than baked into the path — a shared glyph that
+ * hard-codes one caller's dimensions makes every other caller wrong, and the
+ * stroke has to scale with it or a 32px mark drawn at 1.2 reads as a hairline.
+ */
+function PulseIcon({ size = 14, strokeWidth = 1.2 }: { size?: number; strokeWidth?: number }) {
   return (
     <svg
-      width="14"
-      height="14"
+      width={size}
+      height={size}
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.2"
+      strokeWidth={strokeWidth}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -85,6 +95,9 @@ function PulseIcon() {
     </svg>
   );
 }
+
+/** DESIGN.md §6.10, as numbers this module can be checked against. */
+export const EMPTY_STATE_ICON = { size: 32, strokeWidth: 1.5 } as const;
 
 /** The store, started by whichever surface mounts first (the status item is
  * always mounted, so in practice that is boot). */
@@ -127,7 +140,7 @@ function ActivityLine({ entry }: { entry: ActivityEntry }) {
 
 /** One session's card: the dot, what it is doing, what it just did, and — folded
  * away — the rest of its bounded window. */
-function SessionCard({ session, now }: { session: SessionActivity; now: number }) {
+function SessionCardBody({ session, now }: { session: SessionActivity; now: number }) {
   const current = currentEntry(session);
   const last = lastSettledEntry(session);
   // The server's activity feed says nothing about *state* — that is the app
@@ -210,6 +223,25 @@ function SessionCard({ session, now }: { session: SessionActivity; now: number }
   );
 }
 
+/**
+ * The row is O(1) **in renders too**, not only in what it holds.
+ *
+ * Every `session_activity` frame replaces the whole snapshot object, so without
+ * this boundary one session's tool call re-renders every other session's card —
+ * up to four times a second, for rows whose data did not move. That is precisely
+ * the re-render storm the server's 250 ms coalescing exists to prevent, arriving
+ * one layer later, and it gets worse with exactly the thing this feature is for:
+ * four agents working at once.
+ *
+ * `session` and `now` are the whole prop surface and both are reference-stable
+ * across a frame — `mergeSessions` replaces only the rows the frame carried and
+ * keeps the identity of the rest (`activity.test.ts` pins that, because it is
+ * what makes this memo do anything), and `now` moves once a minute. The per-row
+ * store subscriptions inside the body are unaffected: those still re-render this
+ * card when *this* session's state or flags change, which is the point of them.
+ */
+export const SessionCard = memo(SessionCardBody);
+
 // ---- the panel ----------------------------------------------------------------
 
 export function ActivityPanel(_props: IDockviewPanelProps) {
@@ -249,7 +281,7 @@ export function ActivityBody({
       {sessions.length === 0 ? (
         <div className="wb-activity-empty" data-testid="activity-empty">
           <span className="wb-activity-empty-icon">
-            <PulseIcon />
+            <PulseIcon {...EMPTY_STATE_ICON} />
           </span>
           <p className="wb-activity-empty-title">No agent sessions running</p>
           <p className="wb-activity-note">

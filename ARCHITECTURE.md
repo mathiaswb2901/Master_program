@@ -729,7 +729,13 @@ Four properties, each with a rendering rather than a footnote:
    1,656 bytes** — asserted in `test_activity.py` and again in the browser
    (`ui/e2e/perf/activity.spec.ts`: 4 frames end to end, 0 of 10 sampled frames
    over 50 ms), because "a burst must not become a re-render storm" is a count,
-   not a claim.
+   not a claim. The client half of that promise is a **memo boundary on the
+   row**: a frame replaces the whole snapshot object, so `ActivityBody` re-runs
+   on every one of them, and without the boundary one busy session would
+   re-render every *other* session's card four times a second — the storm
+   arriving one layer after the socket that was coalesced to prevent it. It
+   works because `mergeSessions` keeps the identity of the rows a frame did not
+   carry; both halves are pinned by tests, since either one alone is inert.
 3. **Jailed, and no results.** This feed is wider than the socket its frames came
    from, so every path argument is normalized workspace-relative with the same
    function provenance uses, and one that escapes the workspace is redacted

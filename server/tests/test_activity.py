@@ -37,6 +37,7 @@ from workbench_server.services.activity import (
     ActivityService,
     describe,
 )
+from workbench_server.services.agent_sessions import SessionManager
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import STORM_TOOL_CALLS
 
@@ -413,6 +414,51 @@ def test_a_burst_is_coalesced_into_a_handful_of_frames(tmp_path: Path) -> None:
         row = client.get("/api/activity").json()["sessions"][0]
         assert len(row["entries"]) == MAX_ENTRIES_PER_SESSION
         assert row["dropped"] == STORM_TOOL_CALLS - MAX_ENTRIES_PER_SESSION
+
+
+def test_a_broken_activity_observer_cannot_wedge_the_shutdown(tmp_path: Path) -> None:
+    """Shutting the server down with a fleet running, while this feed is broken.
+
+    The reproduction, at the level a user meets it: a real app, two real
+    sessions that have each run a turn, and the observer raising when the
+    lifespan tears them down. ``close`` telling the fleet view a session is gone
+    is a *notification*; everything after it in that method **releases a
+    resource**, and ``close_all`` is awaited by the lifespan before the watcher,
+    the PTYs and the Office host are stopped.
+
+    Before the guard, the exception escaped ``close`` -> ``close_all`` -> the
+    lifespan: the first session's turn task and SDK client were left running,
+    the second session was never closed at all, and the whole rest of shutdown
+    was skipped. Here that failure surfaces as ``TestClient.__exit__`` raising.
+    """
+    (tmp_path / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        manager: SessionManager = app.state.session_manager
+        local_ids = [
+            client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+            for _ in range(2)
+        ]
+        # A turn each, so both sessions actually hold a connected SDK client —
+        # a session that never ran has nothing for a broken close to strand.
+        for local_id in local_ids:
+            with client.websocket_connect(f"/ws/agent/{local_id}") as agent:
+                agent.send_text(json.dumps({"type": "user_message", "text": "use tool"}))
+                while json.loads(agent.receive_text())["type"] != "turn_done":
+                    pass
+        sessions = [manager.get(local_id) for local_id in local_ids]
+        assert all(session is not None and session._client is not None for session in sessions)
+
+        def boom(**_: Any) -> None:
+            raise RuntimeError("the activity service is broken")
+
+        app.state.activity.note_session_gone = boom
+    # Leaving the block ran the lifespan's shutdown. Reaching this line at all is
+    # the regression assertion: it did not raise.
+    for session in sessions:
+        assert session is not None
+        assert session._client is None, "an SDK client outlived the server"
+    assert manager.sessions == {}, "close_all gave up partway through the fleet"
 
 
 async def test_the_first_change_after_a_quiet_fleet_goes_out_immediately() -> None:

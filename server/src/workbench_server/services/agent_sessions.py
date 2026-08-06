@@ -620,8 +620,18 @@ class AgentSession:
         self._abandon_pending_permissions("the session closed")
         # Leaves the fleet view now rather than lingering as a row nothing will
         # ever update — and the frame says so, because clients hold their own map.
+        #
+        # Guarded like every step below it. ``_activity_observer`` is a Protocol
+        # this class does not own, and everything after this line *releases a
+        # resource*: an exception escaping here would strand the turn task and
+        # leave the SDK connection open. Worse at shutdown, where ``close_all``
+        # walks the whole fleet through this method and the lifespan handler
+        # awaits it before stopping the watcher, the PTYs and Office.
         if self._activity_observer is not None:
-            self._activity_observer.note_session_gone(session_id=self.local_id)
+            try:
+                self._activity_observer.note_session_gone(session_id=self.local_id)
+            except Exception:
+                log.exception("agent.activity_close_note_failed", session=self.local_id)
         if self._turn_task is not None:
             self._turn_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -758,8 +768,19 @@ class SessionManager:
         return ids
 
     async def close_all(self) -> None:
+        """Close every session, isolating each one.
+
+        This is the shutdown path (``main.py``'s lifespan awaits it), so one
+        session that cannot be closed must not keep the other sessions' SDK
+        clients alive — nor stop the watcher, the PTYs and the Office host from
+        being torn down after it. ``close`` already guards its own steps; this
+        is the backstop for whatever it does not.
+        """
         for session in list(self._sessions.values()):
-            await session.close()
+            try:
+                await session.close()
+            except Exception:
+                log.exception("agent.session_close_failed", local_id=session.local_id)
         self._sessions.clear()
 
 

@@ -13,7 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ActivityEntry, ActivitySnapshot, SessionActivity, SessionState } from "../types";
 
-import { ActivityBody, ActivityReading } from "./ActivityPanel";
+import { ActivityBody, ActivityReading, EMPTY_STATE_ICON, SessionCard } from "./ActivityPanel";
 
 // Three modules this panel reaches through and never exercises. `openPanel`
 // pulls in the whole registry (and with it Monaco's browser bundle); the store
@@ -93,6 +93,20 @@ describe("an empty fleet", () => {
     expect(html).toContain("empty whenever the fleet is");
     // Deliberate, not broken: no half-rendered row, no zeroed anything.
     expect(html).not.toContain("wb-activity-session");
+  });
+
+  it("draws its icon at the size DESIGN.md §6.10 fixes, not the tab's", () => {
+    // The glyph is shared with the tab and the status bar, which want 14px. An
+    // empty state is specified at 32px / 1.5 stroke, and nothing in the
+    // stylesheet scales an SVG — so the size has to come from the element.
+    expect(EMPTY_STATE_ICON).toEqual({ size: 32, strokeWidth: 1.5 });
+    const html = show(snapshot([]));
+    const icon = html.slice(html.indexOf("wb-activity-empty-icon"));
+    expect(icon).toContain('width="32"');
+    expect(icon).toContain('height="32"');
+    expect(icon).toContain('stroke-width="1.5"');
+    // The other two surfaces keep the size that suits the text beside them.
+    expect(reading(snapshot([session("one", [entry("a")])]))).toContain('width="14"');
   });
 
   it("distinguishes 'not loaded yet' from 'nothing running'", () => {
@@ -224,6 +238,27 @@ describe("four sessions at once", () => {
     expect(show(snapshot(FLEET.sessions, { dropped_sessions: 3 }))).toContain(
       "3 older sessions have dropped out of it",
     );
+  });
+});
+
+describe("what a frame costs to render", () => {
+  it("puts a memo boundary on the row, so a busy session is one card's work", () => {
+    // Every `session_activity` frame replaces the whole snapshot object, so
+    // `ActivityBody` re-runs on each of them — up to four times a second while
+    // the fleet is busy. The *rows* must not: with four agents working, a burst
+    // in one session's tool calls would otherwise re-render the other three
+    // cards on every frame, for data that did not move. That is the re-render
+    // storm the server's 250 ms coalescing exists to prevent, one layer later.
+    //
+    // Two halves, and this is the second. `mergeSessions` keeping the identity
+    // of rows the frame did not carry is pinned in `activity.test.ts`; this
+    // boundary is what turns that stable reference into a skipped render.
+    //
+    // Asserted on the element type rather than by counting renders: the suite
+    // is node-only by design (`vitest.config.ts`) and `renderToStaticMarkup`
+    // never bails out of a memo — server rendering has nothing to reuse — so a
+    // render count here would pass whether or not the boundary existed.
+    expect(SessionCard.$$typeof).toBe(Symbol.for("react.memo"));
   });
 });
 

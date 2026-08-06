@@ -141,4 +141,19 @@ describe("merging a live frame", () => {
     const after = mergeSessions([session("s1", [], T)], [session("s1", [entry("a")], T)], ["s1"]);
     expect(after).toEqual([]);
   });
+
+  it("keeps the identity of every row the frame did not carry", () => {
+    // Not a micro-optimisation: `SessionCard` is `React.memo`, so this reference
+    // is the *only* thing standing between one busy session and a re-render of
+    // every other card in the fleet, four times a second. A merge that rebuilt
+    // untouched rows — a `.map(r => ({...r}))` added later for any reason —
+    // would leave the memo in place and silently stop it working, which is
+    // exactly the kind of regression no rendering assertion would catch.
+    const quiet = session("s2", [entry("x", { settled_at: T, ok: true })], T - 1);
+    const before = [session("s1", [entry("a")], T), quiet];
+    const after = mergeSessions(before, [session("s1", [entry("b")], T + 1)], []);
+    expect(after.find((r) => r.session_id === "s2")).toBe(quiet);
+    // And the row that did move is the frame's, not the one it replaced.
+    expect(after.find((r) => r.session_id === "s1")).not.toBe(before[0]);
+  });
 });
