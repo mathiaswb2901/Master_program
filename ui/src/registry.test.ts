@@ -530,6 +530,9 @@ describe("the registered tools", () => {
       "Alt+Shift+ArrowUp": "pane.swap.up",
       "Alt+Shift+ArrowDown": "pane.swap.down",
       "Alt+M": "layout.focus",
+      // The chord that answers "what are the chords" — the one a user needs
+      // before they know any others (`panels/Keyboard.tsx`).
+      "Alt+K": "keys.open",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",
       "Ctrl+3": "panel.agent",
@@ -549,7 +552,7 @@ describe("the registered tools", () => {
     const closable = panelTools(TOOLS)
       .filter((registered) => panelTabInfo(TOOLS, registered.id).closable)
       .map((registered) => registered.id);
-    expect(closable).toEqual(["scratchpad", "usage"]);
+    expect(closable).toEqual(["scratchpad", "usage", "keys"]);
   });
 
   it("host both shortcut kinds", () => {

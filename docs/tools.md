@@ -98,6 +98,20 @@ Agent-facing tools are *not* here — see below.
 - **A tool id may not contain `#`** — it is the pane-id separator, and a tool called
   `a#b` would make every pane of it address a tool called `a` (`panes.test.ts`, against
   the real registry).
+- **Every command you register appears in the keyboard reference**, grouped under your
+  tool's `title`, with the chords your `shortcuts` table gives it (`keyref.test.ts`,
+  against the real registry). You do not register anything for this and you cannot opt
+  out: the reference is a rendering of the registry (`ui/src/keyref.ts`, DESIGN.md
+  §6.12), which is what stops it going stale the day you move a chord.
+
+## Tooltips name their chord — and ask the registry for it
+
+If your capability puts a control on screen for something that also has a chord, its
+tooltip says so: `title={chordTooltip("Split right", "pane.split.right")}`
+(`ui/src/keyref.ts`). That is how the mouse path teaches the keyboard one. Never write the
+keycap into the string — a tooltip naming a chord that has since moved teaches the wrong
+reflex, which is worse than teaching none, and `chordFor` answers `""` for a command that
+has no chord so the label degrades to just the label.
 
 ## Plural tools (more than one pane of the same thing)
 

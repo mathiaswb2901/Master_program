@@ -75,6 +75,21 @@ export const SHORTCUT_NAME = "Show the marker";
 export const SHORTCUT_BODY = "echo e2e-shortcut-marker";
 /** Name of the deliberately malformed entry, echoed in the problems toast. */
 export const BROKEN_SHORTCUT_NAME = "Broken entry";
+/**
+ * The welcome card's dismissal, seeded **dismissed**.
+ *
+ * The card opens itself as a tab on a window nobody has arranged, which is
+ * exactly what a fresh temp workspace is — so without this every journey after
+ * the first would run against a five-tab window and `panes.spec.ts` would count
+ * one panel too many. Seeding it says what is true of this workspace: it is one
+ * the suite has used before.
+ *
+ * `discover.spec.ts` owns the other side of it — it clears this file through
+ * the app's own API to get the first-run window back, and puts it as it found
+ * it afterwards, so the journey holds whatever order the suite runs in.
+ */
+export const WELCOME_FILE = ".workbench/welcome.json";
+
 /** The `layout` entry: the one shortcut kind that acts rather than inserts.
  * Journey 9 presses its chord and asserts the panels moved. */
 export const LAYOUT_SHORTCUT_NAME = "Fleet view";
@@ -134,6 +149,11 @@ function seed(root: string): void {
   }
   fs.mkdirSync(path.join(root, ".workbench"));
   fs.writeFileSync(path.join(root, ".workbench", "shortcuts.md"), SHORTCUTS_FILE, "utf-8");
+  fs.writeFileSync(
+    path.join(root, ...WELCOME_FILE.split("/")),
+    `${JSON.stringify({ dismissed: true }, null, 2)}\n`,
+    "utf-8",
+  );
   seedTargetFolders(root);
 }
 

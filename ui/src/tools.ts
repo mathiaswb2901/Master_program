@@ -16,6 +16,7 @@ import type { WorkbenchTool } from "./registry";
 import { agentTool } from "./panels/AgentPanel";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
+import { keyboardTool } from "./panels/Keyboard";
 import { layoutsTool } from "./panels/Layouts";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
@@ -37,6 +38,10 @@ export const TOOLS: readonly WorkbenchTool[] = [
   officeTool,
   scratchpadTool,
   usageTool,
+  // After every capability it describes, and before the two that arrange them:
+  // its reference is a rendering of everything above, and its status chip sits
+  // just inside the layout chip at the bar's outer edge.
+  keyboardTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its

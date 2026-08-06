@@ -166,6 +166,18 @@ modifier that file may use, so every chord a tool takes is one a user cannot
 have — a price the Terminal's `Alt+T` earns and a worked example does not.
 `docs/tools.md` is the walkthrough.
 
+**The registry is also what the app knows about itself.** Because every command,
+chord, panel and status item is declared rather than written down, "what can this
+app do" is a *derivation* and not a document: `ui/src/keyref.ts` groups every
+command under the tool that owns it (`commandOwners`, which covers the dynamic
+sets too) and `ui/src/panels/Keyboard.tsx` renders that as the welcome card and
+the keyboard reference (DESIGN.md §6.12). Tooltips that name a chord ask the same
+registry for it rather than spelling it out. This is the difference between a
+discovery surface and a cheat sheet: a cheat sheet is wrong the day a tool moves
+a chord and nothing says so, while `ui/src/keyref.test.ts` fails the build when a
+registered command is unreachable from the surface, or when the chord it shows is
+not the chord that runs.
+
 ## Panes
 
 The window is tiled, not fixed: any pane splits in two, anything registered goes

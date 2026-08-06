@@ -334,6 +334,30 @@ export function shortcutHost(
   return host?.id ?? null;
 }
 
+/**
+ * Which tool owns each command id — static and dynamic alike.
+ *
+ * The registry already knows this; nothing had asked it before. The keyboard
+ * reference does (`keyref.ts`), because "grouped by the tool that owns it" is
+ * the only grouping that cannot go stale: a command moving to another tool
+ * moves its row, and a tool renaming itself renames its section.
+ *
+ * `dynamicCommands.build()` is called here, which the memoized command list
+ * deliberately avoids doing on every keystroke — this one is called when a
+ * *panel renders*, which is several orders of magnitude rarer, and skipping the
+ * dynamic set would file one row per saved layout under the wrong heading.
+ */
+export function commandOwners(
+  tools: readonly WorkbenchTool[],
+): Map<string, WorkbenchTool> {
+  const owners = new Map<string, WorkbenchTool>();
+  for (const tool of tools.filter(isEnabled)) {
+    for (const command of tool.commands ?? []) owners.set(command.id, tool);
+    for (const command of tool.dynamicCommands?.build() ?? []) owners.set(command.id, tool);
+  }
+  return owners;
+}
+
 /** Chord ids named by a `shortcuts` table that no command of that tool owns.
  * A typo there would silently drop a binding, so a test fails on a non-empty
  * result rather than the chord quietly not existing. */

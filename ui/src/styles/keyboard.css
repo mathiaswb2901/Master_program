@@ -1,0 +1,244 @@
+/* The welcome card and the keyboard reference (DESIGN.md §6.12).
+   Colours only via tokens — never raw hex. */
+
+.wb-keys {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: var(--type-md-size);
+  line-height: calc(var(--type-md-line) / var(--type-md-size));
+}
+
+/* ---- welcome card --------------------------------------------------------- */
+
+/* A card on the elevated surface rather than a full-bleed hero: it is one thing
+   inside a panel, and the panel is one tab among others. That is the whole
+   reason it interrupts nothing. */
+.wb-welcome {
+  flex: none;
+  margin: var(--space-6) var(--space-6) var(--space-2);
+  padding: var(--space-6);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.wb-welcome-title {
+  margin: 0;
+  font-size: var(--type-2xl-size);
+  line-height: var(--type-2xl-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-welcome-lede {
+  margin: var(--space-3) 0 var(--space-6);
+  max-width: 62ch;
+  font-size: var(--type-md-size);
+  color: var(--text-secondary);
+}
+
+.wb-welcome-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Each of these runs a real command. Outline-free until hovered: four filled
+   buttons in a row would be four primary actions, and §6.10 allows none. */
+.wb-welcome-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  width: 100%;
+  padding: var(--space-4) var(--space-5);
+  text-align: left;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  transition:
+    background-color var(--motion-tint),
+    border-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+/* Instant in, eased out (DESIGN.md §5.1.5). */
+.wb-welcome-action:hover,
+.wb-welcome-action:active {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  transition-duration: 0s;
+}
+
+.wb-welcome-action-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.wb-welcome-action-label {
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-welcome-action-hint {
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+.wb-welcome-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-welcome-note {
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- search --------------------------------------------------------------- */
+
+.wb-keys-search {
+  flex: none;
+  padding: var(--space-5) var(--space-6) var(--space-4);
+}
+
+.wb-keys-input {
+  width: 100%;
+  height: var(--control-height);
+  padding: 0 var(--space-5);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--type-md-size);
+  color: var(--text-primary);
+}
+
+.wb-keys-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* ---- the reference -------------------------------------------------------- */
+
+.wb-keys-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-6) var(--space-7);
+}
+
+.wb-keys-group + .wb-keys-group {
+  margin-top: var(--space-5);
+}
+
+.wb-keys-group-title {
+  padding: var(--space-4) 0 var(--space-2);
+  color: var(--text-tertiary);
+}
+
+/* 26px rows, the density of every other list in the app (§1.5). A reference is
+   read down a column, so the chords are right-aligned in one of them. */
+.wb-keys-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: var(--row-height);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wb-keys-row-title {
+  flex: none;
+  max-width: 58%;
+  color: var(--text-primary);
+  font-size: var(--type-sm-size);
+}
+
+.wb-keys-row-detail {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+/* Two chords for one command ("Alt W", "Ctrl F4") must read as two, so the gap
+   between chords is wider than the gap between the caps inside one. */
+.wb-keys-row-chords {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex: none;
+}
+
+/* One chord is its own group of caps, so two chords for the same command read
+   as two ("Alt W  Ctrl F4") instead of one run of four caps. */
+.wb-keys-chord {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.wb-keys-empty {
+  padding: var(--space-6) 0;
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- the pass-through note ------------------------------------------------ */
+
+.wb-keys-note {
+  margin-top: var(--space-7);
+  padding: var(--space-5);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+}
+
+.wb-keys-note-title {
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-3);
+}
+
+.wb-keys-note p {
+  margin: 0 0 var(--space-3);
+  max-width: 72ch;
+}
+
+.wb-keys-note p:last-child {
+  margin-bottom: 0;
+}
+
+.wb-keys-note code {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  color: var(--text-primary);
+}
+
+/* The keycaps inside a sentence sit on the text baseline rather than in a row
+   of their own, so they do not push the line height around. */
+.wb-keys-note .wb-keycap {
+  margin: 0 1px;
+}
+
+/* ---- the status chip ------------------------------------------------------ */
+
+.wb-keys-chip {
+  gap: var(--space-2);
+}
+
+.wb-keys-chip-label {
+  font-size: var(--type-xs-size);
+}
