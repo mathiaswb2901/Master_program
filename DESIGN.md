@@ -10,7 +10,7 @@ The window is a machined frame with content cut into it. Chrome is the *lighter*
 surface and every buffer is a well sunk below it, six achromatic steps from #393939
 chrome down to a pure-black terminal — the inverse of every graphite editor, and the
 reason a panel here reads as an object instead of as more window. Nothing in the
-neutrals carries a hue: Lab C\* is **0.00** on all twenty of them, no blue-grey, no warm
+neutrals carries a hue: Lab C\* is **0.00** on all twenty-three of them, no blue-grey, no warm
 grey, no tint at all. Against that, one amber, and it means two things only: *where I am*
 and *this is changing right now*. So the only chromatic pixel in the chrome is always the
 one worth looking at.
@@ -187,6 +187,7 @@ meter filling, focus mode holding the window, the one action the app is blocked 
 | The QuickBar input's focus underline | `--border-strong` | The bar being open already says focus is in it; the selected row's amber edge is the mark that matters inside a 640px overlay |
 | The plan card's *Recommended* pill | Outlined neutral | A standing property of an option — true before you opened the card |
 | The "this really is Word" dot | `--success` | True for as long as the window is docked. A permanent amber dot is how amber stops meaning anything |
+| Every live shell tab's dot (§6.6) | `--success` | Found by *looking at the running app*, not by reading the stylesheet: it is set from `terminal.alive`, so a shell sitting at a prompt all afternoon wore the one "right now" colour, on every terminal tab at once |
 
 **Kept, deliberately**: the scene-graph `accent` role in visual artifacts
 (`.is-accent` on a table row, a node, a metric). That is the model saying *this is the
@@ -252,7 +253,7 @@ read as one system.
 **The light theme is derived, not inverted.** ANVIL is a dark direction; light re-applies
 its four rules to a white ground:
 
-- *Achromatic neutrals* — C\* = 0.00 on all twenty, shadows and scrim included.
+- *Achromatic neutrals* — C\* = 0.00 on all twenty-three, shadows and scrim included.
 - *Content at the end of the scale* — so the chrome is **darker** than the wells here.
   Same sentence, opposite direction; §2.1's three consequences hold unchanged.
 - *Visible edges* — `--border-subtle` is 2.51:1 on panel, dark's exact figure, because
@@ -557,9 +558,14 @@ through the token file and fails the build if a colour-only one lands on a sprin
   the amber; everything else about a pane's chrome is neutral. Full-bleed because the
   *pane* is what is focused, not a tab. 2px rather than the 1px this used to be: §1.4
   gives every hairline in the window to structure, so a 1px focus mark borrows
-  structure's weight and becomes something you have to look for. Implemented as
-  `box-shadow: inset 0 2px 0 0 var(--accent)` on `.dv-active-group`'s tab container, and
-  never animated — a focus indicator that arrives late is a focus indicator that lies.
+  structure's weight and becomes something you have to look for. Implemented as a
+  `::before` overlay on `.dv-active-group`'s tab container, and never animated — a focus
+  indicator that arrives late is a focus indicator that lies. **Not** an `inset`
+  box-shadow: that paints on the container's own background and the tabs are children
+  with backgrounds of their own, so it is occluded across the whole width of the active
+  tab and the rule appears to *start* after the tab instead of crossing the pane. Not a
+  `border-top` either, which would cross but would take its 2px out of the 34px strip
+  and jump the tab row every time focus moved.
 - Tab strip: height **34px**, bg `--surface-app`, bottom hairline `--border-subtle`.
 - **A nested strip is `--surface-panel`, not `--surface-app`** (§2.1). The editor's file
   strip and the terminal's shell strip sit inside a pane that already has a strip; they
