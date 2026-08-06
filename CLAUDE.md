@@ -11,7 +11,11 @@ Full plan and status: `ROADMAP.md`. Design system: `DESIGN.md` (binding for all 
 - UI: `cd ui && npm install` once, then `npm run dev` (Vite, port 5173);
   `npm run lint` — eslint; `npm run test` — vitest; `npm run build` — type-check + bundle
 - `cd ui && npm run e2e` — Playwright: builds the UI, then drives it against a real
-  server in a temp workspace with `WORKBENCH_FAKE_AGENT=1` (`ui/e2e/`, chromium only)
+  server in a temp workspace with `WORKBENCH_FAKE_AGENT=1` (`ui/e2e/`, chromium only).
+  **One lane at a time**: the ports are fixed (8788/4173) and the other run's teardown
+  kills whatever holds them, so a concurrent suite dies mid-run with
+  `ECONNREFUSED 127.0.0.1:4173` and a screenful of failures that are all one cause.
+  Wait for the ports to be free before starting, and re-run before believing a red suite
 - `cd ui && npm run perf` — the Feel perf lane: same production build against a
   **generated 5,005-file workspace** (`ui/playwright.perf.config.ts`, `ui/e2e/perf/`).
   A bare run builds its fixture in a temp directory and removes it (with the
