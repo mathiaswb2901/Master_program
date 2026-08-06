@@ -463,3 +463,42 @@ describe("the ANSI ramp reads on its own ground", () => {
     }
   });
 });
+
+// ---- the comments are documentation too -------------------------------------
+
+describe("no stylesheet comment quotes a colour tokens.css does not have", () => {
+  // The ANVIL stylesheets explain themselves in hex — "#393939 pane -> #202020
+  // strip -> #141414 buffer" is how the inverted ramp is made reviewable at the
+  // point it is applied. That makes those comments published figures, and a
+  // published figure that nobody re-derives drifts: office.css described the
+  // light mat as #A8A8A8 for the length of this branch while the token said
+  // #A5A5A5, which is the wrong number for anyone hand-checking contrast or
+  // copying the value out. Same rule as every other test in this file — the
+  // prose and the stylesheet cannot disagree without the build saying so.
+  //
+  // A retired colour therefore has no place in a stylesheet comment. Its home
+  // is the ROADMAP entry that retired it, where it can be labelled as history
+  // instead of read as fact.
+  const DECLARED = new Set([...DARK.values(), ...LIGHT.values()].map((v) => v.toUpperCase()));
+  const SHEETS = fs
+    .readdirSync(path.join(UI_ROOT, "src", "styles"))
+    .filter((name) => name.endsWith(".css"));
+
+  it("finds the stylesheets at all", () => {
+    // Guards the guard: a moved directory must not read as "nothing to check".
+    expect(SHEETS.length).toBeGreaterThan(10);
+  });
+
+  it.each(SHEETS)("%s", (name) => {
+    const css = fs.readFileSync(path.join(UI_ROOT, "src", "styles", name), "utf-8");
+    for (const [comment] of css.matchAll(/\/\*[\s\S]*?\*\//g)) {
+      for (const [quoted] of comment.matchAll(/#[0-9A-Fa-f]{6}\b/g)) {
+        expect(
+          DECLARED.has(quoted.toUpperCase()),
+          `${name} quotes ${quoted}, which tokens.css does not declare in either ` +
+            `theme — update the comment to the live value, or drop the hex`,
+        ).toBe(true);
+      }
+    }
+  });
+});

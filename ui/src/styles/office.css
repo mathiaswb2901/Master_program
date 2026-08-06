@@ -22,7 +22,7 @@
 }
 
 /* THE MAT (DESIGN.md §6.1, document panels). `--surface-paper-surround` is a
-   mid-grey field now (#5A5A5A dark / #A8A8A8 light) rather than a shade of the
+   mid-grey field now (#5A5A5A dark / #A5A5A5 light) rather than a shade of the
    chrome, which is what lets a white page read as a sheet of paper laid on
    something instead of a hole cut in the window. Three parts, and all three are
    needed — a surround with no inset is a background, not a mat:

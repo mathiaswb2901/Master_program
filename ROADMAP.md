@@ -823,12 +823,16 @@ without forking — the difference between a fixed app and an instrument.
   crispness bar and the owner chose **ANVIL** — true black, achromatic neutrals, one
   hot amber, an inverted surface ramp (chrome lighter than the wells it frames) and a
   document mat that makes a docked Word page read as paper. `DESIGN.md` §2 is rewritten
-  to it and `ui/e2e/palette.test.ts` gates every published figure; the desktop shell's
-  caption tint reads the same tokens, so the window frame follows for free. What remains
+  to it and `ui/e2e/palette.test.ts` gates every published figure. **It stops at the
+  webview edge**: the native window frame is still Tauri's default decoration, which
+  follows the OS-wide light/dark setting rather than these tokens. What remains
   here is everything the palette does not decide — aggressive
   ui-ux-pro-max design overhaul on top of the now-complete structural layer —
   distinctive welcome surface, branded empty states, micro-interactions, Monaco
-  enrichment, content search (Ctrl+Shift+F), settings UI. (Layout persistence and
+  enrichment, content search (Ctrl+Shift+F), settings UI, and the one piece of ANVIL
+  that lives outside `ui/`: tinting the native chrome from the current tokens, which
+  carries `desktop/src-tauri/src/host/class.rs`'s `PANEL_SURFACE` with it.
+  (Layout persistence and
   dockview maximize moved to M5 item 2 and **landed** there; ~~floating and popped-out
   panels are still unclaimed — dockview supports both and nothing has asked yet~~ —
   claimed 2026-08-05, now M5 item 13.) The redesign now has substantially more structure
@@ -1224,9 +1228,16 @@ Build for real external users, not just the author. Consequences, tracked as wor
   the light theme is **derived from ANVIL's four rules rather than inverted from its
   values** (and states the one thing that could not survive the crossing — the hot amber
   is 1.33:1 on a light panel, so light marks with a deep amber and keeps the hot one for
-  filled areas); and the desktop shell's **caption tint reads these tokens**, so the
-  native window frame follows the theme automatically — nothing in `desktop/src-tauri/`
-  needed to change for the window to become an ANVIL window.
+  filled areas); and **ANVIL stops at the webview edge**. Nothing in `desktop/src-tauri/`
+  changed, and the honest reading of that is a gap rather than a win: the window is
+  created with Tauri's default `decorations: true` and no `theme`, so the native caption
+  is whatever the OS-wide light/dark setting says — it does not read `tokens.css`, and it
+  does not follow the app's own theme toggle either. Tinting it takes a real
+  `DwmSetWindowAttribute` call (`DWMWA_CAPTION_COLOR` / `DWMWA_TEXT_COLOR`) driven from
+  the current `--surface-app` / `--text-primary`, and no such call exists yet. That is M7
+  work, and it carries `host/class.rs`'s `PANEL_SURFACE` with it — still the retired
+  graphite `#1A1D22`, and now *more* visible than before, since the launch flash shows
+  against the paper mat's pale surround rather than against dark chrome.
 
 - 2026-08-06 — **Scope freeze** (owner: "continue with our plan and add stuff
   afterwards"). M5 grew from seven items to fifteen in a single day — every addition
