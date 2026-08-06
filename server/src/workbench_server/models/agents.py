@@ -11,7 +11,12 @@ SessionState = Literal["idle", "working", "needs_attention"]
 
 class SessionInfo(BaseModel):
     session_id: str
-    folder: str  # workspace-relative folder the session is bound to ("" = root)
+    # Workspace-relative folder the session is bound to ("" = root) — or, for a
+    # live session that survived a workspace switch, its own absolute path. See
+    # `SessionManager.set_workspace_root`: a running agent is not killed by the
+    # user opening another folder, and labelling it with a relative path would
+    # file it under a same-named folder of the project it has nothing to do with.
+    folder: str
     state: SessionState
     live: bool  # True = running in this process; False = resumable transcript on disk
     title: str  # first user message or a fallback

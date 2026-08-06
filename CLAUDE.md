@@ -147,7 +147,15 @@ ruling it out.
   checkout the main session uses. One writer per checkout, always.
 - `--amend`/`reset`/`rebase` only after verifying `git log -1` shows the expected HEAD;
   never put `git commit` at the tail of a long `&&` chain.
-- Run the app: `uv run workbench-server` (workspace = CWD it starts from).
+- Run the app: `uv run workbench-server`. The workspace **starts** as the CWD it was
+  launched from (or `WORKBENCH_WORKSPACE_ROOT`) and is no longer fixed there: the
+  status-bar chip and the QuickBar's *Switch workspace…* re-root the running server
+  (M5 item 5, `services/workspaces.py`). The desktop shell opens the OS folder
+  dialog; a browser tab takes a typed path. Recent workspaces live under the
+  machine's app data dir (`WORKBENCH_APP_DATA_ROOT` moves it), never in a project.
+  A service that copies `workspace.root` into a field of its own must implement
+  `set_workspace_root` **and** be listed in `create_app`'s `WorkspaceService`
+  construction — one that is not keeps serving the folder the user left.
   **Native Office hosting** (a real Word docked in a panel) needs the desktop
   shell — `cd desktop && npm run tauri dev` — and nothing else: `auto` is on, and
   `GET /api/office/capabilities` says why when it is not available.

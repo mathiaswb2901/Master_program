@@ -410,6 +410,18 @@ class ShortcutsService:
     def state(self) -> ShortcutsState:
         return self._state
 
+    def set_workspace_root(self, root: Path) -> None:
+        """Read the new workspace's file instead, and publish if it says
+        something different.
+
+        Neither watch is restarted. The workspace half rides the shared bus and
+        matches on the *relative* path, which the re-rooted watcher now reports
+        against the new root; the global half watches a path in the user's home
+        that a workspace switch does not move.
+        """
+        self._workspace_file = root.resolve() / Path(WORKSPACE_SHORTCUTS_PATH)
+        self._reload_and_publish()
+
     def reload(self) -> bool:
         """Re-read both files. Returns True when the merged state changed."""
         state = merge_shortcuts(

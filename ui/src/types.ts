@@ -104,7 +104,8 @@ export type WorkspaceEvent =
   | OfficeHostEvent
   | WorktreeChangedEvent
   | UsageEvent
-  | SessionActivityEvent;
+  | SessionActivityEvent
+  | WorkspaceChangedEvent;
 
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
@@ -1107,4 +1108,42 @@ export interface PruneResult {
   reclaimed: string[];
   kept: KeptSlot[];
   pool: WorktreePool;
+}
+
+// ---- workspaces.py ----------------------------------------------------------
+// The workspace is no longer fixed at launch. Paths here are absolute and in the
+// OS's own form, because a human reads them and types them back in; everything
+// *inside* a workspace still travels as a workspace-relative POSIX path.
+
+export interface WorkspaceRef {
+  path: string;
+  /** The folder's own name — what a picker row reads as. */
+  name: string;
+  opened_at: number;
+  /** False = not there any more. The row stays, offered as unavailable. */
+  exists: boolean;
+}
+
+export interface WorkspaceState {
+  root: string;
+  name: string;
+  /** False = nobody chose this root and the server fell back to the directory it
+   * was launched from. The first-run case the UI has to *say* rather than
+   * present as if it were a decision. */
+  explicit: boolean;
+  /** Most recent first, current root included. */
+  recents: WorkspaceRef[];
+  /** Why the recents file was ignored, if it was. */
+  problem: string | null;
+}
+
+export interface SwitchWorkspaceRequest {
+  path: string;
+}
+
+/** The root moved under everyone — see `services/workspaces.py`. */
+export interface WorkspaceChangedEvent {
+  type: "workspace_changed";
+  root: string;
+  name: string;
 }

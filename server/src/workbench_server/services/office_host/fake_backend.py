@@ -18,6 +18,12 @@ failure from the UI without a special API):
 * ``already-open``      -> a handle marked ``adopted``: the fake found the
   document open in an instance it did not launch. Returned rather than raised,
   so what gets exercised is the *service's* own never-adopt rule.
+* ``refuse-close``      -> docks normally and then will not quit, which is the
+  ``close_failed`` path: a real Word sitting on the desktop with an unsaved
+  edit in it because a "Save changes?" modal ate the close. The instance stays
+  alive on purpose — the whole point of that state is that the window is still
+  there — so a caller that must not proceed until the document is really closed
+  (a workspace switch) has something to refuse against.
 
 Never enabled by default (``Settings.office_fake``), and ``main.py`` logs a
 warning on startup when it is: a panel showing a document that is not really
@@ -34,6 +40,7 @@ import structlog
 from workbench_server.models.office_host import HostAppKind, PanelRect
 from workbench_server.services.office_host.backend import (
     EmbedRefusedError,
+    HostBackendError,
     HostHandle,
     HostLiveness,
     LaunchFailedError,
@@ -49,6 +56,7 @@ FakeFailure = Literal[
     "embed_refused",
     "crash_after_embed",
     "already_open",
+    "refuse_close",
 ]
 
 #: Filename fragment -> failure, matched case-insensitively on the whole path.
@@ -58,6 +66,7 @@ FAILURE_TRIGGERS: dict[str, FakeFailure] = {
     "refuse-embed": "embed_refused",
     "crash-after-embed": "crash_after_embed",
     "already-open": "already_open",
+    "refuse-close": "refuse_close",
 }
 
 #: Fake pids start well above the ones a test machine hands out, so a number
@@ -139,6 +148,11 @@ class FakeHostBackend:
 
     async def close(self, handle: HostHandle) -> None:
         self.calls.append(("close", str(handle.pid)))
+        if self._branches.get(handle.pid) == "refuse_close":
+            # Still alive, deliberately: `close_failed` means the window is on
+            # the desktop with the user's edit in it, and a fake that quietly
+            # died here would let a caller "handle" a case that never happened.
+            raise HostBackendError("fake window would not quit")
         self._alive[handle.pid] = False
 
     async def poll(self, handle: HostHandle) -> HostLiveness:
