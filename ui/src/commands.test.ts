@@ -147,6 +147,9 @@ describe("command registry", () => {
       // The plan card's, contributed through the Agent's descriptor rather
       // than as a tool of its own — a card is not a capability.
       "plan.annotate",
+      // The conversation browser sits next to the Agent because it is a way
+      // into one — a row there opens an agent pane.
+      "conversations.open",
       "terminal.new",
       "terminal.close",
       "office.detachHost",
