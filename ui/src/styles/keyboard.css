@@ -156,6 +156,24 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* A command whose `when()` is closed right now.
+
+   The row stays — the reference teaches what exists — and it is marked exactly
+   the way the QuickBar marks the same thing (`.wb-qb-row:disabled` in
+   `quickbar.css`): `--text-disabled`, keeping its place in its section, because
+   moving or hiding it answers "where did that command go?" with silence. The
+   detail slot says so in words as well, since colour is never the only signal
+   (DESIGN.md §7). The keycaps go with it: a cap at full contrast beside a
+   disabled title is the one part of the row that still looks pressable. */
+.wb-keys-row.is-unavailable .wb-keys-row-title,
+.wb-keys-row.is-unavailable .wb-keycap {
+  color: var(--text-disabled);
+}
+
+.wb-keys-row.is-unavailable .wb-keycap {
+  border-color: var(--border-subtle);
+}
+
 .wb-keys-row-title {
   flex: none;
   max-width: 58%;

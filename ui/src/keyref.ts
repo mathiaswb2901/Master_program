@@ -30,6 +30,17 @@ export interface KeyRefRow {
   /** Chords, most-preferred first. Empty = reachable from the QuickBar only,
    * which is a fact worth showing rather than a row worth hiding. */
   chords: readonly string[];
+  /**
+   * Would this command run *right now* (`Command.when`)?
+   *
+   * A reference exists to teach, so a gated-off command keeps its row — "jump
+   * to the 3rd session" is worth knowing about before you have three sessions.
+   * But a row that reads like every other one while its chord is inert teaches
+   * a reflex that silently does nothing (`resolveCommand` drops it: no
+   * `preventDefault`, no feedback), which is the one thing worse than not
+   * teaching it. So the row says which it is, and the panel shows it.
+   */
+  available: boolean;
 }
 
 /** One section: the tool that owns these commands, or the window itself. */
@@ -71,11 +82,26 @@ function detailOf(command: Command): string {
   }
 }
 
+/**
+ * Is this command's gate open? Asked the same way `detailOf` asks for a
+ * subtitle — live, and never allowed to cost the reference its list. A gate
+ * that *throws* is a broken tool, not a closed door, so the row stays ordinary:
+ * dimming a command on the strength of an exception would be a guess.
+ */
+function availableOf(command: Command): boolean {
+  try {
+    return command.when?.() !== false;
+  } catch {
+    return true;
+  }
+}
+
 const row = (command: Command): KeyRefRow => ({
   id: command.id,
   title: command.title,
   detail: detailOf(command),
   chords: command.keys ?? [],
+  available: availableOf(command),
 });
 
 /**

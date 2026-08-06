@@ -41,13 +41,19 @@
  */
 
 import type { DockviewApi, IDockviewPanelProps } from "dockview";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { create } from "zustand";
 
 import * as api from "../api";
 import { allCommands, type Command } from "../commands";
 import { openPanel } from "../dock";
-import { chordFor, filterKeyReference, keyReference, rowCount } from "../keyref";
+import {
+  chordFor,
+  filterKeyReference,
+  keyReference,
+  rowCount,
+  type KeyRefRow,
+} from "../keyref";
 import { chordKeycaps } from "../keys";
 import type { ToolCommand, WorkbenchTool } from "../registry";
 import { useStore } from "../store";
@@ -76,15 +82,39 @@ interface WelcomeState {
  */
 const useWelcome = create<WelcomeState>()(() => ({ dismissed: null }));
 
-async function readDismissed(): Promise<boolean> {
+/**
+ * The flag, out of the file's bytes.
+ *
+ * Present but unreadable still means "this window has been here before" —
+ * truncated by a crash mid-write, hand-edited into invalid JSON, or carrying a
+ * shape some later schema stopped writing. All of them are a workspace that has
+ * been used, and the failure direction that never nags is *dismissed*.
+ */
+function parseDismissed(content: string): boolean {
   try {
-    const file = await api.getFileContent(WELCOME_FILE);
-    const parsed: unknown = JSON.parse(file.content);
-    // Present but unreadable still means "this window has been here before".
+    const parsed: unknown = JSON.parse(content);
     return (parsed as { dismissed?: unknown }).dismissed !== false;
   } catch {
-    // 404 (the usual case, and the whole of first run), or a parse failure.
-    return false;
+    return true;
+  }
+}
+
+/**
+ * Has this workspace dismissed the welcome?
+ *
+ * The two failure modes here are not the same answer, and collapsing them is
+ * how a discovery surface becomes a nag. **Only a genuine 404 means "never
+ * dismissed"** — that is first run, and it is the whole of first run. Every
+ * other failure (a 500, a permission error, a backend that is not up yet, a
+ * file we could read but not parse) is *not* evidence that this window is new,
+ * so it counts as dismissed: one bad `GET` during launch must never reopen the
+ * welcome card on a workspace somebody has been using for a month.
+ */
+async function readDismissed(): Promise<boolean> {
+  try {
+    return parseDismissed((await api.getFileContent(WELCOME_FILE)).content);
+  } catch (error) {
+    return !(error instanceof api.ApiError && error.status === 404);
   }
 }
 
@@ -339,9 +369,45 @@ function PassThrough() {
   );
 }
 
-function KeyboardPanel(_props: IDockviewPanelProps) {
+/** What the detail slot says for a chord that would do nothing if pressed now.
+ * Plain, and it replaces the live detail rather than sitting beside it: a
+ * gated-off command's `detail()` is usually empty anyway (there is no session
+ * to name), and "the chord is inert" is the fact worth the column. */
+const UNAVAILABLE_DETAIL = "not available yet";
+
+function ReferenceRow({ row }: { row: KeyRefRow }) {
+  return (
+    <div className={`wb-keys-row${row.available ? "" : " is-unavailable"}`}>
+      <span className="wb-keys-row-title u-truncate">{row.title}</span>
+      <span className="wb-keys-row-detail u-truncate">
+        {row.available ? row.detail : UNAVAILABLE_DETAIL}
+      </span>
+      <span className="wb-keys-row-chords">
+        {row.chords.map((chord) => (
+          <Chord key={chord} text={chord} />
+        ))}
+      </span>
+    </div>
+  );
+}
+
+// `panel`, not `api`: this module's `api` is the HTTP client above.
+function KeyboardPanel({ api: panel }: IDockviewPanelProps) {
   const dismissed = useWelcome((s) => s.dismissed);
   const [query, setQuery] = useState("");
+  // Availability is a *live* read (`Command.when`), and this panel is a tab
+  // that stays mounted behind whatever you do next — so the answer it showed
+  // when you opened it goes stale the moment you start a session. Re-render
+  // when the tab is brought forward, which is the only moment the rows are
+  // being read. Nothing else about the reference changes on activation, so
+  // this is one render, not a subscription to the app's state.
+  const [, revisit] = useState(0);
+  useEffect(() => {
+    const subscription = panel.onDidActiveChange((event) => {
+      if (event.isActive) revisit((n) => n + 1);
+    });
+    return () => subscription.dispose();
+  }, [panel]);
   // Subscribed to the one input that changes this list while the panel is open:
   // the user editing `.workbench/shortcuts.md`, which the watcher pushes back
   // as new commands. Their rows appear here without a reload — which is the
@@ -351,8 +417,11 @@ function KeyboardPanel(_props: IDockviewPanelProps) {
   // runtime (one row per saved layout) and the user's own entries. Memoized
   // upstream, so this is an identity read rather than a rebuild.
   const commands = allCommands();
-  const groups = useMemo(() => keyReference(TOOLS, commands), [commands]);
-  const shown = useMemo(() => filterKeyReference(groups, query), [groups, query]);
+  // Deliberately unmemoized: `keyReference` asks every command whether it would
+  // run right now, and a memo keyed on the (stable) command list would cache
+  // that answer for the life of the panel. It is a map over ~60 commands.
+  const groups = keyReference(TOOLS, commands);
+  const shown = filterKeyReference(groups, query);
   const total = rowCount(shown);
 
   // The welcome is the first thing on a first-run window, so the search box is
@@ -386,15 +455,7 @@ function KeyboardPanel(_props: IDockviewPanelProps) {
           <section key={group.id} className="wb-keys-group" aria-label={group.title}>
             <div className="wb-keys-group-title u-label">{group.title}</div>
             {group.rows.map((row) => (
-              <div key={row.id} className="wb-keys-row">
-                <span className="wb-keys-row-title u-truncate">{row.title}</span>
-                <span className="wb-keys-row-detail u-truncate">{row.detail}</span>
-                <span className="wb-keys-row-chords">
-                  {row.chords.map((chord) => (
-                    <Chord key={chord} text={chord} />
-                  ))}
-                </span>
-              </div>
+              <ReferenceRow key={row.id} row={row} />
             ))}
           </section>
         ))}

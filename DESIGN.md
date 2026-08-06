@@ -693,6 +693,16 @@ beside your work like anything else, which is what you want while you are learni
   `--text-tertiary`, then its chords as keycaps (§6.5). A command with **no** chord keeps
   its row: it is reachable from the QuickBar, and saying so is the point. Two chords for
   one command are two keycap groups with a wider gap between them than inside them.
+- A command whose gate is **closed right now** (`Command.when`, e.g. `Alt+1..9` on a
+  window with no session) keeps its row and says so: title and keycaps at
+  `--text-disabled`, and *not available yet* in the detail slot — never colour alone
+  (§7). This is the QuickBar's own answer to the same question, applied here: a row that
+  cannot run keeps its place in its section, because moving or hiding it answers "where
+  did that command go?" with silence. The chord of a gated-off command is dropped
+  silently by the keymap — no `preventDefault`, no feedback — so a row that looked ready
+  to press would teach a reflex that does nothing, which is worse than teaching none.
+  The gates are re-read whenever the panel's tab is brought forward, so a session started
+  since it was opened lights those rows up.
 - Search matches the row's text, its **chord** (`alt+s`, `alt s` and `alts` all find the
   split) and the section name (`panes` shows that whole keymap). Substring, not the
   QuickBar's fuzzy score: a reference is read, not raced.

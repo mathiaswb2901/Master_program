@@ -23,7 +23,7 @@
  * as it found it afterwards — so it holds whatever order the suite runs in.
  */
 
-import { expect, request, test, type Page } from "@playwright/test";
+import { expect, request, test, type Page, type Route } from "@playwright/test";
 
 import type { LayoutsResponse } from "../src/types";
 import { launchSettled, openApp, workspaceReady } from "./app";
@@ -47,13 +47,25 @@ async function persistedPaneIds(page: Page): Promise<string[]> {
   return Object.keys(current?.panels ?? {}).sort();
 }
 
-/** Write the dismissal flag the way the app writes it — through the files API,
- * which is the whole of its persistence (`panels/Keyboard.tsx`). */
-async function setDismissed(page: Page, dismissed: boolean): Promise<void> {
+/** Write the welcome file's bytes, the way the app writes them — through the
+ * files API, which is the whole of its persistence (`panels/Keyboard.tsx`). */
+async function writeWelcome(page: Page, content: string): Promise<void> {
   const response = await page.request.put("/api/files/content", {
-    data: { path: WELCOME_FILE, content: `${JSON.stringify({ dismissed }, null, 2)}\n` },
+    data: { path: WELCOME_FILE, content },
   });
-  expect(response.ok(), "the welcome flag was written").toBe(true);
+  expect(response.ok(), "the welcome file was written").toBe(true);
+}
+
+async function setDismissed(page: Page, dismissed: boolean): Promise<void> {
+  await writeWelcome(page, `${JSON.stringify({ dismissed }, null, 2)}\n`);
+}
+
+/** No saved arrangement, so nothing restores over an auto-opened panel — the
+ * half of the auto-open rule that is *not* about the welcome file. */
+async function clearLayouts(page: Page): Promise<void> {
+  await page.request.put("/api/layouts", {
+    data: { current: null, current_name: null, saved: [] },
+  });
 }
 
 /** Run a QuickBar command by its row title — the keyboard path to anything. */
@@ -64,15 +76,17 @@ async function runCommand(page: Page, title: string): Promise<void> {
   await expect(quickbar).toBeHidden();
 }
 
-/** A window nobody has arranged: no saved layout, no dismissal. */
-async function firstRun(page: Page): Promise<void> {
-  await page.request.put("/api/layouts", {
-    data: { current: null, current_name: null, saved: [] },
-  });
-  await setDismissed(page, false);
+async function relaunch(page: Page): Promise<void> {
   await page.reload();
   await workspaceReady(page);
   await launchSettled(page);
+}
+
+/** A window nobody has arranged: no saved layout, no dismissal. */
+async function firstRun(page: Page): Promise<void> {
+  await clearLayouts(page);
+  await setDismissed(page, false);
+  await relaunch(page);
 }
 
 /**
@@ -116,7 +130,43 @@ test("a new window says what it is, and the reference teaches the chords", async
     ).toContainText("Alt");
   });
 
+  await test.step("and every one of them is reachable by keyboard alone", async () => {
+    // A discovery surface for a keyboard-first app that can only be *used* with
+    // a mouse teaches the wrong thing about the product it is introducing
+    // (DESIGN.md §7). The card sits above the search box in DOM order, so
+    // Shift+Tab from the box walks it backwards — "Got it" first, then the four
+    // actions from the bottom up. That the walk arrives at all is the assertion:
+    // it proves tab order follows reading order and that nothing in the card is
+    // a div pretending to be a button.
+    const split = welcome(page).locator(".wb-welcome-action", {
+      hasText: "Split this pane in two",
+    });
+    await search(page).press("Shift+Tab");
+    await expect(welcome(page).getByRole("button", { name: "Got it" })).toBeFocused();
+    for (let step = 0; step < 3; step += 1) await page.keyboard.press("Shift+Tab");
+    await expect(split).toBeFocused();
+    // Focused *visibly*: the global `:focus-visible` ring is the one selection
+    // signal this panel relies on (`styles/keyboard.css` says so in a comment),
+    // and a comment is not a test.
+    const outline = await split.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return `${style.outlineStyle} ${style.outlineWidth}`;
+    });
+    expect(outline, "the focused welcome action has no visible ring").toBe("solid 2px");
+
+    // Enter runs it — the same picker the mouse opens below.
+    await page.keyboard.press("Enter");
+    const picker = page.getByRole("dialog", { name: "Split this pane to the right" });
+    await expect(picker).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(picker).toBeHidden();
+    await expect(welcome(page)).toBeHidden();
+  });
+
   await test.step("its affordances do the thing, not describe it", async () => {
+    // Back to a first-run window: the keyboard pass above used the card up, and
+    // using it is what dismisses it.
+    await firstRun(page);
     await welcome(page)
       .locator(".wb-welcome-action", { hasText: "Split this pane in two" })
       .click();
@@ -132,9 +182,7 @@ test("a new window says what it is, and the reference teaches the chords", async
     // Using it dismissed it: a user who has started does not need to be told
     // how to start.
     await expect(welcome(page)).toBeHidden();
-    await page.reload();
-    await workspaceReady(page);
-    await launchSettled(page);
+    await relaunch(page);
     // The scaffolding is what must not come back — this is what "a user who has
     // used it for a month never sees it again" has to mean. Whether the *panel*
     // is still on screen is the layout system's business and deliberately not
@@ -170,6 +218,30 @@ test("a new window says what it is, and the reference teaches the chords", async
     await expect(
       page.getByRole("region", { name: "Why some chords reach the terminal" }),
     ).toBeVisible();
+  });
+
+  await test.step("a chord that would do nothing right now says so", async () => {
+    // `Alt+9` jumps to the ninth most recent session, and no window in this
+    // suite has nine — so the command is registered, listed, and inert.
+    // `resolveCommand` drops a command whose `when()` is false without so much
+    // as a `preventDefault`, so a row that read like every other one would be
+    // teaching a reflex that silently fails: worse than teaching nothing
+    // (§6.12). Chosen over `Alt+1` deliberately — whether *one* session exists
+    // depends on which journeys ran first, and a test may not depend on that.
+    await search(page).fill("jump to session 9");
+    const jump = reference(page).locator(".wb-keys-row");
+    await expect(jump).toHaveCount(1);
+    await expect(jump).toHaveClass(/is-unavailable/);
+    await expect(jump).toContainText("not available yet");
+    // Still listed, still carrying its chord: the reference teaches what exists.
+    await expect(jump.locator(".wb-keycap")).toHaveText(["Alt", "9"]);
+
+    // And a command that is live right now carries no such mark.
+    await search(page).fill("new terminal");
+    await expect(
+      reference(page).locator(".wb-keys-row", { hasText: "New terminal" }).first(),
+    ).not.toHaveClass(/is-unavailable/);
+    await search(page).fill("");
   });
 
   let discovered = "";
@@ -209,11 +281,50 @@ test("a new window says what it is, and the reference teaches the chords", async
     await expect(reference(page)).toBeVisible();
   });
 
+  await test.step("a welcome that cannot be read counts as dismissed, not as new", async () => {
+    // The failure direction that never nags (§6.12), and the one a single
+    // `catch` gets wrong. Both halves below are a workspace somebody has used
+    // for a month, and in both the *only* honest reading is "this window has
+    // been here before" — a 404 is the one answer that means first run.
+    //
+    // Every launch here is against a cleared arrangement, because that is the
+    // other half of the auto-open rule: with a layout on disk nothing opens
+    // anyway and the assertion would pass without proving a thing.
+
+    // Truncated mid-write, hand-edited, or written by a schema that has moved
+    // on: present, and not parseable.
+    await writeWelcome(page, '{"dismissed": fal');
+    await clearLayouts(page);
+    await relaunch(page);
+    await expect(welcome(page)).toBeHidden();
+    expect(await panels(page)).toEqual(DEFAULT_PANELS);
+
+    // And the transient case: the file says the welcome is *due*, but the one
+    // GET that would have read it fails for a reason that is not "no such
+    // file". A backend hiccup during launch must not reopen the scaffolding.
+    await writeWelcome(page, `${JSON.stringify({ dismissed: false }, null, 2)}\n`);
+    const welcomeRead = (url: URL): boolean =>
+      url.pathname === "/api/files/content" && url.searchParams.get("path") === WELCOME_FILE;
+    const fail500 = (route: Route): Promise<void> =>
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"disk"}' });
+    await page.route(welcomeRead, fail500);
+    await clearLayouts(page);
+    await relaunch(page);
+    await expect(welcome(page)).toBeHidden();
+    expect(await panels(page)).toEqual(DEFAULT_PANELS);
+    await page.unroute(welcomeRead, fail500);
+
+    await setDismissed(page, true);
+  });
+
   await test.step("reset leaves the workspace as the next journey expects it", async () => {
+    // Deliberately the *last* thing that touches disk, and deliberately a poll:
+    // every step above ends by reloading a window whose arrangement is saved on
+    // a debounce, so this is where the journey waits for the writing to stop.
+    // A step added after this one has to re-establish the same thing or the
+    // next journey inherits whichever write happened to land last.
     await runCommand(page, "Switch to the Default layout");
     expect(await panels(page)).toEqual(DEFAULT_PANELS);
-    // Wait for the debounced autosave, so the last thing written to disk is the
-    // arrangement above rather than the one with a Keyboard pane in it.
     await expect
       .poll(() => persistedPaneIds(page), { timeout: 10_000 })
       .toEqual(["agent", "editors", "files", "terminal"]);
@@ -225,9 +336,7 @@ test("a new window says what it is, and the reference teaches the chords", async
     // is an arrangement on disk now, so it is the truth about which panels are
     // open — even with the welcome un-dismissed, nothing opens over it.
     await setDismissed(page, false);
-    await page.reload();
-    await workspaceReady(page);
-    await launchSettled(page);
+    await relaunch(page);
     await expect(welcome(page)).toBeHidden();
     expect(await panels(page)).toEqual(DEFAULT_PANELS);
     await setDismissed(page, true);

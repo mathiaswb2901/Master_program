@@ -813,7 +813,10 @@ because other sections and five running lanes reference these numbers.
     picker (it is the consequence of a split, not a gesture of its own); and the plan
     card's annotate toggle, which names `Alt+A` in its tooltip but hardcodes it — that
     file belonged to another lane this cycle, so converting it to `chordTooltip` is the
-    one loose end (`ui/src/panels/PlanCard.tsx`, DESIGN.md §6.12).
+    one loose end (`ui/src/panels/PlanCard.tsx`, DESIGN.md §6.12). It is **monitored,
+    not merely disclosed**: `keyref.test.ts` reads that tooltip's literal and fails if it
+    stops matching the chord `plan.annotate` actually runs on, and the check retires
+    itself the moment the line is converted.
 
 **Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
 infrastructure read as nothing produced, so the order below front-loads visible shape

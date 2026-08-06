@@ -17,6 +17,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 
+// As text, not as a module: this is a source-level assertion about a tooltip in
+// another tool's file, and importing the tool itself would drag Monaco, the
+// store and half the app in to read one string.
+import planCardSource from "./panels/PlanCard.tsx?raw";
+
 import {
   chordFor,
   chordTooltip,
@@ -166,12 +171,65 @@ describe("grouping", () => {
       title: "New terminal",
       detail: "a shell in this folder",
       chords: ["Alt+T"],
+      available: true,
     });
   });
 
   it("keeps a command with no chord — the QuickBar is still a way to it", () => {
     const groups = keyReference(tools, [command("terminal.new", "New terminal")]);
     expect(groups[0]?.rows[0]?.chords).toEqual([]);
+  });
+});
+
+// ---- gated commands ---------------------------------------------------------
+
+/**
+ * `Command.when` is what makes a chord inert: `resolveCommand` drops a gated-off
+ * command silently — no `preventDefault`, no feedback — so a reference row that
+ * looks like every other one teaches a reflex that does nothing. The reference
+ * keeps the row (it is teaching what exists) and marks it instead.
+ *
+ * The case that reaches a real user is the exact one the welcome card targets:
+ * an empty workspace, where `Alt+1..9` list nine sessions to jump to and there
+ * are no sessions.
+ */
+describe("availability", () => {
+  const tools = [
+    tool({ id: "agent", title: "Agent", commands: [command("session.jump.1", "x")] }),
+  ];
+
+  it("marks a row whose gate is closed right now", () => {
+    const groups = keyReference(tools, [
+      { ...command("session.jump.1", "Jump to session 1", ["Alt+1"]), when: () => false },
+    ]);
+    expect(groups[0]?.rows[0]?.available).toBe(false);
+  });
+
+  it("keeps the row rather than hiding what the app can do", () => {
+    const groups = keyReference(tools, [
+      { ...command("session.jump.1", "Jump to session 1", ["Alt+1"]), when: () => false },
+    ]);
+    expect(groups[0]?.rows[0]?.chords).toEqual(["Alt+1"]);
+  });
+
+  it("treats an ungated command as available", () => {
+    const groups = keyReference(tools, [command("session.jump.1", "Jump to session 1")]);
+    expect(groups[0]?.rows[0]?.available).toBe(true);
+  });
+
+  // Same rule as `detail`: one tool's thunk throwing costs that row its extra,
+  // never the reference its list. A broken gate is a broken tool, not a closed
+  // door, so the row stays ordinary rather than being dimmed on a guess.
+  it("stays ordinary when a gate throws", () => {
+    const groups = keyReference(tools, [
+      {
+        ...command("session.jump.1", "Jump to session 1", ["Alt+1"]),
+        when: () => {
+          throw new Error("no store here");
+        },
+      },
+    ]);
+    expect(groups[0]?.rows[0]?.available).toBe(true);
   });
 });
 
@@ -279,5 +337,29 @@ describe("the shipped registry", () => {
     for (const id of ["quickbar.files", "pane.split.right", "session.new", "quickbar.commands"]) {
       expect(ids.has(id), `the welcome card offers ${id}, which nothing registers`).toBe(true);
     }
+  });
+
+  /**
+   * The last chord in the app still written by hand.
+   *
+   * Every other tooltip that names one asks `chordFor` (DESIGN.md §6.12), so
+   * rebinding a command relabels its controls and nothing can go stale. The
+   * plan card's **Annotate** button is the exception — `PlanCard.tsx` belongs to
+   * another lane while this lands, so the conversion to `chordTooltip` waits
+   * for it. The exception is monitored rather than trusted: if `Alt+A` moves,
+   * this fails instead of the button quietly teaching the wrong key.
+   *
+   * The test retires itself. Once that title is built from the registry there
+   * is no literal left to find, `written` is `undefined`, and this passes for
+   * the right reason — the assertion is "no hand-written chord disagrees with
+   * the registry", not "there is one".
+   */
+  it("keeps the one hand-written chord tooltip honest", () => {
+    const written = /title="[^"]*\(((?:Alt|Ctrl|Shift)\+[^)"]+)\)"/.exec(planCardSource)?.[1];
+    expect(
+      written === undefined || written === chordFor("plan.annotate"),
+      `PlanCard's tooltip says ${String(written)}; plan.annotate runs on ` +
+        `${chordFor("plan.annotate")}. Use chordTooltip() (DESIGN.md §6.12).`,
+    ).toBe(true);
   });
 });
