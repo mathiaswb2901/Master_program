@@ -17,6 +17,8 @@ name (the ``FAILURE_TRIGGERS`` precedent):
   2000-row ``Forecast`` sheet that does not, so the same document exercises both
   the whole-range read and the windowed one.
 * ``…empty…`` / ``…blank…`` (Excel) -> a single sheet with no used range.
+* ``…notes…`` (Excel) -> a ``Notes`` sheet of few but very long non-ASCII cells,
+  so a read exercises the aggregate-text bound, not just the cell-count cap.
 * an instance that has been killed -> :class:`DocGoneError`, the read racing a
   close.
 """
@@ -71,6 +73,16 @@ def excel_sheets(name: str) -> dict[str, Grid]:
     low = name.lower()
     if "empty" in low or "blank" in low:
         return {"Sheet1": {}}
+    if "notes" in low:
+        # A sheet whose used range is tiny by *cell count* but huge by text: a
+        # notes column of very long cells. It exercises the aggregate-text bound
+        # a cell-count cap alone cannot enforce — one such cell can hold Excel's
+        # 32,767-char maximum.
+        notes: Grid = {(0, 0): "Item", (0, 1): "Note"}
+        for row in range(1, 6):
+            notes[(row, 0)] = f"row {row}"
+            notes[(row, 1)] = "Åsen 2 " * 5_000  # ~35k chars of non-ASCII prose
+        return {"Notes": notes}
     budget: Grid = {}
     for col, header in enumerate(("Month", "Revenue", "Cost", "Margin")):
         budget[(0, col)] = header
@@ -93,6 +105,18 @@ def _used_dims(grid: Grid) -> tuple[int, int]:
     if not grid:
         return 0, 0
     return max(row for row, _ in grid) + 1, max(col for _, col in grid) + 1
+
+
+def _cap_cell(value: str, limit: int) -> str:
+    """One cell's text, truncated to ``limit`` chars with an ellipsis if cut.
+
+    Shared by the real bridge's contract: no single cell may dominate the window,
+    so a lone long cell is trimmed here rather than left to overrun the byte
+    budget the tool clamps at the far end.
+    """
+    if len(value) <= limit:
+        return value
+    return value[: max(limit - 1, 0)] + "…"
 
 
 class FakeDocumentBridge:
@@ -160,7 +184,7 @@ class FakeDocumentBridge:
         )
 
     async def read_excel(
-        self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int
+        self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int, max_chars: int
     ) -> CellWindow:
         sheets = excel_sheets(self._name(handle))
         if sheet not in sheets:
@@ -191,14 +215,29 @@ class FakeDocumentBridge:
         last_row = total_rows - 1 if row2 is None else min(row2, total_rows - 1)
         last_col = total_cols - 1 if col2 is None else min(col2, total_cols - 1)
         ncols = last_col - col1 + 1
-        # Trim rows so the window fits the cell budget; never below one row, so a
-        # read always shows something and says how to widen it.
+        # Trim rows so the window fits the cell-count budget; never below one row,
+        # so a read always shows something and says how to widen it.
         max_rows = max(1, max_cells // ncols)
         last_row = min(last_row, row1 + max_rows - 1)
-        cells = [
-            [grid.get((row, col), "") for col in range(col1, last_col + 1)]
-            for row in range(row1, last_row + 1)
-        ]
+        # Bound the *text volume* too, not just the cell count: a count cap alone
+        # does not stop a single long cell (a notes column, up to 32k chars in
+        # Excel) from blowing the window past the tool's byte budget on its own.
+        # Cap each cell so a full row of ``ncols`` cells stays within ``max_chars``,
+        # then stop adding rows once the aggregate would exceed it — keeping at
+        # least the first row so the read is never empty.
+        per_cell = max(1, max_chars // ncols)
+        cells: list[list[str]] = []
+        used = 0
+        for row in range(row1, last_row + 1):
+            row_cells = [
+                _cap_cell(grid.get((row, col), ""), per_cell) for col in range(col1, last_col + 1)
+            ]
+            row_chars = sum(len(cell) for cell in row_cells)
+            if cells and used + row_chars > max_chars:
+                break
+            cells.append(row_cells)
+            used += row_chars
+        last_row = row1 + len(cells) - 1
         return CellWindow(
             sheet=sheet,
             a1_range=f"{cell_ref(row1, col1)}:{cell_ref(last_row, last_col)}",

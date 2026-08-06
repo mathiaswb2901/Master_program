@@ -29,6 +29,7 @@ from workbench_server.services.agent_tools import (
     MAX_DESCRIPTION_CHARS,
     OFFICE_READ,
     OFFICE_READ_MAX_CELLS,
+    OFFICE_READ_MAX_CHARS,
     PRESENT_PLAN,
     allowed_tool_names,
     clamp_result,
@@ -376,3 +377,37 @@ class TestOfficeReadBudget:
         # AXI shape 1: a windowed read states what it did not show and how to widen.
         assert "of 2000" in text
         assert "range=" in text
+
+    async def test_non_ascii_word_body_is_clamped_to_the_byte_budget(self) -> None:
+        # The char cap (6000) is not a byte cap: dense multibyte body — emoji here,
+        # but Norwegian æ/ø/å is the routine case — runs to several bytes per
+        # character, so a full window serializes well past max_result_bytes. The
+        # tool must clamp it, not hand the model an oversized wall of text.
+        body = "⚡" * OFFICE_READ_MAX_CHARS  # 3 bytes/char -> ~18 kB, over the 8 kB cap
+        assert len(body.encode()) > OFFICE_READ.max_result_bytes
+        reader = _Reader(
+            DocStructure(kind="word", paragraph_count=1),
+            WordText(start_paragraph=0, returned_chars=len(body), total_paragraphs=1, text=body),
+        )
+        result = await handle_office_read(reader, {"path": "notat.docx"})
+        assert len(result_text(result).encode()) <= OFFICE_READ.max_result_bytes
+
+    async def test_one_long_excel_cell_is_clamped_to_the_byte_budget(self) -> None:
+        # A single long cell (a notes column, up to 32k chars) blows the TSV past
+        # the ceiling on its own, regardless of the other 599 cells the count cap
+        # allows. The tool clamps the rendered grid to its byte budget.
+        giant = "Åsen 2 " * 5_000
+        reader = _Reader(
+            DocStructure(kind="excel", sheets=[SheetDim(name="Notes", rows=1, cols=1)]),
+            CellWindow(
+                sheet="Notes",
+                a1_range="A1:A1",
+                rows=1,
+                cols=1,
+                total_rows=1,
+                total_cols=1,
+                cells=[[giant]],
+            ),
+        )
+        result = await handle_office_read(reader, {"path": "notes.xlsx", "sheet": "Notes"})
+        assert len(result_text(result).encode()) <= OFFICE_READ.max_result_bytes

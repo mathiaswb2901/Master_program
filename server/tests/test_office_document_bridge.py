@@ -175,6 +175,23 @@ class TestExcel:
                 name, sheet="Forecast", a1_range="not-a-range", max_chars=6_000, max_cells=600
             )
 
+    async def test_a_long_cell_is_bounded_by_text_not_just_cell_count(self, tmp_path: Path) -> None:
+        # The Notes sheet is six rows of one 35k-char non-ASCII cell each: well
+        # under the 600-cell cap, so a count-only bound would return the lot and
+        # blow the tool's byte budget. The read must bound aggregate text — trim
+        # rows and cap each cell — so the rendered result stays within budget.
+        from workbench_server.services.agent_tools import OFFICE_READ
+
+        service, name = await _docked(tmp_path, "notes.xlsx")
+        window = await service.read_document(name, sheet="Notes", max_chars=6_000, max_cells=600)
+        assert isinstance(window, CellWindow)
+        assert window.total_rows == 6  # the whole used range is still reported
+        # No single cell dominates, and the aggregate text is bounded near max_chars.
+        assert all(len(cell) <= 6_000 for row in window.cells for cell in row)
+        assert sum(len(cell) for row in window.cells for cell in row) <= 6_000 + 6_000
+        text = _text(await handle_office_read(service, {"path": name, "sheet": "Notes"}))
+        assert len(text.encode()) <= OFFICE_READ.max_result_bytes
+
 
 # ---- refusals ---------------------------------------------------------------
 
@@ -210,6 +227,11 @@ class TestRefusals:
         )
         with pytest.raises(DocNotReadableError):
             await service.read_document(name, max_chars=6_000, max_cells=600)
+        # And the agent gets a clean AXI refusal, not a blank or a traceback: the
+        # generic catch-all serves this branch, so pin what it actually renders.
+        text = _text(await handle_office_read(service, {"path": name}))
+        assert text.strip()
+        assert name in text
 
     async def test_no_bridge_reports_unavailable(self, tmp_path: Path) -> None:
         service, name = await _docked(tmp_path, "report.docx", with_bridge=False)
@@ -217,3 +239,8 @@ class TestRefusals:
             await service.read_document(name, max_chars=6_000, max_cells=600)
         with pytest.raises(DocNotReadableError):
             await service.document_structure(name)
+        # The no-reader-available case must also reach the agent as an actionable
+        # sentence naming the document, not an empty result it cannot interpret.
+        text = _text(await handle_office_read(service, {"path": name}))
+        assert text.strip()
+        assert name in text

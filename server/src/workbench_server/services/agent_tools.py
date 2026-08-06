@@ -226,10 +226,14 @@ async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> di
 #: Server-side window bounds, applied before the read reaches the bridge so a
 #: single call can never return the whole of a large document. The model may ask
 #: for fewer characters but not more; the cell budget is not the model's to set.
-#: Sized so a full window stays well inside ``max_result_bytes`` below: Word text
-#: is one byte per char here, and Excel at 600 short cells over ~8 columns is a
-#: few thousand bytes of TSV — a 2000-row sheet (16k cells) never fits, which is
-#: the point of windowing rather than streaming.
+#: These bound the window's *shape* — characters of Word body, count of Excel
+#: cells, and (threaded through as ``max_chars``) the aggregate text of an Excel
+#: window so one long cell cannot fill it. They do **not** bound the serialized
+#: *byte* size: non-ASCII body (Norwegian æ/ø/å, denser diacritics, emoji) runs
+#: to several bytes per character, so 6000 chars can exceed ``max_result_bytes``.
+#: ``handle_office_read`` clamps the final text to that byte ceiling as the
+#: backstop these char/cell caps cannot be. A 2000-row sheet (16k cells) never
+#: fits, which is the point of windowing rather than streaming.
 OFFICE_READ_MAX_CHARS = 6_000
 OFFICE_READ_MAX_CELLS = 600
 
@@ -409,9 +413,16 @@ async def handle_office_read(reader: OfficeDocumentReader, args: dict[str, Any])
         )
     except DocumentBridgeError as error:
         return error_result(_office_read_refusal(error, path))
-    if isinstance(result, WordText):
-        return text_result(_format_word(result, path))
-    return text_result(_format_excel(result, path))
+    text = (
+        _format_word(result, path) if isinstance(result, WordText) else _format_excel(result, path)
+    )
+    # The two server-side caps bound the window's *shape* (characters of Word body,
+    # count of Excel cells), not its byte size: non-ASCII body (Norwegian æ/ø/å,
+    # denser diacritics or emoji) runs to several bytes per character, so a full
+    # window can serialize past ``max_result_bytes`` even though it is within the
+    # char/cell caps. Clamp is the byte backstop the caps cannot be — office_read
+    # is text the model reads, never JSON it parses, so truncating it is safe.
+    return text_result(clamp_result(text, OFFICE_READ.max_result_bytes))
 
 
 # ---- the registry -----------------------------------------------------------

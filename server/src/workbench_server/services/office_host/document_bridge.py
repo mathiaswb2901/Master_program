@@ -111,14 +111,17 @@ class DocumentBridge(Protocol):
         ...
 
     async def read_excel(
-        self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int
+        self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int, max_chars: int
     ) -> CellWindow:
         """Read a window of ``sheet``, at most ``max_cells`` cells.
 
         ``a1_range`` selects the corner or rectangle to read; ``None`` starts at
-        A1. The window is trimmed to ``max_cells`` and reports the whole used
-        range so the caller can ask for the rest. Raises
-        :class:`RangeInvalidError` for an unknown sheet or a malformed range,
-        :class:`DocGoneError` if the instance has closed.
+        A1. The window is trimmed to ``max_cells`` *and* to ``max_chars`` of
+        aggregate cell text — the count cap alone does not bound a sheet whose
+        cells hold long text (a notes column, a 32k-char cell), so both bound the
+        result and each cell is truncated so one long cell cannot fill the window
+        by itself. Reports the whole used range so the caller can ask for the
+        rest. Raises :class:`RangeInvalidError` for an unknown sheet or a
+        malformed range, :class:`DocGoneError` if the instance has closed.
         """
         ...

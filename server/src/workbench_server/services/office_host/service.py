@@ -719,7 +719,9 @@ class OfficeHostService:
         """Read a window of the live document at ``path``.
 
         Word documents are read by ``start_paragraph``/``max_chars``; Excel
-        worksheets by ``sheet``/``a1_range``, trimmed to ``max_cells``. Reading
+        worksheets by ``sheet``/``a1_range``, trimmed to ``max_cells`` cells and
+        ``max_chars`` of aggregate cell text so one long cell cannot overrun the
+        window. Reading
         an Excel document without a ``sheet`` is a caller error here — the tool
         returns the structure instead — so it is refused rather than guessed.
         """
@@ -728,7 +730,9 @@ class OfficeHostService:
             return await self._guarded_read(bridge.read_word(handle, start_paragraph, max_chars))
         if sheet is None:
             raise DocNotReadableError("name a sheet to read from an Excel document")
-        return await self._guarded_read(bridge.read_excel(handle, sheet, a1_range, max_cells))
+        return await self._guarded_read(
+            bridge.read_excel(handle, sheet, a1_range, max_cells, max_chars)
+        )
 
     def _readable(self, path: str) -> tuple[_Host, DocumentBridge, HostHandle]:
         """The host, its reader and its owned handle — or the refusal that says
