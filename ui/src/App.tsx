@@ -5,6 +5,7 @@ import {
 } from "dockview";
 import { useEffect, useState } from "react";
 
+import { applyCaptionTint } from "./captionTint";
 import { installCommandKeys } from "./commands";
 import { layoutDefaultPanels, setDockApi } from "./dock";
 import { DirtyCloseModal, ShellCloseModal } from "./panels/Modal";
@@ -89,6 +90,7 @@ function onReady(event: DockviewReadyEvent): void {
 
 export default function App() {
   const attention = useStore((s) => anyNeedsAttention(s.sessionStates));
+  const theme = useStore((s) => s.theme);
   // In a browser the backend is whatever served this page. In the shell it may
   // still be starting — the window opens first, deliberately — and nothing
   // below may open a socket until it answers: the terminal does not reconnect.
@@ -115,6 +117,15 @@ export default function App() {
     document.title = attention ? `● ${BASE_TITLE}` : BASE_TITLE;
     void setAttention(attention);
   }, [attention]);
+
+  // The other half of the window chrome: the caption Windows draws around this
+  // page, tinted from the same tokens the page is painted with. Keyed on the
+  // theme because that is what the tokens follow — and read *after* the flip has
+  // committed, so `captionTint()` sees the palette now on screen rather than the
+  // one it is replacing. Inert in a browser tab, which has no window.
+  useEffect(() => {
+    void applyCaptionTint();
+  }, [theme]);
 
   // Never lose unsaved buffers to a silent window close/refresh. `beforeunload`
   // covers the browser (and an in-shell reload); the shell's own close arrives

@@ -521,8 +521,16 @@ def test_no_usage_figure_is_logged_at_the_default_level(
     assert "usage.rate_limit" not in out
     for field in ("utilization", "resets_at"):
         assert field not in out, f"{field} was logged at the default level"
+    # Without the timestamp column. structlog's console renderer opens every
+    # line with an ISO instant, and one of the fake utilizations is `1.0` — which
+    # is a substring of any line logged at a second ending in 1 with a fraction
+    # starting 0 (`...T09:27:31.015523Z`). That made this a ~1-in-10 false
+    # failure with nothing wrong: the figure was in the clock, not in the log.
+    # (Observed 2026-08-06 on a full-suite run; the assertion below is the one
+    # that was always meant.)
+    body = "".join(line.split(" ", 1)[-1] for line in out.splitlines(keepends=True))
     for _kind, _status, utilization, _resets in fake_agent.FAKE_RATE_LIMITS:
-        assert str(utilization) not in out, "a usage figure was logged under another name"
+        assert str(utilization) not in body, "a usage figure was logged under another name"
 
 
 def test_the_rate_limit_diagnostic_is_debug_only(monkeypatch: pytest.MonkeyPatch) -> None:

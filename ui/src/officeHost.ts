@@ -202,7 +202,15 @@ export async function runCommand(
 interface OfficeHostStore {
   /** Null until the first fetch answers. */
   capabilities: OfficeCapabilities | null;
-  /** Live and settled hosts, by workspace-relative path. */
+  /**
+   * Live and settled hosts, **by workspace-relative path**.
+   *
+   * That key is why this map cannot outlive a workspace: `report.docx` names one
+   * document in the project you were in and a different one in the project you
+   * moved to, so an entry left behind would back the wrong document's UI. See
+   * `closeLive` and `resetForWorkspace`, which are what the office-host tool's
+   * workspace-switch guard is made of.
+   */
   hosts: Record<string, OfficeHostInfo>;
   init: () => void;
   refreshCapabilities: () => Promise<void>;
@@ -214,9 +222,48 @@ interface OfficeHostStore {
   /** Give the window back to the desktop, leaving the document open. */
   detach: (path: string) => Promise<void>;
   close: (path: string) => Promise<void>;
+  /**
+   * Every document with a window still open — the states that are not terminal,
+   * `detached` included, because a detached document is one Word still has.
+   */
+  live: () => string[];
+  /**
+   * Close all of them and resolve with the file names Office would **not**
+   * close: a real window left on the desktop, with the user's unsaved edits in
+   * it, which is a fact that has to reach them before the panel that could say
+   * it goes away.
+   */
+  closeLive: () => Promise<string[]>;
+  /** Forget the workspace that is gone — after everything in flight has landed,
+   * so a late close cannot write a stale path back into an empty map. */
+  resetForWorkspace: () => Promise<void>;
 }
 
 let started = false;
+/**
+ * Close/detach calls that have not landed yet.
+ *
+ * A panel unmounting fires `close()` and does not wait for it, so a workspace
+ * reset that cleared `hosts` immediately would race the response writing the old
+ * project's path back in. Every mutation that resolves into `hosts` is tracked
+ * here and `resetForWorkspace` drains it first.
+ */
+const inFlight = new Set<Promise<unknown>>();
+
+/** Run `work`, keeping it in `inFlight` until it settles either way. */
+async function tracked<T>(work: Promise<T>): Promise<T> {
+  inFlight.add(work);
+  try {
+    return await work;
+  } finally {
+    inFlight.delete(work);
+  }
+}
+
+/** The last segment of a workspace-relative path — what the user calls the file. */
+export function fileNameOf(path: string): string {
+  return path.split("/").pop() ?? path;
+}
 /** Rect per host id, coalesced to one POST per animation frame — a splitter
  * drag produces a resize per frame and each one would otherwise be a request. */
 const pendingBounds = new Map<string, PanelRect>();
@@ -299,26 +346,81 @@ export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
     const host = get().hosts[path];
     if (host === undefined || host.state !== "embedded") return;
     pendingBounds.delete(host.host_id);
-    try {
-      const detached = await api.detachOfficeHost(host.host_id);
-      set((state) => ({ hosts: { ...state.hosts, [path]: detached } }));
-    } catch {
-      // The state the panel renders comes from the bus either way.
-    }
+    await tracked(
+      api
+        .detachOfficeHost(host.host_id)
+        .then((detached) => {
+          set((state) => ({ hosts: { ...state.hosts, [path]: detached } }));
+        })
+        .catch(() => {
+          // The state the panel renders comes from the bus either way.
+        }),
+    );
   },
 
   close: async (path) => {
     const host = get().hosts[path];
-    if (host === undefined) return;
+    // A settled host has nothing left to end, and the unmount that follows a
+    // guarded close would otherwise send a second request for the same window.
+    if (host === undefined || TERMINAL.has(host.state)) return;
     pendingBounds.delete(host.host_id);
-    try {
-      const closed = await api.closeOfficeHost(host.host_id);
-      set((state) => ({ hosts: { ...state.hosts, [path]: closed } }));
-    } catch {
-      // Already gone server-side; the record it keeps is the truth either way.
+    // Tracked as one unit *including* the write, so a drain that has finished
+    // really has seen every host record this call was going to produce.
+    await tracked(
+      api
+        .closeOfficeHost(host.host_id)
+        .then((closed) => {
+          set((state) => ({ hosts: { ...state.hosts, [path]: closed } }));
+        })
+        .catch(() => {
+          // Already gone server-side; the record it keeps is the truth either way.
+        }),
+    );
+  },
+
+  live: () =>
+    Object.entries(get().hosts)
+      .filter(([, host]) => !TERMINAL.has(host.state))
+      .map(([path]) => path),
+
+  closeLive: async () => {
+    const live = get().live();
+    // One at a time: two applications asked to quit at once can each raise a
+    // "Save changes?" dialog, and the second one opens behind the first.
+    for (const path of live) await get().close(path);
+    const settled = get().hosts;
+    // Reported **once**, not forever. A refused close leaves the host terminal
+    // with `close_failed` set, so it is no longer `live` and a second attempt
+    // goes through. That is deliberate: the window is out of Workbench's hands
+    // at that point (the server's own sweep keeps re-asking), the user has been
+    // told in the sentence that stopped them, and a workspace they can never
+    // leave until Word behaves would be a trap rather than a safeguard.
+    return live.filter((path) => settled[path]?.close_failed === true).map(fileNameOf);
+  },
+
+  resetForWorkspace: async () => {
+    // Drained rather than cleared: an unmounting panel fires `close()` without
+    // waiting, so clearing first would let that response write the *old*
+    // workspace's relative path back into a map that is meant to be empty —
+    // which is exactly how `report.docx` from the project you left ends up
+    // backing `report.docx` in the project you opened.
+    for (let drain = 0; inFlight.size > 0 && drain < MAX_DRAINS; drain += 1) {
+      await Promise.allSettled([...inFlight]);
     }
+    if (inFlight.size > 0) {
+      // Never seen in practice — closes are finite and started by unmounts, not
+      // by each other — but a reset that waits forever would hang the switch,
+      // and a stale entry is recoverable while a wedged window is not.
+      console.warn("office host: workspace reset gave up waiting on in-flight closes");
+    }
+    set({ hosts: {} });
   },
 }));
+
+/** How many times `resetForWorkspace` re-drains before it gives up. Two is
+ * enough for the real sequence (the unmount's closes, then anything they
+ * started); the rest is headroom. */
+const MAX_DRAINS = 10;
 
 const TERMINAL = new Set(["closed", "crashed", "failed"]);
 

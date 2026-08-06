@@ -24,12 +24,14 @@ import {
   documentViewFor,
   documentViews,
   dynamicCommandsKey,
+  heldAcrossWorkspaceSwitch,
   notifyDockReady,
   openToolPanel,
   panelComponents,
   panelFocusCommands,
   panelTabInfo,
   panelTools,
+  settleBeforeWorkspaceSwitch,
   shortcutAction,
   shortcutHost,
   statusItems,
@@ -364,6 +366,59 @@ describe("panels", () => {
     const opened = dock.panels.filter((panel) => panel.component === "many");
     expect(opened).toHaveLength(2);
     expect(opened[0]?.id).not.toBe(opened[1]?.id);
+  });
+});
+
+describe("the workspace-switch guard", () => {
+  const guarded = (id: string, held: string[], stranded: string[] = []): WorkbenchTool =>
+    tool({
+      id,
+      workspaceSwitchGuard: { held: () => held, settle: () => Promise.resolve(stranded) },
+    });
+
+  it("gathers what every enabled tool is holding, and nothing from a disabled one", () => {
+    const tools = [
+      guarded("office-host", ["report.docx"]),
+      tool({ id: "quiet" }),
+      { ...guarded("off", ["never.xlsx"]), when: () => false },
+    ];
+    expect(heldAcrossWorkspaceSwitch(tools)).toEqual(["report.docx"]);
+  });
+
+  it("reports what would not settle, so the caller can refuse the switch", async () => {
+    const tools = [guarded("a", ["ok.docx"]), guarded("b", ["wedged.docx"], ["wedged.docx"])];
+    expect(await settleBeforeWorkspaceSwitch(tools)).toEqual(["wedged.docx"]);
+  });
+
+  it("settles one tool at a time, never two applications at once", async () => {
+    const order: string[] = [];
+    const slow = (id: string, ms: number): WorkbenchTool =>
+      tool({
+        id,
+        workspaceSwitchGuard: {
+          held: () => [id],
+          settle: async () => {
+            await new Promise((resolve) => setTimeout(resolve, ms));
+            order.push(id);
+            return [];
+          },
+        },
+      });
+    // The first one takes longer: with `Promise.all` the order would invert.
+    await settleBeforeWorkspaceSwitch([slow("first", 20), slow("second", 1)]);
+    expect(order).toEqual(["first", "second"]);
+  });
+
+  it("treats a guard that throws as one that could not settle", async () => {
+    // An exception is not consent to move the workspace out from under it.
+    const angry = tool({
+      id: "angry",
+      workspaceSwitchGuard: {
+        held: () => ["report.docx"],
+        settle: () => Promise.reject(new Error("no")),
+      },
+    });
+    expect(await settleBeforeWorkspaceSwitch([angry])).toEqual(["report.docx"]);
   });
 });
 

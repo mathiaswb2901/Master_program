@@ -124,7 +124,10 @@ export function defineWorkbenchTheme(theme: Theme): void {
       rule("attribute.value", "--ansi-green"),
     ],
     colors: {
-      "editor.background": toHex(cssVar("--surface-panel")),
+      // The buffer is a content well, not panel chrome: `--surface-code` is one
+      // full step below `--surface-panel` on ANVIL's ramp (DESIGN.md §2.1), so
+      // the code sits *in* the panel instead of level with the tree beside it.
+      "editor.background": toHex(cssVar("--surface-code")),
       "editor.foreground": toHex(cssVar("--text-primary")),
       "editor.lineHighlightBackground": toHex(cssVar("--surface-hover")),
       "editor.selectionBackground": toHex(cssVar("--surface-selected")),
@@ -132,7 +135,7 @@ export function defineWorkbenchTheme(theme: Theme): void {
       "editorLineNumber.foreground": toHex(cssVar("--text-tertiary")),
       "editorLineNumber.activeForeground": toHex(cssVar("--text-secondary")),
       "editorCursor.foreground": toHex(cssVar("--accent")),
-      "editorGutter.background": toHex(cssVar("--surface-panel")),
+      "editorGutter.background": toHex(cssVar("--surface-code")),
       "editorWidget.background": toHex(cssVar("--surface-overlay")),
       "editorWidget.border": toHex(cssVar("--border-default")),
       "editorSuggestWidget.selectedBackground": toHex(cssVar("--surface-selected")),
@@ -140,7 +143,7 @@ export function defineWorkbenchTheme(theme: Theme): void {
       "scrollbarSlider.background": hexVar("--border-strong") + "88",
       "scrollbarSlider.hoverBackground": hexVar("--border-strong") + "BB",
       "scrollbarSlider.activeBackground": hexVar("--border-strong"),
-      "editorOverviewRuler.border": toHex(cssVar("--surface-panel")),
+      "editorOverviewRuler.border": toHex(cssVar("--surface-code")),
       focusBorder: toHex(cssVar("--focus-ring")),
     },
   });

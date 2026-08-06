@@ -314,7 +314,12 @@ function EditorTabs() {
   }
 
   return (
-    <div className="wb-editor">
+    // `is-document` puts the whole frame on the paper mat — tab strip included
+    // — whenever the buffer in front of you is a document rather than text
+    // (DESIGN.md §6.1). It follows the *active view*, not the file extension:
+    // whichever tool claims the kind decides, exactly as `documentViewFor` does
+    // for the body below.
+    <div className={activeView === null ? "wb-editor" : "wb-editor is-document"}>
       <div className="wb-editor-tabs" role="tablist">
         {openFiles.map((f) => (
           <EditorTab key={f.path} file={f} active={f.path === activePath} />

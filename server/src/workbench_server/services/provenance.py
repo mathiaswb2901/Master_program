@@ -170,6 +170,23 @@ class ProvenanceService:
         #: tests drive it synchronously, with no loop at all).
         self._loop: asyncio.AbstractEventLoop | None = None
 
+    def set_workspace_root(self, root: Path) -> None:
+        """Re-root, and **forget everything**.
+
+        Both halves of this map are keyed by a workspace-relative path, so
+        carrying them across a switch would attribute ``src/main.py`` in the
+        project you just opened to an agent that wrote ``src/main.py`` in the
+        one you left — a claim that is not merely stale but about a different
+        file. Pending claims go for the same reason; the watcher events they
+        were waiting for describe paths under the old root and will never come.
+
+        Nothing is published. The client re-reads ``GET /api/provenance`` as part
+        of adopting the new workspace, and an empty map is the correct answer.
+        """
+        self._root = root.resolve()
+        self._claims.clear()
+        self._entries.clear()
+
     def _dispatch(self, action: Callable[[], None]) -> None:
         """Run ``action`` on the event loop, from whichever thread we are on."""
         loop = self._loop

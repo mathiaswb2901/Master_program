@@ -47,7 +47,7 @@ One Python process, one webview window, one optional local Office engine.
 
 Not packaging polish — a **requirement**. Real Word/Excel/PowerPoint windows are
 reparented into panels (`SetParent`), and a browser tab has no HWND to parent
-them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns four things:
+them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns five things:
 
 | Concern | Why it cannot live in the UI |
 |---|---|
@@ -55,6 +55,7 @@ them to. The shell (`desktop/src-tauri/`, Rust + Tauri 2) owns four things:
 | Backend supervision (`backend.rs`) | Nothing in a webview can start or outlive a process |
 | Close guard | WebView2 ignores `beforeunload`, so a native close silently discarded dirty buffers |
 | Attention badge | `document.title` never reaches a native title bar or the taskbar |
+| Caption tint (`caption.rs`) | The frame is drawn by the window manager, outside the document and outside the process — no stylesheet can reach it |
 
 **Backend supervision.** One probe of `GET /api/health` decides: if a *Workbench*
 backend is already listening the shell **attaches** — a developer's own `uv run
@@ -108,6 +109,54 @@ backend too:
   it looks like. Only the *ack* is on that clock; once the modal is up the user
   has as long as they like. The state machine and all of its transitions are
   unit-tested in `close_guard.rs`.
+
+**Caption tint** (`caption.rs`, `ui/src/captionTint.ts`). The frame was the one
+part of the product that looked like every other Windows program — a stock grey
+caption above a graphite app — and it is unreachable from CSS, being drawn by
+the window manager in another process entirely. Windows 11 lets an app change
+what that frame is painted *with* while leaving it to paint it:
+`DWMWA_CAPTION_COLOR` (35), `DWMWA_TEXT_COLOR` (36) and `DWMWA_BORDER_COLOR`
+(34). **Tinting rather than replacing is the whole decision.** Dragging,
+snapping, double-click-to-maximise, Aero Shake, the snap-layouts flyout, the
+system menu and the three window buttons keep working because they are still
+the real ones; a custom frame reimplements every one of them (M7 — see
+`ROADMAP.md`, and note that *what* such a frame would carry depends on a visual
+direction not yet chosen).
+
+Three consequences the design turns on:
+
+- **The colours belong to the UI.** `tokens.css` is the single source of truth
+  for colour, so the shell is *told* three resolved tokens — `--surface-app`,
+  `--text-secondary`, `--border-strong` — through the same `shell.ts` seam that
+  carries the attention badge, on startup and on every theme flip. A hex
+  constant in Rust would be a second palette no theme toggle could reach.
+- **The window buttons are not text.** `DWMWA_TEXT_COLOR` reaches the title and
+  nothing else; DWM draws the minimise/maximise/close glyphs from the window's
+  immersive light/dark mode. So the shell derives that flag from the caption's
+  own **relative luminance** — from the colour, not from the theme's name, so a
+  palette change carries it — and the title/caption pair is held to DESIGN.md
+  §7's 4.5:1 by a test that reads `tokens.css` itself
+  (`ui/e2e/captionContrast.test.ts`: 8.3:1 dark, 6.5:1 light today).
+- **"On startup" has to mean startup.** The UI cannot send a tint until its
+  bundle has mounted, so the caption was stock for the first moments of every
+  launch — the exact pixel this exists to fix. The last tint is therefore
+  cached in the app config dir and re-applied from `RunEvent::Ready`, the first
+  instant a window exists. It is a cache of the UI's own value, never a second
+  authority: a first-ever run has none, and anything but three parseable
+  colours means no pre-tint. `Ready` runs on the event loop, so the *read* is
+  on a thread of its own and only the painting is posted back — the config
+  directory can be a roaming profile or a network share, and a window that will
+  not repaint while one resolves is worse than the flash being removed.
+
+Degrading is silent in every direction. Windows 10 has no attributes 34–36 and
+refuses them (`E_INVALIDARG`) — one log line, and the caption stays the
+system's; the older immersive-dark-mode flag is still attempted, because a dark
+system caption over a dark app beats a light one. `DwmGetWindowAttribute` cannot
+read these back (measured: `E_INVALIDARG` on 26200), so the evidence a tint
+landed is the set's `HRESULT` plus the shell log, and the evidence it broke
+nothing is the window state read back afterwards — style bits, `WM_NCHITTEST`
+over the caption, the system menu — which is what `caption.rs`'s window tests
+assert against a real window.
 
 **Both hosts, always.** `ui/src/shell.ts` is the only module importing
 `@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
@@ -324,9 +373,12 @@ in-process calls where the model and the user dominate.
 | `routers/orchestrator.py` | `GET /api/orchestrator` (crews + budget), stop an orchestrator's crew |
 | `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
+| `routers/workspaces.py` | `GET /api/workspace`, `POST /api/workspace/switch` (the root, and the recent list) |
 | `routers/worktrees.py` | list/acquire/release/renew/prune the managed worktree pool |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
-| `services/workspace.py` | path jail, atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
+| `services/workspace.py` | path jail (root is mutable — see below), atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
+| `services/workspaces.py` | switching the root at runtime: validation, the one list of everything that re-roots, the recent list |
+| `services/app_data.py` | where machine-local state lives (`%LOCALAPPDATA%\Workbench`) — the pool root and the recent workspaces, never a `.workbench/` folder |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
@@ -1275,6 +1327,104 @@ contributes **no panel**: commands, a status chip, a `shortcuts.md` kind and an
   uses `fromJSON(…, { reuseExistingPanels: true })`, which moves the panels that
   exist in both rather than recreating them.
 
+- **The layout file follows a workspace switch.** `layouts.json` is *in* the
+  workspace, so a different project is a different document: the Layouts tool
+  implements the registry's `onWorkspaceChanged` hook, which disarms
+  persistence, drops the saved list and re-reads. Disarming first is the
+  load-bearing half — persistence is armed at that point, so the next sash drag
+  would otherwise write the old project's window into the new project's file.
+
+## The workspace is not fixed at launch
+
+Until M5 the workspace root was `Settings.resolved_workspace()`, read once in
+`create_app`, so opening another project meant restarting the server with an
+environment variable. `services/workspaces.py` makes the root something the
+running server changes (`POST /api/workspace/switch`).
+
+**The jail does not move; the root it asks about does.** Every path from the wire
+still becomes a filesystem path through `Workspace.safe_path`, and it still
+answers exactly one question — inside the root or not. What a switch changes is
+*which* root, so a path from the workspace you just left is refused by the rule
+that has always refused `../`. `Workspace.root` is therefore **mutable**, and
+deliberately expressed as one attribute on one object: every router reaches the
+jail through `app.state.workspace`, so re-pointing that object re-roots all of
+them at once and none can be left behind by not being told.
+
+**Everything that copied the root owes a `set_workspace_root`, and the list of
+them lives in exactly one place.** `create_app` hands `WorkspaceService` the
+services that kept their own copy — shortcuts, layouts, provenance, the session
+manager (sync), then the watcher and the worktree pool (async, because they
+restart something). A service added later that copies the root and is not on
+that list is one that keeps serving the project the user left, and the symptom
+is data from the wrong workspace rather than a crash.
+
+**And that whole sequence is held under one lock.** `WorkspaceService.switch`
+writes the jail synchronously and then *awaits* the watcher and the pool, so
+without serialization two switches interleave — both jail writes land, then both
+restarts do, in an order nothing makes agree. Two windows on one server is a
+supported arrangement (it is why `workspace_changed` exists), so this is
+reachable from the UI, and what it produces is a server whose jail and whose
+watch point at different projects plus a watch on a workspace nobody is in that
+`stop()` can no longer reach. Serialized rather than refused with a 409: the
+second window asked for something legitimate, and it is re-validated against the
+root that actually won.
+
+- **The watcher is a real restart**, and it is awaited. `awatch` is bound to the
+  directory it was opened on, so the old watch has to be *gone* before the new
+  one publishes — overlapping them would put two projects' relative paths on one
+  bus, and a client patching its tree from those would build a listing out of
+  both. Its stop event and `IgnoreIndex` are rebuilt with it.
+- **Provenance is cleared, not re-rooted.** Its map is keyed by
+  workspace-relative paths, so carrying it across would attribute `src/main.py`
+  in the new project to an agent that wrote `src/main.py` in the old one.
+- **The worktree pool is a different pool.** Its root is keyed by the workspace
+  it serves and its slots are checkouts of *that* repository, so a switch is a
+  full stop/start: the cross-process lock is released, the slot table dropped,
+  and `start()` rediscovers the repo. Slots in the old pool are left as they
+  are — a lease is not cancelled by the user opening another folder.
+- **Terminals and live agent sessions keep running.** A PTY is a shell that was
+  never inside the path jail (it can `cd` anywhere by design), and an agent may
+  be mid-turn holding an edit it has not written; killing either because the
+  user opened another folder is silent loss of running work. New terminals and
+  new sessions are created under the new root — `routers/terminal.py` now reads
+  `app.state.workspace.root` rather than the launch setting, which is where a
+  new shell was quietly still opening in the old project. A live session whose
+  folder is no longer inside the root is **relabelled with its absolute path**,
+  so the session list cannot file it under a same-named folder of the project it
+  has nothing to do with.
+- **Recent workspaces are the user's data, not a project's.** They live in
+  `<app data>/workspaces.json` (`services/app_data.py`, the same home the pool
+  root uses), never in a `.workbench/` folder: a list of the projects you work on
+  would otherwise be written into one of them. Most recent first, capped, deduped
+  case-insensitively because Windows paths are, and a folder that is gone is
+  listed as unavailable rather than forgotten. An unreadable or foreign-version
+  file costs the history and nothing else.
+- **The UI adopts, it does not reload.** `store.adoptWorkspace()` throws away
+  everything keyed to the old root (open editors, the tree, provenance, session
+  groups) and re-reads; then `notifyWorkspaceChanged(TOOLS, root)` tells every
+  tool that keeps workspace-scoped state. A dirty buffer is the one thing kept:
+  the switcher blocks on its own unsaved work with the dirty-close confirm, and
+  a buffer left dirty by *another* window's switch stays on screen as an orphan
+  that cannot be saved — the same relative path in the new workspace is a
+  different file.
+- **A docked Office window is unsaved work that is not a buffer**, and it gets
+  the mirror-image hook. An `office` open file is never marked dirty — the
+  unsaved paragraph is inside Word — so the dirty check is blind to it, and the
+  panel that renders `close_failed` is the very one a switch unmounts. Tools
+  holding something like that declare a `workspaceSwitchGuard` (`registry.ts`):
+  `held()` names it for the confirm dialog, `settle()` closes it **before** the
+  root moves, and anything that would not settle *cancels* the switch, with the
+  window still on screen to say so. `hosts` in `officeHost.ts` is keyed by
+  workspace-relative path, so `onWorkspaceChanged` then drains the closes that
+  are still in flight before clearing it — clearing first would let a late
+  response write `report.docx` from the old project back into the map that backs
+  `report.docx` in the new one.
+- **Only the shell can show a folder dialog.** There is no web API returning a
+  filesystem *path* for a directory, so `pick_directory` is a shell command
+  (`tauri-plugin-dialog`, registered in Rust and reached only through our own
+  command) and a browser tab gets an honest typed-path prompt instead of a dead
+  button — `ui/src/shell.ts`, as with every other native capability.
+
 ## The managed worktree pool
 
 `CLAUDE.md` has required "one writer per checkout, always" since M4, enforced by
@@ -1524,6 +1674,22 @@ Format spec: `docs/shortcuts.md`.
    time and only fails when it is far too late. Presence is the invariant, size is
    the symptom, and a file listing cannot answer either — only what is inside a
    chunk can.
+
+   **One workspace, walked in file order**, is the other cost of a single worker.
+   The app persists the window arrangement *into* the workspace it is being
+   measured in (`.workbench/layouts.json`, on a 500 ms debounce), so without a
+   reset a spec starts in whatever window the spec before it left and a budget
+   becomes a function of the alphabet: `panes.spec.ts` builds a 13-pane fleet on
+   purpose and sorts immediately before `watcher.spec.ts`, whose row then waited
+   30 s below the fold of a file tree a fraction of its former height — a spec
+   that passes in 4.5 s alone. Every perf spec therefore takes its `test` from
+   `ui/e2e/perf/window.ts`, which puts the empty layouts document back before the
+   page navigates; one PUT on an API context, so the launch timeline it must not
+   disturb still begins at `goto`, and an eslint rule makes that import the only
+   way to get a `test` in the directory. What the reset does **not** cover is
+   server-side state — agent sessions and PTYs outlive the page that made them,
+   and `launch.spec.ts`'s layout-shift budget can still read a session
+   `activity.spec.ts` created (see its docstring).
 
    The lane is **disk-neutral**, which is not free when the fixture is 5,105 files:
    a bare run builds it in a `mkdtemp` directory and removes it — along with the

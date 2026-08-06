@@ -7,13 +7,18 @@
   background: var(--surface-terminal);
 }
 
-/* Tab strip reuses the dock tab language at the same 34px (§6.1/§6.6). */
+/* Tab strip reuses the dock tab language at the same 34px (§6.1/§6.6), and is
+   painted as a *nested* strip: one step inside the pane's own tab strip, so the
+   window descends #393939 pane -> #202020 shell strip -> #000000 terminal.
+   The old `--surface-app` was indistinguishable from `--surface-panel` in the
+   graphite ramp; under ANVIL it would put the lightest chrome inside the
+   darkest well. */
 .wb-term-tabs {
   display: flex;
   align-items: stretch;
   flex: none;
   height: var(--bar-height);
-  background: var(--surface-app);
+  background: var(--surface-panel);
   border-bottom: 1px solid var(--border-subtle);
   overflow-x: auto;
 }
@@ -52,9 +57,15 @@
   color: inherit;
 }
 
-/* Running process: steady dot — the pulse belongs to agents alone (§6.6). */
+/* Live shell: steady dot, and **not** amber (DESIGN.md §2.4 audit). It is set
+   from `terminal.alive`, which is true from the moment the PTY starts until it
+   exits — a shell sitting at a prompt all afternoon wore the app's one "this is
+   happening right now" colour, on every terminal tab at once. Found by looking
+   at the running app, not by reading the stylesheet. `--success` is the standing
+   healthy state, and it pairs with the "Session running" label the dot already
+   carries (§6.4). */
 .wb-term-running {
-  background: var(--agent-working);
+  background: var(--success);
 }
 
 /* Close button: hover/active only, same as the editor tabs (§6.1). */
@@ -129,7 +140,9 @@
   align-items: center;
   gap: var(--space-5);
   padding: var(--space-6) var(--space-8);
-  background: var(--surface-elevated);
+  /* Floating over the terminal, so overlay rather than elevated (§2.1) — and
+     `--surface-elevated` against a #000000 ground would read as part of it. */
+  background: var(--surface-overlay);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);

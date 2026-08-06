@@ -9,6 +9,8 @@
  *   and asks us instead (`onCloseRequested`).
  * - the `document.title` attention badge — a native title bar and the taskbar
  *   read the *window* title, not the DOM (`setAttention`).
+ * - the caption's colours — the frame around the webview is drawn by Windows,
+ *   from outside the document, so no stylesheet can reach it (`setCaptionTint`).
  *
  * `@tauri-apps/api` is imported dynamically and only after `isTauri()` passes,
  * so a browser build never fetches the chunk.
@@ -112,6 +114,37 @@ export async function setAttention(on: boolean): Promise<void> {
   await invoke("set_attention", { on });
 }
 
+/**
+ * The three colours Windows draws the window frame with, as `#RRGGBB`.
+ *
+ * The payload of `set_caption_tint`, and therefore the contract with
+ * `desktop/src-tauri/src/caption.rs` — it is declared here because this module
+ * owns the seam, and `captionTint.ts` (which decides *which* tokens fill it)
+ * imports the type from here rather than the other way round.
+ */
+export interface CaptionTint {
+  /** Caption background — the strip the window title sits in. */
+  caption: string;
+  /** The window title itself. */
+  text: string;
+  /** The window's outer border, all four edges. */
+  border: string;
+}
+
+/**
+ * Paint the native caption, its title text and the window border in our own
+ * colours.
+ *
+ * Windows keeps drawing the caption — this only changes what it draws with — so
+ * dragging, snapping, double-click-to-maximise, the system menu and the three
+ * window buttons stay entirely native. Inert in a browser tab (there is no
+ * window) and a logged no-op on a Windows build without the attributes; see
+ * `caption.rs`.
+ */
+export async function setCaptionTint(tint: CaptionTint): Promise<void> {
+  await invoke("set_caption_tint", { tint });
+}
+
 /** Close for real: the user answered the dirty-close prompt with "close". */
 export async function closeShellWindow(): Promise<void> {
   await invoke("confirm_close");
@@ -120,6 +153,38 @@ export async function closeShellWindow(): Promise<void> {
 /** The user cancelled — drop the shell's pending-close state. */
 export async function cancelShellClose(): Promise<void> {
   await invoke("cancel_close");
+}
+
+/**
+ * Can this host show a real folder picker? False in a browser tab.
+ *
+ * Exposed rather than left to `isTauri()` at the call site, because the answer
+ * is what the *picker* renders: outside the shell the Browse row is shown
+ * disabled with the reason, not hidden, so "where did Browse go?" is never a
+ * question anyone has to ask (DESIGN.md §6.5 — a row whose reason for existing
+ * is that the user can see why it is unavailable).
+ */
+export function canPickDirectory(): boolean {
+  return isTauri();
+}
+
+/**
+ * The OS directory dialog. `null` = the user cancelled, or there is no shell.
+ *
+ * There is no browser equivalent worth shimming: `showDirectoryPicker` returns a
+ * sandboxed handle, not a path, and the server needs a path it can resolve. So a
+ * browser tab gets an honest fallback — type or paste a path — rather than a
+ * button that does nothing. This never throws: a failed dialog is "no folder
+ * chosen", which is the same thing the user pressing Escape means.
+ */
+export async function pickDirectory(): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    return await callShell<string | null>("pick_directory");
+  } catch (err) {
+    console.error("folder picker failed", err);
+    return null;
+  }
 }
 
 /**
