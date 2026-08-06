@@ -62,7 +62,7 @@ from workbench_server.services.orchestrator import (
     SETTING_POOL_SIZE,
     OrchestratorService,
 )
-from workbench_server.services.usage import UsageService
+from workbench_server.services.usage import MAX_SESSION_COSTS, UsageService
 from workbench_server.services.worktrees import WorktreeService
 
 pytestmark = pytest.mark.timeout(180)
@@ -486,6 +486,50 @@ async def test_the_fleet_cost_ceiling_counts_a_stopped_workers_spend(fleet: Flee
     assert refusal.reason == "fleet_cost"
     assert refusal.observed == pytest.approx(0.50)
     assert "WORKBENCH_ORCHESTRATOR_FLEET_COST_USD" in refusal.detail
+
+
+@pytest.mark.fleet(budget=budget(max_fleet_cost_usd=(MAX_SESSION_COSTS + 3) * 0.10))
+async def test_the_fleet_ceiling_binds_after_the_usage_map_evicts_a_worker(fleet: Fleet) -> None:
+    """Churning cheap workers past the usage map's global LRU must not launder
+    their spend.
+
+    :class:`UsageService` keeps only ``MAX_SESSION_COSTS`` session-cost rows for
+    the *whole server*, LRU by last turn. Read the budget straight through that
+    map and a worker whose row has evicted counts as having spent nothing — so
+    an orchestrator could spend its ceiling many times over by stopping and
+    respawning cheap workers, which is the exact loop the fleet budget exists to
+    bound. The roster's own high-water mark of each worker's spend is what keeps
+    the ceiling honest once a row falls out. This drives the roster well past
+    the cap; without that mark the summed spend would plateau at the surviving
+    tail and the ceiling would never bind.
+    """
+    boss = fleet.orchestrator()
+    per_worker = 0.10
+    spent = 0.0
+    spawned = 0
+    refusal: SpawnRefusal | None = None
+    # One slot at a time — spawn, spend a little, give the slot back — for more
+    # workers than the usage map can hold, so the earliest rows are long gone
+    # from it by the time the ceiling is reached.
+    for _ in range(MAX_SESSION_COSTS * 2):
+        result = await fleet.service.spawn(boss, "cheap")
+        if isinstance(result, SpawnRefusal):
+            refusal = result
+            break
+        spawned += 1
+        fleet.usage.note_turn(session_id=result.worker_id, cost_usd=per_worker)
+        spent += per_worker
+        await fleet.service.stop_worker(boss, result.worker_id)
+
+    assert refusal is not None, "the fleet cost ceiling never bound — churn laundered the spend"
+    assert refusal.reason == "fleet_cost"
+    # It bound only *after* more workers than the usage map can hold were churned
+    # through it, which is the whole point: the evicted rows' cost still counted.
+    assert spawned > MAX_SESSION_COSTS
+    # And it bound at the real running total, not a truncated tail of it.
+    assert refusal.observed is not None
+    assert refusal.observed == pytest.approx(spent)
+    assert refusal.observed >= fleet.service.budget.max_fleet_cost_usd
 
 
 @pytest.mark.fleet(budget=budget(max_worker_turns=1))

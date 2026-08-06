@@ -109,11 +109,16 @@ _STATUS_BY_NAME: Final[dict[str, UsageStatus]] = {status: status for status in S
 #: sees a handful of model ids; this only stops an unbounded map.
 MAX_MODELS: Final = 12
 
-#: Cap on per-session cost rows. Comfortably above any concurrent-session
-#: ceiling *and* above the orchestrator's worker limit, because a stopped
-#: worker's cost stays worth showing — "that one cost $2.40 before it failed" is
-#: the number the next spawn decision is made on. LRU by last turn, so what
-#: falls out is the oldest, not the most expensive.
+#: Cap on per-session cost rows in the degraded *view*. This is a display and
+#: memory bound, not a ledger: it is LRU by last turn across the whole server
+#: (every chat and every worker of every orchestrator share these slots), so a
+#: session's row falls out once enough others have taken a turn. Mission
+#: Control's budget therefore does **not** trust a row to survive here — the
+#: orchestrator keeps its own high-water mark of each worker's spend
+#: (``services/orchestrator.py``), because a budget that read an evicted row as
+#: zero would let a churn of cheap workers spend a ceiling many times over.
+#: Kept comfortably above the concurrent-session ceiling all the same, so the
+#: rows a user is actively looking at do not churn under them.
 MAX_SESSION_COSTS: Final = 32
 
 

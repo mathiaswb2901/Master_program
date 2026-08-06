@@ -114,9 +114,21 @@ class OrchestratorUnavailableError(Exception):
 class _Worker:
     """One worker's bookkeeping — the parent link, the lease and the task.
 
-    Deliberately does **not** carry state, activity or cost: those live in the
-    session, the activity service and the usage service, and a copy here would
-    be a fourth number to keep honest.
+    Carries state and activity nowhere: those live in the session and the
+    activity service, and a copy here would be a number to keep honest.
+
+    It *does* carry spend, and that is not a duplicate accumulator — it is a
+    **high-water mark** of what the usage service last reported for this worker.
+    :class:`~workbench_server.services.usage.UsageService` keeps only a small,
+    globally-LRU'd map of the *whole server's* session costs (every chat and
+    every worker of every orchestrator share those slots), so a worker's live
+    entry falls out of it once enough other sessions have taken a turn. Reading
+    the budget straight through that map treated an evicted worker as having
+    spent nothing — the restart-to-evade loop this budget exists to bound. The
+    roster, by contrast, keeps a worker for the orchestrator's whole life, so it
+    is the right place to remember the spend. Turns and cost only ever grow, so
+    ``max(kept, live)`` sampled while the entry is still present is exactly the
+    real figure, and it survives the eviction (see :meth:`_spend_of`).
     """
 
     worker_id: str
@@ -129,6 +141,11 @@ class _Worker:
     updated_at: float
     outcome: WorkerOutcome | None = None
     detail: str | None = None
+    #: High-water mark of this worker's turns and dollars, refreshed from the
+    #: usage service every time it is read and whenever the worker settles a turn
+    #: — so the figure outlives the usage map's global LRU eviction.
+    turns: int = 0
+    cost_usd: float = 0.0
     #: Rolling tail of the worker's own output, for ``read_worker``.
     buffer: str = ""
     #: Set once the slot has been given back, so a double stop cannot release a
@@ -207,18 +224,41 @@ class OrchestratorService:
         roster = self._rosters.get(orchestrator_id)
         return [] if roster is None else [self._info(w) for w in roster.workers.values()]
 
-    def _info(self, worker: _Worker) -> WorkerInfo:
+    def _spend_of(self, worker: _Worker) -> tuple[int, float]:
+        """This worker's turns and dollars — the one figure the board and the
+        budget both read, kept correct across the usage map's LRU eviction.
+
+        The usage service is still the source: while a worker's entry is present
+        we take it verbatim. But that map holds only the last
+        :data:`~workbench_server.services.usage.MAX_SESSION_COSTS` sessions the
+        *whole server* has seen, so a worker's entry evicts once enough other
+        sessions have run — and a budget that read ``None`` as zero there would
+        let an orchestrator spend its ceiling many times over by churning cheap
+        workers. Turns and cost are monotonic, so keeping the high-water mark of
+        every sample makes the last live value survive the eviction. Sampled
+        here (every read) and on ``turn_done`` (the pump, where the entry was
+        just written and cannot have evicted yet), so the final figure is always
+        captured before it can fall out.
+        """
         entry = self._usage.session_entry(worker.worker_id)
+        if entry is not None:
+            worker.turns = max(worker.turns, entry.turns)
+            worker.cost_usd = max(worker.cost_usd, entry.cost_usd)
+        return worker.turns, worker.cost_usd
+
+    def _info(self, worker: _Worker) -> WorkerInfo:
+        turns, _cost = self._spend_of(worker)
         return WorkerInfo(
             worker_id=worker.worker_id,
             orchestrator_id=worker.orchestrator_id,
             task=worker.task,
             slot=worker.slot,
             path=worker.path,
-            # Turns come from the usage service rather than from a counter here:
-            # it is the number the budget is enforced against and the number the
-            # board renders, and a third one would eventually disagree with both.
-            turns=entry.turns if entry else 0,
+            # Turns come from the usage service (via the roster's high-water
+            # mark) rather than from a counter here: it is the number the budget
+            # is enforced against and the number the board renders, and a third
+            # one would eventually disagree with both.
+            turns=turns,
             outcome=worker.outcome,
             detail=worker.detail,
             created_at=worker.created_at,
@@ -381,39 +421,35 @@ class OrchestratorService:
         turns = 0
         cost = 0.0
         for worker in roster.workers.values():
-            entry = self._usage.session_entry(worker.worker_id)
-            if entry is None:
-                continue
-            turns += entry.turns
-            cost += entry.cost_usd
+            worker_turns, worker_cost = self._spend_of(worker)
+            turns += worker_turns
+            cost += worker_cost
         return turns, cost
 
     def _worker_refusal(self, worker: _Worker) -> SpawnRefusal | None:
         """The per-worker half, checked before *more work* rather than before
         creation — a worker's first turn has by definition cost nothing."""
-        entry = self._usage.session_entry(worker.worker_id)
-        if entry is None:
-            return None
-        if entry.turns >= self._budget.max_worker_turns:
+        turns, cost = self._spend_of(worker)
+        if turns >= self._budget.max_worker_turns:
             return SpawnRefusal(
                 reason="worker_turns",
                 detail=(
-                    f"worker {worker.worker_id} has taken {entry.turns} of "
+                    f"worker {worker.worker_id} has taken {turns} of "
                     f"{self._budget.max_worker_turns} turns — raise {SETTING_WORKER_TURNS}"
                 ),
                 limit=float(self._budget.max_worker_turns),
-                observed=float(entry.turns),
+                observed=float(turns),
                 setting=SETTING_WORKER_TURNS,
             )
-        if entry.cost_usd >= self._budget.max_worker_cost_usd:
+        if cost >= self._budget.max_worker_cost_usd:
             return SpawnRefusal(
                 reason="worker_cost",
                 detail=(
-                    f"worker {worker.worker_id} has spent ${entry.cost_usd:.2f} of "
+                    f"worker {worker.worker_id} has spent ${cost:.2f} of "
                     f"${self._budget.max_worker_cost_usd:.2f} — raise {SETTING_WORKER_COST}"
                 ),
                 limit=self._budget.max_worker_cost_usd,
-                observed=entry.cost_usd,
+                observed=cost,
                 setting=SETTING_WORKER_COST,
             )
         return None
@@ -560,8 +596,16 @@ class OrchestratorService:
                     message = str(getattr(event, "message", "the turn failed"))
                     self._append(worker, f"\n[error] {message}\n")
                     self.note_failed(worker.worker_id, message)
-                elif kind == "turn_done" and bool(getattr(event, "is_error", False)):
-                    self.note_failed(worker.worker_id, "the worker's turn ended in an error")
+                elif kind == "turn_done":
+                    # The usage service wrote this worker's turn immediately
+                    # before emitting the frame (``agent_sessions.py``), so its
+                    # entry is the freshest it will ever be and cannot yet have
+                    # evicted. Sample it into the roster's high-water mark now,
+                    # so the final figure is captured before any later session
+                    # can push it out of the usage map's LRU.
+                    self._spend_of(worker)
+                    if bool(getattr(event, "is_error", False)):
+                        self.note_failed(worker.worker_id, "the worker's turn ended in an error")
         except asyncio.CancelledError:
             raise
         except Exception:  # a reader that dies must not take the worker with it
