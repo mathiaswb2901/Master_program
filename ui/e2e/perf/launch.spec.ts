@@ -82,13 +82,13 @@ import { test } from "./window";
  * unvirtualised, and two queued Feel items own that. This one owns the paint.
  *
  * **What the lane was doing to this number, 2026-08-06.** Until `./window`
- * landed, every spec here started in whatever window the spec before it had
- * saved, so this test was timing a *restore* as often as a launch. Same machine,
+ * landed, the window this test launched into was whatever the spec before it had
+ * saved — a launch measured against no fixed starting point at all. Same machine,
  * pinned `WB_PERF_WORKSPACE`, `.workbench/` wiped, full lane, before and after
  * that change: tree rows **714.9 → 686.6 ms**, FCP **700 → 672 ms**, DCL
- * **68.4 → 64.1 ms** — inside this box's noise, which is the point: the reset is
- * one PUT on an API context before the page navigates, and it does not show up
- * in what this file measures.
+ * **68.4 → 64.1 ms** — inside this box's noise, which is the point twice over.
+ * The starting window is now stated, and stating it cost this measurement
+ * nothing: the reset is one PUT on an API context before the page navigates.
  *
  * One number it did *not* fix is below. And when comparing runs, compare
  * like-for-like on the *server*, not just the workspace: the first page load
