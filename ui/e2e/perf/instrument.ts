@@ -16,6 +16,10 @@
  *   including style/layout time no long task covers.
  * * **a rAF sampler** — the continuous case (scrolling, dragging), where no
  *   single event is slow and the thing that is wrong is the frame rhythm.
+ * * **`layout-shift`** — "it jumped while I was reading it". The one thing a
+ *   *faster* first paint can make worse: render before the webfont arrives and
+ *   the swap can reflow the shell. Collected so that trade is measured rather
+ *   than assumed (`launch.spec.ts`).
  *
  * Installed with `addInitScript`, so the observers exist before the app's first
  * line runs and `buffered: true` picks up what happened before that.
@@ -39,6 +43,12 @@ export interface TaskSample {
   blockingDuration?: number;
 }
 
+export interface ShiftSample {
+  startTime: number;
+  value: number;
+  hadRecentInput: boolean;
+}
+
 export interface Telemetry {
   /** Entry types this browser actually reported on — an empty list is a real
    * finding, not a silent zero. */
@@ -53,10 +63,19 @@ export interface Telemetry {
   paints: { name: string; startTime: number }[];
   /** `performance.now()` at the first moment a file row existed in the DOM. */
   treeReady: number | null;
+  /**
+   * `performance.now()` at the first moment a Monaco editor had painted lines.
+   * `.monaco-editor` alone appears before the first render, so the marker is
+   * `.view-lines` — the point at which the user is looking at their file.
+   */
+  editorReady: number | null;
+  /** Timestamps a spec asked for by name (see `mark`). */
+  marks: Record<string, number>;
   events: EventSample[];
   eventsTruncated: boolean;
   longTasks: TaskSample[];
   longAnimationFrames: TaskSample[];
+  layoutShifts: ShiftSample[];
 }
 
 /**
@@ -70,10 +89,13 @@ export async function installTelemetry(page: Page): Promise<void> {
     const state = {
       observed: [] as string[],
       treeReady: null as number | null,
+      editorReady: null as number | null,
+      marks: {} as Record<string, number>,
       events: [] as EventSample[],
       eventsTruncated: false,
       longTasks: [] as TaskSample[],
       longAnimationFrames: [] as TaskSample[],
+      layoutShifts: [] as ShiftSample[],
       frames: [] as number[],
       sampling: false,
     };
@@ -118,18 +140,57 @@ export async function installTelemetry(page: Page): Promise<void> {
         blockingDuration: entry.blockingDuration ?? 0,
       });
     });
+    observe(
+      "layout-shift",
+      {},
+      (entry: PerformanceEntry & { value: number; hadRecentInput: boolean }) => {
+        state.layoutShifts.push({
+          startTime: entry.startTime,
+          value: entry.value,
+          hadRecentInput: entry.hadRecentInput,
+        });
+      },
+    );
 
-    // "Launch" ends when a file row exists, so mark it in the DOM rather than
-    // from the test: a poll from outside measures its own polling interval.
+    // Two moments are marked in the DOM rather than polled from the test: a
+    // poll from outside measures its own polling interval. "Launch" ends when a
+    // file row exists; "opened" ends when Monaco has painted lines.
     const watcher = new MutationObserver(() => {
-      if (state.treeReady !== null) return;
-      if (document.querySelector('[role="treeitem"]') !== null) {
+      if (state.treeReady === null && document.querySelector('[role="treeitem"]') !== null) {
         state.treeReady = performance.now();
-        watcher.disconnect();
       }
+      if (state.editorReady === null && document.querySelector(".view-lines") !== null) {
+        state.editorReady = performance.now();
+      }
+      if (state.treeReady !== null && state.editorReady !== null) watcher.disconnect();
     });
     watcher.observe(document, { childList: true, subtree: true });
   }, GLOBAL);
+}
+
+/**
+ * Stamp `performance.now()` in the page under a name, immediately before the
+ * test does something. Used for the one interval no browser entry describes —
+ * the gap between the user's click and their file being on screen — where the
+ * end is observed in the page (`editorReady`) and only the start needs saying.
+ */
+export async function mark(page: Page, name: string): Promise<void> {
+  await page.evaluate(
+    ([globalName, markName]: [string, string]) => {
+      const state = (window as unknown as Record<string, { marks: Record<string, number> }>)[
+        globalName
+      ];
+      state.marks[markName] = performance.now();
+    },
+    [GLOBAL, name] as [string, string],
+  );
+}
+
+/** Total layout shift the user did not cause — the font-swap check. */
+export function cumulativeLayoutShift(telemetry: Telemetry): number {
+  return telemetry.layoutShifts
+    .filter((shift) => !shift.hadRecentInput)
+    .reduce((total, shift) => total + shift.value, 0);
 }
 
 /** Read everything collected so far. */
@@ -157,10 +218,13 @@ export async function readTelemetry(page: Page): Promise<Telemetry> {
         .getEntriesByType("paint")
         .map((p) => ({ name: p.name, startTime: p.startTime })),
       treeReady: state.treeReady,
+      editorReady: state.editorReady,
+      marks: state.marks,
       events: state.events,
       eventsTruncated: state.eventsTruncated,
       longTasks: state.longTasks,
       longAnimationFrames: state.longAnimationFrames,
+      layoutShifts: state.layoutShifts,
     };
   }, GLOBAL);
 }

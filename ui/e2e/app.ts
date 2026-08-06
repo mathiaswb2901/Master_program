@@ -21,10 +21,52 @@ export async function workspaceReady(page: Page): Promise<void> {
   await expect(page.getByRole("treeitem", { name: "src" })).toBeVisible();
 }
 
+/**
+ * Wait out the launch's own idle work: the editor chunk (`ui/src/monaco.ts`).
+ *
+ * Monaco is 3.3 MB and it is fetched on a `requestIdleCallback` once the root
+ * listing lands, so for a few hundred milliseconds after the tree appears the
+ * main thread has a parse coming. A journey drives the app ~10 ms later, which
+ * no hand can, and a keystroke that lands inside that parse is delayed by it —
+ * measured: the double-`Alt+M` journey's two presses arrived 370–491 ms apart
+ * against the 300 ms animation they have to interrupt, and passed as soon as
+ * the parse was out of the way.
+ *
+ * That cost is real, one-time, and priced where it belongs: `e2e/perf/
+ * open-file.spec.ts` measures a click that races the prefetch and says so.
+ * Here it is noise in front of what the journey is actually about, so it is
+ * waited out rather than raced. Two steps, because the resource arriving is not
+ * the parse finishing: wait for the chunk, then for an idle callback behind it.
+ * Bounded and forgiving throughout — a build with no separate editor chunk (or
+ * a page that never idles) carries straight on.
+ */
+export async function launchSettled(page: Page): Promise<void> {
+  await page
+    .waitForFunction(
+      () =>
+        performance
+          .getEntriesByType("resource")
+          .some((entry) => /monacoBundle-/.test(entry.name) && entry.name.endsWith(".js")),
+      undefined,
+      { timeout: 15_000 },
+    )
+    .catch(() => undefined);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        const idle = (globalThis as { requestIdleCallback?: (cb: () => void) => number })
+          .requestIdleCallback;
+        if (idle === undefined) setTimeout(resolve, 50);
+        else idle(() => resolve());
+      }),
+  );
+}
+
 /** Open the app and wait until it is usable — how every journey starts. */
 export async function openApp(page: Page): Promise<void> {
   await gotoApp(page);
   await workspaceReady(page);
+  await launchSettled(page);
 }
 
 export function treeItem(page: Page, name: string): Locator {
