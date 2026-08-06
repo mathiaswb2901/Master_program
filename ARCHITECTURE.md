@@ -113,6 +113,74 @@ backend too:
 `@tauri-apps/api`, dynamically and only after `isTauri()` passes, so a browser
 build never fetches the chunk and every call is inert in a tab.
 
+## The launch path
+
+What the browser must do before the window is usable is a design surface, not a
+build artifact, and it has one rule: **nothing that is not needed to paint may be
+statically imported from `main.tsx`.** A module script blocks
+`DOMContentLoaded` until it is downloaded, parsed *and evaluated*, so every byte
+reachable from the entry is paid on every cold start whether or not the feature
+is used.
+
+Monaco is the whole reason the rule is written down. `import * as monaco from
+"monaco-editor"` pulls the barrel — the editor plus ~90 basic-language
+contributions plus four language services — and `main.tsx` imported it
+statically, which made the eager chunk 88% editor and 1,030 kB gzipped, on a
+launch where the user may never open a file.
+
+```
+main.tsx ──► App ──► EditorArea (panel: tabs, empty state, provenance bar — instant)
+                          │
+                          └─ React.lazy ──► CodeEditor ──► @monaco-editor/react
+                                   ▲                  └──► monacoBundle.ts ──► monaco-editor
+                                   │                          (its own chunk + its own CSS)
+                          prefetchMonaco() on requestIdleCallback,
+                          armed when the workspace tree lands
+```
+
+- **`ui/src/monaco.ts` is the seam and imports no Monaco** (`import type` only,
+  erased). It holds the pure half — the mono font, the extension→language table,
+  the theme name — and memoizes one dynamic `import("./monacoBundle")`. The model
+  helpers the store calls (`setModelContent`, `disposeModel`) no-op until the
+  editor exists, which is the same answer as "no model for that path" and is what
+  the store already handled.
+- **Anything read from a CSS token is read when the bundle lands, never when the
+  load is armed.** Loading late puts a window between "the prefetch is scheduled"
+  and "Monaco exists" in which `defineWorkbenchTheme` can do nothing — so a theme
+  toggle inside it is dropped, and a `Theme` captured at arming time is stale by
+  the time it is used while the tokens it reads are live. The two then describe
+  different themes, and the name `<Editor theme=…>` asks for is never registered:
+  Monaco substitutes a built-in theme for a name it does not know, silently, so
+  the first file opens in neither palette. Hence `loadMonaco()` takes no theme and
+  calls `documentTheme()` (`ui/src/theme.ts`) inside its `.then()` — the DOM
+  attribute, because `setTheme` flips it before it sets the store and the tokens
+  follow the attribute. Reproduced in `ui/e2e/theme.spec.ts`, pinned in
+  `ui/src/monacoLoad.test.ts`.
+- **The split is inside the panel, not at the registry.** The editor panel is in
+  the startup layout, so lazy-loading its registered `panel.component` would defer
+  nothing and would hand dockview a component that suspends with no boundary. The
+  chrome renders at once; only the Monaco surface (`panels/CodeEditor.tsx`) is
+  behind `React.lazy` + `Suspense`. The registry needed no change to allow it.
+- **The bundle is hand-picked, and the two lists are one list**
+  (`ui/src/monacoBundle.ts`): `edcore.main` for the editor with all its
+  contributions, plus exactly the language grammars `languageForPath` can return.
+  A grammar not in the extension table is bytes nobody can ask for; an extension
+  with no grammar opens as plain text with no error anywhere, which is why
+  `monaco.test.ts` checks both directions. JSON is the only language *service*
+  kept — it has no basic-language grammar, so its service *is* its highlighting.
+- **The prefetch is armed by the tree, not by mounting.** Between first paint and
+  the workspace listing arriving the main thread is idle, so an unconditional
+  `requestIdleCallback` fires straight into the launch it was meant to stay out
+  of. It is also given no `timeout`: an idle callback that fires anyway is the
+  long task this change exists to remove, in a new place.
+- **`main.tsx` renders immediately.** It used to await `window.load` so surfaces
+  computing colors from CSS tokens could not read them early — a wait on the last
+  webfont to protect a read that was never at risk, since script execution already
+  waits for the stylesheets above it and both surfaces are built later anyway. The
+  layout-shift ceiling in `ui/e2e/perf/launch.spec.ts` is what keeps the fonts
+  arriving late from becoming a reflow; the fix if it is ever breached is
+  `font-display`/`size-adjust`, not the gate.
+
 ## Tool registry
 
 A **tool** is one capability, declared in one descriptor next to its own code
@@ -1268,6 +1336,17 @@ Format spec: `docs/shortcuts.md`.
    too — cold launch, frame timing — but they carry the `@wallclock` tag and CI
    records them instead of blocking on them. A budget that fails for reasons other
    than the code gets switched off, and a switched-off budget defends nothing.
+
+   **The bundle budget** (`ui/e2e/perf/bundle.spec.ts`) is the third shape: bytes,
+   which are as deterministic as counts and so also block. It reads rollup's own
+   per-chunk module attribution — written to `dist/bundle-metafile.json` by a
+   plugin in `vite.config.ts`, aggregated by package so it stays a few kB — and
+   asserts a gzipped ceiling on the eager entry chunk *and* that **no module under
+   `node_modules/monaco-editor` is in it**. The second assertion is the one that
+   holds: a size ceiling alone lets an editor creep back a defensible import at a
+   time and only fails when it is far too late. Presence is the invariant, size is
+   the symptom, and a file listing cannot answer either — only what is inside a
+   chunk can.
 
    The lane is **disk-neutral**, which is not free when the fixture is 5,105 files:
    a bare run builds it in a `mkdtemp` directory and removes it — along with the
