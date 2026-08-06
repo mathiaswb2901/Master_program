@@ -818,7 +818,14 @@ without forking — the difference between a fixed app and an instrument.
 
 ### M7 — Premium & Public (identity + OSS release)
 
-- The logged "frontend is too plain" change request executed in full: aggressive
+- The logged "frontend is too plain" change request executed in full. **Its colour half
+  landed early, on 2026-08-06**: six directions were drafted against a measured
+  crispness bar and the owner chose **ANVIL** — true black, achromatic neutrals, one
+  hot amber, an inverted surface ramp (chrome lighter than the wells it frames) and a
+  document mat that makes a docked Word page read as paper. `DESIGN.md` §2 is rewritten
+  to it and `ui/e2e/palette.test.ts` gates every published figure; the desktop shell's
+  caption tint reads the same tokens, so the window frame follows for free. What remains
+  here is everything the palette does not decide — aggressive
   ui-ux-pro-max design overhaul on top of the now-complete structural layer —
   distinctive welcome surface, branded empty states, micro-interactions, Monaco
   enrichment, content search (Ctrl+Shift+F), settings UI. (Layout persistence and
@@ -1185,8 +1192,41 @@ Build for real external users, not just the author. Consequences, tracked as wor
   concept that names them), and **a config that can bind anything** (folded into item 4
   — `.tmux.conf` rebinds all of tmux, and "bind anything the registry knows" is the
   version of that which survives our untrusted-workspace-file rule). The look is a
-  separate problem with a separate answer: three visual directions, rendered rather than
-  described, for the owner to choose between — see the M7 change request.
+  separate problem with a separate answer: visual directions, rendered rather than
+  described, for the owner to choose between — six of them were, and ANVIL was
+  chosen the same day (see the M7 change request below).
+
+- 2026-08-06 — **ANVIL: the visual identity, chosen and built** (owner, on the third
+  telling: "too plain, reads as a generic VS Code clone", then "it still feels like a
+  cheap VS Code editor", then "the program still looks superold"). The look was treated
+  as a measurement problem rather than a taste one, because three rejections in a row
+  say the previous passes were arguing about taste. What the old palette actually
+  measured: five dark surfaces spanning **1.31:1** end to end, two of them 1.10:1 apart
+  — one grey field, not a window with panels in it; `--border-subtle` at **1.17:1** on
+  panel, below the threshold at which a 1px edge is perceived *at all*, while
+  `DESIGN.md` §1.4 elects hairlines to carry every piece of structure and forbids
+  shadows as the fallback — which is the mechanical reason no panel read as an object;
+  `--text-tertiary` at **4.24:1** under 11px text, a live WCAG failure against §7's own
+  rule; and a steel-blue accent at 220° on a 220° graphite base, i.e. VS Code's and
+  GitHub's.
+  **Six directions were drafted against that measured crispness bar** — surface spread,
+  hairline visibility, text contrast, and how far the accent sits from the base hue —
+  rather than described in prose, and the owner chose **ANVIL** on 2026-08-06: a
+  true-black instrument with zero colour in its neutrals (Lab C\* = 0.00 on all twenty
+  greys) and exactly one hot amber, spent only on *where I am* and *what is changing
+  right now*. Measured: surface ramp 0.0 / 6.3 / 12.3 / 18.0 / 24.0 / 29.7 L\* (adjacent
+  steps 5.8–6.3, end to end 29.7), `--border-subtle` 2.51:1 on panel, primary text
+  14.94:1, no text pair below 4.55:1 and only one below 5:1.
+  The ramp is **inverted**: `--surface-app` is now *lighter* than `--surface-panel`, so
+  the chrome frames darker content wells instead of panels sitting on a darker app.
+  Shipped in `DESIGN.md` §1–§2, §6.1 and §7, gated by `ui/e2e/palette.test.ts`, which
+  re-derives every published figure from `tokens.css`. Two consequences worth recording:
+  the light theme is **derived from ANVIL's four rules rather than inverted from its
+  values** (and states the one thing that could not survive the crossing — the hot amber
+  is 1.33:1 on a light panel, so light marks with a deep amber and keeps the hot one for
+  filled areas); and the desktop shell's **caption tint reads these tokens**, so the
+  native window frame follows the theme automatically — nothing in `desktop/src-tauri/`
+  needed to change for the window to become an ANVIL window.
 
 - 2026-08-06 — **Scope freeze** (owner: "continue with our plan and add stuff
   afterwards"). M5 grew from seven items to fifteen in a single day — every addition

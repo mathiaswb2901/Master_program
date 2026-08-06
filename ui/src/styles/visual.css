@@ -397,7 +397,7 @@
 .wb-vis-diff {
   margin: 0;
   padding: var(--space-4) 0;
-  background: var(--surface-terminal);
+  background: var(--surface-code);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   overflow-x: auto;
