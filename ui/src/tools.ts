@@ -15,6 +15,7 @@ import type { WorkbenchTool } from "./registry";
 
 import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
+import { conversationsTool } from "./panels/Conversations";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { layoutsTool } from "./panels/Layouts";
@@ -24,11 +25,19 @@ import { panesTool } from "./panels/Panes";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
 import { usageTool } from "./panels/UsagePanel";
+import { workspacesTool } from "./panels/Workspaces";
 
 export const TOOLS: readonly WorkbenchTool[] = [
+  // First, and it contributes no panel: it decides which *project* every panel
+  // below is looking at, so its status chip belongs at the left end of the bar
+  // where the workspace name has always been.
+  workspacesTool,
   filesTool,
   editorTool,
   agentTool,
+  // After the Agent, because it is a way *into* one: a row here opens an agent
+  // pane, and the two read as one capability seen from two distances.
+  conversationsTool,
   terminalTool,
   // Before the OnlyOffice tool, and that is the registration: `documentViewFor`
   // takes the first enabled tool offering a view for a kind, so the native host

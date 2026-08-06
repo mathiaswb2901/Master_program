@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 
-import { visibleCommands } from "../commands";
+import { useVisibleCommands } from "../commands";
 import { chordKeycaps } from "../keys";
 import { usePresence } from "../motion";
 import { useStore } from "../store";
@@ -66,8 +66,11 @@ export function QuickBar() {
   const prefill = useStore((s) => s.quickBarPrefill);
   const pick = useStore((s) => s.quickPick);
   const tree = useStore((s) => s.tree);
+  // Subscribed, not sampled: the command set grows after launch (see the hook).
+  const commands = useVisibleCommands();
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
   const selRef = useRef<HTMLButtonElement>(null);
   // Held on screen for `--motion-exit-ms` after it closes, so dismissing it is
   // a movement rather than a disappearance (DESIGN.md §5).
@@ -83,6 +86,30 @@ export function QuickBar() {
       void useStore.getState().ensureFileIndex();
     }
   }, [open, prefill]);
+
+  /**
+   * The keyboard, on every open — which is not the same as on every mount.
+   *
+   * `autoFocus` is a mount-time attribute, and this overlay does not remount
+   * each time it opens: it is held on screen for `--motion-exit-ms` after it
+   * closes (`usePresence`, above), so an open inside that window reuses
+   * the input that is already there and nothing focuses it a second time. Focus
+   * is then wherever the dismissal left it — the row a mouse click just ran,
+   * most often — and the palette answers no keys at all: Escape does not close
+   * it, typing does not filter it, and the only way out is the backdrop. The
+   * window is `--motion-exit-ms` *at least*: it is a `setTimeout`, so a busy
+   * main thread (a launch, a layout switch) stretches it.
+   *
+   * Two dependencies beyond `open`, for the two ways in. `present` because the
+   * first render of an open QuickBar has no input to focus — `usePresence`
+   * flips it from an effect of its own, so the element exists one commit later.
+   * `prefill` because a chord pressed *at* an open palette (`Ctrl+Shift+P` over
+   * a file search) reopens it in the other mode, which the effect above already
+   * treats as a fresh open; the keyboard has to agree with the query it reset.
+   */
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open, prefill, present]);
 
   useEffect(() => {
     selRef.current?.scrollIntoView({ block: "nearest" });
@@ -109,7 +136,7 @@ export function QuickBar() {
   let rows: Row[];
   if (pick !== null) {
     const q = query.trim();
-    const supplied = pick.rows();
+    const supplied = pick.rows(q);
     // Ranked inside each section, never across them: the sections are the
     // vocabulary ("Panels", "Agent sessions", "Files"), and a list that
     // reshuffles its headers on every keystroke is unreadable.
@@ -134,7 +161,7 @@ export function QuickBar() {
     const q = query.slice(1).trim();
     // Every command in the registry, so the QuickBar is the complete keyboard
     // path to the app — nothing is reachable only by mouse or only by chord.
-    rows = visibleCommands()
+    rows = commands
       .map((command) => ({ command, score: fuzzyScore(q, command.title) }))
       .filter((x) => x.score !== null)
       // Categorized commands (shortcuts.md) sort after the built-ins, so their
@@ -213,7 +240,7 @@ export function QuickBar() {
           `pointer-events: none` in the stylesheet is what makes it inert. */}
       <div className={"wb-qb" + exiting} role="dialog" aria-label={pick?.label ?? "Quick open"}>
         <input
-          autoFocus
+          ref={inputRef}
           className="wb-qb-input"
           placeholder={pick?.placeholder ?? "Search files — type > for actions"}
           value={query}

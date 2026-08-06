@@ -61,10 +61,14 @@
   color: var(--text-primary);
 }
 
-/* Replacement focus treatment — the bar itself is the focus context. */
+/* Replacement focus treatment — the bar itself is the focus context, and the
+   input is the only thing in it that takes keys, so "focus is here" is already
+   said by the bar being open. Demoted from accent (DESIGN.md §2.4 audit): the
+   selected row's amber edge is the mark that matters inside this overlay, and
+   two ambers in one 640px surface is one too many. */
 .wb-qb-input:focus-visible {
   outline: none;
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--border-strong);
 }
 
 .wb-qb-results {

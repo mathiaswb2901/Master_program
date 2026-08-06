@@ -28,7 +28,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+
+// The lane's `test`, like every spec here — even though these three read the
+// build off disk and never open a page, which is exactly why it costs them
+// nothing: a fixture no test requests is never set up (`./window`).
+import { test } from "./window";
 
 /** `ui/dist`, from `<ui>/e2e/perf/`. Built by `npm run perf` before this runs. */
 const DIST = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "dist");

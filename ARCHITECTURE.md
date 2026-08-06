@@ -366,21 +366,26 @@ in-process calls where the model and the user dominate.
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
+| `routers/conversations.py` | `GET /api/conversations` (Claude Code's whole transcript store, grouped by folder) |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `routers/activity.py` | `GET /api/activity` (the fleet's live tool calls) |
 | `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
+| `routers/workspaces.py` | `GET /api/workspace`, `POST /api/workspace/switch` (the root, and the recent list) |
 | `routers/worktrees.py` | list/acquire/release/renew/prune the managed worktree pool |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
-| `services/workspace.py` | path jail, atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
+| `services/workspace.py` | path jail (root is mutable — see below), atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
+| `services/workspaces.py` | switching the root at runtime: validation, the one list of everything that re-roots, the recent list |
+| `services/app_data.py` | where machine-local state lives (`%LOCALAPPDATA%\Workbench`) — the pool root and the recent workspaces, never a `.workbench/` folder |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
-| `services/session_index.py` | per-folder history from Claude Code's storage |
+| `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
+| `services/conversations.py` | the whole store, browsable: enumerate + mtime-cached reads, lossy-key resolution, the workspace jail |
 | `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
@@ -667,7 +672,33 @@ item 3, PR 5).
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage
 (`session_index.py`), so CLI sessions and Workbench sessions share one history,
-grouped per folder.
+grouped per folder. **Read-only, and browsable whole** — `services/conversations.py`
+walks the entire store rather than the one folder a session is bound to, which is
+what the Conversations panel renders (M5 item 12, half A).
+
+Three properties make that safe to open on a whim, and each is a constraint rather
+than a nicety. **Nothing writes.** A test watches every byte and mtime under the store
+across a browse and fails on any change; there is no delete path at all. **The cheap
+pass and the expensive one are separate.** Enumeration is one `os.scandir` per project
+directory — 17 directories and 80 transcripts measured at 1.8 ms — and yields
+everything ordering and counting need; reading a transcript for its title and turn
+count is a full pass (1.28 s for all 80, 398 MB, cold) and is therefore both bounded by
+`?limit=` (the newest N are *read*; every conversation is still listed, with the unread
+ones carrying `read: false` — a limit that dropped rows would drop whole folders) and
+cached against each file's `(mtime_ns, size)`, so a second browse of an unchanged store
+is enumeration only (93 ms including folder resolution). Append-only transcripts are
+what make that pair a sound invalidation. The scan runs in a thread; the router does
+nothing else. **What cannot be known is named.** `encode_project_dir` is lossy and not
+reversible (`C:\a\b` and `C:/a-b` collide), so a display path is *matched* against
+directories that exist — descending from the workspace, then home, then the filesystem
+anchors, pruned by the file tree's own ignore rules — and the raw encoded key is shown
+whenever nothing matches, never a reconstructed path. A transcript that will not parse
+keeps its row and carries the reason.
+
+Half A opens only what is inside the workspace jail. A conversation from a folder
+outside it is listed with its reason on screen rather than hidden — opening one needs
+the multi-root roots (M5 item 5/6), and until then knowing the conversation exists is
+most of what the browser is for.
 
 ## Provenance
 
@@ -1194,6 +1225,104 @@ contributes **no panel**: commands, a status chip, a `shortcuts.md` kind and an
   uses `fromJSON(…, { reuseExistingPanels: true })`, which moves the panels that
   exist in both rather than recreating them.
 
+- **The layout file follows a workspace switch.** `layouts.json` is *in* the
+  workspace, so a different project is a different document: the Layouts tool
+  implements the registry's `onWorkspaceChanged` hook, which disarms
+  persistence, drops the saved list and re-reads. Disarming first is the
+  load-bearing half — persistence is armed at that point, so the next sash drag
+  would otherwise write the old project's window into the new project's file.
+
+## The workspace is not fixed at launch
+
+Until M5 the workspace root was `Settings.resolved_workspace()`, read once in
+`create_app`, so opening another project meant restarting the server with an
+environment variable. `services/workspaces.py` makes the root something the
+running server changes (`POST /api/workspace/switch`).
+
+**The jail does not move; the root it asks about does.** Every path from the wire
+still becomes a filesystem path through `Workspace.safe_path`, and it still
+answers exactly one question — inside the root or not. What a switch changes is
+*which* root, so a path from the workspace you just left is refused by the rule
+that has always refused `../`. `Workspace.root` is therefore **mutable**, and
+deliberately expressed as one attribute on one object: every router reaches the
+jail through `app.state.workspace`, so re-pointing that object re-roots all of
+them at once and none can be left behind by not being told.
+
+**Everything that copied the root owes a `set_workspace_root`, and the list of
+them lives in exactly one place.** `create_app` hands `WorkspaceService` the
+services that kept their own copy — shortcuts, layouts, provenance, the session
+manager (sync), then the watcher and the worktree pool (async, because they
+restart something). A service added later that copies the root and is not on
+that list is one that keeps serving the project the user left, and the symptom
+is data from the wrong workspace rather than a crash.
+
+**And that whole sequence is held under one lock.** `WorkspaceService.switch`
+writes the jail synchronously and then *awaits* the watcher and the pool, so
+without serialization two switches interleave — both jail writes land, then both
+restarts do, in an order nothing makes agree. Two windows on one server is a
+supported arrangement (it is why `workspace_changed` exists), so this is
+reachable from the UI, and what it produces is a server whose jail and whose
+watch point at different projects plus a watch on a workspace nobody is in that
+`stop()` can no longer reach. Serialized rather than refused with a 409: the
+second window asked for something legitimate, and it is re-validated against the
+root that actually won.
+
+- **The watcher is a real restart**, and it is awaited. `awatch` is bound to the
+  directory it was opened on, so the old watch has to be *gone* before the new
+  one publishes — overlapping them would put two projects' relative paths on one
+  bus, and a client patching its tree from those would build a listing out of
+  both. Its stop event and `IgnoreIndex` are rebuilt with it.
+- **Provenance is cleared, not re-rooted.** Its map is keyed by
+  workspace-relative paths, so carrying it across would attribute `src/main.py`
+  in the new project to an agent that wrote `src/main.py` in the old one.
+- **The worktree pool is a different pool.** Its root is keyed by the workspace
+  it serves and its slots are checkouts of *that* repository, so a switch is a
+  full stop/start: the cross-process lock is released, the slot table dropped,
+  and `start()` rediscovers the repo. Slots in the old pool are left as they
+  are — a lease is not cancelled by the user opening another folder.
+- **Terminals and live agent sessions keep running.** A PTY is a shell that was
+  never inside the path jail (it can `cd` anywhere by design), and an agent may
+  be mid-turn holding an edit it has not written; killing either because the
+  user opened another folder is silent loss of running work. New terminals and
+  new sessions are created under the new root — `routers/terminal.py` now reads
+  `app.state.workspace.root` rather than the launch setting, which is where a
+  new shell was quietly still opening in the old project. A live session whose
+  folder is no longer inside the root is **relabelled with its absolute path**,
+  so the session list cannot file it under a same-named folder of the project it
+  has nothing to do with.
+- **Recent workspaces are the user's data, not a project's.** They live in
+  `<app data>/workspaces.json` (`services/app_data.py`, the same home the pool
+  root uses), never in a `.workbench/` folder: a list of the projects you work on
+  would otherwise be written into one of them. Most recent first, capped, deduped
+  case-insensitively because Windows paths are, and a folder that is gone is
+  listed as unavailable rather than forgotten. An unreadable or foreign-version
+  file costs the history and nothing else.
+- **The UI adopts, it does not reload.** `store.adoptWorkspace()` throws away
+  everything keyed to the old root (open editors, the tree, provenance, session
+  groups) and re-reads; then `notifyWorkspaceChanged(TOOLS, root)` tells every
+  tool that keeps workspace-scoped state. A dirty buffer is the one thing kept:
+  the switcher blocks on its own unsaved work with the dirty-close confirm, and
+  a buffer left dirty by *another* window's switch stays on screen as an orphan
+  that cannot be saved — the same relative path in the new workspace is a
+  different file.
+- **A docked Office window is unsaved work that is not a buffer**, and it gets
+  the mirror-image hook. An `office` open file is never marked dirty — the
+  unsaved paragraph is inside Word — so the dirty check is blind to it, and the
+  panel that renders `close_failed` is the very one a switch unmounts. Tools
+  holding something like that declare a `workspaceSwitchGuard` (`registry.ts`):
+  `held()` names it for the confirm dialog, `settle()` closes it **before** the
+  root moves, and anything that would not settle *cancels* the switch, with the
+  window still on screen to say so. `hosts` in `officeHost.ts` is keyed by
+  workspace-relative path, so `onWorkspaceChanged` then drains the closes that
+  are still in flight before clearing it — clearing first would let a late
+  response write `report.docx` from the old project back into the map that backs
+  `report.docx` in the new one.
+- **Only the shell can show a folder dialog.** There is no web API returning a
+  filesystem *path* for a directory, so `pick_directory` is a shell command
+  (`tauri-plugin-dialog`, registered in Rust and reached only through our own
+  command) and a browser tab gets an honest typed-path prompt instead of a dead
+  button — `ui/src/shell.ts`, as with every other native capability.
+
 ## The managed worktree pool
 
 `CLAUDE.md` has required "one writer per checkout, always" since M4, enforced by
@@ -1399,10 +1528,18 @@ Format spec: `docs/shortcuts.md`.
    flight* — the `slow tool` trigger exists for exactly that — the line replaced
    in place when it settles, the file target opening the file, three
    conversations changing at their own rhythms, and a Grep-heavy turn that
-   leaves a capped row rather than a growing one). The two states no browser
-   journey can reach in time — a quarter-hour-old usage snapshot, and four
-   sessions all mid-tool-call at the same instant — are `renderToStaticMarkup`
-   tests instead (`ui/src/panels/UsagePanel.test.tsx`,
+   leaves a capped row rather than a growing one). Journey 11 adds the
+   **conversation browser**: the suite seeds `.claude-projects` with one
+   transcript per case the browser has to tell apart (inside the workspace,
+   outside it, a folder that no longer exists, one that will not parse), then
+   asserts the folder groups render, that search filters across titles *and*
+   folder names, that a refused folder is *shown* with its reason, that a row
+   resumes into an agent pane carrying its history, that opening the same row
+   twice focuses that pane rather than cloning it, and that two browser panes —
+   one scoped to a folder, one not — stay independent through a reload. The two
+   states no browser journey can reach in time — a quarter-hour-old usage
+   snapshot, and four sessions all mid-tool-call at the same instant — are
+   `renderToStaticMarkup` tests instead (`ui/src/panels/UsagePanel.test.tsx`,
    `ui/src/panels/ActivityPanel.test.tsx`).
    Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.
@@ -1435,6 +1572,22 @@ Format spec: `docs/shortcuts.md`.
    time and only fails when it is far too late. Presence is the invariant, size is
    the symptom, and a file listing cannot answer either — only what is inside a
    chunk can.
+
+   **One workspace, walked in file order**, is the other cost of a single worker.
+   The app persists the window arrangement *into* the workspace it is being
+   measured in (`.workbench/layouts.json`, on a 500 ms debounce), so without a
+   reset a spec starts in whatever window the spec before it left and a budget
+   becomes a function of the alphabet: `panes.spec.ts` builds a 13-pane fleet on
+   purpose and sorts immediately before `watcher.spec.ts`, whose row then waited
+   30 s below the fold of a file tree a fraction of its former height — a spec
+   that passes in 4.5 s alone. Every perf spec therefore takes its `test` from
+   `ui/e2e/perf/window.ts`, which puts the empty layouts document back before the
+   page navigates; one PUT on an API context, so the launch timeline it must not
+   disturb still begins at `goto`, and an eslint rule makes that import the only
+   way to get a `test` in the directory. What the reset does **not** cover is
+   server-side state — agent sessions and PTYs outlive the page that made them,
+   and `launch.spec.ts`'s layout-shift budget can still read a session
+   `activity.spec.ts` created (see its docstring).
 
    The lane is **disk-neutral**, which is not free when the fixture is 5,105 files:
    a bare run builds it in a `mkdtemp` directory and removes it — along with the

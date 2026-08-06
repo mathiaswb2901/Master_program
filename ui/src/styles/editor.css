@@ -4,14 +4,20 @@
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--surface-panel);
+  background: var(--surface-code);
 }
 
+/* A *nested* strip, one step inside the pane's own tab strip — so it is
+   painted `--surface-panel`, not `--surface-app`. Under ANVIL's ramp the pane
+   chrome is the lighter surface and each nested layer steps down toward the
+   buffer: #393939 pane strip -> #202020 file strip -> #141414 buffer. Painting
+   this at `--surface-app` would put a light strip directly under the pane's
+   dark active tab and break the fusion that is the active indicator (§6.1). */
 .wb-editor-tabs {
   display: flex;
   height: var(--bar-height);
   flex: none;
-  background: var(--surface-app);
+  background: var(--surface-panel);
   border-bottom: 1px solid var(--border-subtle);
   overflow-x: auto;
   scrollbar-width: none;
@@ -37,11 +43,63 @@
   background: var(--surface-hover);
 }
 
-/* Active tab fuses into the panel body — that fusion IS the indicator. */
+/* Active tab fuses into the buffer below it — that fusion IS the indicator. */
 .wb-editor-tab.is-active {
   color: var(--text-primary);
-  background: var(--surface-panel);
-  box-shadow: 0 1px 0 0 var(--surface-panel);
+  background: var(--surface-code);
+  box-shadow: 0 1px 0 0 var(--surface-code);
+}
+
+/* ---- THE PAPER MAT (DESIGN.md §6.1, document panels) ----------------------
+   A white Word page dropped straight onto app chrome reads as a hole punched
+   in the window. What makes it read as *paper* is a mat: a mid-grey field it
+   sits on, a rim around it, and — the part that is usually forgotten — a tab
+   strip painted at the mat value, so the frame is one continuous surface from
+   the tab down past the page edge instead of two unrelated greys meeting.
+
+   `is-document` is set by EditorArea whenever the active buffer is claimed by
+   a document view, so the frame follows the file rather than the file type
+   list. Text buffers are untouched. */
+.wb-editor.is-document .wb-editor-tabs {
+  background: var(--surface-paper-surround);
+  border-bottom-color: var(--border-paper-rim);
+}
+
+/* Text on the mat is `--text-primary`/`--text-secondary`, NOT `--text-on-paper`.
+   The mat is a mid-grey (L* 38 dark, 68 light), so it is the one surface where
+   both themes' text works and the *paper* pair does not: near-black on the dark
+   mat measures 2.67:1, worse than the failure this whole palette exists to fix.
+   `--text-on-paper` is for chrome drawn over the page itself. On the mat:
+   primary 6.33:1 [7.41], secondary 4.75:1 [5.59]; tertiary is 3.33:1 and is
+   therefore never used here. */
+.wb-editor.is-document .wb-editor-tab {
+  color: var(--text-secondary);
+}
+
+.wb-editor.is-document .wb-editor-tab:hover {
+  background: none;
+  color: var(--text-primary);
+}
+
+/* The active document's tab fuses into the mat, not into a panel, and the page
+   below it is what the eye lands on. */
+.wb-editor.is-document .wb-editor-tab.is-active {
+  background: var(--surface-paper-surround);
+  box-shadow: 0 1px 0 0 var(--surface-paper-surround);
+  color: var(--text-primary);
+}
+
+.wb-editor.is-document .wb-tab-close {
+  color: var(--text-secondary);
+}
+
+.wb-editor.is-document .wb-tab-close:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.wb-editor.is-document .wb-dirty-dot {
+  background: var(--text-secondary);
 }
 
 .wb-editor-tab-label {
@@ -138,15 +196,21 @@
   min-width: 0;
 }
 
+/* Demoted from accent (DESIGN.md §2.4 audit): a link back to a conversation is
+   navigation, not "something is changing right now", and amber that marks a
+   standing thing is amber that has stopped meaning anything. The underline is
+   the affordance — which is also the non-colour signal §7 asks for. */
 .wb-provenance-link {
-  color: var(--accent);
+  color: var(--text-primary);
   font-size: inherit;
   font-weight: var(--weight-medium);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
 }
 
 .wb-provenance-link:hover {
-  color: var(--accent-hover);
-  text-decoration: underline;
+  text-decoration-color: currentcolor;
 }
 
 /* Non-modal conflict bar ("Changed on disk — Reload / Keep mine"). */

@@ -156,6 +156,38 @@ export async function cancelShellClose(): Promise<void> {
 }
 
 /**
+ * Can this host show a real folder picker? False in a browser tab.
+ *
+ * Exposed rather than left to `isTauri()` at the call site, because the answer
+ * is what the *picker* renders: outside the shell the Browse row is shown
+ * disabled with the reason, not hidden, so "where did Browse go?" is never a
+ * question anyone has to ask (DESIGN.md §6.5 — a row whose reason for existing
+ * is that the user can see why it is unavailable).
+ */
+export function canPickDirectory(): boolean {
+  return isTauri();
+}
+
+/**
+ * The OS directory dialog. `null` = the user cancelled, or there is no shell.
+ *
+ * There is no browser equivalent worth shimming: `showDirectoryPicker` returns a
+ * sandboxed handle, not a path, and the server needs a path it can resolve. So a
+ * browser tab gets an honest fallback — type or paste a path — rather than a
+ * button that does nothing. This never throws: a failed dialog is "no folder
+ * chosen", which is the same thing the user pressing Escape means.
+ */
+export async function pickDirectory(): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    return await callShell<string | null>("pick_directory");
+  } catch (err) {
+    console.error("folder picker failed", err);
+    return null;
+  }
+}
+
+/**
  * One shell command whose *answer* matters, and whose failure is the caller's
  * to explain.
  *

@@ -61,12 +61,14 @@ command is one a user would reach for without looking.
 | `groupActions` | One control at the right end of every pane's tab strip, for a tool that acts on panes rather than living in one. The pane system's split glyphs are the only one (DESIGN.md §6.11); there is room for one. |
 | `documentView` | Renders one `OpenFile` kind inside the editor area (`kind`, `component`, `hostClassName`, `keepMounted`). This is how Office panels attach — the editor area asks the registry, not a list of extensions. |
 | `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row; `category` puts it in its own QuickBar section. |
-| `dynamicCommands` | `{ key, build }` for commands whose *set* changes while the app runs — one row per saved layout, and one per recent workspace later. `build` is called only when `key()` changes, because the merged command list is read on every keystroke. **Dynamic commands never carry a chord**: a chord has to be static to be pinned by a test and to lose a `shortcuts.md` collision deterministically. |
+| `dynamicCommands` | `{ key, build }` for commands whose *set* changes while the app runs — one row per saved layout, one per recent workspace. `build` is called only when `key()` changes, because the merged command list is read on every keystroke. **Dynamic commands never carry a chord**: a chord has to be static to be pinned by a test and to lose a `shortcuts.md` collision deterministically. |
 | `shortcuts` | `{ commandId: ["Alt+X", …] }` — the tool's whole keymap in one block. A key that names no command of that tool fails `registry.test.ts` rather than silently binding nothing. Take an `Alt` chord only if the command earns it (see above). |
 | `statusContributions` | `{ region: "left" \| "center" \| "right", component }`. Rendered in registry order inside the region. |
 | `shortcutKinds` | `["shell"]` or `["prompt"]` — the `shortcuts.md` kinds this panel hosts. An entry of that kind brings this panel forward before it is inserted. |
 | `shortcutActions` | `{ layout: (body) => … }` — a `shortcuts.md` kind this tool *carries out* instead of inserting. Only one kind uses it today (`layout`), and only because moving panels is all it can do; if you are adding a kind that touches a file, a shell or an agent, you are breaking the rule that a workspace file may add rows and never actions (`docs/shortcuts.md`). |
 | `onDockReady` | The live `DockviewApi`, once, when the dock exists (and `null` when it goes away) — for a tool that operates on the dock rather than living in it. The layout system is the one; anything else should be reaching for `openPanel`. |
+| `onWorkspaceChanged` | The workspace root moved (M5 item 5): drop what this tool cached about the project that is gone and read the new one. Called *after* the app-wide reset, so the tree, the sessions and the editors are already the new workspace's. The Layouts tool is the first user — `layouts.json` is *in* the workspace, so a switch is a different file. If your tool reads anything out of `.workbench/`, it needs this, and the switcher must not have to know your tool exists. |
+| `workspaceSwitchGuard` | `{ held: () => string[], settle: () => Promise<string[]> }` — the *other* half of `onWorkspaceChanged`, asked **before** the root moves. `onWorkspaceChanged` is for state a tool can re-read; this is for state it cannot, because the user's work is sitting in something outside the browser. `held` names what would be stranded (file names, for the confirm dialog); `settle` resolves with what it could **not** settle, and a non-empty answer cancels the switch. The native Office host is the one: a real Word window is never a dirty buffer, and the panel that could say "it would not close" is exactly the one a switch unmounts. |
 | `when` | Takes the whole tool out: no panel, no commands, no status items. **Asked once**, when the registry is first derived, and remembered — gate on build- or boot-time facts (a flag, `isTauri()`). Anything that changes while the app runs belongs on a command's own `when` or inside the panel. |
 | `icon` | Optional glyph in the panel tab. |
 
@@ -140,8 +142,12 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
 **the pane id is the whole of what a restart gets back**. Three rules follow:
 
 - the key must still mean the same thing after a restart — `agent#<session_id>`,
-  `editors#<workspace-relative path>`, `terminal#<n>`. Changing what a key means renames
-  the user's saved arrangement, exactly as renaming a tool id does;
+  `editors#<workspace-relative path>`, `terminal#<n>`,
+  `conversations#<claude-project-key>`. Changing what a key means renames the user's
+  saved arrangement, exactly as renaming a tool id does. The conversation browser is
+  worth a look here: its key is *Claude Code's own encoded directory name* rather than a
+  path, because that encoding is lossy and the path is the thing we cannot reconstruct —
+  the key that persists is the one we know is true;
 - `key()` is a thunk and may be `async`, because minting one sometimes takes a round trip
   ("New agent session" creates the session, then binds the pane to its id). Answering
   `null` abandons the split rather than binding a pane to nothing;
@@ -166,6 +172,21 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
   session the server no longer has. The Agent pane waits for the session to appear live
   in the listing before it opens a socket, because a socket that reconnects behind a
   correct "this session is gone" note is a reconnect storm nobody can see.
+- **Opening a pane is one call.** `revealPane(toolId, key)`
+  (`ui/src/panels/Panes.tsx`) puts `toolId#key` on screen, or focuses the pane that
+  already shows it; a `null` key means the tool's own default pane. That second half is
+  not a nicety: the conversation browser opens agent panes, and "open this conversation"
+  must never clone the pane it is already in. Use it rather than reaching for
+  `dockApiHandle()` — placing panes belongs to the pane capability, and a second copy of
+  `addPanel` is how the two drift. It is the *open* gesture; `placeChoice` is the *split*
+  gesture, and the difference is what happens to a pane that already exists (focused
+  where it is, versus moved into the split you asked for).
+- **A plural tool's "open my panel" command must use it too.** `openPanel` deliberately
+  mints a *second* pane when a plural tool's default panel is already open — correct for
+  "give me another terminal", wrong for "show me the browser", which would hand the user
+  a duplicate every time they ran the command and persist its throwaway
+  `<tool>#<timestamp>` key into the saved layout as an instance binding that means
+  nothing. `revealPane(toolId, null)` is the version that focuses what is already there.
 - **A limit you know before the gesture belongs on the row.** `disabled: true` on an
   instance option greys it in the picker with `detail` as the reason, and the keyboard
   skips it (DESIGN.md §6.5). The agent's `New agent session` uses it: the server caps

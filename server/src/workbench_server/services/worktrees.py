@@ -113,6 +113,7 @@ from workbench_server.models.worktrees import (
     WorktreePoolState,
     WorktreeState,
 )
+from workbench_server.services.app_data import app_data_dir
 from workbench_server.services.event_bus import EventBus
 
 log = structlog.get_logger()
@@ -286,19 +287,6 @@ async def run_git(cwd: Path, args: Sequence[str], timeout_s: float) -> GitResult
 #: ``warn_unreachable`` would otherwise call the POSIX half of every branch below
 #: dead code on the Windows-only type-check this project runs.
 WINDOWS = sys.platform == "win32"
-
-
-def app_data_dir() -> Path:
-    """Machine-local Workbench state that is *not* the user's project.
-
-    ``%LOCALAPPDATA%`` on Windows, which is where a Windows-first app puts
-    working data it does not want roamed or backed up. Elsewhere it follows the
-    ``~/.workbench`` convention ``services/shortcuts.py`` already established.
-    """
-    local = os.environ.get("LOCALAPPDATA")
-    if WINDOWS and local:
-        return Path(local) / "Workbench"
-    return Path.home() / ".workbench"
 
 
 def normalized_path(text: str) -> Path:
@@ -497,6 +485,10 @@ class WorktreeService:
     ) -> None:
         self._workspace_root = workspace_root.resolve()
         self._bus = bus
+        #: Kept so a workspace switch can re-derive the default root without
+        #: overriding a root the operator named — an explicitly configured pool
+        #: root is one pool, whatever workspace it is serving.
+        self._pool_root_override = pool_root
         self._root = (pool_root or default_pool_root(self._workspace_root)).resolve()
         self._capacity = max(1, min(capacity, MAX_POOL_SIZE))
         self._lease_seconds = lease_seconds
@@ -575,6 +567,40 @@ class WorktreeService:
         """
         async with self._lock:
             self._pool_lock.release()
+
+    async def set_workspace_root(self, root: Path) -> None:
+        """Follow a workspace switch: a different project is a different pool.
+
+        The pool is keyed by the workspace it serves (``workspace_key``), and the
+        slots in it are checkouts of *that* repository. Carrying them across a
+        switch would hand an agent working on project B a worktree of project A —
+        the exact "data from the wrong project" failure the switch exists to
+        avoid — so this is a full stop/start: the cross-process lock on the old
+        root is released, the slot table is dropped, and ``start`` rediscovers
+        the repository and reconciles the new root against its disk.
+
+        Slots in the old pool are left exactly as they are. They are borrowed
+        checkouts with a lease, and nothing about the user opening another folder
+        says an agent has stopped working in one; the next server on that
+        workspace finds them where they were.
+        """
+        workspace_root, pool_root = self._rebased(root)
+        await self.stop()
+        async with self._lock:
+            self._workspace_root = workspace_root
+            self._root = pool_root
+            self._repo = None
+            self._slots = {}
+            self._problem = "the worktree pool has not been started"
+        await self.start()
+
+    def _rebased(self, root: Path) -> tuple[Path, Path]:
+        """The two roots a switch produces. Sync, for the same reason
+        :func:`normalized_path` is: ``Path.resolve`` is a blocking call and does
+        not belong in a coroutine, even when it is only touching a name."""
+        workspace_root = root.resolve()
+        pool_root = (self._pool_root_override or default_pool_root(workspace_root)).resolve()
+        return workspace_root, pool_root
 
     # ---- reading ------------------------------------------------------------
 

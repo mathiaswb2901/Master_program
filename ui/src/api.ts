@@ -5,6 +5,7 @@ import type {
   AcknowledgeRequest,
   ActivitySnapshot,
   CallbackResponse,
+  ConversationStore,
   CreateRequest,
   CreateSessionRequest,
   DirListing,
@@ -26,10 +27,12 @@ import type {
   SessionInfo,
   SessionLimits,
   ShortcutsState,
+  SwitchWorkspaceRequest,
   TranscriptResponse,
   TreeNode,
   UiState,
   UsageSnapshot,
+  WorkspaceState,
   WriteRequest,
   WriteResponse,
 } from "./types";
@@ -98,6 +101,12 @@ export const getActivity = (): Promise<ActivitySnapshot> => request("/api/activi
 
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
 
+export const getWorkspace = (): Promise<WorkspaceState> => request("/api/workspace");
+
+/** Re-root the server. 400 with the reason for a folder that cannot be served. */
+export const switchWorkspace = (body: SwitchWorkspaceRequest): Promise<WorkspaceState> =>
+  request("/api/workspace/switch", jsonInit("POST", body));
+
 export const putLayouts = (body: LayoutsState): Promise<OkResponse> =>
   request("/api/layouts", jsonInit("PUT", body));
 
@@ -118,6 +127,14 @@ export const getTranscript = (folder: string, sessionId: string): Promise<Transc
 
 export const putUiState = (body: UiState): Promise<unknown> =>
   request("/api/agents/ui-state", jsonInit("PUT", body));
+
+/** Every Claude conversation on this machine, grouped by the folder it ran in.
+ * `limit` bounds only the expensive half — everything that exists is counted,
+ * and the newest `limit` are read for their title and turn count. */
+export const getConversations = (limit?: number): Promise<ConversationStore> =>
+  request(
+    limit === undefined ? "/api/conversations" : `/api/conversations?limit=${String(limit)}`,
+  );
 
 export const getOfficeStatus = (): Promise<OfficeStatus> => request("/api/office/status");
 

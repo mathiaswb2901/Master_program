@@ -751,6 +751,38 @@ class SessionManager:
         log.info("agent.session_created", local_id=local_id, folder=folder_relative)
         return session
 
+    def set_workspace_root(self, root: Path) -> None:
+        """Follow a workspace switch. **Running sessions are not touched.**
+
+        A live session is a `claude` process with its own cwd, possibly mid-turn
+        and possibly holding an edit it has not written yet; the user opening
+        another folder says nothing about whether that agent has finished. So the
+        switch changes where *new* sessions are created and nothing else — the
+        conversations keep running, their sockets keep working (they are keyed by
+        session id, which no root enters into), and their transcripts stay where
+        the SDK put them.
+
+        What does change is how a survivor is *labelled*. ``folder_relative`` is
+        a path relative to the workspace, and after a switch a session started in
+        ``src`` of the old project would be listed under the new project's
+        ``src`` — the same group as a folder it has nothing to do with. So a
+        session whose folder is no longer inside the root is relabelled with its
+        own absolute path, which cannot collide with any relative folder and
+        reads, in the session list, as the other project it belongs to.
+        """
+        self._root = root.resolve()
+        for session in self._sessions.values():
+            session.folder_relative = self._label_for(session.folder)
+
+    def _label_for(self, folder: Path) -> str:
+        """``folder`` as ``SessionInfo.folder``: workspace-relative when it is
+        inside the workspace, its own absolute path when it is not."""
+        if folder == self._root:
+            return ""
+        if self._root in folder.parents:
+            return folder.relative_to(self._root).as_posix()
+        return folder.as_posix()
+
     def get(self, local_id: str) -> AgentSession | None:
         return self._sessions.get(local_id)
 
@@ -766,6 +798,21 @@ class SessionManager:
         for session in self._sessions.values():
             ids |= session.sdk_session_ids
         return ids
+
+    def live_by_sdk_id(self) -> dict[str, str]:
+        """SDK transcript id -> the local id of the live session continuing it.
+
+        :meth:`live_sdk_ids` answers "is this transcript already open"; this
+        answers "and *where*". The conversation browser needs the second one:
+        resuming a conversation that is already running would fork it into a
+        second session with the same history, so the browser focuses the pane it
+        is already in instead (a pane's identity is its local session id).
+        """
+        return {
+            sdk_id: session.local_id
+            for session in self._sessions.values()
+            for sdk_id in session.sdk_session_ids
+        }
 
     async def close_all(self) -> None:
         """Close every session, isolating each one.
