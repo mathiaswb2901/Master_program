@@ -78,13 +78,24 @@ async function savedLayouts(page: Page): Promise<string[]> {
   return names;
 }
 
-/** Command-palette row titles, for the `shortcuts.md` assertion. */
+/**
+ * Command-palette row titles, for the `shortcuts.md` assertion.
+ *
+ * Escape is sent **to the input**, not to the page, and that is not a detail:
+ * the QuickBar handles Escape in the input's own `onKeyDown`, so a page-level
+ * press only closes it while that input happens to hold focus. Every other spec
+ * that dismisses this overlay has typed into it first (`quickbar.spec.ts`,
+ * `panes.spec.ts`) and so focuses it without meaning to; this helper only ever
+ * read rows, and dismissing it from the page was flaky here for that reason.
+ * Whether a palette opened by its chord should be guaranteed focused is the
+ * QuickBar's own question, and `quickbar.spec.ts` is where it belongs.
+ */
 async function commandTitles(page: Page): Promise<string[]> {
   await page.keyboard.press("Control+Shift+P");
   const palette = page.getByRole("dialog", { name: "Quick open" });
   await expect(palette).toBeVisible();
   const titles = await palette.locator(".wb-qb-row-title").allInnerTexts();
-  await page.keyboard.press("Escape");
+  await palette.locator(".wb-qb-input").press("Escape");
   await expect(palette).toBeHidden();
   return titles;
 }
