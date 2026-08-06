@@ -20,10 +20,17 @@ const mocks = vi.hoisted(() => ({
     shortcuts: [] as unknown[],
     runShortcut: () => undefined,
   },
+  /** Every selector handed to `useStore` — i.e. every subscription taken out.
+   * The node suite has no DOM to re-render, so this is where a hook's *claim*
+   * to be live is checked: see the `useVisibleCommands` test. */
+  selectors: [] as ((state: unknown) => unknown)[],
 }));
 
 vi.mock("./store", () => ({
-  useStore: Object.assign(() => undefined, { getState: () => mocks.state }),
+  useStore: Object.assign((select?: (state: unknown) => unknown) => {
+    if (select !== undefined) mocks.selectors.push(select);
+    return undefined;
+  }, { getState: () => mocks.state }),
   emptyPlanDraft: () => ({
     choices: {},
     notes: {},
@@ -52,8 +59,14 @@ vi.mock("./monaco", () => ({
   prefetchMonaco: () => undefined,
 }));
 
-const { allCommands, builtinCommands, GLOBAL_COMMANDS, mergeCommands, visibleCommands } =
-  await import("./commands");
+const {
+  allCommands,
+  builtinCommands,
+  GLOBAL_COMMANDS,
+  mergeCommands,
+  useVisibleCommands,
+  visibleCommands,
+} = await import("./commands");
 
 const press = (key: string, mods: Partial<KeyLike> = {}): KeyLike => ({
   key,
@@ -95,6 +108,7 @@ function expectRegistryInvariants(commands: readonly Command[]): void {
 
 beforeEach(() => {
   mocks.state.shortcuts = [];
+  mocks.selectors.length = 0;
 });
 
 describe("command registry", () => {
@@ -249,6 +263,28 @@ describe("shortcuts.md extension", () => {
     const dynamic = allCommands().filter((command) => command.id.startsWith("layout.apply."));
     expect(dynamic.length).toBeGreaterThan(0);
     for (const command of dynamic) expect(command.keys).toBeUndefined();
+  });
+
+  /**
+   * The registry grows *after* launch — the file is fetched once the window is
+   * already up, and re-fetched every time the watcher sees it change — so a
+   * surface that reads the list without subscribing to it shows whatever was
+   * registered the moment it rendered and never repairs itself. That is a bug
+   * a user meets as a QuickBar opened during launch with their own commands
+   * missing from it, and (measured) as an `Alt` chord from `shortcuts.md` that
+   * does nothing for the first moments of a page.
+   *
+   * Asserted on the selector rather than on a re-render: this suite is
+   * node-only, so what can be checked here is that the hook really hands
+   * zustand the slice that changes when the entries do — the subscription is
+   * the fix, and a `getState()` read dressed up as a hook would pass any
+   * assertion made on the returned list alone.
+   */
+  it("subscribes a React surface to the entries rather than sampling them", () => {
+    mocks.state.shortcuts = [entry({ name: "Fleet view" })];
+    expect(useVisibleCommands().map((command) => command.title)).toContain("Fleet view");
+    expect(mocks.selectors).toHaveLength(1);
+    expect(mocks.selectors[0]?.(mocks.state)).toBe(mocks.state.shortcuts);
   });
 
   it("binds a free chord to a shortcut", () => {
