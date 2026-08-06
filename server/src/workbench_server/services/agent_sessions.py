@@ -767,6 +767,21 @@ class SessionManager:
             ids |= session.sdk_session_ids
         return ids
 
+    def live_by_sdk_id(self) -> dict[str, str]:
+        """SDK transcript id -> the local id of the live session continuing it.
+
+        :meth:`live_sdk_ids` answers "is this transcript already open"; this
+        answers "and *where*". The conversation browser needs the second one:
+        resuming a conversation that is already running would fork it into a
+        second session with the same history, so the browser focuses the pane it
+        is already in instead (a pane's identity is its local session id).
+        """
+        return {
+            sdk_id: session.local_id
+            for session in self._sessions.values()
+            for sdk_id in session.sdk_session_ids
+        }
+
     async def close_all(self) -> None:
         """Close every session, isolating each one.
 

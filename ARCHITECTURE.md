@@ -317,6 +317,7 @@ in-process calls where the model and the user dominate.
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
+| `routers/conversations.py` | `GET /api/conversations` (Claude Code's whole transcript store, grouped by folder) |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `routers/activity.py` | `GET /api/activity` (the fleet's live tool calls) |
@@ -331,7 +332,8 @@ in-process calls where the model and the user dominate.
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
-| `services/session_index.py` | per-folder history from Claude Code's storage |
+| `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
+| `services/conversations.py` | the whole store, browsable: enumerate + mtime-cached reads, lossy-key resolution, the workspace jail |
 | `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
@@ -618,7 +620,33 @@ item 3, PR 5).
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage
 (`session_index.py`), so CLI sessions and Workbench sessions share one history,
-grouped per folder.
+grouped per folder. **Read-only, and browsable whole** — `services/conversations.py`
+walks the entire store rather than the one folder a session is bound to, which is
+what the Conversations panel renders (M5 item 12, half A).
+
+Three properties make that safe to open on a whim, and each is a constraint rather
+than a nicety. **Nothing writes.** A test watches every byte and mtime under the store
+across a browse and fails on any change; there is no delete path at all. **The cheap
+pass and the expensive one are separate.** Enumeration is one `os.scandir` per project
+directory — 17 directories and 80 transcripts measured at 1.8 ms — and yields
+everything ordering and counting need; reading a transcript for its title and turn
+count is a full pass (1.28 s for all 80, 398 MB, cold) and is therefore both bounded by
+`?limit=` (the newest N are *read*; every conversation is still listed, with the unread
+ones carrying `read: false` — a limit that dropped rows would drop whole folders) and
+cached against each file's `(mtime_ns, size)`, so a second browse of an unchanged store
+is enumeration only (93 ms including folder resolution). Append-only transcripts are
+what make that pair a sound invalidation. The scan runs in a thread; the router does
+nothing else. **What cannot be known is named.** `encode_project_dir` is lossy and not
+reversible (`C:\a\b` and `C:/a-b` collide), so a display path is *matched* against
+directories that exist — descending from the workspace, then home, then the filesystem
+anchors, pruned by the file tree's own ignore rules — and the raw encoded key is shown
+whenever nothing matches, never a reconstructed path. A transcript that will not parse
+keeps its row and carries the reason.
+
+Half A opens only what is inside the workspace jail. A conversation from a folder
+outside it is listed with its reason on screen rather than hidden — opening one needs
+the multi-root roots (M5 item 5/6), and until then knowing the conversation exists is
+most of what the browser is for.
 
 ## Provenance
 
@@ -1350,10 +1378,18 @@ Format spec: `docs/shortcuts.md`.
    flight* — the `slow tool` trigger exists for exactly that — the line replaced
    in place when it settles, the file target opening the file, three
    conversations changing at their own rhythms, and a Grep-heavy turn that
-   leaves a capped row rather than a growing one). The two states no browser
-   journey can reach in time — a quarter-hour-old usage snapshot, and four
-   sessions all mid-tool-call at the same instant — are `renderToStaticMarkup`
-   tests instead (`ui/src/panels/UsagePanel.test.tsx`,
+   leaves a capped row rather than a growing one). Journey 11 adds the
+   **conversation browser**: the suite seeds `.claude-projects` with one
+   transcript per case the browser has to tell apart (inside the workspace,
+   outside it, a folder that no longer exists, one that will not parse), then
+   asserts the folder groups render, that search filters across titles *and*
+   folder names, that a refused folder is *shown* with its reason, that a row
+   resumes into an agent pane carrying its history, that opening the same row
+   twice focuses that pane rather than cloning it, and that two browser panes —
+   one scoped to a folder, one not — stay independent through a reload. The two
+   states no browser journey can reach in time — a quarter-hour-old usage
+   snapshot, and four sessions all mid-tool-call at the same instant — are
+   `renderToStaticMarkup` tests instead (`ui/src/panels/UsagePanel.test.tsx`,
    `ui/src/panels/ActivityPanel.test.tsx`).
    Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.
