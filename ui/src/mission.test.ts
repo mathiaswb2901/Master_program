@@ -40,6 +40,7 @@ function activity(id: string, patch: Partial<SessionActivity> = {}): SessionActi
     session_id: id,
     folder: "",
     title: `session ${id}`,
+    kind: "chat",
     entries: [],
     dropped: 0,
     active_at: T,
@@ -142,6 +143,14 @@ describe("building a card", () => {
     // board that waited for a tool call would show an empty window for the
     // first seconds of every session.
     expect(cards({ sessions: [activity("a")] })).toHaveLength(1);
+  });
+
+  it("reads an orchestrator's kind from the activity feed, before it spawns", () => {
+    // The whole point of carrying `kind` on the fleet's per-session identity: a
+    // freshly-started orchestrator has no worker roster and no pending prompt,
+    // so the board would otherwise read it as an ordinary chat until it acted.
+    const [card] = cards({ sessions: [activity("boss", { kind: "orchestrator" })] });
+    expect(card?.kind).toBe("orchestrator");
   });
 
   it("keeps a stopped worker's card while its orchestrator still lists it", () => {

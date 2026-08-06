@@ -28,10 +28,11 @@
  * split `panes.spec.ts` and `activity.spec.ts` make).
  */
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
 import { installTelemetry, record, sampleFrames } from "./instrument";
+import { test } from "./window";
 
 /** Must match `STORM_TOOL_CALLS` in `services/fake_agent.py`. */
 const STORM_TOOL_CALLS = 40;

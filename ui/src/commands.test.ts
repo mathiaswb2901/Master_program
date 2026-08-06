@@ -176,6 +176,7 @@ describe("command registry", () => {
       "activity.open",
       // Mission Control after both, because it is the board *over* them.
       "mission.open",
+      "mission.newOrchestrator",
       // The two tools that arrange panels rather than being one, in the order
       // `tools.ts` lists them: Panes splits the window, Layouts remembers it.
       "pane.split.right",

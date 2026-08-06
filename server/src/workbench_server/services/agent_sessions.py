@@ -153,7 +153,9 @@ class ActivityObserver(Protocol):
     fleet rather than as an empty panel.
     """
 
-    def note_session(self, *, session_id: str, title: str, folder: str) -> None: ...
+    def note_session(
+        self, *, session_id: str, title: str, folder: str, kind: SessionKind = "chat"
+    ) -> None: ...
 
     def note_tool_started(
         self,
@@ -558,7 +560,10 @@ class AgentSession:
             # stay stale until the turn happens to call a tool.
             if self._activity_observer is not None:
                 self._activity_observer.note_session(
-                    session_id=self.local_id, title=self.title, folder=self.folder_relative
+                    session_id=self.local_id,
+                    title=self.title,
+                    folder=self.folder_relative,
+                    kind=self.kind,
                 )
         self._turn_task = asyncio.create_task(self._run_turn(text))
 
@@ -866,6 +871,7 @@ class SessionManager:
                 session_id=local_id,
                 title=session.title or FALLBACK_TITLE,
                 folder=folder_label,
+                kind=session.kind,
             )
         log.info("agent.session_created", local_id=local_id, folder=folder_label, kind=kind)
         return session

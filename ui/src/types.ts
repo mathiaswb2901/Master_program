@@ -263,6 +263,10 @@ export interface SessionActivity {
   session_id: string;
   folder: string;
   title: string;
+  /** What kind of session this is. Carried on the fleet's per-session identity
+   * so Mission Control can tell an orchestrator from a chat before it has run a
+   * tool — mirrors `SessionActivity.kind` in `models/activity.py`. */
+  kind: SessionKind;
   /** Newest first, capped. Ordered by when each call *started*; a settle
    * patches an entry where it stands rather than moving it. */
   entries: ActivityEntry[];

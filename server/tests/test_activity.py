@@ -214,6 +214,18 @@ def test_a_session_that_has_run_nothing_is_still_a_row(tmp_path: Path) -> None:
     assert row.entries == []
     assert row.title == "new session"
     assert row.folder == "src"
+    # A plain chat by default — the kind is only news for an orchestrator.
+    assert row.kind == "chat"
+
+
+def test_a_sessions_kind_rides_the_row_from_creation(tmp_path: Path) -> None:
+    """Mission Control tells an orchestrator from a chat off the activity feed,
+    before either has run a tool or raised a prompt — so the kind has to be on
+    the row the moment the session is created, not derived from later activity.
+    """
+    svc, _ = service(tmp_path)
+    svc.note_session(session_id="boss", title="run the crew", folder="", kind="orchestrator")
+    assert svc.snapshot().sessions[0].kind == "orchestrator"
 
 
 def test_naming_a_session_twice_with_the_same_title_costs_no_frame(tmp_path: Path) -> None:

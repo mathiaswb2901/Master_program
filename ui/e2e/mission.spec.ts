@@ -30,7 +30,7 @@
 
 import { expect, request, test, type Locator, type Page } from "@playwright/test";
 
-import { openApp, sendChat } from "./app";
+import { openApp } from "./app";
 
 /** The fake orchestrator's triggers (`services/fake_agent.py`). Each really
  * calls the real service — a refusal would be reported as a refusal. */
@@ -55,6 +55,22 @@ function cards(page: Page): Locator {
 /** Cards that are workers, which is what a crew is made of. */
 function workerCards(page: Page): Locator {
   return page.locator('.wb-mission .wb-mission-card[data-kind="worker"]');
+}
+
+/** Drive the orchestrator the way a user does from the board: click its card to
+ * open its chat, then type into the pane that click just focused. Starting an
+ * orchestrator leaves *two* agent panes on screen — the default one and the
+ * orchestrator's own — so a bare `.wb-chat-input textarea` is two elements and
+ * the send has to name which pane it means (`.dv-active-group`, the same scope
+ * `panes.spec.ts` uses; CLAUDE.md forbids an unscoped pane-internal locator). */
+async function sendToOrchestrator(page: Page, text: string): Promise<void> {
+  await page.locator('.wb-mission-card[data-kind="orchestrator"] .wb-mission-title').click();
+  const input = page.locator(".dv-active-group .wb-chat-input textarea");
+  await input.fill(text);
+  await input.press("Enter");
+  await expect(
+    page.locator(".dv-active-group .wb-msg-user").filter({ hasText: text }),
+  ).toBeVisible();
 }
 
 /** Leave the workspace with the arrangement every other journey expects. The
@@ -112,7 +128,7 @@ test("mission control: a crew, on one board", async ({ page }) => {
   });
 
   await test.step("it spawns two workers, each in a worktree of its own", async () => {
-    await sendChat(page, SPAWN_PROMPT);
+    await sendToOrchestrator(page, SPAWN_PROMPT);
     await expect(workerCards(page)).toHaveCount(2, { timeout: 30_000 });
 
     // A slot each. Two workers in one checkout is exactly the failure the pool
@@ -203,8 +219,8 @@ test("mission control: a crew, on one board", async ({ page }) => {
     // Nothing is left waiting on the user, so the reading hides again (§6.7).
     await expect(page.getByTestId("mission-status")).toHaveCount(0);
     // And the orchestrator's own tool path agrees the crew is gone.
-    await sendChat(page, REAP_PROMPT);
-    await expect(page.locator(".wb-chat")).toContainText("reaped 0 worker(s)", {
+    await sendToOrchestrator(page, REAP_PROMPT);
+    await expect(page.locator(".dv-active-group .wb-chat")).toContainText("reaped 0 worker(s)", {
       timeout: 30_000,
     });
   });

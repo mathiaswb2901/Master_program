@@ -198,7 +198,7 @@ def budget(**overrides: Any) -> OrchestratorBudget:
         "max_fleet_cost_usd": 20.0,
     }
     base.update(overrides)
-    return OrchestratorBudget(**base)  # type: ignore[arg-type]
+    return OrchestratorBudget(**base)
 
 
 class Fleet:
@@ -262,6 +262,11 @@ async def settle() -> None:
         await asyncio.sleep(0.02)
 
 
+def _is_dir(path: str) -> bool:
+    """A sync wrapper so an async test may ask the filesystem a question."""
+    return Path(path).is_dir()
+
+
 # ---- spawn, list, read, send, stop ------------------------------------------
 
 
@@ -273,8 +278,8 @@ async def test_spawn_binds_a_worker_to_its_own_worktree_slot(fleet: Fleet) -> No
     assert isinstance(first, WorkerInfo)
     assert isinstance(second, WorkerInfo)
     assert first.slot != second.slot
-    assert Path(first.path).is_dir()
-    assert Path(second.path).is_dir()
+    assert _is_dir(first.path)
+    assert _is_dir(second.path)
     # And each really is a *session*, in that directory — the board's card, the
     # activity row and the agent pane all key off this same id.
     assert fleet.sessions.get(first.worker_id) is not None
@@ -381,9 +386,12 @@ def test_a_worker_gets_no_shell_and_no_orchestrator_toolset() -> None:
     a budget attached.
     """
     for kind in ("chat", "orchestrator", "worker"):
-        names = allowed_tool_names(kind)  # type: ignore[arg-type]
+        names = allowed_tool_names(kind)
         assert not any("Bash" in name for name in names)
-    names_of = lambda kind: [spec.name for spec in tools_for(kind)]  # noqa: E731
+
+    def names_of(kind: SessionKind) -> list[str]:
+        return [spec.name for spec in tools_for(kind)]
+
     assert names_of("worker") == names_of("chat")
     assert set(names_of("orchestrator")) > set(names_of("chat"))
     # And the five extra tools are exactly the orchestrator's.

@@ -66,6 +66,7 @@ function activity(id: string, summary: string, running = true): SessionActivity 
     session_id: id,
     folder: "",
     title: `session ${id}`,
+    kind: "chat",
     entries: [
       {
         entry_id: `${id}-1`,

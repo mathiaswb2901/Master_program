@@ -63,6 +63,7 @@ from workbench_server.models.activity import (
     SessionActivity,
     SessionActivityEvent,
 )
+from workbench_server.models.agents import SessionKind
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.provenance import workspace_relative
 
@@ -163,6 +164,7 @@ class _Window:
     folder: str
     title: str
     active_at: float
+    kind: SessionKind = "chat"
     entries: OrderedDict[str, ActivityEntry] = field(default_factory=OrderedDict)
     dropped: int = 0
 
@@ -172,6 +174,7 @@ class _Window:
             session_id=self.session_id,
             folder=self.folder,
             title=self.title,
+            kind=self.kind,
             entries=list(reversed(self.entries.values())),
             dropped=self.dropped,
             active_at=self.active_at,
@@ -255,24 +258,31 @@ class ActivityService:
 
     # ---- the signal, from the two call sites that build the chat frames -----
 
-    def note_session(self, *, session_id: str, title: str, folder: str) -> None:
+    def note_session(
+        self, *, session_id: str, title: str, folder: str, kind: SessionKind = "chat"
+    ) -> None:
         """A session exists (or has just been named).
 
         Called when a session is created and again when its first message
         derives its title, so the fleet view lists a session that has not run a
         tool yet — an idle fleet is the common case and "three sessions open,
         none touching anything" is a reading, while an empty panel is not.
+
+        ``kind`` is stamped once, at creation: it is what lets Mission Control
+        tell an orchestrator from a chat before either has run a tool.
         """
         # Stamped now, applied on the loop: the row's age is when the session was
         # created, not whenever the loop next gets a slice.
         at = self._clock()
-        self._dispatch(lambda: self._apply_session(session_id, title, folder, at))
+        self._dispatch(lambda: self._apply_session(session_id, title, folder, kind, at))
 
-    def _apply_session(self, session_id: str, title: str, folder: str, at: float) -> None:
+    def _apply_session(
+        self, session_id: str, title: str, folder: str, kind: SessionKind, at: float
+    ) -> None:
         window = self._windows.get(session_id)
         if window is None:
             self._windows[session_id] = _Window(
-                session_id=session_id, folder=folder, title=title, active_at=at
+                session_id=session_id, folder=folder, title=title, kind=kind, active_at=at
             )
         elif window.title == title:
             return  # nothing a client would render differently

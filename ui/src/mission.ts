@@ -141,9 +141,13 @@ export function buildCards(input: {
     const worker = workers.get(sessionId) ?? null;
     const prompts = promptsById.get(sessionId);
     // A worker's kind is known from the roster even when the activity feed has
-    // no row for it yet; the prompt frame carries a kind too, and both beat the
-    // default because the default is "an ordinary chat".
-    const kind: SessionKind = worker !== null ? "worker" : (prompts?.kind ?? "chat");
+    // no row for it yet; otherwise the activity feed carries it — that feed is
+    // the fleet's per-session identity from the moment a session is created, so
+    // an orchestrator reads as one before it has spawned a worker or raised a
+    // prompt. The prompt frame is the fallback for a card this window heard of
+    // through a prompt before the feed, and "an ordinary chat" is the default.
+    const kind: SessionKind =
+      worker !== null ? "worker" : (activity?.kind ?? prompts?.kind ?? "chat");
     const running = activity?.entries.some((entry) => entry.settled_at === null) === true;
     cards.push({
       sessionId,
