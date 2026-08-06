@@ -25,7 +25,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api";
-import { hostAppKind, physicalRect, useOfficeHostStore } from "../officeHost";
+import { fileNameOf, hostAppKind, physicalRect, useOfficeHostStore } from "../officeHost";
 import type { WorkbenchTool } from "../registry";
 import { useStore, type OpenFile } from "../store";
 import type { HostAppKind, HostReason, OfficeHostInfo, PanelRect } from "../types";
@@ -350,6 +350,34 @@ export const officeHostTool: WorkbenchTool = {
     // Same reason as OnlyOffice, one layer deeper: a tab switch must not tear
     // a native window down and start Word again.
     keepMounted: true,
+  },
+  /**
+   * A docked Word is not a buffer, and this is where that difference is paid.
+   *
+   * The dirty-buffer guard cannot see this document — an `office` open file is
+   * never marked dirty, because the unsaved paragraph is inside Word and not
+   * inside anything this app models — so without a guard here a switch would
+   * unmount the panel, fire a close nobody waited for, and leave the user with
+   * a Word window on their desktop that the UI can no longer say anything
+   * about. Settling *before* the root moves keeps this panel mounted for
+   * exactly as long as it might have something to report.
+   */
+  workspaceSwitchGuard: {
+    held: () => useOfficeHostStore.getState().live().map(fileNameOf),
+    settle: () => useOfficeHostStore.getState().closeLive(),
+  },
+  /**
+   * The root moved. `hosts` is keyed by workspace-*relative* path, so every key
+   * in it now names a file in a project this window has left.
+   *
+   * Reached on both paths and it has to work on both: the window that asked has
+   * already settled its hosts through the guard above, but a window that merely
+   * *heard* about the switch has not — its documents were closed by the store's
+   * reset, and this drains those closes before clearing so a late response
+   * cannot re-seed the map with a path from the old workspace.
+   */
+  onWorkspaceChanged: () => {
+    void useOfficeHostStore.getState().resetForWorkspace();
   },
   statusContributions: [{ region: "right", component: OfficeHostStatus }],
   commands: [

@@ -32,7 +32,9 @@ vi.mock("./store", () => ({
 
 vi.mock("./tools", () => ({ TOOLS: [] }));
 
-const { looksLikeAbsolutePath, workspaceRows } = await import("./panels/Workspaces");
+const { looksLikeAbsolutePath, switchWarning, workspaceRows } = await import(
+  "./panels/Workspaces"
+);
 
 function state(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -115,5 +117,30 @@ describe("workspaceRows", () => {
 
   it("renders nothing but the openers before the first read lands", () => {
     expect(workspaceRows(null, "").map((row) => row.key)).toEqual(["browse"]);
+  });
+});
+
+describe("what the confirm dialog says", () => {
+  it("describes a dirty buffer as something that cannot be saved after", () => {
+    const message = switchWarning(["bid.py"], []);
+    expect(message).toContain("1 file has unsaved changes: bid.py");
+    expect(message).toContain("cannot be saved");
+    expect(message).not.toContain("Office");
+  });
+
+  it("describes a docked document as a real window that gets closed", () => {
+    // Not "unsaved changes": this app does not know whether Word has any, and
+    // saying it does would be a claim it cannot make. What it *can* say is what
+    // the switch will do to the window.
+    const message = switchWarning([], ["report.docx"]);
+    expect(message).toContain("1 document is open in Office: report.docx");
+    expect(message).toContain("closes the real window");
+    expect(message).not.toContain("unsaved changes");
+  });
+
+  it("says both when both are at risk, and agrees with itself about number", () => {
+    const message = switchWarning(["bid.py", "notes.md"], ["a.docx", "b.xlsx"]);
+    expect(message).toContain("2 files have unsaved changes: bid.py, notes.md");
+    expect(message).toContain("2 documents are open in Office: a.docx, b.xlsx");
   });
 });

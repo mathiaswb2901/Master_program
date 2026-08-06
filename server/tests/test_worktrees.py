@@ -49,9 +49,11 @@ from workbench_server.models.worktrees import (
     WorktreeInfo,
     WorktreePool,
 )
+from workbench_server.services import worktrees as worktrees_service
 from workbench_server.services.app_data import app_data_dir
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
+from workbench_server.services.workspaces import RecentsStore, WorkspaceService
 from workbench_server.services.worktrees import (
     DISCARD_FAILED_DETAIL,
     POOL_LOCK_FILE,
@@ -63,6 +65,7 @@ from workbench_server.services.worktrees import (
     GitRunner,
     LeaseError,
     PoolExhaustedError,
+    PoolLock,
     PoolUnavailableError,
     SlotNotFoundError,
     WorktreeService,
@@ -112,11 +115,10 @@ def _commit(repo: Path, message: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    """A real repository with two commits, so a reset has something to do."""
-    root = tmp_path / "project"
-    root.mkdir()
+def _make_repo(root: Path, *, marker: str = "model.py") -> Path:
+    """A real repository at ``root``. A function as well as a fixture because
+    the workspace-switch test needs a *second* one to switch to."""
+    root.mkdir(parents=True)
     _git(root, "init", "-b", "main")
     _git(root, "config", "user.email", "test@workbench.invalid")
     _git(root, "config", "user.name", "Workbench Test")
@@ -125,10 +127,16 @@ def repo(tmp_path: Path) -> Path:
     # a CRLF checkout against an LF literal. The pool does not care either way;
     # the fixture does.
     _git(root, "config", "core.autocrlf", "false")
-    (root / "model.py").write_bytes(b"VERSION = 1\n")
+    (root / marker).write_bytes(b"VERSION = 1\n")
     (root / ".gitignore").write_bytes(b"node_modules/\n")
     _commit(root, "first")
     return root
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A real repository with two commits, so a reset has something to do."""
+    return _make_repo(tmp_path / "project")
 
 
 @pytest.fixture
@@ -1016,6 +1024,73 @@ async def test_a_second_server_on_one_workspace_does_not_serve_the_pool(
 
     assert third.snapshot().problem is None
     assert [slot.slot for slot in third.snapshot().slots] == [held.slot]
+
+
+# ---- following a workspace switch -------------------------------------------
+
+
+async def test_a_workspace_switch_re_roots_the_pool_and_hands_back_its_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pool is the most involved of the services a switch re-roots.
+
+    Every other one copies a path and re-derives a filename from it; this one
+    releases a cross-process lock, drops the slot table, re-derives its root from
+    the *workspace key*, and rediscovers a git repository. So it is asserted
+    through the real :class:`WorkspaceService`, the same way the sync rootables
+    are in ``test_workspaces.py`` — the failure this catches is an agent asking
+    for a checkout of the project it is in and being handed a worktree of the one
+    the user left.
+
+    No ``pool_root`` is passed, deliberately: the derivation is the part a switch
+    exercises, and a test that pinned the root would assert nothing about it.
+    """
+    monkeypatch.setattr(worktrees_service, "app_data_dir", lambda: tmp_path / "appdata")
+    alpha = _make_repo(tmp_path / "alpha", marker="alpha.py")
+    beta = _make_repo(tmp_path / "beta", marker="beta.py")
+
+    bus = EventBus()
+    pool = WorktreeService(alpha, bus)
+    _LIVE.append(pool)
+    await pool.start()
+    workspace = Workspace(alpha)
+    switcher = WorkspaceService(
+        workspace,
+        bus,
+        sync_rootables=[],
+        async_rootables=[pool],
+        explicit=False,
+        recents=RecentsStore(tmp_path / "recents"),
+    )
+
+    alpha_pool_root = pool.root
+    held = await pool.acquire(_acquire())
+    assert pool.repo == alpha.resolve()
+    assert [slot.slot for slot in pool.snapshot().slots] == [held.slot]
+
+    await switcher.switch(str(beta))
+
+    # The root followed, and it is the one the *new* workspace's key derives —
+    # a different folder, not the old one reused under a new name.
+    assert pool.root == default_pool_root(beta.resolve())
+    assert pool.root != alpha_pool_root
+    # The repository was rediscovered, and the slot table dropped: alpha's
+    # checkout is not offered to anyone working in beta.
+    assert pool.repo == beta.resolve()
+    assert pool.snapshot().repo == str(beta.resolve())
+    assert pool.snapshot().slots == []
+    assert pool.snapshot().problem is None
+    # Alpha's own slot is still on disk where its agent left it — a switch is
+    # not a reason to reclaim a borrowed checkout (see `set_workspace_root`).
+    assert _is_dir(held.path)
+
+    # The cross-process lock followed too, which is the part that decides whether
+    # a *second* server can serve the workspace we left. Probed by taking it.
+    probe = PoolLock()
+    assert probe.acquire(alpha_pool_root) is None, "alpha's pool lock was never handed back"
+    probe.release()
+    blocked = PoolLock().acquire(pool.root)
+    assert blocked is not None and "another process" in blocked
 
 
 # ---- the pool root is not the workspace -------------------------------------

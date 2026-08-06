@@ -67,6 +67,15 @@ export const DOCX_FILE = "sample.docx";
  */
 export const DOCX_ALREADY_OPEN = "sample-already-open.docx";
 export const DOCX_REFUSES_EMBED = "sample-refuse-embed.docx";
+/**
+ * The document that docks and then will not quit — the `close_failed` window,
+ * sitting on the desktop with an unsaved edit in it.
+ *
+ * Journey 10 uses it: a workspace switch has to *stop* for this, because the
+ * only surface that can say a real Word window was left behind is the panel the
+ * switch would have unmounted.
+ */
+export const DOCX_REFUSES_CLOSE = "sample-refuse-close.docx";
 /** A deck, for the one application v1 deliberately does not dock. */
 export const PPTX_FILE = "slides.pptx";
 /** Body of the working shell shortcut; the terminal journey asserts this text
@@ -129,7 +138,13 @@ function seed(root: string): void {
   // backend with no Document Server configured, so nothing ever reads a byte of
   // these — three of them are named to choose a branch of the host lifecycle,
   // and the fourth is the application v1 will not dock.
-  for (const name of [DOCX_FILE, DOCX_ALREADY_OPEN, DOCX_REFUSES_EMBED, PPTX_FILE]) {
+  for (const name of [
+    DOCX_FILE,
+    DOCX_ALREADY_OPEN,
+    DOCX_REFUSES_EMBED,
+    DOCX_REFUSES_CLOSE,
+    PPTX_FILE,
+  ]) {
     fs.writeFileSync(path.join(root, name), "not a real document\n", "utf-8");
   }
   fs.mkdirSync(path.join(root, ".workbench"));

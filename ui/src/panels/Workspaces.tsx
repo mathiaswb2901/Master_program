@@ -30,13 +30,29 @@
  * live agent sessions keep running — a PTY is a shell that was never inside the
  * path jail, and an agent may be mid-turn — and a dirty buffer blocks the switch
  * rather than being discarded.
+ *
+ * **And one thing it does not know how to ask about itself.** A docked Word or
+ * Excel window is unsaved work that is not a buffer: an `office` open file is
+ * never marked dirty, because the paragraph nobody has saved is inside Word.
+ * Tools that hold something like that declare a `workspaceSwitchGuard`
+ * (`registry.ts`), which this asks before the prompt and settles before the
+ * root moves — so the panel that could say "Word would not close" is still on
+ * screen at the moment that becomes true. The switcher names no capability
+ * here, for the same reason `onWorkspaceChanged` exists rather than a call to
+ * Layouts.
  */
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { create } from "zustand";
 
 import * as api from "../api";
-import { notifyWorkspaceChanged, type ToolCommand, type WorkbenchTool } from "../registry";
+import {
+  heldAcrossWorkspaceSwitch,
+  notifyWorkspaceChanged,
+  settleBeforeWorkspaceSwitch,
+  type ToolCommand,
+  type WorkbenchTool,
+} from "../registry";
 import { canPickDirectory, pickDirectory } from "../shell";
 import { useStore, type QuickPickRow } from "../store";
 import { TOOLS } from "../tools";
@@ -164,6 +180,17 @@ async function performSwitch(path: string): Promise<void> {
   if (useWorkspaceUi.getState().busy) return;
   useWorkspaceUi.setState({ busy: true });
   try {
+    // Guarded tools get the last word, on every path into here — including the
+    // one that asked nothing because there were no dirty buffers. Something
+    // that will not settle (a Word window that refused to close, with the
+    // user's edits still in it) cancels the switch rather than being reported
+    // after the fact: the panel that can explain it is still mounted only while
+    // this window is still in the workspace that owns it.
+    const stranded = await settleBeforeWorkspaceSwitch(TOOLS);
+    if (stranded.length > 0) {
+      toast("error", `Staying here: ${stranded.join(", ")} could not be closed.`);
+      return;
+    }
     const state = await api.switchWorkspace({ path });
     await adopt(state);
     toast("success", `Workspace: ${state.name}`);
@@ -178,6 +205,27 @@ async function performSwitch(path: string): Promise<void> {
 }
 
 /**
+ * Everything at risk from a switch, named the way the user names it.
+ *
+ * Two sources, because there are two kinds of unsaved work and only one of them
+ * is a buffer. Dirty editors are ours: their bytes are in this window and the
+ * relative path they would be written to means a different file after a switch.
+ * Guarded tools are the other kind — a *real* Word window holding a paragraph
+ * nobody has saved, which this app can neither save nor discard and which is
+ * never marked dirty because Word owns that question. Missing the second is why
+ * a switch used to close a document behind the user's back.
+ */
+function atRisk(): { dirty: string[]; held: string[] } {
+  return {
+    dirty: useStore
+      .getState()
+      .openFiles.filter((f) => f.dirty)
+      .map((f) => f.name),
+    held: heldAcrossWorkspaceSwitch(TOOLS),
+  };
+}
+
+/**
  * Switch to `path`, asking first if anything is unsaved.
  *
  * The same decision the dirty-close guard asks, for the same reason and across
@@ -189,7 +237,8 @@ export function requestWorkspaceSwitch(path: string): void {
   if (trimmed === "") return;
   const current = useWorkspaceUi.getState().current;
   if (current !== null && samePath(current.root, trimmed)) return;
-  if (useStore.getState().openFiles.some((f) => f.dirty)) {
+  const { dirty, held } = atRisk();
+  if (dirty.length > 0 || held.length > 0) {
     useWorkspaceUi.setState({ pending: trimmed });
     return;
   }
@@ -374,25 +423,60 @@ function PathPrompt() {
   );
 }
 
+/**
+ * What the confirm dialog says, given what is at risk.
+ *
+ * Pure and exported so the wording is unit-tested: this sentence is the whole
+ * warning, and a switch that closes a Word window must not describe itself as
+ * being about text buffers.
+ */
+export function switchWarning(dirty: string[], held: string[]): string {
+  const parts: string[] = [];
+  if (dirty.length > 0) {
+    const noun = dirty.length === 1 ? "file has" : "files have";
+    parts.push(
+      `${String(dirty.length)} ${noun} unsaved changes: ${dirty.join(", ")}. ` +
+        "They cannot be saved once this window is looking at another project.",
+    );
+  }
+  if (held.length > 0) {
+    const noun = held.length === 1 ? "document is" : "documents are";
+    parts.push(
+      `${String(held.length)} ${noun} open in Office: ${held.join(", ")}. ` +
+        "Switching closes the real window, and Office decides what to do with " +
+        "anything unsaved in it.",
+    );
+  }
+  return parts.join(" ");
+}
+
 /** Rendered app-wide from the status bar: confirms a switch over unsaved work. */
 function DirtySwitchModal() {
   const pending = useWorkspaceUi((s) => s.pending);
-  const openFiles = useStore((s) => s.openFiles);
+  // Subscribed rather than read once: a save that lands (or a Word window the
+  // user closes themselves) while this dialog is up should change what it says.
+  useStore((s) => s.openFiles);
+  useWorkspaceUi((s) => s.busy);
   if (pending === null) return null;
-  const dirty = openFiles.filter((f) => f.dirty);
-  const noun = dirty.length === 1 ? "file has" : "files have";
+  const { dirty, held } = atRisk();
   const resolve = (action: "save" | "discard" | "cancel"): void =>
     void resolvePendingSwitch(action);
   return (
     <ConfirmModal
       title="Switch workspace?"
-      message={
-        `${dirty.length} ${noun} unsaved changes: ${dirty.map((f) => f.name).join(", ")}. ` +
-        "They cannot be saved once this window is looking at another project."
-      }
+      message={switchWarning(dirty, held)}
       actions={[
-        { label: "Save and switch", kind: "primary", onClick: () => resolve("save") },
-        { label: "Discard changes", kind: "outline", onClick: () => resolve("discard") },
+        // "Save" and "discard" are about the buffers; an Office document is
+        // closed either way, because there is no third state in which a window
+        // belonging to a workspace this window has left is a good outcome.
+        {
+          label: dirty.length > 0 ? "Save and switch" : "Close and switch",
+          kind: "primary",
+          onClick: () => resolve("save"),
+        },
+        ...(dirty.length > 0
+          ? [{ label: "Discard changes", kind: "outline" as const, onClick: () => resolve("discard") }]
+          : []),
         { label: "Cancel", kind: "ghost", onClick: () => resolve("cancel") },
       ]}
       onDismiss={() => resolve("cancel")}

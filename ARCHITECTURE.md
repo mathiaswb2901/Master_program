@@ -1112,6 +1112,17 @@ restart something). A service added later that copies the root and is not on
 that list is one that keeps serving the project the user left, and the symptom
 is data from the wrong workspace rather than a crash.
 
+**And that whole sequence is held under one lock.** `WorkspaceService.switch`
+writes the jail synchronously and then *awaits* the watcher and the pool, so
+without serialization two switches interleave — both jail writes land, then both
+restarts do, in an order nothing makes agree. Two windows on one server is a
+supported arrangement (it is why `workspace_changed` exists), so this is
+reachable from the UI, and what it produces is a server whose jail and whose
+watch point at different projects plus a watch on a workspace nobody is in that
+`stop()` can no longer reach. Serialized rather than refused with a 409: the
+second window asked for something legitimate, and it is re-validated against the
+root that actually won.
+
 - **The watcher is a real restart**, and it is awaited. `awatch` is bound to the
   directory it was opened on, so the old watch has to be *gone* before the new
   one publishes — overlapping them would put two projects' relative paths on one
@@ -1150,6 +1161,18 @@ is data from the wrong workspace rather than a crash.
   a buffer left dirty by *another* window's switch stays on screen as an orphan
   that cannot be saved — the same relative path in the new workspace is a
   different file.
+- **A docked Office window is unsaved work that is not a buffer**, and it gets
+  the mirror-image hook. An `office` open file is never marked dirty — the
+  unsaved paragraph is inside Word — so the dirty check is blind to it, and the
+  panel that renders `close_failed` is the very one a switch unmounts. Tools
+  holding something like that declare a `workspaceSwitchGuard` (`registry.ts`):
+  `held()` names it for the confirm dialog, `settle()` closes it **before** the
+  root moves, and anything that would not settle *cancels* the switch, with the
+  window still on screen to say so. `hosts` in `officeHost.ts` is keyed by
+  workspace-relative path, so `onWorkspaceChanged` then drains the closes that
+  are still in flight before clearing it — clearing first would let a late
+  response write `report.docx` from the old project back into the map that backs
+  `report.docx` in the new one.
 - **Only the shell can show a folder dialog.** There is no web API returning a
   filesystem *path* for a directory, so `pick_directory` is a shell command
   (`tauri-plugin-dialog`, registered in Rust and reached only through our own

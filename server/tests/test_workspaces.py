@@ -281,6 +281,68 @@ async def test_switch_to_the_current_root_is_a_no_op_that_still_succeeds(
     await watcher.stop()
 
 
+def _live_watches() -> list[asyncio.Task[None]]:
+    """Every watch task still running on this loop, however it was started.
+
+    Named rather than tracked through ``watcher._task``, because the failure this
+    exists to catch is precisely a watch that **nothing holds a reference to**:
+    an overwritten ``_task`` is a watch that ``stop`` can no longer reach and
+    that keeps publishing the old project's paths on the shared bus forever.
+    """
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "workspace-watcher" and not task.done()
+    ]
+
+
+async def test_two_windows_switching_at_once_cannot_half_switch_the_server(
+    tmp_path: Path,
+) -> None:
+    """Two windows, one server, two switches in the same tick.
+
+    A supported arrangement, not a hypothetical: the ``workspace_changed`` frame
+    the switcher publishes exists *because* a second window can learn about a
+    switch it did not ask for, and either window may be the one that asks.
+
+    Re-rooting is a sequence — the jail synchronously, then an awaited restart of
+    the watcher — so without a lock across the whole of it the two halves of two
+    switches interleave: both windows' jail writes land, then both watcher
+    restarts do, and they need not land in the same order. What that produces is
+    a server whose path jail (every file, office and content endpoint) and whose
+    watch (the tree the user is looking at) point at *different projects*, plus a
+    watch on the workspace nobody is in that no ``stop`` can ever reach — a
+    server that looks correct from either window and reads the wrong folder.
+    """
+    alpha, beta = _two_projects(tmp_path)
+    gamma = tmp_path / "gamma"
+    (gamma / ".workbench").mkdir(parents=True)
+    (gamma / "only-in-gamma.txt").write_bytes(b"g\n")
+
+    bus = EventBus()
+    workspace = Workspace(alpha)
+    watcher = Watcher(alpha, bus)
+    service = _service(workspace, bus, recents_dir=tmp_path / "appdata", asyncs=[watcher])
+    watcher.start()
+
+    try:
+        await asyncio.gather(service.switch(str(beta)), service.switch(str(gamma)))
+
+        # Whichever window won is not the assertion — "last one wins" is a fine
+        # answer and the loser's window is told by the bus. What must be true is
+        # that the server agrees with *itself*.
+        assert watcher._root == workspace.root
+        assert workspace.root in {beta.resolve(), gamma.resolve()}
+        assert service.root == workspace.root
+        # One watch, and it is the one the watcher can still stop.
+        live = _live_watches()
+        assert live == [watcher._task]
+    finally:
+        await watcher.stop()
+        for stray in _live_watches():
+            stray.cancel()
+
+
 async def test_a_refused_root_changes_nothing(tmp_path: Path) -> None:
     alpha, _ = _two_projects(tmp_path)
     bus = EventBus()

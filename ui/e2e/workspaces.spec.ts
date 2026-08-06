@@ -20,6 +20,8 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { openApp, treeItem, typeInEditor } from "./app";
 import {
+  DOCX_FILE,
+  DOCX_REFUSES_CLOSE,
   E2E_WORKSPACE,
   NOTES_FILE,
   SECOND_FILE,
@@ -102,6 +104,30 @@ test("switches between two workspaces, and refuses to lose unsaved work", async 
   await expect(treeItem(page, NOTES_FILE)).toBeVisible();
   expect(await commandTitles(page)).toContain(SHORTCUT_NAME);
 
+  // ---- a docked Office window is unsaved work the buffers cannot see -------
+  // An `office` open file is never marked dirty — the unsaved paragraph is
+  // inside Word, not inside anything this app models — so the dirty-buffer
+  // check is blind to it. Without a guard of its own, the switch closed a real
+  // window behind the user's back while the tree was already painting the other
+  // project.
+  await treeItem(page, DOCX_FILE).click();
+  await expect(page.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+
+  await switchTo(page, `Open ${SECOND_WORKSPACE}`, SECOND_WORKSPACE);
+  const docked = page.getByRole("dialog", { name: "Switch workspace?" });
+  await expect(docked).toBeVisible();
+  await expect(docked).toContainText(DOCX_FILE);
+  await expect(docked).toContainText("open in Office");
+  // Nothing is dirty yet, so there is nothing to discard — the choice is close
+  // the document or stay.
+  await expect(docked.getByRole("button", { name: "Close and switch" })).toBeVisible();
+  await expect(docked.getByRole("button", { name: "Discard changes" })).toHaveCount(0);
+  await docked.getByRole("button", { name: "Cancel" }).click();
+
+  // Cancel really cancelled: the window is still docked, in this workspace.
+  await expect(chip(page)).toHaveText(firstName);
+  await expect(page.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+
   // ---- the dirty-buffer refusal -------------------------------------------
   // A buffer that is not saved here cannot be saved at all once the window is
   // looking at another project, so the switch asks the same question the
@@ -132,6 +158,9 @@ test("switches between two workspaces, and refuses to lose unsaved work", async 
   await expect(treeItem(page, NOTES_FILE)).toHaveCount(0);
   // The editor went with it — its buffer named a path in the workspace we left.
   await expect(page.locator(".wb-editor-tab")).toHaveCount(0);
+  // And so did the docked document: settled *before* the root moved, by the
+  // guard, rather than closed by an unmount nobody waited for.
+  await expect(page.locator(".wb-office-native")).toHaveCount(0);
 
   // shortcuts.md followed: this workspace's entry is in the palette, the other
   // workspace's is not.
@@ -150,4 +179,34 @@ test("switches between two workspaces, and refuses to lose unsaved work", async 
   await expect(treeItem(page, SECOND_FILE)).toHaveCount(0);
   expect(await commandTitles(page)).toContain(SHORTCUT_NAME);
   expect(await savedLayouts(page)).not.toContain(SECOND_LAYOUT_NAME);
+
+  // ---- and a window that will not close stops the switch -------------------
+  // The worst version of this bug is not a document closed too eagerly, it is
+  // one that could not be closed at all: Office keeps the window, the user's
+  // edit is still in it, and the only surface that renders that fact is this
+  // panel. Reporting it *after* the root moved would mean reporting it into a
+  // panel that no longer exists — so the switch does not happen.
+  //
+  // Last in the journey on purpose: it deliberately leaves a wedged window and
+  // the bar that reports it on screen, which no later leg should have to work
+  // around. `afterAll` re-roots through the API, which is not the guarded path.
+  await treeItem(page, DOCX_REFUSES_CLOSE).click();
+  await expect(page.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+
+  await switchTo(page, `Open ${SECOND_WORKSPACE}`, SECOND_WORKSPACE);
+  const wedged = page.getByRole("dialog", { name: "Switch workspace?" });
+  await expect(wedged).toContainText(DOCX_REFUSES_CLOSE);
+  await wedged.getByRole("button", { name: "Close and switch" }).click();
+
+  // Refused, and said so — and we are still in the workspace that owns the
+  // window, with the panel that explains it on screen. Filtered rather than
+  // `.wb-toast` alone: several earlier legs of this journey leave one up.
+  await expect(
+    page
+      .locator(".wb-toast.is-error")
+      .filter({ hasText: `Staying here: ${DOCX_REFUSES_CLOSE} could not be closed.` }),
+  ).toBeVisible();
+  await expect(chip(page)).toHaveText(firstName);
+  await expect(treeItem(page, NOTES_FILE)).toBeVisible();
+  await expect(page.locator(".wb-office-bar")).toContainText("would not close");
 });

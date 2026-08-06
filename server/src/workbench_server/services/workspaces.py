@@ -26,6 +26,12 @@ before anything else so that no request in flight can be answered against a mix
 of the two; the watcher is restarted last so its first events describe a tree the
 rest of the server already agrees about.
 
+**And one switch at a time.** That order is only an order if nothing runs
+between its steps, so the whole sequence is held under one lock
+(:meth:`WorkspaceService.switch`). Two windows on one server is a supported
+arrangement, and two switches in one tick would otherwise interleave into a
+server whose jail and whose watch are pointed at different projects.
+
 **Recents are the user's, not a project's.** They go under the machine's app data
 dir (``services/app_data.py``), never into a ``.workbench/`` folder — a list of
 the projects you work on is data about *you*, and writing it into one of those
@@ -33,6 +39,7 @@ projects would both commit your other clients' folder names into a git repo and
 make the list disagree with itself depending on where you happened to be.
 """
 
+import asyncio
 import json
 import os
 import tempfile
@@ -232,6 +239,9 @@ class WorkspaceService:
         self._async = async_rootables
         self._explicit = explicit
         self._recents = recents or RecentsStore()
+        #: One switch at a time. See :meth:`switch` for why the whole sequence
+        #: and not just the awaited half.
+        self._switching = asyncio.Lock()
 
     @property
     def root(self) -> Path:
@@ -259,26 +269,51 @@ class WorkspaceService:
         succeeds: it is what a picker row for "where you already are" does, and
         tearing the watcher down to arrive where we started would be a visible
         flicker for nothing.
+
+        **One switch at a time, and the lock spans the whole sequence.** Two
+        windows on one server is a supported arrangement — that is what the
+        ``workspace_changed`` frame is for — so two switches landing in the same
+        tick is a thing users do, not a thing tests invent. Re-rooting is a
+        sequence with an await in the middle of it, and unserialized that
+        sequence interleaves: both jail writes land, then both watcher restarts
+        do, and nothing makes those two orders agree. The results are a server
+        whose jail and whose watch point at different projects, and a watch on a
+        workspace nobody is in that no ``stop`` can reach any more, because the
+        second restart overwrote the handle to the first. Both look like a
+        working server from either window.
+
+        Serialized rather than refused with a 409: the second window asked for
+        something legitimate, and after the first switch finishes the second is
+        re-validated against the root that actually won and applied on top of it.
+        Last one wins, both windows are told by the bus, and no state exists in
+        between. A second switch to the root the first one just arrived at
+        collapses into the no-op above, which is the common case when two windows
+        are driven from the same picker.
         """
-        root = validate_root(Path(path))
-        if root == self._workspace.root:
+        async with self._switching:
+            # Inside the lock, both of them: validating and comparing against a
+            # root another switch is in the middle of moving is how a "no-op"
+            # concludes it has nothing to do and skips a re-root it owed.
+            root = validate_root(Path(path))
+            if root == self._workspace.root:
+                self._recents.record(root)
+                return self.state()
+
+            previous = self._workspace.root
+            # The jail first: from here on, every path from the wire is judged
+            # against the new root, so nothing in flight can be answered half-way
+            # between the two.
+            self._workspace.set_root(root)
+            for service in self._sync:
+                service.set_workspace_root(root)
+            # The watcher (and the pool) last, and awaited: a restart that
+            # overlapped with the old watch would put two projects' paths on one
+            # bus.
+            for awaitable in self._async:
+                await awaitable.set_workspace_root(root)
+
+            self._explicit = True
             self._recents.record(root)
+            log.info("workspace.switched", root=str(root), previous=str(previous))
+            self._bus.publish(WorkspaceChangedEvent(root=str(root), name=_name_of(root)))
             return self.state()
-
-        previous = self._workspace.root
-        # The jail first: from here on, every path from the wire is judged
-        # against the new root, so nothing in flight can be answered half-way
-        # between the two.
-        self._workspace.set_root(root)
-        for service in self._sync:
-            service.set_workspace_root(root)
-        # The watcher (and the pool) last, and awaited: a restart that overlapped
-        # with the old watch would put two projects' paths on one bus.
-        for awaitable in self._async:
-            await awaitable.set_workspace_root(root)
-
-        self._explicit = True
-        self._recents.record(root)
-        log.info("workspace.switched", root=str(root), previous=str(previous))
-        self._bus.publish(WorkspaceChangedEvent(root=str(root), name=_name_of(root)))
-        return self.state()
