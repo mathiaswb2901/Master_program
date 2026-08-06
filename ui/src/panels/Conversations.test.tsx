@@ -123,6 +123,10 @@ describe("what it will not open", () => {
     expect(html).toContain("Outside this workspace");
     expect(html).toContain("Fix the DST bug");
     expect(html).toContain("is-blocked");
+    // …and the reason is the *control's* description, not just a paragraph
+    // above it: colour and position are never the only signal (§7).
+    expect(html).toContain('aria-describedby="wb-conv-reason-C--work-repo"');
+    expect(html).toContain('id="wb-conv-reason-C--work-repo"');
   });
 
   it("shows an unresolvable folder under the key that was actually stored", () => {

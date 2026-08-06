@@ -27,7 +27,9 @@
  * non-empty one is refused up front rather than failing obscurely later.
  *
  * The directory is deliberately left behind: it holds the exact state a failing
- * journey left, next to the Playwright trace.
+ * journey left, next to the Playwright trace. So is its `-projects` sibling,
+ * the seeded Claude transcript store (below) — the same reason, and the same
+ * convention as the perf lane's fixture.
  */
 
 import fs from "node:fs";
@@ -126,14 +128,20 @@ echo two
 
 // ---- Claude Code's conversation store, seeded ------------------------------
 //
-// `playwright.config.ts` points `WORKBENCH_CLAUDE_PROJECTS_DIR` at
-// `<workspace>/.claude-projects`, so the developer's real session history is
-// never read. That leaves the directory *empty*, which is exactly the state
-// the conversation browser has nothing to say about — so the journey seeds it
-// with one of each case the browser has to tell apart.
+// The suite points `WORKBENCH_CLAUDE_PROJECTS_DIR` away from `~/.claude` so the
+// developer's real session history is never read or listed. That leaves the
+// directory *empty*, which is the one state the conversation browser has
+// nothing to say about — so it is seeded with one transcript per case the
+// browser has to tell apart.
+//
+// **A sibling of the workspace, never inside it** (the perf lane's convention,
+// `e2e/perf/workspace.ts`). Inside, the store is a folder in the file tree, and
+// it is the alphabetically first one: journey 1 asserts which row `Home` lands
+// on, and a transcript directory silently became the answer. What we seed for
+// one journey must not be scenery in another's.
 
-/** Directory the backend is told to read transcripts from (config.ts agrees). */
-const PROJECTS_DIR = ".claude-projects";
+/** Where the backend is told to read transcripts from, for a given workspace. */
+export const projectsDirFor = (root: string): string => `${root}-projects`;
 
 /** Claude Code's project-dir encoding, mirrored from
  * `services/session_index.py`. Lossy on purpose: it is what makes the browser's
@@ -184,7 +192,7 @@ function writeTranscript(
   sessionId: string,
   records: Record_[],
 ): void {
-  const directory = path.join(root, PROJECTS_DIR, key);
+  const directory = path.join(projectsDirFor(root), key);
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(
     path.join(directory, `${sessionId}.jsonl`),
@@ -218,7 +226,7 @@ function seedConversations(root: string): void {
 
   // Not JSON at all, and truncated mid-record: the browser must keep the row.
   fs.writeFileSync(
-    path.join(root, PROJECTS_DIR, rootKey, `${CONV_BROKEN_ID}.jsonl`),
+    path.join(projectsDirFor(root), rootKey, `${CONV_BROKEN_ID}.jsonl`),
     '}}} not json\n{"type":"user","message":{"role":"user","content":"cut off her',
     "utf-8",
   );

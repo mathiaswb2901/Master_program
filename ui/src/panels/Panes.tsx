@@ -292,7 +292,8 @@ function markNewPane(panel: IDockviewPanel): void {
 
 /**
  * Put `toolId#key` on screen — the "open this thing" gesture, as opposed to the
- * "split here and choose" gesture `placeChoice` serves.
+ * "split here and choose" gesture `placeChoice` serves. A null key is the
+ * tool's own default pane.
  *
  * The difference is what happens when the pane already exists. A split *moves*
  * it next to the pane you split, because that is what you asked for; opening
@@ -301,13 +302,19 @@ function markNewPane(panel: IDockviewPanel): void {
  * twice focuses the existing pane rather than cloning it" — the rule falls out
  * of pane identity (`ui/src/panes.ts`) rather than being enforced by a caller.
  *
+ * This is also what a **plural** tool's "open my panel" command must use.
+ * `openToolPanel` (registry.ts) deliberately mints a second pane when a plural
+ * tool's panel is already open — that is right for a tool you want N of, and
+ * wrong for the command that means "show me the browser", which would otherwise
+ * hand you a duplicate every time you ran it (and persist its throwaway key).
+ *
  * Lives here rather than in the tool that calls it: placing panes is the pane
  * capability's job, and a second copy of `addPanel` elsewhere is how the two
  * would drift.
  */
 export function revealPane(
   toolId: string,
-  key: string,
+  key: string | null,
   direction: SplitDirection = "right",
 ): void {
   const dock = dockApiHandle();

@@ -55,11 +55,20 @@ async function runCommand(page: Page, title: string): Promise<void> {
   await expect(quickbar).toBeHidden();
 }
 
-/** Open the browser and wait for the seeded store to have landed. */
+/**
+ * Open the browser and wait for the seeded store to have landed.
+ *
+ * `toHaveCount(1)`, not `.first()`: running the command with the panel already
+ * open must *focus* it, and the bug this caught did the opposite — a plural
+ * tool's default pane is minted afresh by `openPanel`, so the second run of the
+ * command left two identical browsers and two search boxes.
+ */
 async function openBrowser(page: Page): Promise<void> {
   await runCommand(page, "Browse Claude conversations");
-  await expect(browser(page).first()).toBeVisible();
+  await expect(browser(page)).toHaveCount(1);
   await expect(row(page, CONV_ROOT_TITLE)).toBeVisible();
+  await runCommand(page, "Browse Claude conversations");
+  await expect(browser(page)).toHaveCount(1);
 }
 
 /** Pane ids as they are on disk — the strings the next launch will trust. */
@@ -74,9 +83,18 @@ async function persisted(page: Page, paneId: string): Promise<void> {
   await expect.poll(() => persistedPaneIds(page), { timeout: 10_000 }).toContain(paneId);
 }
 
+const NO_LAYOUT = { current: null, current_name: null, saved: [] };
+
+/** Each test starts from the default arrangement. The window autosaves, and
+ * these four tests share one workspace — without this, the pane test 4 opens is
+ * scenery in test 1, and "the search box" stops being one element. */
+test.beforeEach(async ({ page }) => {
+  await page.request.put("/api/layouts", { data: NO_LAYOUT });
+});
+
 test.afterAll(async () => {
   const context = await request.newContext({ baseURL: test.info().project.use.baseURL });
-  await context.put("/api/layouts", { data: { current: null, current_name: null, saved: [] } });
+  await context.put("/api/layouts", { data: NO_LAYOUT });
   await context.dispose();
 });
 

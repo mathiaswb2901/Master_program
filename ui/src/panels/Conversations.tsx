@@ -52,7 +52,6 @@ import {
   useConversations,
   visibleGroups,
 } from "../conversations";
-import { openPanel } from "../dock";
 import { paneInstance } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import { relativeTime, relativeTimePhrase } from "../relativeTime";
@@ -65,6 +64,20 @@ import "../styles/conversations.css";
 const TOOL_ID = "conversations";
 /** The tool a row opens into. Its panes are `agent#<session id>`. */
 const AGENT_TOOL_ID = "agent";
+
+/**
+ * Show the unscoped browser: the one already on screen, or a new one.
+ *
+ * `revealPane` rather than `openPanel`, and the difference matters for a plural
+ * tool: `openPanel` mints a *second* pane when the default one is already open
+ * (right for "give me another terminal", wrong for "show me the browser"), and
+ * its throwaway instance key would then persist into the saved layout as a
+ * scope naming no project. Caught by journey 11, which found two search boxes.
+ */
+function showBrowser(): void {
+  revealPane(TOOL_ID, null);
+  void useConversations.getState().load();
+}
 
 function HistoryIcon() {
   return (
@@ -87,6 +100,11 @@ function HistoryIcon() {
 }
 
 // ---- one row ----------------------------------------------------------------
+
+/** Id of the sentence explaining why a folder will not open — referenced by
+ * every row inside it, so the reason reaches a screen reader as the *control's*
+ * description rather than only as a paragraph somewhere above (DESIGN.md §7). */
+const reasonId = (group: ProjectGroup): string => `wb-conv-reason-${group.key}`;
 
 function Row({ group, conversation }: { group: ProjectGroup; conversation: ConversationInfo }) {
   const [busy, setBusy] = useState(false);
@@ -115,8 +133,10 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
       type="button"
       className={"wb-conv-row" + (blocked ? " is-blocked" : "") + (busy ? " is-busy" : "")}
       onClick={open}
-      // The reason travels with the control, so a pointer user gets it without
-      // clicking and a screen reader gets it from the accessible description.
+      // The reason travels with the control: a pointer user gets it on hover,
+      // and a screen reader gets it as this button's description rather than as
+      // a paragraph it might never reach.
+      {...(blocked && group.reason !== null ? { "aria-describedby": reasonId(group) } : {})}
       title={
         blocked
           ? (group.reason ?? "")
@@ -156,7 +176,7 @@ function Group({ group }: { group: ProjectGroup }) {
           is a sentence rather than a lock glyph: DESIGN.md §7 — colour and
           iconography are never the only signal. */}
       {group.reason !== null && (
-        <p className="wb-conv-reason" role="note">
+        <p className="wb-conv-reason" id={reasonId(group)} role="note">
           {group.reason}
         </p>
       )}
@@ -263,7 +283,7 @@ export function ConversationsBody({
           <button
             type="button"
             className="wb-btn wb-btn-sm wb-btn-outline"
-            onClick={() => openPanel(TOOL_ID)}
+            onClick={showBrowser}
           >
             Show all conversations
           </button>
@@ -428,10 +448,7 @@ export const conversationsTool: WorkbenchTool = {
       id: "conversations.open",
       title: "Browse Claude conversations",
       detail: () => "every conversation on this machine, grouped by folder",
-      run: () => {
-        openPanel(TOOL_ID);
-        void useConversations.getState().load();
-      },
+      run: showBrowser,
     },
   ],
   // No chord. A registered chord beats the user's `shortcuts.md` one and Alt is
