@@ -40,11 +40,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 import { ANIMATABLE, motionDeclarations } from "./css";
 import { FIXTURE } from "./fixture";
 import { installTelemetry, readTelemetry, record, sampleFrames, type FrameStats } from "./instrument";
+import { test } from "./window";
 
 const UI_ROOT = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 
