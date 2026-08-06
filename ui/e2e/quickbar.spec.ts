@@ -18,7 +18,10 @@
  *  - a **registered tool** reaches the user through the registry alone: the
  *    Scratchpad's command is in the QuickBar, running it opens a panel that is
  *    not in the default layout, what is typed there lands in a real workspace
- *    file, and the tab it arrived on closes it again.
+ *    file, and the tab it arrived on closes it again;
+ *  - the palette **takes the keyboard when it opens**, including on an open that
+ *    reuses the input a closing one left mounted — asserted without typing
+ *    first, because typing is what focuses it everywhere else in this suite.
  */
 
 import path from "node:path/posix";
@@ -193,5 +196,53 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
     await page.getByRole("button", { name: "Close Scratchpad" }).click();
     await expect(page.getByRole("textbox", { name: "Scratchpad" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Close Agent" })).toHaveCount(0);
+  });
+
+  await test.step("the palette takes the keyboard on open, with nothing typed first", async () => {
+    // The gesture nothing else in this suite makes. Every other dismissal here
+    // types into the input on the way — which focuses it — so a palette that
+    // opened without the keyboard would still have passed those steps. Escape
+    // is pressed at the page level for the same reason: it only reaches the
+    // handler through the input, so this fails if the palette focused nothing.
+    await page.keyboard.press("Control+Shift+P");
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    await expect(quickbar).toBeVisible();
+    await expect(quickbar.locator(".wb-qb-input")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(quickbar).toBeHidden();
+  });
+
+  await test.step("…and on an open that reuses the input the last one left behind", async () => {
+    // The bug, reproduced: the overlay is held on screen for `--motion-exit-ms`
+    // after it closes (`usePresence`, motion.ts), so an open inside that window
+    // reuses the input already in the DOM. `autoFocus` is a mount-time
+    // attribute and could not fire a second time, and dismissing by *clicking*
+    // a row is what made that visible — focus sat on the button, so the
+    // reopened palette answered no keys at all: Escape did not close it, typing
+    // did not filter it, and only the backdrop got the user out.
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    await page.keyboard.press("Control+Shift+P");
+    await expect(quickbar).toBeVisible();
+    const before = await quickbar.locator(".wb-qb-input").elementHandle();
+    await quickbar.locator(".wb-qb-row", { hasText: "Toggle theme" }).first().click();
+
+    // Straight back in, with no wait for it to leave: that wait is exactly what
+    // every other spec does, and exactly what hid this.
+    await page.keyboard.press("Control+Shift+P");
+    await expect(quickbar).toBeVisible();
+    const after = await quickbar.locator(".wb-qb-input").elementHandle();
+    // The same element, not a new one — which is what makes this the reopen
+    // case rather than a fresh mount that would have focused itself anyway. If
+    // the exit window is ever removed this assertion says so, rather than the
+    // step quietly becoming a duplicate of the one above.
+    expect(await page.evaluate(([a, b]) => a === b, [before, after])).toBe(true);
+
+    await expect(quickbar.locator(".wb-qb-input")).toBeFocused();
+    // Both halves of "it has the keyboard": what is typed filters the list…
+    await page.keyboard.type("Toggle the");
+    await expect(quickbar.locator(".wb-qb-input")).toHaveValue(">Toggle the");
+    // …and Escape from the page still lands on the handler that closes it.
+    await page.keyboard.press("Escape");
+    await expect(quickbar).toBeHidden();
   });
 });
