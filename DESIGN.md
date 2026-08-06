@@ -557,6 +557,7 @@ commands and their default chords on its tool descriptor (`docs/tools.md`), and
 | `Alt+Shift+←→↑↓` | Swap this pane with the one in that direction |
 | `Alt+O` | Focus the next pane |
 | `Alt+X` | Close this pane |
+| `Alt+A` | Annotate the plan card — point at part of an artifact (§6.3) |
 
 **Pass-through:** inside xterm and Monaco — both full keyboard applications — only
 chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the

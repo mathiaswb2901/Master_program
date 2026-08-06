@@ -22,6 +22,7 @@ from workbench_server.models.plans import (
     PlanResolved,
     PlanResponse,
     StepListNode,
+    node_anchor,
     plan_input_schema,
 )
 from workbench_server.services.agent_sessions import PlanAlreadyPendingError, SessionBridge
@@ -264,7 +265,7 @@ class TestWireFrames:
                 plan_id="p1",
                 verdict="approve",
                 choices={"approach": "local"},
-                annotations=[PlanAnnotation(node_id="q1", text="yes, 2025 only")],
+                annotations=[PlanAnnotation(anchor=node_anchor("q1"), text="yes, 2025 only")],
                 comment="go",
             )
         )

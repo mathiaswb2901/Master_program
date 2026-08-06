@@ -293,3 +293,147 @@
   line-height: var(--type-sm-line);
   color: var(--text-tertiary);
 }
+
+/* ---- Annotate mode -------------------------------------------------------- */
+/* A mode should look like a mode: the card takes an accent rim so it is obvious
+   which card is listening, and nothing else on screen changes. The rim is the
+   only decoration — every other affordance in this mode is a real control with
+   a real focus ring, because the mode has to be operable from the keyboard
+   (DESIGN.md §7) and a mouse-only mode would fail that outright. */
+
+.wb-plan-card.is-annotating {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-muted);
+}
+
+.wb-plan-head .wb-btn.is-active {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+}
+
+.wb-plan-annotate-hint {
+  margin: 0;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-tertiary);
+}
+
+/* Prose, split into pickable phrases. Deliberately still reads as a paragraph:
+   the offsets are into the source string, so this is the same text, in the same
+   order, with the seams made clickable. */
+.wb-plan-phrases {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+}
+
+.wb-plan-phrase {
+  font: inherit;
+  color: var(--text-primary);
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  outline: 1px dashed var(--border-strong);
+  outline-offset: 1px;
+}
+
+.wb-plan-phrase:hover {
+  background: var(--surface-hover);
+  outline-color: var(--accent);
+}
+
+.wb-plan-phrase:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.wb-plan-phrase.is-noted {
+  background: var(--accent-muted);
+}
+
+.wb-plan-whole {
+  align-self: flex-start;
+  font: inherit;
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.wb-plan-whole:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.wb-plan-whole:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* The notes attached to one node — target, text, and the two things you can do
+   to it. A list, not a popover: a note you can only see by hovering the thing
+   it is about is a note you will lose. */
+.wb-plan-notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-plan-note-row {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-elevated);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+}
+
+.wb-plan-note-row.is-editing {
+  border-left-color: var(--accent);
+}
+
+.wb-plan-note-target {
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-sm-line);
+}
+
+.wb-plan-note-row span.wb-plan-note-text {
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wb-plan-note-row textarea.wb-plan-note-text {
+  width: 100%;
+  resize: vertical;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-primary);
+}
+
+.wb-plan-note-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}

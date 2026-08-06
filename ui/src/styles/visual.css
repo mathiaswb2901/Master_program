@@ -502,3 +502,126 @@
 .wb-vis-metric.is-error {
   border-left-color: var(--error);
 }
+
+/* ---- Anchorable parts (annotate mode) ------------------------------------- */
+/* A part is a real button, so it wears the standard focus ring (§7) and reaches
+   the keyboard for free. Outside annotate mode a part with no note renders no
+   element at all (`visual/annotate.tsx`), so none of this is on the render
+   budget's critical path. Colour is never the sole signal: a noted part carries
+   a ✎ glyph as well as its tint, and a targetable one is outlined, not filled —
+   the drawing must still read as the drawing while the mode is on. */
+
+.wb-vis-part {
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  max-width: 100%;
+}
+
+button.wb-vis-part {
+  cursor: pointer;
+  outline: 1px dashed var(--border-strong);
+  outline-offset: 1px;
+  transition: background-color var(--duration-1) var(--ease-standard);
+}
+
+button.wb-vis-part:hover {
+  background: var(--surface-hover);
+  outline-color: var(--accent);
+}
+
+button.wb-vis-part:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.wb-vis-part.is-noted {
+  background: var(--accent-muted);
+}
+
+.wb-vis-part.is-editing {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The visible half of "there is a note here" (§7 — never colour alone). */
+.wb-vis-pin {
+  font-size: var(--type-xs-size);
+  line-height: 1;
+  color: var(--accent);
+}
+
+.wb-vis-pin-svg {
+  font-size: 11px;
+  fill: var(--accent);
+  text-anchor: middle;
+}
+
+/* The row-handle column, present only while annotating. */
+.wb-vis-pick-col {
+  width: 22px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.wb-vis-node[role="button"],
+.wb-vis-edge-part[role="button"] {
+  cursor: pointer;
+}
+
+.wb-vis-node[role="button"]:focus-visible rect,
+.wb-vis-edge-part[role="button"]:focus-visible path {
+  stroke: var(--focus-ring);
+  stroke-width: 2;
+}
+
+.wb-vis-node.is-noted rect,
+.wb-vis-edge-part.is-noted path {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+/* The two-step point picker: choose a series, then a point. Both are plain
+   buttons, because a chart may legally hold 2,400 points and none of them may
+   be a tab stop of its own. */
+.wb-vis-points {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-vis-points-pick {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.wb-vis-points-pick .wb-btn.is-active {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+}
+
+.wb-vis-points-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.wb-vis-points-list .wb-vis-part {
+  padding: 0 var(--space-2);
+  font-size: var(--type-xs-size);
+  line-height: 18px;
+  min-height: 18px;
+}
