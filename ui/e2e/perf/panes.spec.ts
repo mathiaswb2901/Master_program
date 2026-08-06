@@ -24,10 +24,11 @@
  * `@wallclock`: frame timing on a shared CI runner is a report, not a gate.
  */
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 import { FIXTURE } from "./fixture";
 import { installTelemetry, readTelemetry, record, round, sampleFrames } from "./instrument";
+import { test } from "./window";
 
 /**
  * Measured 2026-08-05 on the author's machine, on the 5,005-file fixture, at

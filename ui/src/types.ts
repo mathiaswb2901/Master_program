@@ -103,7 +103,8 @@ export type WorkspaceEvent =
   | FileProvenanceEvent
   | OfficeHostEvent
   | WorktreeChangedEvent
-  | UsageEvent;
+  | UsageEvent
+  | SessionActivityEvent;
 
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
@@ -215,6 +216,62 @@ export interface UsageSnapshot {
 export interface UsageEvent {
   type: "usage";
   snapshot: UsageSnapshot;
+}
+
+// ---- activity.py ------------------------------------------------------------
+// What the fleet is touching *right now* — the other end of provenance above.
+// That one answers "who wrote this file", after the fact and conservatively;
+// this answers "what is happening this second", across every session, whether
+// or not this window has that conversation open. Bounded by construction: a
+// rolling window per session, a cap on sessions, and everything dropped is
+// counted rather than silently lost. Never persisted.
+
+export interface ActivityEntry {
+  /** The SDK's `tool_use` id: the same id the chat row settles on. */
+  entry_id: string;
+  tool: string;
+  /** One capped line, built server-side with paths jailed to the workspace. */
+  summary: string;
+  /** Workspace-relative path this call names, or null when it named none (or
+   * named one outside the workspace, which is redacted rather than sent). */
+  target: string | null;
+  /** Unix seconds. */
+  started_at: number;
+  /** Unix seconds, or null while the call is still running. */
+  settled_at: number | null;
+  /** null while running — the distinction the panel is built on, so not a bool. */
+  ok: boolean | null;
+}
+
+export interface SessionActivity {
+  session_id: string;
+  folder: string;
+  title: string;
+  /** Newest first, capped. Ordered by when each call *started*; a settle
+   * patches an entry where it stands rather than moving it. */
+  entries: ActivityEntry[];
+  /** Entries this session's window has dropped. Shown, never silent. */
+  dropped: number;
+  /** Unix seconds of the most recent thing that happened in this session. */
+  active_at: number;
+}
+
+/** GET /api/activity. Empty `sessions` = no agent sessions running, which is
+ * both the common case and what a restart honestly reports. */
+export interface ActivitySnapshot {
+  sessions: SessionActivity[];
+  max_entries_per_session: number;
+  max_sessions: number;
+  dropped_sessions: number;
+}
+
+/** Broadcast on /ws/events when some sessions' activity changes. Carries whole
+ * rows for the sessions that moved (never the fleet, unless the fleet moved)
+ * and names the ones that left, because clients hold their own copy. */
+export interface SessionActivityEvent {
+  type: "session_activity";
+  sessions: SessionActivity[];
+  removed: string[];
 }
 
 // ---- shortcuts.py -----------------------------------------------------------
@@ -583,6 +640,69 @@ export interface PlanResponse {
   /** At most 40 (server-capped) — a part anchor makes one node worth several. */
   annotations: PlanAnnotation[];
   comment: string;
+}
+
+// ---- conversations.py -------------------------------------------------------
+
+/** One transcript on disk, as a row in the conversation browser. */
+export interface ConversationInfo {
+  session_id: string;
+  /** Derived by the same function live sessions use — a conversation does not
+   * retitle when it stops being live. */
+  title: string;
+  /** Unix mtime of the transcript: when the conversation was last active. */
+  updated_at: number;
+  /** User messages carrying text. Tool results are stored as user records and
+   * are deliberately not counted. */
+  turns: number;
+  /** The scan hit its byte budget, so `turns` is a floor — rendered as "120+". */
+  turns_capped: boolean;
+  /** This transcript was read for its title and turn count. False when it fell
+   * outside the response's read budget (`limit`): the conversation exists and
+   * is listed — every one always is — but `title` is a placeholder and `turns`
+   * is 0 until a wider `limit` reads it. */
+  read: boolean;
+  /** Local id of the live session continuing this transcript, or null. Opening
+   * such a row focuses the pane it is already in instead of forking it. */
+  live_session_id: string | null;
+  /** Why this row is not fully knowable. Never a reason to drop it. */
+  problem: string | null;
+}
+
+/** One folder's conversations — a directory of Claude Code's storage. */
+export interface ProjectGroup {
+  /** The encoded directory name. Always true, never a guess. */
+  key: string;
+  /** Resolved path when there is one, the encoded key when there is not. */
+  label: string;
+  resolved: boolean;
+  folder: string | null;
+  /** Workspace-relative path when the folder is inside this workspace
+   * ("" = the workspace root); null when it is outside or unresolved. */
+  workspace_relative: string | null;
+  /** Whether a row here can be opened now. False is a *visible* refusal. */
+  openable: boolean;
+  reason: string | null;
+  updated_at: number;
+  conversations: ConversationInfo[];
+}
+
+/** `GET /api/conversations` — read-only view of Claude Code's own storage. */
+export interface ConversationStore {
+  projects: ProjectGroup[];
+  projects_root: string;
+  root_exists: boolean;
+  total_projects: number;
+  /** Every conversation that exists, in every folder — `limit` bounds reading,
+   * never listing, so this is also how many rows `projects` holds. */
+  total_conversations: number;
+  /** How many were read in full (title + turns). Less than
+   * `total_conversations` means the rest are listed with `read: false` and are
+   * waiting for a wider `limit`. */
+  returned_conversations: number;
+  limit: number;
+  /** When the scan ran. There is no watcher on somebody else's storage. */
+  scanned_at: number;
 }
 
 // ---- agents.py --------------------------------------------------------------

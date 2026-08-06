@@ -140,8 +140,12 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
 **the pane id is the whole of what a restart gets back**. Three rules follow:
 
 - the key must still mean the same thing after a restart — `agent#<session_id>`,
-  `editors#<workspace-relative path>`, `terminal#<n>`. Changing what a key means renames
-  the user's saved arrangement, exactly as renaming a tool id does;
+  `editors#<workspace-relative path>`, `terminal#<n>`,
+  `conversations#<claude-project-key>`. Changing what a key means renames the user's
+  saved arrangement, exactly as renaming a tool id does. The conversation browser is
+  worth a look here: its key is *Claude Code's own encoded directory name* rather than a
+  path, because that encoding is lossy and the path is the thing we cannot reconstruct —
+  the key that persists is the one we know is true;
 - `key()` is a thunk and may be `async`, because minting one sometimes takes a round trip
   ("New agent session" creates the session, then binds the pane to its id). Answering
   `null` abandons the split rather than binding a pane to nothing;
@@ -166,6 +170,21 @@ serializes panel ids into `.workbench/layouts.json` and nothing else about a pan
   session the server no longer has. The Agent pane waits for the session to appear live
   in the listing before it opens a socket, because a socket that reconnects behind a
   correct "this session is gone" note is a reconnect storm nobody can see.
+- **Opening a pane is one call.** `revealPane(toolId, key)`
+  (`ui/src/panels/Panes.tsx`) puts `toolId#key` on screen, or focuses the pane that
+  already shows it; a `null` key means the tool's own default pane. That second half is
+  not a nicety: the conversation browser opens agent panes, and "open this conversation"
+  must never clone the pane it is already in. Use it rather than reaching for
+  `dockApiHandle()` — placing panes belongs to the pane capability, and a second copy of
+  `addPanel` is how the two drift. It is the *open* gesture; `placeChoice` is the *split*
+  gesture, and the difference is what happens to a pane that already exists (focused
+  where it is, versus moved into the split you asked for).
+- **A plural tool's "open my panel" command must use it too.** `openPanel` deliberately
+  mints a *second* pane when a plural tool's default panel is already open — correct for
+  "give me another terminal", wrong for "show me the browser", which would hand the user
+  a duplicate every time they ran the command and persist its throwaway
+  `<tool>#<timestamp>` key into the saved layout as an instance binding that means
+  nothing. `revealPane(toolId, null)` is the version that focuses what is already there.
 - **A limit you know before the gesture belongs on the row.** `disabled: true` on an
   instance option greys it in the picker with `detail` as the reason, and the keyboard
   skips it (DESIGN.md §6.5). The agent's `New agent session` uses it: the server caps
@@ -208,6 +227,17 @@ a toast, because toasts genuinely are app-wide.
 
 If your tool's state starts being read from outside, that is the signal to move it to
 `store.ts` — not to export a getter from your module.
+
+**If your tool's server half is a firehose, coalesce it on the server.** The live
+activity feed (`ui/src/activity.ts`, `services/activity.py`) is the third tool to own a
+store and the first whose events fire on *every tool call of every session*. The rule it
+adds: batching belongs where the events are produced, not in the component. The policy
+`services/terminal_stream.py` proves — first change after a quiet stream goes out
+immediately, then at most one frame per window, coalesced so only the latest state per
+subject survives — costs one timer on the server and gives every window in the app a
+bounded frame rate for free. A `useEffect` that throttles on the client fixes one
+panel's render count and leaves the socket, the JSON parsing and every other listener
+paying full price. Budget it where it can fail: a count of frames per burst, in a test.
 
 ## Styling
 
