@@ -19,6 +19,7 @@ import { expect, test } from "@playwright/test";
 import { FIXTURE } from "./fixture";
 import {
   cumulativeLayoutShift,
+  describeShifts,
   installTelemetry,
   readTelemetry,
   record,
@@ -91,6 +92,35 @@ const LAUNCH_CEILING_MS = 1_500;
  * one sub-pixel shift from the status bar in both. This is the assertion that
  * keeps it that way: a layout whose height comes from text would start failing
  * here, and the fix would be `font-display`/`size-adjust`, not the gate again.
+ *
+ * **What it caught instead, 2026-08-06 — and it was not the fonts.** A workspace
+ * with *any* agent session shifted **0.064**: 3x this ceiling and 20x the number
+ * above. The session picker was `flex: none; max-height: 40%`, so its height was
+ * its content's — `GET /api/agents/sessions` answered after first paint, the
+ * rows replaced the "No sessions yet" line, and the chat below them moved. Every
+ * returning user paid it on every launch; the lane never saw it because the only
+ * launch it measured was into an empty workspace. Reserving the box
+ * (`--sessions-list-height`, DESIGN.md §1.9/§6.12) puts it back to **0.003 with
+ * six sessions seeded**, and the chat area stops appearing in the attribution
+ * at all.
+ *
+ * Two things that measurement taught, both worth keeping:
+ *
+ *  * **A small move in a bad frame is not a small shift.** The picker grew 19.5
+ *    px with one session — on its own, worth about 0.006. It scored 0.064
+ *    because it landed in the same frame as the file tree swapping its centred
+ *    "Loading workspace…" for the real toolbar, a **322 px** jump. A shift entry
+ *    takes its distance fraction from the *largest* mover in the frame and its
+ *    impact fraction from the *union* of all of them, so the tree's distance
+ *    priced the picker's area. Removing either one collapses the score; the
+ *    picker is the one that was wrong. The tree's own swap is the 0.003 that
+ *    remains, and is the same defect one panel over — `.wb-empty` centred where
+ *    the toolbar will be — kept out of this change because it is a second panel,
+ *    not because it is right.
+ *  * **Attribution, not a number.** `instrument.ts` records the nodes each shift
+ *    moved and `describeShifts` puts them in the failure message, because
+ *    "0.064" sent the last reader to a trace file while
+ *    `div.wb-chat-area 109.5→283px` names the rule.
  */
 const LAYOUT_SHIFT_CEILING = 0.02;
 
@@ -124,7 +154,68 @@ test("cold launch reaches a clickable file tree", { tag: "@wallclock" }, async (
 
   expect(treeReady, "no file row ever appeared").not.toBeNull();
   expect(treeReady ?? Infinity).toBeLessThan(LAUNCH_CEILING_MS);
-  expect(shift, "the shell reflowed after first paint").toBeLessThan(LAYOUT_SHIFT_CEILING);
+  expect(shift, `the shell reflowed after first paint: ${describeShifts(telemetry)}`).toBeLessThan(
+    LAYOUT_SHIFT_CEILING,
+  );
+});
+
+/**
+ * Enough to overflow the picker's reserved box and to land in two folder groups
+ * — the case the reservation exists for. A box that still grew with its content
+ * would grow further here than the single session that first caught this.
+ */
+const SEEDED_SESSIONS = 6;
+
+/**
+ * The launch a *returning* user makes: one whose session picker has something
+ * in it.
+ *
+ * This is the case the lane never measured. `GET /api/agents/sessions` answers
+ * after first paint, and until the box was reserved the arriving rows replaced
+ * the "No sessions yet" line and pushed the chat down the pane — 0.064 measured
+ * against a ceiling of 0.02, on every launch, for everyone who had ever run an
+ * agent. The empty workspace above shifts 0.003 and saw none of it.
+ *
+ * Untagged, so it blocks: a shift score is geometry, not wall-clock. Nothing
+ * here is timed and nothing waits on a duration — the assertion is that a box
+ * whose contents arrive late has the same height before and after they do.
+ */
+test("a launch into a workspace with sessions does not reflow", async ({ page }, info) => {
+  // Before the page exists, so the listing is something the launch *finds*.
+  // Two folders: the picker groups by folder, and a group label is a row-sized
+  // piece of geometry the reservation has to cover as well (M5).
+  const folders = ["", FIXTURE.top_level_dirs[0]];
+  for (let i = 0; i < SEEDED_SESSIONS; i++) {
+    const created = await page.request.post("/api/agents/sessions", {
+      data: { folder: folders[i % folders.length] },
+    });
+    expect(created.ok(), `could not seed a session: ${String(created.status())}`).toBeTruthy();
+  }
+
+  await installTelemetry(page);
+  await page.goto("/");
+  await expect(page.getByRole("treeitem", { name: "notes.md", exact: true })).toBeVisible();
+  // A shift budget satisfied by a list that never arrived is not a budget. At
+  // least, not exactly: a full lane shares one backend, so earlier specs'
+  // sessions are in here too.
+  await expect
+    .poll(() => page.locator(".wb-session-row").count())
+    .toBeGreaterThanOrEqual(SEEDED_SESSIONS);
+
+  const telemetry = await readTelemetry(page);
+  const shift = cumulativeLayoutShift(telemetry);
+
+  await record(
+    info,
+    "cold-launch-with-sessions",
+    `${String(SEEDED_SESSIONS)} sessions seeded, layout shift ${shift.toFixed(3)} — ` +
+      describeShifts(telemetry),
+    { fixture: FIXTURE, seeded: SEEDED_SESSIONS, telemetry },
+  );
+
+  expect(shift, `the pane reflowed as the session list arrived: ${describeShifts(telemetry)}`).toBeLessThan(
+    LAYOUT_SHIFT_CEILING,
+  );
 });
 
 /**

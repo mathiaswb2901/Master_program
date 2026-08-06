@@ -43,10 +43,29 @@ export interface TaskSample {
   blockingDuration?: number;
 }
 
+/**
+ * One element a shift moved, named the way a stylesheet names it.
+ *
+ * A shift score on its own says the window reflowed and nothing about what to
+ * fix — which is how `.wb-sessions` grew a session list under every returning
+ * user for a milestone without anyone noticing (`launch.spec.ts`). The browser
+ * knows the answer: `layout-shift` entries carry `sources`, and a source is the
+ * node plus where it was and where it went.
+ */
+export interface ShiftSource {
+  /** `div.wb-chat-area`, or `(detached)` for a node already gone. */
+  node: string;
+  /** Top edge before and after, in CSS px — a reflow is a vertical move. */
+  fromY: number;
+  toY: number;
+}
+
 export interface ShiftSample {
   startTime: number;
   value: number;
   hadRecentInput: boolean;
+  /** Empty when the browser reported no attribution, never absent. */
+  sources: ShiftSource[];
 }
 
 export interface Telemetry {
@@ -140,14 +159,36 @@ export async function installTelemetry(page: Page): Promise<void> {
         blockingDuration: entry.blockingDuration ?? 0,
       });
     });
+    /** `div.wb-chat-area` — tag plus the first two classes, which is enough to
+     * find the rule that did it and short enough to keep in every entry. */
+    const name = (node: Node | null): string => {
+      const element = node as Element | null;
+      if (element === null || element.tagName === undefined) return "(detached)";
+      const classes = element.classList === undefined ? [] : Array.from(element.classList);
+      return element.tagName.toLowerCase() + classes.slice(0, 2).map((c) => `.${c}`).join("");
+    };
+
     observe(
       "layout-shift",
       {},
-      (entry: PerformanceEntry & { value: number; hadRecentInput: boolean }) => {
+      (
+        entry: PerformanceEntry & {
+          value: number;
+          hadRecentInput: boolean;
+          sources?: { node: Node | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }[];
+        },
+      ) => {
         state.layoutShifts.push({
           startTime: entry.startTime,
           value: entry.value,
           hadRecentInput: entry.hadRecentInput,
+          // Capped: one entry can name every row of a list that moved, and the
+          // first few are what identifies the reflow.
+          sources: (entry.sources ?? []).slice(0, 4).map((source) => ({
+            node: name(source.node),
+            fromY: source.previousRect.top,
+            toY: source.currentRect.top,
+          })),
         });
       },
     );
@@ -191,6 +232,31 @@ export function cumulativeLayoutShift(telemetry: Telemetry): number {
   return telemetry.layoutShifts
     .filter((shift) => !shift.hadRecentInput)
     .reduce((total, shift) => total + shift.value, 0);
+}
+
+/**
+ * What moved, worst first — the sentence a failing shift budget owes whoever
+ * reads the failure. "the shell reflowed" sends someone to a trace; "0.055 at
+ * 420 ms (div.wb-chat-area 168→296px)" sends them to the rule.
+ */
+export function describeShifts(telemetry: Telemetry, limit = 3): string {
+  const shifts = telemetry.layoutShifts.filter((shift) => !shift.hadRecentInput);
+  if (shifts.length === 0) return "nothing moved";
+  const worst = [...shifts].sort((a, b) => b.value - a.value);
+  const described = worst
+    .slice(0, limit)
+    .map((shift) => {
+      const moved = shift.sources
+        .map((source) => `${source.node} ${round(source.fromY)}→${round(source.toY)}px`)
+        .join(", ");
+      return `${shift.value.toFixed(3)} at ${round(shift.startTime)} ms (${moved === "" ? "no attribution" : moved})`;
+    })
+    .join("; ");
+  // Say what was left out: a reader who cannot tell whether they saw all of it
+  // goes to the trace anyway, which is the round trip this exists to prevent.
+  // The rest are in the run's JSON attachment.
+  const rest = worst.length - Math.min(limit, worst.length);
+  return rest === 0 ? described : `${described}; +${String(rest)} smaller (see the attachment)`;
 }
 
 /** Read everything collected so far. */

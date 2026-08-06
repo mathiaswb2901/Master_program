@@ -9,6 +9,9 @@
 
 /* ---- Sessions list -------------------------------------------------------- */
 
+/* Header + the reserved list below, and never more than 40% of the pane: the
+   cap is the one thing here that may depend on the window, because the window's
+   size is known at first paint and a session list is not. */
 .wb-sessions {
   flex: none;
   max-height: 40%;
@@ -25,12 +28,37 @@
   padding: var(--space-4) var(--space-5);
 }
 
+/* Reserved, never content-sized (DESIGN.md §1.9, §6.12).
+
+   `GET /api/agents/sessions` answers after first paint, so a list that grew
+   from "No sessions yet" into its rows moved the chat — and everything below it
+   in the pane — on every launch anyone with a session made. Measured on the
+   perf lane: 0.064 layout shift against a 0.02 ceiling with one session, 0.003
+   with none (`ui/e2e/perf/launch.spec.ts`).
+
+   `0 1 <basis>`: it may shrink under the 40% cap above when the pane is short,
+   and it never grows with its content — beyond the reserved box the rows
+   scroll. The long list lives in the Conversations panel, which is a browser
+   rather than a switcher. */
 .wb-sessions-list {
+  flex: 0 1 var(--sessions-list-height);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   padding-bottom: var(--space-3);
 }
 
+/* Folder groups keep their own height: flex items in a scroller shrink to fit
+   by default, which would squash the rows instead of scrolling them. */
+.wb-sessions-list > * {
+  flex: none;
+}
+
 .wb-sessions-none {
+  /* Centred in the box that is there either way (§6.10) — an empty list should
+     read as chosen, not as a list that failed to arrive. */
+  margin: auto;
   padding: var(--space-2) var(--space-5) var(--space-4);
   font-size: var(--type-sm-size);
   color: var(--text-tertiary);
