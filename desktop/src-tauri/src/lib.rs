@@ -276,6 +276,9 @@ pub fn run() {
                 // Before the webview has finished loading, let alone mounted:
                 // the caption wears the last run's colours from the first
                 // frame instead of being stock grey until the UI can speak.
+                // Returns at once — this arm is the event loop, so the cache
+                // is read on a thread of its own and only the painting is
+                // posted back here.
                 caption::restore_tint(app);
                 #[cfg(all(windows, debug_assertions))]
                 host::start_demo_if_asked(app);

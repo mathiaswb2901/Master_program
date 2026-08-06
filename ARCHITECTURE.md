@@ -143,7 +143,10 @@ Three consequences the design turns on:
   cached in the app config dir and re-applied from `RunEvent::Ready`, the first
   instant a window exists. It is a cache of the UI's own value, never a second
   authority: a first-ever run has none, and anything but three parseable
-  colours means no pre-tint.
+  colours means no pre-tint. `Ready` runs on the event loop, so the *read* is
+  on a thread of its own and only the painting is posted back — the config
+  directory can be a roaming profile or a network share, and a window that will
+  not repaint while one resolves is worse than the flash being removed.
 
 Degrading is silent in every direction. Windows 10 has no attributes 34–36 and
 refuses them (`E_INVALIDARG`) — one log line, and the caption stays the

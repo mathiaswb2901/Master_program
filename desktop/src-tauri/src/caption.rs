@@ -48,7 +48,7 @@
 //! better fallback than a light one, and it costs one call. Nothing here can
 //! fail a startup: the command returns `()`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -215,6 +215,14 @@ fn apply_colors(_window: &tauri::Window, _colors: Colors) -> Result<(), TintErro
 // palette: nothing here invents a colour, a first-ever run simply has none,
 // and a palette change is one launch behind for the few hundred milliseconds
 // until the real tint lands.
+//
+// The read is not on the event loop. `RunEvent::Ready` runs on the main
+// thread, which is the window's message pump, and this file lives in the
+// user's app-config directory — a roaming profile, a network-mounted
+// `AppData`, or a path a virus scanner has open at that exact moment. None of
+// those has a bound, and a window that will not repaint while one of them
+// resolves is a worse failure than the caption flash this section exists to
+// remove. Same reasoning that put `backend::start()` on a thread of its own.
 
 /// The cache's name inside the app's own config directory.
 ///
@@ -261,25 +269,71 @@ pub fn parse_cached(contents: &str) -> Option<CaptionTint> {
     parts.next().is_none().then_some(tint)
 }
 
+/// The cached tint, or `None`.
+///
+/// No file (the first-ever run), a file that will not open, or contents that
+/// are not three colours — all of them mean the same thing, which is that the
+/// window is born wearing the system's caption and nothing is wrong.
+fn read_cached(path: &Path) -> Option<CaptionTint> {
+    parse_cached(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Find and read the cache away from the calling thread, then hand what it
+/// found to `paint`.
+///
+/// `locate` runs on the reader too, so *nothing* in the chain touches the
+/// caller: not resolving the app-config directory, not the read itself. That
+/// split is the whole reason this is a function — see the section note above
+/// for why the event loop must not be the thread that waits on this disk.
+///
+/// Returns the reader's handle so a test can wait for it. The shell drops it:
+/// there is nothing to join, and nothing that a failure here would change.
+fn read_off_thread<L, P>(locate: L, paint: P) -> std::thread::JoinHandle<()>
+where
+    L: FnOnce() -> Option<PathBuf> + Send + 'static,
+    P: FnOnce(CaptionTint) + Send + 'static,
+{
+    std::thread::spawn(move || {
+        if let Some(tint) = locate().and_then(|path| read_cached(&path)) {
+            paint(tint);
+        }
+    })
+}
+
 /// Paint the window the moment it exists, from the last run's colours.
 ///
 /// Called from `RunEvent::Ready`, which is the earliest point at which there is
 /// a window to paint — Tauri creates the configured window only after `setup`
-/// returns. Silent in every failure direction: no cache, no window, or a DWM
-/// that refuses, and the caption is simply the system's until the UI sends the
-/// real one a moment later.
+/// returns. The disk work happens on a thread of its own and only the painting
+/// is posted back to the main one: the read is the unbounded half, while
+/// `DwmSetWindowAttribute` is neither slow nor ours to make thread-safe, and
+/// `host/main_thread.rs` already sets the house rule that Win32 window work
+/// runs on the thread that owns the window.
+///
+/// Silent in every failure direction: no cache, no window, an event loop that
+/// has already gone, or a DWM that refuses — and the caption is simply the
+/// system's until the UI sends the real one a moment later.
 pub fn restore_tint(app: &tauri::AppHandle) {
+    let reader = app.clone();
+    let painter = app.clone();
+    read_off_thread(
+        move || cache_path(&reader),
+        move |tint| {
+            let app = painter.clone();
+            if let Err(err) = painter.run_on_main_thread(move || pre_tint(&app, &tint)) {
+                crate::backend::log(&format!("caption not pre-tinted: {err}"));
+            }
+        },
+    );
+}
+
+/// The painting half of [`restore_tint`], on the main thread it posts to.
+fn pre_tint(app: &tauri::AppHandle, tint: &CaptionTint) {
     use tauri::Manager;
-    let Some(tint) = cache_path(app)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|contents| parse_cached(&contents))
-    else {
-        return;
-    };
     let Some(webview) = app.get_webview_window("main") else {
         return;
     };
-    match apply(&webview.as_ref().window(), &tint) {
+    match apply(&webview.as_ref().window(), tint) {
         Ok(colors) => crate::backend::log(&format!(
             "caption pre-tinted from the last run: caption={:#08X}",
             colors.caption
@@ -376,6 +430,9 @@ mod win {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+
     use super::*;
 
     fn tint(caption: &str) -> CaptionTint {
@@ -475,6 +532,83 @@ mod tests {
         ] {
             assert!(parse_cached(bad).is_none(), "{bad:?}");
         }
+    }
+
+    /// A directory of this module's own, in `backend.rs`'s style: a real path
+    /// on a real disk without a dev-dependency for it, removed on the way out.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wb-caption-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    #[test]
+    fn nothing_in_the_restore_chain_runs_on_the_thread_that_asks_for_it() {
+        // `restore_tint` is called from `RunEvent::Ready` — the event loop, and
+        // so the window's message pump. Reading there stalls the pump for as
+        // long as the disk takes, and this file lives in the user's app-config
+        // directory: a roaming profile, a network-mounted AppData, or a path AV
+        // has open. `locate` is asserted alongside the read because resolving
+        // that directory is part of the same chain.
+        let dir = scratch("off-thread");
+        let path = dir.join(CACHE_FILE);
+        std::fs::write(&path, "#14161a #a8b0bc #3d4450").unwrap();
+
+        let here = std::thread::current().id();
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        let (located, painted) = (Arc::clone(&threads), Arc::clone(&threads));
+        let (tx, rx) = mpsc::channel();
+        read_off_thread(
+            move || {
+                located.lock().unwrap().push(std::thread::current().id());
+                Some(path)
+            },
+            move |tint| {
+                painted.lock().unwrap().push(std::thread::current().id());
+                tx.send(tint).unwrap();
+            },
+        )
+        .join()
+        .expect("the reader thread");
+
+        // It still reads the colours it was given — moving the work must not
+        // quietly lose it.
+        let tint = rx.recv().expect("the cached tint");
+        assert_eq!(Colors::parse(&tint).unwrap().caption, 0x001A_1614);
+
+        let threads = threads.lock().unwrap();
+        assert_eq!(threads.len(), 2, "locate and paint both ran: {threads:?}");
+        assert!(
+            threads.iter().all(|id| *id != here),
+            "the cache was touched on the caller's thread: {threads:?} vs {here:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_cache_that_is_missing_or_junk_paints_nothing() {
+        let dir = scratch("no-paint");
+        let path = dir.join(CACHE_FILE);
+        // Never written: the first-ever run, which must not be an error.
+        assert!(read_cached(&path).is_none());
+        // Written, but not three colours — same outcome, no half-painted frame.
+        std::fs::write(&path, "#14161a #a8b0bc").unwrap();
+        assert!(read_cached(&path).is_none());
+
+        // And end to end: neither "no cache directory at all" nor a junk file
+        // reaches `paint`, so `restore_tint` has nothing to post to the window.
+        for locate in [None, Some(path)] {
+            let painted = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&painted);
+            read_off_thread(move || locate, move |_| flag.store(true, Ordering::SeqCst))
+                .join()
+                .expect("the reader thread");
+            assert!(!painted.load(Ordering::SeqCst));
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
