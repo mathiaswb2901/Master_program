@@ -16,6 +16,7 @@ from typing import Any
 
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
+from workbench_server.models.office_bridge import CellWindow, DocStructure, SheetDim, WordText
 from workbench_server.models.plans import (
     AnnotationAnchor,
     PlanAnnotation,
@@ -26,9 +27,12 @@ from workbench_server.services.agent_tools import (
     AGENT_TOOLS,
     GET_WORKSPACE_STATE,
     MAX_DESCRIPTION_CHARS,
+    OFFICE_READ,
+    OFFICE_READ_MAX_CELLS,
     PRESENT_PLAN,
     allowed_tool_names,
     clamp_result,
+    handle_office_read,
     handle_present_plan,
     workspace_state_result,
 )
@@ -79,6 +83,38 @@ class _Bridge:
         )
 
 
+class _Reader:
+    """OfficeDocumentReader stub: canned structure + one read result.
+
+    The office bridge's own branches (empty, unknown sheet, gone, windowing) are
+    exercised end-to-end against the real service and fake in
+    ``test_office_document_bridge.py``; here it only has to stand in so the SDK
+    wiring builds and the result budget is measured against a worst-case window.
+    """
+
+    def __init__(
+        self, structure: DocStructure, result: WordText | CellWindow | None = None
+    ) -> None:
+        self._structure = structure
+        self._result = result
+
+    async def document_structure(self, path: str) -> DocStructure:
+        return self._structure
+
+    async def read_document(
+        self,
+        path: str,
+        *,
+        max_chars: int,
+        max_cells: int,
+        sheet: str | None = None,
+        a1_range: str | None = None,
+        start_paragraph: int = 0,
+    ) -> WordText | CellWindow:
+        assert self._result is not None
+        return self._result
+
+
 def representative_plan_payload() -> dict[str, Any]:
     """A plan of the size the card was designed for: a choice and some steps."""
     return {
@@ -124,12 +160,17 @@ def representative_ui_state() -> UiState:
 
 class TestRegistry:
     def test_every_tool_declares_a_name_schema_and_output_format(self) -> None:
-        assert [spec.name for spec in AGENT_TOOLS] == ["get_workspace_state", "present_plan"]
+        assert [spec.name for spec in AGENT_TOOLS] == [
+            "get_workspace_state",
+            "present_plan",
+            "office_read",
+        ]
         for spec in AGENT_TOOLS:
             # ``output_format``, ``max_result_bytes`` and ``max_schema_bytes``
             # are required fields, so an omission is a type error — this asserts
-            # the values are the ones we actually ship.
-            assert spec.output_format == "compact-json"
+            # every tool ships a sane, bounded value (the format itself is a
+            # per-tool choice: office_read is ``text``, the others compact JSON).
+            assert spec.output_format in ("compact-json", "text", "markdown")
             assert spec.max_result_bytes > 0
             assert spec.max_schema_bytes > 0
             assert isinstance(spec.input_schema, dict)
@@ -144,12 +185,20 @@ class TestRegistry:
         assert allowed_tool_names() == [
             "mcp__workbench__get_workspace_state",
             "mcp__workbench__present_plan",
+            "mcp__workbench__office_read",
         ]
 
     def test_a_session_allows_every_registered_tool(self) -> None:
         """Asserted against the options a real session is built with, so the
         registry and the SDK wiring cannot drift apart silently."""
-        options = build_agent_options(UiStateStore(), Settings(), Path.cwd(), None, _Bridge())
+        options = build_agent_options(
+            UiStateStore(),
+            Settings(),
+            Path.cwd(),
+            None,
+            _Bridge(),
+            _Reader(DocStructure(kind="word", paragraph_count=0)),
+        )
         assert set(allowed_tool_names()) <= set(options.allowed_tools)
         assert set(options.mcp_servers) == {"workbench"}
 
@@ -284,3 +333,46 @@ class TestResultBudget:
         assert GET_WORKSPACE_STATE.input_schema == {}
         assert PRESENT_PLAN.input_schema["properties"].keys() >= {"title", "nodes"}
         assert "plan_id" not in PRESENT_PLAN.input_schema["properties"]
+
+
+class TestOfficeReadBudget:
+    """office_read is ``text``, and its result is bounded by the window it reads,
+    not by the size of the document. These pin that a worst-case window — the
+    widest Word body and the largest Excel window the server-side caps allow —
+    stays inside the tool's declared ceiling, so a real 2000-row sheet cannot."""
+
+    def test_the_office_read_schema_fits_its_ceiling(self) -> None:
+        assert OFFICE_READ.schema_bytes <= OFFICE_READ.max_schema_bytes
+        assert OFFICE_READ.input_schema["required"] == ["path"]
+
+    async def test_a_full_word_window_stays_within_budget(self) -> None:
+        body = "Para. " * 1000  # ~6 kB, the max_chars ceiling's worth of body
+        reader = _Reader(
+            DocStructure(kind="word", paragraph_count=200),
+            WordText(start_paragraph=0, returned_chars=len(body), total_paragraphs=200, text=body),
+        )
+        result = await handle_office_read(reader, {"path": "notes.docx"})
+        assert len(result_text(result).encode()) <= OFFICE_READ.max_result_bytes
+
+    async def test_a_full_excel_window_stays_within_budget(self) -> None:
+        cols = 8
+        rows = OFFICE_READ_MAX_CELLS // cols
+        cells = [[f"{r}.{c}" for c in range(cols)] for r in range(rows)]
+        reader = _Reader(
+            DocStructure(kind="excel", sheets=[SheetDim(name="Forecast", rows=2000, cols=cols)]),
+            CellWindow(
+                sheet="Forecast",
+                a1_range=f"A1:{'H'}{rows}",
+                rows=rows,
+                cols=cols,
+                total_rows=2000,
+                total_cols=cols,
+                cells=cells,
+            ),
+        )
+        result = await handle_office_read(reader, {"path": "forecast.xlsx", "sheet": "Forecast"})
+        text = result_text(result)
+        assert len(text.encode()) <= OFFICE_READ.max_result_bytes
+        # AXI shape 1: a windowed read states what it did not show and how to widen.
+        assert "of 2000" in text
+        assert "range=" in text

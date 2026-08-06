@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from workbench_server.models.agents import TextDelta, TurnDone
+from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
 from workbench_server.services.agent_sessions import SessionManager
+from workbench_server.services.office_host.document_bridge import DocNotHostedError
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 
 pytestmark = pytest.mark.skipif(
@@ -21,9 +23,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+class _NoReader:
+    """No document is docked in this smoke test — office_read just refuses."""
+
+    async def document_structure(self, path: str) -> DocStructure:
+        raise DocNotHostedError(path)
+
+    async def read_document(
+        self,
+        path: str,
+        *,
+        max_chars: int,
+        max_cells: int,
+        sheet: str | None = None,
+        a1_range: str | None = None,
+        start_paragraph: int = 0,
+    ) -> WordText | CellWindow:
+        raise DocNotHostedError(path)
+
+
 @pytest.mark.timeout(300)
 async def test_real_sdk_round_trip(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path, sdk_client_factory(UiStateStore()), max_sessions=1)
+    manager = SessionManager(
+        tmp_path, sdk_client_factory(UiStateStore(), _NoReader()), max_sessions=1
+    )
     session = manager.create("")
     queue = session.subscribe()
     session.send_user_message("Reply with exactly the word: pong. No punctuation, nothing else.")

@@ -37,9 +37,11 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 import structlog
 
+from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
 from workbench_server.models.office_host import (
     HOSTABLE_KINDS,
     HostReason,
@@ -58,13 +60,21 @@ from workbench_server.services.office_host.backend import (
     HostBackendError,
     HostHandle,
 )
+from workbench_server.services.office_host.document_bridge import (
+    DocNotHostedError,
+    DocNotReadableError,
+    DocumentBridge,
+)
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
+from workbench_server.services.office_host.fake_document_bridge import FakeDocumentBridge
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.office_host.shell_channel import ShellChannel
 from workbench_server.services.office_host.state import ForeignProcessError, HostLifecycle
 from workbench_server.services.workspace import Workspace
 
 log = structlog.get_logger()
+
+T = TypeVar("T")
 
 #: How often live hosts are checked for liveness. Polling is the only crash
 #: signal there is: nothing calls us back when Word disappears.
@@ -172,6 +182,26 @@ def build_backend(
     return ShellHostBackend(channel)
 
 
+def build_bridge(
+    mode: OfficeNativeMode, fake: bool, backend: HostBackend | None
+) -> DocumentBridge | None:
+    """The one place a document reader is chosen, sibling of :func:`build_backend`.
+
+    ``None`` means "cannot read a hosted document here", which is not an error:
+    the ``office_read`` tool says so and names how to open one. The fake shares
+    the fake host backend so a read is answered for exactly the pids it launched.
+    The real COM reader arrives in a later PR; until then the ``ShellHostBackend``
+    branch is deliberately ``None`` — hosting a window is shipped, reading its
+    live document is not.
+    """
+    if mode == "off":
+        return None
+    if fake and isinstance(backend, FakeHostBackend):
+        return FakeDocumentBridge(backend)
+    # ShellHostBackend -> None for now (PR 2 builds the real ShellDocumentBridge).
+    return None
+
+
 @dataclass
 class _Host:
     lifecycle: HostLifecycle
@@ -207,6 +237,7 @@ class OfficeHostService:
         bus: EventBus,
         backend: HostBackend | None,
         *,
+        bridge: DocumentBridge | None = None,
         mode: OfficeNativeMode = "auto",
         fake: bool = False,
         channel: ShellChannel | None = None,
@@ -226,6 +257,10 @@ class OfficeHostService:
         self._channel = channel
         # "off" wins over everything, including a backend somebody wired in.
         self._backend = None if mode == "off" else backend
+        #: The read seam onto the live document. ``None`` where a document cannot
+        #: be read (off, or a real backend before PR 2 ships the COM reader); the
+        #: ``office_read`` tool reports that plainly rather than failing opaquely.
+        self._bridge = None if mode == "off" else bridge
         self._office_detected = detector()
         self._clock = clock
         self._poll_interval_s = poll_interval_s
@@ -656,6 +691,82 @@ class OfficeHostService:
 
     def get(self, host_id: str) -> OfficeHostInfo:
         return self._require(host_id).lifecycle.info()
+
+    # ---- reading the live document (the COM bridge seam) ---------------------
+
+    async def document_structure(self, path: str) -> DocStructure:
+        """The shape of the live document at ``path``: Word paragraph count, or
+        the Excel sheets and their used-range dimensions.
+
+        Raises :class:`~...document_bridge.DocNotHostedError` when nothing is
+        docked for the path, and the other
+        :class:`~...document_bridge.DocumentBridgeError` refusals the read seam
+        reports.
+        """
+        host, bridge, handle = self._readable(path)
+        return await self._guarded_read(bridge.structure(handle, host.lifecycle.kind))
+
+    async def read_document(
+        self,
+        path: str,
+        *,
+        max_chars: int,
+        max_cells: int,
+        sheet: str | None = None,
+        a1_range: str | None = None,
+        start_paragraph: int = 0,
+    ) -> WordText | CellWindow:
+        """Read a window of the live document at ``path``.
+
+        Word documents are read by ``start_paragraph``/``max_chars``; Excel
+        worksheets by ``sheet``/``a1_range``, trimmed to ``max_cells``. Reading
+        an Excel document without a ``sheet`` is a caller error here — the tool
+        returns the structure instead — so it is refused rather than guessed.
+        """
+        host, bridge, handle = self._readable(path)
+        if host.lifecycle.kind == "word":
+            return await self._guarded_read(bridge.read_word(handle, start_paragraph, max_chars))
+        if sheet is None:
+            raise DocNotReadableError("name a sheet to read from an Excel document")
+        return await self._guarded_read(bridge.read_excel(handle, sheet, a1_range, max_cells))
+
+    def _readable(self, path: str) -> tuple[_Host, DocumentBridge, HostHandle]:
+        """The host, its reader and its owned handle — or the refusal that says
+        why the live document cannot be read."""
+        host = self._live_host_for(path)
+        if host is None:
+            raise DocNotHostedError(
+                f"{path} is not docked in Workbench; open it first, then read it"
+            )
+        if self._bridge is None:
+            raise DocNotReadableError(self._read_unavailable_detail())
+        if host.lifecycle.state not in ("embedded", "detached"):
+            raise DocNotReadableError(
+                f"{path} is still opening (it is {host.lifecycle.state}); "
+                "try again once it is docked"
+            )
+        try:
+            handle = self._owned(host)
+        except ForeignProcessError as error:
+            raise DocNotReadableError(
+                f"the window for {path} is not the instance Workbench launched"
+            ) from error
+        return host, self._bridge, handle
+
+    def _read_unavailable_detail(self) -> str:
+        if self._fake:  # pragma: no cover - the fake always has a bridge
+            return "the fake host backend has no document reader"
+        return "reading the live document is not available here (it needs the desktop shell)"
+
+    async def _guarded_read(self, call: Awaitable[T]) -> T:
+        """One bridge read, under the service's per-call ceiling. A read that
+        never returns — a Word thinking about a modal — must not hang the request
+        that started it, so it is cancelled and reported rather than awaited
+        forever."""
+        try:
+            return await asyncio.wait_for(call, self._operation_timeout_s)
+        except TimeoutError as error:
+            raise DocNotReadableError("the read did not return in time") from error
 
     # ---- lifecycle ----------------------------------------------------------
 

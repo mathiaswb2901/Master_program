@@ -959,10 +959,11 @@ def test_session_status_reaches_the_events_websocket(
     """
     factory = make_factory([delta("ok"), ResultMessage()])
 
-    # Mirrors the real signature, Settings included: main.py passes the settings
-    # through so a session's options (bundled skills, setting sources) are
-    # configurable, and a stub that drops the argument fails at call time.
-    def fake_sdk_client_factory(_ui_state_store: Any, _settings: Any = None) -> Any:
+    # Mirrors the real signature, reader and Settings included: main.py passes
+    # the office-host reader (for office_read) and the settings through, so a
+    # session's options are configurable, and a stub that drops an argument
+    # fails at call time.
+    def fake_sdk_client_factory(_ui_state_store: Any, _reader: Any, _settings: Any = None) -> Any:
         return factory
 
     monkeypatch.setattr(main, "sdk_client_factory", fake_sdk_client_factory)
