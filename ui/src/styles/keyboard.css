@@ -123,10 +123,9 @@
   color: var(--text-primary);
 }
 
-.wb-keys-input:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
+/* No `:focus-visible` rule here on purpose: the global one in `tokens.css` is
+   the ring this input should have, and a local copy is a second number to keep
+   honest (DESIGN.md §7). */
 
 /* ---- the reference -------------------------------------------------------- */
 
