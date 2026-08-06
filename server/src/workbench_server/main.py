@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
 from workbench_server.routers import (
+    activity,
     agents,
     events,
     files,
@@ -26,6 +27,7 @@ from workbench_server.routers import (
     usage,
     worktrees,
 )
+from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
@@ -77,6 +79,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # The account's plan limits, as far as a live session's stream reports them.
     # In-memory by design: live state about an account, not workspace data.
     usage_service = UsageService(event_bus)
+    # What the fleet is touching right now. The other end of provenance: that
+    # one says who wrote a file after the fact, this one says what is happening
+    # this second, across every session, whether or not a window has that
+    # conversation open. In-memory and bounded, like usage.
+    activity_service = ActivityService(workspace.root, event_bus)
     ui_state_store = UiStateStore()
     session_index = SessionIndex(settings.resolved_projects_dir())
     # Fake mode replaces the SDK client and nothing else: same SessionManager,
@@ -104,6 +111,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Rate-limit transitions and per-turn cost: an account-wide figure that
         # only ever arrives on a session's stream.
         usage_observer=usage_service,
+        # Every announced tool call *and* its result, fanned out fleet-wide on
+        # the shared bus — the frames themselves only reach the sockets that
+        # opened each conversation.
+        activity_observer=activity_service,
     )
     office_service = OfficeService(
         workspace,
@@ -146,6 +157,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         watcher.start()
         shortcuts_service.start()
         provenance_service.start()
+        # Binds to this loop, which is what lets it coalesce a burst of tool
+        # calls into one frame instead of one frame per call.
+        activity_service.start()
         office_host_service.start()
         # Reads the pool state and reconciles it with the disk. Never raises: a
         # machine with no git, or a workspace that is not a repository, reports
@@ -162,6 +176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # apartment thread go.
             await host_backend.aclose()
         await provenance_service.stop()
+        await activity_service.stop()
         await shortcuts_service.stop()
         # Releases the pool's cross-process lock, so the next server on this
         # workspace can serve slots immediately instead of waiting for this
@@ -188,6 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.layouts = layouts_service
     app.state.worktrees = worktree_service
     app.state.usage = usage_service
+    app.state.activity = activity_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -209,6 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(layouts.router)
     app.include_router(worktrees.router)
     app.include_router(usage.router)
+    app.include_router(activity.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

@@ -13,6 +13,7 @@
 
 import type { WorkbenchTool } from "./registry";
 
+import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
@@ -37,6 +38,7 @@ export const TOOLS: readonly WorkbenchTool[] = [
   officeTool,
   scratchpadTool,
   usageTool,
+  activityTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its
