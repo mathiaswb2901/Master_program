@@ -653,29 +653,45 @@ because other sections and five running lanes reference these numbers.
    two agent panes, two terminals and two editors coexist in one window, each independent
    through a save/restore round trip, and every pane whose resource is gone shows a named
    tombstone with its one recovery action.
-10. **Live agent activity — "see everywhere Claude is editing"** (registers as a tool;
-    panel + command + status contribution). Provenance answers *who wrote this file I am
-    looking at*, after the fact; nothing answers *show me everywhere the fleet is working
-    right now*. One row per live session ordered by most-recently-active — status dot,
-    title, folder, and the current tool line **replaced in place** rather than appended,
-    fading to the last-completed line when a call settles. Retention is one line per
-    session, so the surface is O(sessions), not O(tool calls), and with four agents
-    working you see four rows changing at four different rhythms: fleet legibility
-    without opening four chats. The signal already exists and is already summarised —
-    `ToolUseNote`/`ToolSettled` carry a computed one-line description — but they are
-    emitted only to *that session's* socket, so a client sees activity only for
-    conversations it has opened. The change is one new bus event
-    (`SessionActivityEvent(session_id, folder, tool, summary, phase, ok)`) published from
-    the two call sites that already build those frames. **It is a firehose and must be
-    treated as one**: batched server-side with the policy `services/terminal_stream.py`
-    already proves (first frame after a quiet stream goes immediately, then at most one
-    frame per window, coalescing per session so only the latest line survives), no result
-    excerpts on the shared bus, and the same workspace jail — a fleet-wide feed discloses
-    paths and commands from every session at once, which is wider than the per-session
-    socket. Built on `SessionStatusEvent` + the new event only, so it neither waits for
-    nor collides with the watcher-protocol rewrite in the Feel track. Exit criterion:
-    four sessions working at once are legible from one pane, updating in place, with no
-    measurable cost to the shared `/ws/events` socket under a Grep-heavy turn.
+10. ~~**Live agent activity — "see everywhere Claude is editing"**~~ **done** — the
+    owner's ask, and the exit criterion met by measurement rather than by argument.
+    Provenance answers *who wrote this file I am looking at*, after the fact; this
+    answers *what is the fleet doing this second*, across every session, whether or not
+    this window has that conversation open. What landed: `services/activity.py` +
+    `models/activity.py` + `GET /api/activity`, fed at the SDK seam through a third
+    observer (`ActivityObserver`, after `ToolUseObserver` and `UsageObserver`) from the
+    two call sites that already build `ToolUseNote`/`ToolSettled`, published as
+    `SessionActivityEvent` on the existing `/ws/events` bus, and rendered by a
+    registered tool (`ui/src/panels/ActivityPanel.tsx` + `ui/src/activity.ts`) — a
+    status-bar reading, an on-demand panel of session cards, one module and one line in
+    `tools.ts`. Nothing is persisted: live state about processes is not workspace data,
+    so a restart honestly reports an empty fleet.
+    **The plan's retention was one line per session; the code keeps a small bounded
+    window and renders one line per session**, which is the same O(sessions) surface
+    with the "what did it just do" the card needs — and it made the honest version of
+    the cap possible: what falls out is *counted* on the row, and a **running** call is
+    the last thing a full window gives up, so eight quick calls cannot blank the line
+    that says what an agent is doing now.
+    The firehose is treated as one, and the numbers are asserted: the first change
+    after a quiet fleet publishes immediately, then at most one frame per 250 ms with
+    every change in between coalesced per session — 250 ms rather than the terminal's
+    8 ms because a person reads this. A 40-call `tool storm` (a new fake-agent trigger,
+    which is what "a Grep-heavy turn" looks like on the wire) is **80 changes and
+    arrives as 2 frames totalling 1,656 bytes** (measured 2026-08-06; widest frame
+    1,483 B, 8 entries kept and 32 dropped), held under a quarter of the changes by
+    `test_activity.py` and again in the browser by `ui/e2e/perf/activity.spec.ts` — the
+    first perf budget that mounts a panel re-rendering on agent output, and which
+    measured 4 frames end to end (it also pays for the session being created) with
+    0 of 10 sampled frames over 50 ms. No result excerpts cross to the
+    shared bus (only `ok`), and the workspace jail is by construction: paths are
+    normalized with provenance's own function and one that escapes is redacted rather
+    than printed.
+    Four agents at once are legible in a narrow dock and maximized, asserted where each
+    can be: three conversations at their own rhythms in the E2E journey, four
+    simultaneous mid-call sessions in `ActivityPanel.test.tsx` — a state no browser
+    journey can stage in time. And an idle fleet, which is the common case, is a
+    designed surface rather than an empty panel; the status reading shows nothing at
+    all when nothing is in flight.
 11. ~~**Native plan usage meters** (5-hour window, weekly per model)~~ **done** — the
     owner's ask to see in the app what Claude Code shows in the terminal, and the four
     constraints below are on screen rather than papered over. What landed:
