@@ -23,8 +23,13 @@ import { panesTool } from "./panels/Panes";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
 import { usageTool } from "./panels/UsagePanel";
+import { workspacesTool } from "./panels/Workspaces";
 
 export const TOOLS: readonly WorkbenchTool[] = [
+  // First, and it contributes no panel: it decides which *project* every panel
+  // below is looking at, so its status chip belongs at the left end of the bar
+  // where the workspace name has always been.
+  workspacesTool,
   filesTool,
   editorTool,
   agentTool,

@@ -24,6 +24,7 @@ from workbench_server.routers import (
     shortcuts,
     terminal,
     usage,
+    workspaces,
     worktrees,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
@@ -41,6 +42,7 @@ from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
+from workbench_server.services.workspaces import RecentsStore, WorkspaceService
 from workbench_server.services.worktrees import WorktreeService
 
 log = structlog.get_logger()
@@ -138,11 +140,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fake=settings.office_fake,
         channel=host_channel,
     )
+    # The workspace is no longer fixed at launch (M5 item 5). Everything above
+    # that copied `workspace.root` into a field of its own is listed here, and
+    # this list is the *only* place a switch is coordinated — a service added
+    # later that copies the root and is not named here keeps serving the project
+    # the user left. Sync first (the jail, then the files that are simply re-read
+    # from a different path), async last (restarts: the watcher's watch and the
+    # pool's cross-process lock).
+    workspace_service = WorkspaceService(
+        workspace,
+        event_bus,
+        sync_rootables=[
+            shortcuts_service,
+            layouts_service,
+            provenance_service,
+            session_manager,
+        ],
+        async_rootables=[watcher, worktree_service],
+        # Whether anybody *chose* this root, which the UI has to say rather than
+        # imply: with no setting the server falls back to its launch directory,
+        # and a first run must show what it is showing.
+        explicit=settings.workspace_root is not None,
+        recents=RecentsStore(settings.app_data_root),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("workbench.starting", workspace=str(workspace.root), port=settings.port)
         app.state.http = httpx.AsyncClient(timeout=30)
+        # Before the watcher, so the folder the server opened in is already the
+        # top of the recent list the first time anyone asks for it.
+        workspace_service.start()
         watcher.start()
         shortcuts_service.start()
         provenance_service.start()
@@ -188,6 +216,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.layouts = layouts_service
     app.state.worktrees = worktree_service
     app.state.usage = usage_service
+    app.state.workspaces = workspace_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -209,6 +238,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(layouts.router)
     app.include_router(worktrees.router)
     app.include_router(usage.router)
+    app.include_router(workspaces.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

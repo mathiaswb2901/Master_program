@@ -49,6 +49,7 @@ from workbench_server.models.worktrees import (
     WorktreeInfo,
     WorktreePool,
 )
+from workbench_server.services.app_data import app_data_dir
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
 from workbench_server.services.worktrees import (
@@ -65,7 +66,6 @@ from workbench_server.services.worktrees import (
     PoolUnavailableError,
     SlotNotFoundError,
     WorktreeService,
-    app_data_dir,
     default_pool_root,
     dirty_detail,
     process_alive,

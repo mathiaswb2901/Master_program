@@ -43,6 +43,13 @@ def _is_dir(path: Path) -> bool:
         return False
 
 
+def _resolved(path: Path) -> Path:
+    """``Path.resolve`` behind a sync helper, for the same reason ``_is_dir`` is
+    one: it is a blocking filesystem call and the lint rule that keeps those out
+    of coroutines is right — `set_workspace_root` calls this before it awaits."""
+    return path.resolve()
+
+
 def _hash_of(path: Path) -> str | None:
     try:
         if path.is_file() and path.stat().st_size <= MAX_TEXT_FILE_BYTES:
@@ -91,6 +98,29 @@ class Watcher:
         if self._task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        self._task = None
+
+    async def set_workspace_root(self, root: Path) -> None:
+        """Watch a different tree: stop, re-root, start again.
+
+        A watch cannot be re-pointed in place — ``awatch`` is an async generator
+        bound to the directory it was opened on — so this is a real restart, and
+        it is awaited so the old watch is *gone* before the new one publishes.
+        Overlapping them would emit paths relative to two different roots on one
+        bus, and a client patching its tree from those would be building a
+        directory listing out of two projects.
+
+        The stop event and the ignore index are rebuilt too. ``self._stop`` has
+        been set and cannot be un-set (``asyncio.Event`` has ``clear()``, but a
+        subscriber of the old generator could still be inside it), and
+        ``IgnoreIndex`` caches decisions about paths under the old root.
+        """
+        resolved = _resolved(root)
+        await self.stop()
+        self._root = resolved
+        self._ignore = IgnoreIndex(self._root)
+        self._stop = asyncio.Event()
+        self.start()
 
     async def _run(self) -> None:
         log.info("watcher.started", root=str(self._root))

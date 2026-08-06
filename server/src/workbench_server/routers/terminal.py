@@ -7,7 +7,6 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from workbench_server.config import Settings
 from workbench_server.models.terminal import (
     TerminalExit,
     TerminalInput,
@@ -16,6 +15,7 @@ from workbench_server.models.terminal import (
 )
 from workbench_server.services.pty_manager import PtyManager, PtySession
 from workbench_server.services.terminal_stream import coalesced_output
+from workbench_server.services.workspace import Workspace
 
 log = structlog.get_logger()
 
@@ -36,11 +36,14 @@ async def _pump_output(session: PtySession, ws: WebSocket) -> None:
 
 @router.websocket("/ws/terminal")
 async def terminal_ws(ws: WebSocket) -> None:
-    settings: Settings = ws.app.state.settings
     manager: PtyManager = ws.app.state.pty_manager
+    # The live workspace object, not `settings.resolved_workspace()`: the root
+    # can move now (M5 item 5), and reading the launch setting here would open
+    # every new shell in the project the user had already left.
+    workspace: Workspace = ws.app.state.workspace
     await ws.accept()
 
-    session = manager.spawn(cwd=settings.resolved_workspace())
+    session = manager.spawn(cwd=workspace.root)
     pump = asyncio.create_task(_pump_output(session, ws))
     try:
         while True:

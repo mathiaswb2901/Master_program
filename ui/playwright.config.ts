@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, devices } from "@playwright/test";
 
-import { E2E_WORKSPACE, WORKSPACE_ENV } from "./e2e/workspace";
+import { E2E_APP_DATA, E2E_WORKSPACE, WORKSPACE_ENV } from "./e2e/workspace";
 
 // The E2E harness is deliberately outside the `tsc -b` program (tsconfig.json
 // covers `src` + the two vite configs), so node's globals need no types
@@ -110,6 +110,13 @@ export default defineConfig({
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: E2E_WORKSPACE,
         WORKBENCH_CLAUDE_PROJECTS_DIR: path.join(E2E_WORKSPACE, ".claude-projects"),
+        // Machine-local state — today the recent-workspaces list. Pointed at a
+        // per-run sibling for the same reason the projects dir is redirected:
+        // the switcher journey both reads and writes this, and it must never be
+        // the developer's own history. Outside the workspace, because the pool
+        // root's rule applies here too — state about the user is not a file in
+        // one of their projects.
+        WORKBENCH_APP_DATA_ROOT: E2E_APP_DATA,
         WORKBENCH_LOG_LEVEL: "warning",
       },
       url: `${SERVER_URL}/api/health`,

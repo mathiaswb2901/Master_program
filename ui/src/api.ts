@@ -25,10 +25,12 @@ import type {
   SessionInfo,
   SessionLimits,
   ShortcutsState,
+  SwitchWorkspaceRequest,
   TranscriptResponse,
   TreeNode,
   UiState,
   UsageSnapshot,
+  WorkspaceState,
   WriteRequest,
   WriteResponse,
 } from "./types";
@@ -94,6 +96,12 @@ export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provena
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
+
+export const getWorkspace = (): Promise<WorkspaceState> => request("/api/workspace");
+
+/** Re-root the server. 400 with the reason for a folder that cannot be served. */
+export const switchWorkspace = (body: SwitchWorkspaceRequest): Promise<WorkspaceState> =>
+  request("/api/workspace/switch", jsonInit("POST", body));
 
 export const putLayouts = (body: LayoutsState): Promise<OkResponse> =>
   request("/api/layouts", jsonInit("PUT", body));

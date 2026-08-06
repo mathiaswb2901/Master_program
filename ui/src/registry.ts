@@ -214,6 +214,22 @@ export interface WorkbenchTool {
    */
   onDockReady?: (api: DockviewApi | null) => void;
   /**
+   * The workspace root moved (M5 item 5): drop whatever this tool cached about
+   * the project that is gone, and read the new one.
+   *
+   * The seam exists so the switcher never has to know which capabilities keep
+   * workspace-scoped state. The Layouts tool is the first user — the arrangement
+   * lives in `<workspace>/.workbench/layouts.json`, so a switch means a
+   * different file — and every later tool that reads something out of the
+   * workspace (saved artifacts, a session browser's scope) implements it rather
+   * than being wired into the switcher by hand.
+   *
+   * Called **after** the app-wide reset (`store.adoptWorkspace`), so the tree,
+   * the sessions and the editors are already the new workspace's. `root` is
+   * absolute and in the OS's own form.
+   */
+  onWorkspaceChanged?: (root: string) => void;
+  /**
    * A control at the right end of **every pane's** tab strip, for a tool that
    * acts on panes rather than living in one — the split affordance is the one
    * (DESIGN.md §6.11). Contributed here so `App.tsx` hands dockview a component
@@ -321,6 +337,19 @@ export function notifyDockReady(
   api: DockviewApi | null,
 ): void {
   for (const tool of tools.filter(isEnabled)) tool.onDockReady?.(api);
+}
+
+/** Tell every tool the workspace root moved. One tool throwing must not stop
+ * the next from being told — a half-adopted window is the state where one panel
+ * shows the new project and another still shows the old. */
+export function notifyWorkspaceChanged(tools: readonly WorkbenchTool[], root: string): void {
+  for (const tool of tools.filter(isEnabled)) {
+    try {
+      tool.onWorkspaceChanged?.(root);
+    } catch (err) {
+      console.error(`${tool.id} failed to adopt the new workspace`, err);
+    }
+  }
 }
 
 /** The panel a `shortcuts.md` entry of this kind is typed into, or null if no

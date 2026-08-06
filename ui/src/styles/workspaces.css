@@ -1,0 +1,102 @@
+/* The workspace switcher (ui/src/panels/Workspaces.tsx): the status chip that
+   says which folder this window is looking at, and the typed-path prompt a
+   browser tab gets instead of a folder dialog. Tokens only — DESIGN.md §2. */
+
+.wb-workspace-status {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* The chip is a control, so it reads as one: a hairline that only appears on
+   hover, exactly like the layout chip at the other end of the bar. */
+.wb-workspace-chip {
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  max-width: 200px;
+}
+
+.wb-workspace-chip:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.wb-workspace-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Nobody chose this folder — the server fell back to the directory it was
+   launched from. A dashed edge rather than accent: this is a *provisional*
+   state to be noticed and resolved, not a state worth spending accent on
+   (which DESIGN.md reserves for what the window is actually doing). */
+.wb-workspace-chip.is-unchosen {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+.wb-workspace-chip.is-busy {
+  color: var(--text-tertiary);
+}
+
+.wb-workspace-chip-label {
+  min-width: 0;
+}
+
+/* ---- the browser-tab path prompt ------------------------------------------ */
+
+/* Same shape and elevation as the layout menu at the other end of the bar, and
+   anchored to the same edge it grew out of. */
+.wb-workspace-prompt {
+  position: fixed;
+  left: var(--space-4);
+  bottom: 28px;
+  z-index: 151;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 360px;
+  max-width: calc(100vw - var(--space-6));
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  animation: wb-rise-in var(--motion-enter);
+  transform-origin: bottom left;
+}
+
+.wb-workspace-prompt-label {
+  color: var(--text-tertiary);
+}
+
+.wb-workspace-prompt-form {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.wb-workspace-prompt-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+}
+
+.wb-workspace-prompt-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.wb-workspace-prompt-hint {
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}

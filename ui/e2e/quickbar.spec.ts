@@ -119,10 +119,16 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
 
   await test.step("shortcuts.md entries get their own category", async () => {
     const quickbar = page.getByRole("dialog", { name: "Quick open" });
-    // Both categorized sections, in order: the registry's dynamic rows (the
-    // Layouts tool's) come before the file's, which is what keeps a section
-    // header a header rather than something that appears mid-list.
-    await expect(quickbar.locator(".wb-qb-cat")).toHaveText(["Panes", "Layouts", "Shortcuts"]);
+    // Every categorized section, in order: the registry's own rows come before
+    // the file's, which is what keeps a section header a header rather than
+    // something that appears mid-list. Registry order is `tools.ts` order —
+    // Workspace first, because it decides which project the rest are about.
+    await expect(quickbar.locator(".wb-qb-cat")).toHaveText([
+      "Workspace",
+      "Panes",
+      "Layouts",
+      "Shortcuts",
+    ]);
     const row = quickbar.locator(".wb-qb-row", { hasText: SHORTCUT_NAME }).first();
     // The row shows the snippet itself, never the file's own description.
     await expect(row).toContainText(SHORTCUT_BODY);

@@ -127,6 +127,10 @@ describe("command registry", () => {
     expect(builtinCommands().map((command) => command.id)).toEqual([
       "quickbar.files",
       "quickbar.commands",
+      // The Workspaces tool's, first because it is first in `tools.ts`: it
+      // decides which *project* every panel below is looking at.
+      "workspace.switch",
+      "workspace.open",
       // …the Editor tool's, then the Agent's, then the Terminal's, then the
       // Scratchpad's — registry order (`tools.ts`), never declared here.
       "file.save",
@@ -240,7 +244,7 @@ describe("shortcuts.md extension", () => {
     const categories = allCommands()
       .map((command) => command.category)
       .filter((category): category is string => category !== undefined);
-    expect([...new Set(categories)]).toEqual(["Panes", "Layouts", "Shortcuts"]);
+    expect([...new Set(categories)]).toEqual(["Workspace", "Panes", "Layouts", "Shortcuts"]);
   });
 
   it("never gives a dynamic command a chord", () => {

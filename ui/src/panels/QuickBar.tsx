@@ -109,7 +109,7 @@ export function QuickBar() {
   let rows: Row[];
   if (pick !== null) {
     const q = query.trim();
-    const supplied = pick.rows();
+    const supplied = pick.rows(q);
     // Ranked inside each section, never across them: the sections are the
     // vocabulary ("Panels", "Agent sessions", "Files"), and a list that
     // reshuffles its headers on every keystroke is unreadable.
