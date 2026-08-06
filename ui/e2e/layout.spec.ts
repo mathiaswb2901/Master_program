@@ -62,6 +62,24 @@ const LEAF_ROOT_LAYOUT = {
   activeGroup: "1",
 };
 
+/**
+ * How long `GET /api/shortcuts` is held across the reload in the middle of the
+ * first journey — the race below, made a fact of the run.
+ *
+ * The window comes back on the file tree (`workspaceReady`), and the entries
+ * `shortcuts.md` contributes arrive on their own fetch afterwards. So a chord
+ * that belongs to the *file* rather than to a registered tool is inert for the
+ * first moments of a page, and a journey that presses one ~10 ms after the tree
+ * appears — which no hand can — is racing a fetch it never waited for. That is
+ * a flake seen for real: the press was swallowed and the chip still read the
+ * layout saved before the reload, 15 s later.
+ *
+ * Held for longer than any of it can plausibly take, so the press below is
+ * *always* on the far side of the wait rather than usually on the far side of a
+ * race — the same reason journey 4's reordering test holds a body on the wire.
+ */
+const SHORTCUTS_DELAY_MS = 2_000;
+
 const DEFAULT_PANELS = ["Agent", "Editor", "Files", "Terminal"];
 const REVIEW_PANELS = ["Agent", "Editor", "Files"];
 const AGENTS_PANELS = ["Agent", "Files", "Terminal"];
@@ -191,6 +209,10 @@ test("focus mode, named layouts, and an arrangement that survives a reload", asy
   await test.step("and the arrangement is still there after a reload", async () => {
     // The whole point: not "the store says Review", but "the window came back
     // without a terminal, because the file on disk said so".
+    await page.route("**/api/shortcuts", async (route) => {
+      await page.waitForTimeout(SHORTCUTS_DELAY_MS);
+      await route.continue();
+    });
     await page.reload();
     await workspaceReady(page);
     expect(await panels(page)).toEqual(REVIEW_PANELS);
@@ -198,12 +220,15 @@ test("focus mode, named layouts, and an arrangement that survives a reload", asy
   });
 
   await test.step("a shortcuts.md layout entry moves the panels", async () => {
-    // The one entry kind that acts rather than inserts. It can do exactly this.
-    await page.keyboard.press(LAYOUT_SHORTCUT_CHORD);
-    await expect(page.locator(".wb-layout-chip")).toHaveText("Agents");
-    expect(await panels(page)).toEqual(AGENTS_PANELS);
-    // …and it is a QuickBar row like any other shortcut, showing the layout it
-    // switches to rather than whatever the file chose to call it.
+    // It is a QuickBar row like any other shortcut, showing the layout it
+    // switches to rather than whatever the file chose to call it — and this is
+    // asserted *first* on purpose. The row and the chord are the same command
+    // (`allCommands`), so a row on screen is the app saying the entry has been
+    // read and registered. Pressing the chord before that is pressing a key
+    // nothing is bound to yet: it does nothing, silently, and the assertion
+    // after it spends its whole budget on a window that was never going to
+    // move. `SHORTCUTS_DELAY_MS` above is what makes that certain rather than
+    // occasional.
     await page.keyboard.press("Control+Shift+P");
     const quickbar = page.getByRole("dialog", { name: "Quick open" });
     const row = quickbar
@@ -212,6 +237,12 @@ test("focus mode, named layouts, and an arrangement that survives a reload", asy
     await expect(row).toContainText("layout · Agents");
     await page.keyboard.press("Escape");
     await expect(quickbar).toBeHidden();
+    await page.unroute("**/api/shortcuts");
+
+    // The one entry kind that acts rather than inserts. It can do exactly this.
+    await page.keyboard.press(LAYOUT_SHORTCUT_CHORD);
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Agents");
+    expect(await panels(page)).toEqual(AGENTS_PANELS);
   });
 
   await test.step("switching back to the saved layout brings its panels back", async () => {
