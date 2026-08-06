@@ -118,6 +118,47 @@ class ToolUseObserver(Protocol):
     ) -> None: ...
 
 
+class ActivityObserver(Protocol):
+    """Told what this session is doing, as the chat frames for it are built.
+
+    The third observer on this seam, and the one whose whole point is *reach*:
+    ``ToolUseNote`` and ``ToolSettled`` go to the clients that opened this
+    session's socket, so a window that has never opened this conversation sees
+    nothing of it. The activity service republishes a bounded, jailed row on the
+    shared bus, which is what makes "show me everywhere the fleet is working"
+    answerable from one pane (``services/activity.py``).
+
+    Distinct from :class:`ToolUseObserver` rather than folded into it, because
+    the two want different things from the same moment: provenance wants the
+    path a *write* tool named and drops everything else, while this wants every
+    call — a Grep, a Bash, a Read — and never wants the result text. A single
+    protocol serving both would have to carry the union and let each implementor
+    ignore half.
+
+    ``note_session`` is called at creation *and* when the first message derives
+    the title, so a fleet with sessions that have run nothing still reads as a
+    fleet rather than as an empty panel.
+    """
+
+    def note_session(self, *, session_id: str, title: str, folder: str) -> None: ...
+
+    def note_tool_started(
+        self,
+        *,
+        session_id: str,
+        session_title: str,
+        folder: Path,
+        folder_relative: str,
+        call_id: str,
+        tool: str,
+        tool_input: dict[str, Any],
+    ) -> None: ...
+
+    def note_tool_settled(self, *, session_id: str, call_id: str, ok: bool) -> None: ...
+
+    def note_session_gone(self, *, session_id: str) -> None: ...
+
+
 class UsageObserver(Protocol):
     """Told what the SDK says about the account's limits, and what a turn cost.
 
@@ -180,6 +221,7 @@ class AgentSession:
         event_publisher: EventPublisher | None = None,
         tool_observer: ToolUseObserver | None = None,
         usage_observer: UsageObserver | None = None,
+        activity_observer: ActivityObserver | None = None,
     ) -> None:
         self.local_id = local_id
         self.folder = folder
@@ -197,6 +239,7 @@ class AgentSession:
         self._publisher = event_publisher
         self._tool_observer = tool_observer
         self._usage_observer = usage_observer
+        self._activity_observer = activity_observer
         self._client: SdkClient | None = None
         self._listeners: set[asyncio.Queue[BaseModel]] = set()
         self._pending_permissions: dict[str, asyncio.Future[bool]] = {}
@@ -425,6 +468,13 @@ class AgentSession:
             return
         if self.title is None:
             self.title = derive_title(text)
+            # The fleet view names sessions, and this is the moment a session
+            # stops being "new session" — say so once, rather than let the row
+            # stay stale until the turn happens to call a tool.
+            if self._activity_observer is not None:
+                self._activity_observer.note_session(
+                    session_id=self.local_id, title=self.title, folder=self.folder_relative
+                )
         self._turn_task = asyncio.create_task(self._run_turn(text))
 
     async def _run_turn(self, text: str) -> None:
@@ -476,6 +526,20 @@ class AgentSession:
                             tool_input=tool_input,
                             call_id=call_id,
                         )
+                    # The same moment, fanned out fleet-wide: this frame reaches
+                    # only the clients that opened *this* session's socket, and
+                    # "everywhere Claude is editing" is a question about the
+                    # windows that did not (services/activity.py).
+                    if self._activity_observer is not None:
+                        self._activity_observer.note_tool_started(
+                            session_id=self.local_id,
+                            session_title=self.title or FALLBACK_TITLE,
+                            folder=self.folder,
+                            folder_relative=self.folder_relative,
+                            call_id=call_id,
+                            tool=tool,
+                            tool_input=tool_input,
+                        )
         elif kind == "UserMessage":
             # Tool results arrive as a synthetic user turn (SDK naming — not a
             # message the human typed); each block settles exactly one row.
@@ -497,6 +561,11 @@ class AgentSession:
                 # it cannot be credited with the next change to that path.
                 if self._tool_observer is not None:
                     self._tool_observer.note_tool_result(call_id=raw_id, ok=ok)
+                # Only `ok` crosses to the fleet feed — never the excerpt above.
+                if self._activity_observer is not None:
+                    self._activity_observer.note_tool_settled(
+                        session_id=self.local_id, call_id=raw_id, ok=ok
+                    )
         elif kind == "RateLimitEvent":
             # The account's plan limits, as the CLI reports them when one of
             # them *transitions*. Nothing about it belongs to this conversation,
@@ -549,6 +618,10 @@ class AgentSession:
     async def close(self) -> None:
         self._abandon_pending_plan("the session closed")
         self._abandon_pending_permissions("the session closed")
+        # Leaves the fleet view now rather than lingering as a row nothing will
+        # ever update — and the frame says so, because clients hold their own map.
+        if self._activity_observer is not None:
+            self._activity_observer.note_session_gone(session_id=self.local_id)
         if self._turn_task is not None:
             self._turn_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -599,6 +672,7 @@ class SessionManager:
         event_publisher: EventPublisher | None = None,
         tool_observer: ToolUseObserver | None = None,
         usage_observer: UsageObserver | None = None,
+        activity_observer: ActivityObserver | None = None,
     ) -> None:
         self._root = workspace_root
         self._factory = factory
@@ -607,6 +681,7 @@ class SessionManager:
         self._publisher = event_publisher
         self._tool_observer = tool_observer
         self._usage_observer = usage_observer
+        self._activity_observer = activity_observer
         self._sessions: dict[str, AgentSession] = {}
 
     @property
@@ -644,6 +719,7 @@ class SessionManager:
             event_publisher=self._publisher,
             tool_observer=self._tool_observer,
             usage_observer=self._usage_observer,
+            activity_observer=self._activity_observer,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.
@@ -653,6 +729,15 @@ class SessionManager:
         # time.time, not loop.time: create() is called from sync REST handlers too
         session.created_at = time.time()
         self._sessions[local_id] = session
+        # The fleet view lists sessions, not only busy ones: a session that has
+        # run nothing yet is a row saying so, which is what makes an idle fleet
+        # readable instead of an empty panel.
+        if self._activity_observer is not None:
+            self._activity_observer.note_session(
+                session_id=local_id,
+                title=session.title or FALLBACK_TITLE,
+                folder=folder_relative,
+            )
         log.info("agent.session_created", local_id=local_id, folder=folder_relative)
         return session
 

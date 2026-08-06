@@ -3,6 +3,7 @@
 import type { Theme } from "./theme";
 import type {
   AcknowledgeRequest,
+  ActivitySnapshot,
   CallbackResponse,
   CreateRequest,
   CreateSessionRequest,
@@ -92,6 +93,8 @@ export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcu
 export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
 
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
+
+export const getActivity = (): Promise<ActivitySnapshot> => request("/api/activity");
 
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
 

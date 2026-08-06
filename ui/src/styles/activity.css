@@ -1,0 +1,248 @@
+/* Live agent activity: the fleet card grid and the status reading.
+
+   Tokens only, and no new colours — the dot and the failure tint come from the
+   §2.6 agent-status ramp through `statusVisual`, exactly as the session rows and
+   the status chips do, so four agents read the same here as they do there.
+
+   One layout at both sizes: a single column in a 380px dock and as many columns
+   as fit when the pane is maximized (`Alt+M`), because `auto-fill` over
+   `min(260px, 100%)` reflows instead of scrolling sideways. That is the whole
+   reason the session card is a fixed-height reading — "what it is doing now" and
+   "what it just did" — with the rest of its window folded away: a card that grew
+   with the number of tool calls would make a busy fleet unreadable in a dock. */
+
+.wb-activity {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface-panel);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-activity-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.wb-activity-summary {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-activity-note {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}
+
+.wb-activity-source {
+  margin-top: auto;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ---- the fleet ------------------------------------------------------------- */
+
+.wb-activity-fleet {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: var(--space-5);
+  align-content: start;
+  max-width: 1200px;
+}
+
+.wb-activity-session {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  min-width: 0;
+}
+
+.wb-activity-session-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.wb-activity-session-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.wb-activity-session-title:hover {
+  color: var(--accent);
+}
+
+.wb-activity-session-age {
+  flex: none;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-activity-folder {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- the two lines that are the whole point -------------------------------- */
+
+.wb-activity-now,
+.wb-activity-then {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* Fixed so the two lines' text starts at the same x — the panel is read by
+   scanning down a column, not by reading sentences. */
+.wb-activity-phase {
+  flex: none;
+  width: 3.75rem;
+  color: var(--text-tertiary);
+}
+
+.wb-activity-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.wb-activity-now .wb-activity-line {
+  color: var(--text-primary);
+}
+
+.wb-activity-target {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+}
+
+.wb-activity-target:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+.wb-activity-quiet {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.wb-activity-outcome {
+  flex: none;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- the rest of the window, folded away ----------------------------------- */
+
+.wb-activity-earlier {
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-activity-earlier > summary {
+  cursor: pointer;
+  padding: var(--space-1) 0;
+}
+
+.wb-activity-earlier-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-activity-earlier-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.wb-activity-dropped {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- the state that is most of the time ------------------------------------ */
+
+.wb-activity-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-5);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+.wb-activity-empty-icon {
+  color: var(--text-tertiary);
+}
+
+.wb-activity-empty-title {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+/* ---- status bar ------------------------------------------------------------ */
+
+.wb-activity-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 18px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--agent-working);
+  font-size: var(--type-xs-size);
+  cursor: pointer;
+}
+
+.wb-activity-status:hover {
+  background: var(--surface-hover);
+}
+
+.wb-activity-status-icon {
+  display: inline-flex;
+}

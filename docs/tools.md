@@ -209,6 +209,17 @@ a toast, because toasts genuinely are app-wide.
 If your tool's state starts being read from outside, that is the signal to move it to
 `store.ts` — not to export a getter from your module.
 
+**If your tool's server half is a firehose, coalesce it on the server.** The live
+activity feed (`ui/src/activity.ts`, `services/activity.py`) is the third tool to own a
+store and the first whose events fire on *every tool call of every session*. The rule it
+adds: batching belongs where the events are produced, not in the component. The policy
+`services/terminal_stream.py` proves — first change after a quiet stream goes out
+immediately, then at most one frame per window, coalesced so only the latest state per
+subject survives — costs one timer on the server and gives every window in the app a
+bounded frame rate for free. A `useEffect` that throttles on the client fixes one
+panel's render count and leaves the socket, the JSON parsing and every other listener
+paying full price. Budget it where it can fail: a count of frames per burst, in a test.
+
 ## Styling
 
 Follow `DESIGN.md` tokens — no literal colours, ever. A one-file tool can use inline
