@@ -13,7 +13,9 @@
 
 import type { WorkbenchTool } from "./registry";
 
+import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
+import { conversationsTool } from "./panels/Conversations";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { layoutsTool } from "./panels/Layouts";
@@ -33,6 +35,9 @@ export const TOOLS: readonly WorkbenchTool[] = [
   filesTool,
   editorTool,
   agentTool,
+  // After the Agent, because it is a way *into* one: a row here opens an agent
+  // pane, and the two read as one capability seen from two distances.
+  conversationsTool,
   terminalTool,
   // Before the OnlyOffice tool, and that is the registration: `documentViewFor`
   // takes the first enabled tool offering a view for a kind, so the native host
@@ -42,6 +47,7 @@ export const TOOLS: readonly WorkbenchTool[] = [
   officeTool,
   scratchpadTool,
   usageTool,
+  activityTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its

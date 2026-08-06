@@ -8,9 +8,11 @@
  *  2. `uv run workbench-server` in a **per-run temp workspace** (see
  *     `e2e/workspace.ts`), with `WORKBENCH_FAKE_AGENT=1` so chat, tool rows,
  *     permission prompts and plan cards are exercised without a Claude login or
- *     a single token, and with `WORKBENCH_CLAUDE_PROJECTS_DIR` pointed inside
- *     that workspace so the developer's real session history is never read or
- *     listed. Everything else is production code: real files on disk, the real
+ *     a single token, and with `WORKBENCH_CLAUDE_PROJECTS_DIR` pointed at the
+ *     workspace's `-projects` sibling — seeded with journey 11's conversations,
+ *     and outside the workspace so the developer's real session history is
+ *     never read *and* the fixture is never a folder in the file tree.
+ *     Everything else is production code: real files on disk, the real
  *     watcher, real ConPTY terminals, real WebSockets.
  *  3. `vite preview` serving `ui/dist`, proxying `/api` and `/ws` to that
  *     backend (see `vite.config.ts` — the proxy target follows
@@ -29,7 +31,7 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, devices } from "@playwright/test";
 
-import { E2E_APP_DATA, E2E_WORKSPACE, WORKSPACE_ENV } from "./e2e/workspace";
+import { E2E_APP_DATA, E2E_WORKSPACE, projectsDirFor, WORKSPACE_ENV } from "./e2e/workspace";
 
 // The E2E harness is deliberately outside the `tsc -b` program (tsconfig.json
 // covers `src` + the two vite configs), so node's globals need no types
@@ -109,11 +111,15 @@ export default defineConfig({
         WORKBENCH_OFFICE_FAKE: "1",
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: E2E_WORKSPACE,
-        WORKBENCH_CLAUDE_PROJECTS_DIR: path.join(E2E_WORKSPACE, ".claude-projects"),
+        // A *sibling* of the workspace, seeded by `e2e/workspace.ts`: pointing
+        // it away from `~/.claude` is what keeps the developer's real history
+        // unread, and keeping it out of the workspace is what stops journey
+        // 11's fixture becoming a folder in journey 1's file tree.
+        WORKBENCH_CLAUDE_PROJECTS_DIR: projectsDirFor(E2E_WORKSPACE),
         // Machine-local state — today the recent-workspaces list. Pointed at a
-        // per-run sibling for the same reason the projects dir is redirected:
-        // the switcher journey both reads and writes this, and it must never be
-        // the developer's own history. Outside the workspace, because the pool
+        // per-run sibling for the same reason the projects dir is: the switcher
+        // journey both reads and writes this, and it must never be the
+        // developer's own history. Outside the workspace, because the pool
         // root's rule applies here too — state about the user is not a file in
         // one of their projects.
         WORKBENCH_APP_DATA_ROOT: E2E_APP_DATA,

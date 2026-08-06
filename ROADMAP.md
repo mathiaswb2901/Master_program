@@ -564,7 +564,9 @@ because other sections and five running lanes reference these numbers.
    Claude-login and Office-detection walkthroughs are still open there.
    Still unlocks **half B of item 12**: opening a session whose folder is outside the
    current workspace, which now has an answer (switch to it) short of the multi-root
-   jail from item 6.
+   jail from item 6. The session browser's read half has landed, so every such
+   conversation is already listed and visibly refused with its reason — what this
+   unlocks is exactly the click.
 6. ~~**Managed worktree pool**: backend `WorktreeService` (acquire/release/reap,
    dirty-slot `needs_review` protection)~~ — **the pool is done**
    (`services/worktrees.py`, `models/worktrees.py`, `routers/worktrees.py`, landed
@@ -692,29 +694,45 @@ because other sections and five running lanes reference these numbers.
    two agent panes, two terminals and two editors coexist in one window, each independent
    through a save/restore round trip, and every pane whose resource is gone shows a named
    tombstone with its one recovery action.
-10. **Live agent activity — "see everywhere Claude is editing"** (registers as a tool;
-    panel + command + status contribution). Provenance answers *who wrote this file I am
-    looking at*, after the fact; nothing answers *show me everywhere the fleet is working
-    right now*. One row per live session ordered by most-recently-active — status dot,
-    title, folder, and the current tool line **replaced in place** rather than appended,
-    fading to the last-completed line when a call settles. Retention is one line per
-    session, so the surface is O(sessions), not O(tool calls), and with four agents
-    working you see four rows changing at four different rhythms: fleet legibility
-    without opening four chats. The signal already exists and is already summarised —
-    `ToolUseNote`/`ToolSettled` carry a computed one-line description — but they are
-    emitted only to *that session's* socket, so a client sees activity only for
-    conversations it has opened. The change is one new bus event
-    (`SessionActivityEvent(session_id, folder, tool, summary, phase, ok)`) published from
-    the two call sites that already build those frames. **It is a firehose and must be
-    treated as one**: batched server-side with the policy `services/terminal_stream.py`
-    already proves (first frame after a quiet stream goes immediately, then at most one
-    frame per window, coalescing per session so only the latest line survives), no result
-    excerpts on the shared bus, and the same workspace jail — a fleet-wide feed discloses
-    paths and commands from every session at once, which is wider than the per-session
-    socket. Built on `SessionStatusEvent` + the new event only, so it neither waits for
-    nor collides with the watcher-protocol rewrite in the Feel track. Exit criterion:
-    four sessions working at once are legible from one pane, updating in place, with no
-    measurable cost to the shared `/ws/events` socket under a Grep-heavy turn.
+10. ~~**Live agent activity — "see everywhere Claude is editing"**~~ **done** — the
+    owner's ask, and the exit criterion met by measurement rather than by argument.
+    Provenance answers *who wrote this file I am looking at*, after the fact; this
+    answers *what is the fleet doing this second*, across every session, whether or not
+    this window has that conversation open. What landed: `services/activity.py` +
+    `models/activity.py` + `GET /api/activity`, fed at the SDK seam through a third
+    observer (`ActivityObserver`, after `ToolUseObserver` and `UsageObserver`) from the
+    two call sites that already build `ToolUseNote`/`ToolSettled`, published as
+    `SessionActivityEvent` on the existing `/ws/events` bus, and rendered by a
+    registered tool (`ui/src/panels/ActivityPanel.tsx` + `ui/src/activity.ts`) — a
+    status-bar reading, an on-demand panel of session cards, one module and one line in
+    `tools.ts`. Nothing is persisted: live state about processes is not workspace data,
+    so a restart honestly reports an empty fleet.
+    **The plan's retention was one line per session; the code keeps a small bounded
+    window and renders one line per session**, which is the same O(sessions) surface
+    with the "what did it just do" the card needs — and it made the honest version of
+    the cap possible: what falls out is *counted* on the row, and a **running** call is
+    the last thing a full window gives up, so eight quick calls cannot blank the line
+    that says what an agent is doing now.
+    The firehose is treated as one, and the numbers are asserted: the first change
+    after a quiet fleet publishes immediately, then at most one frame per 250 ms with
+    every change in between coalesced per session — 250 ms rather than the terminal's
+    8 ms because a person reads this. A 40-call `tool storm` (a new fake-agent trigger,
+    which is what "a Grep-heavy turn" looks like on the wire) is **80 changes and
+    arrives as 2 frames totalling 1,656 bytes** (measured 2026-08-06; widest frame
+    1,483 B, 8 entries kept and 32 dropped), held under a quarter of the changes by
+    `test_activity.py` and again in the browser by `ui/e2e/perf/activity.spec.ts` — the
+    first perf budget that mounts a panel re-rendering on agent output, and which
+    measured 4 frames end to end (it also pays for the session being created) with
+    0 of 10 sampled frames over 50 ms. No result excerpts cross to the
+    shared bus (only `ok`), and the workspace jail is by construction: paths are
+    normalized with provenance's own function and one that escapes is redacted rather
+    than printed.
+    Four agents at once are legible in a narrow dock and maximized, asserted where each
+    can be: three conversations at their own rhythms in the E2E journey, four
+    simultaneous mid-call sessions in `ActivityPanel.test.tsx` — a state no browser
+    journey can stage in time. And an idle fleet, which is the common case, is a
+    designed surface rather than an empty panel; the status reading shows nothing at
+    all when nothing is in flight.
 11. ~~**Native plan usage meters** (5-hour window, weekly per model)~~ **done** — the
     owner's ask to see in the app what Claude Code shows in the terminal, and the four
     constraints below are on screen rather than papered over. What landed:
@@ -752,29 +770,39 @@ because other sections and five running lanes reference these numbers.
     between-turns reader means restructuring `AgentSession` around a single reader loop
     that dispatches to the current turn. That is its own PR, and until it lands the
     figures update when you next talk to an agent — which the UI says plainly.
-12. **Session browser — every conversation, grouped by folder** (registers as a tool,
-    plural: one browser can be scoped to a project while another watches everything). The
-    Claude Code resume list, natively: folder groups → session rows (title, relative time,
-    live/disk dot), searchable. Opening a row does **not** open a chat inside the browser
-    — it opens an agent *instance* beside or in place of the focused pane, which is the
-    composability principle paying rent: one browser drives ten agent panes. The read half
-    exists (`services/session_index.py` reads `~/.claude/projects/<encoded-cwd>/*.jsonl`,
-    derives titles, dedupes live against on-disk by SDK id, and `GET
-    /api/agents/sessions` already returns `FolderSessions` groups) — this is a
-    presentation gap, not a capability gap, so **the AgentPanel's folder list becomes this
-    browser's compact form rather than a parallel implementation**. Two real risks:
-    `list_sessions()` takes one folder at a time, so browsing means walking
-    `projects_root` itself, and `encode_project_dir()` is **lossy and not reversible**
-    (`C:\a\b` and `C:/a-b` collide) — so a display path is resolved by matching candidates
-    against real directories and the raw encoded key is shown when it cannot be, never a
-    guessed path; and a `projects` dir with hundreds of folders means hundreds of
-    glob+stat+first-line reads per refresh, so it needs an mtime-gated cache and
-    pagination or it becomes the thing that makes startup slow. **Split on an honest
-    dependency**: half A — browse, search and resume anything readable, including projects
-    outside this workspace — ships alone and is complete; half B — *opening* a session
-    whose folder is outside the workspace jail — waits for item 5. Exit criterion: every
-    project under `~/.claude/projects/` is listed with a resolved-or-honestly-encoded
-    folder name, and a row opens as its own agent pane next to the focused one.
+12. ~~**Session browser — every conversation, grouped by folder**~~ — **half A done**
+    (`ui/src/panels/Conversations.tsx`, `services/conversations.py`,
+    `models/conversations.py`, `routers/conversations.py`; `GET /api/conversations`).
+    The owner's ask, in his words: *"For Claude I also need to have an overview like we do
+    in Claude Code with which chats belong to which folder."* Registered as a tool and
+    **plural, bound to a project key** — `conversations` watches everything,
+    `conversations#<encoded-key>` watches one folder — so one browser can be scoped to a
+    project while another sees the lot, and the scope survives a restart because the key
+    *is* the pane id. Opening a row does not open a chat inside the browser: it resumes
+    into an agent pane beside the focused one, and because a pane's identity is its
+    session id, opening the same conversation twice **focuses that pane rather than
+    cloning it**. Both risks the plan named were real and are answered on the measured
+    numbers rather than by assertion. **Cost**: enumeration and reading are split — one
+    `os.scandir` per project directory (17 dirs, 80 transcripts: **1.8 ms**) orders,
+    counts and *lists* everything, while titles and turn counts cost a full pass
+    (**1.28 s** for 398 MB cold) and are therefore bounded by `?limit=` and cached against
+    each transcript's `(mtime_ns, size)`; a warm browse is **93 ms**, the scan runs off
+    the event loop, and nothing scans until the panel is opened, so startup is untouched.
+    A limit bounds *reading*, never listing — every conversation gets its row, the unread
+    ones saying so, because dropping rows drops whole folders. **The lossy key**:
+    resolved by matching against directories that exist (workspace first, then home, then
+    the anchors, pruned by the file tree's ignore rules) and shown as the raw stored key
+    when nothing matches — never a reconstructed path. Two more properties this shipped
+    with: it is **read-only** (a test watches every byte and mtime under the store across a
+    browse; there is no delete path), and it is **honest about what it withheld** — a store
+    bigger than the page says how many were not read and offers the wider window.
+    **Carried to half B, and only this**: *opening* a conversation whose folder is outside
+    the workspace jail. It is listed, searchable and visibly refused with its reason today
+    — hiding it would be the worse answer — and it becomes openable when item 5's
+    workspace switcher (or item 6's multi-root roots) lands. The AgentPanel's folder list
+    is deliberately still there: it is the compact form for the folders *this* workspace
+    contains, and merging the two is a presentation change worth doing on top of a landed
+    browser rather than inside it.
 13. **Pop-out — panes on a second monitor** (was item 2's deferral note and M7's
     "unclaimed" line; the owner's "full screen sharing mode" and "no limits" claims it).
     dockview supports floating groups and popped-out windows; with panes in place this is
@@ -845,8 +873,11 @@ lanes hold these files and a second edit is pure conflict. **2.** **Item 11 usag
 nothing to visible, and independent of panes, the watcher rewrite and Office, so it can
 run in parallel with step 1. **3.** **Item 10 activity** — the first new panel that panes
 makes worth having (you want to split it beside your editor and maximize it), and the feed
-Mission Control should render. **4.** **Item 12 session browser, half A** — after item 10
-because they share a row shape and building the live one first means the browser reuses it.
+Mission Control should render. **4.** ~~**Item 12 session browser, half A**~~ — **landed**.
+It went ahead of item 10 rather than after it: the shared "row shape" turned out to be a
+title, an age and a count, which is a stylesheet rather than a component, and waiting
+would have parked the owner's own request behind an unrelated lane. Half B stays with
+item 5.
 **5.** Moat track in parallel throughout, in its existing order, ending in the
 side-by-side Office proof. **6.** **Item 13 pop-out**, after panes and after the Office
 composition PR, which is what makes its native-window decision necessary. **7.** Then

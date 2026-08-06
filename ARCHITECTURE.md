@@ -312,13 +312,15 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, layouts, office host, usage, worktrees |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host, usage, worktrees |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
+| `routers/conversations.py` | `GET /api/conversations` (Claude Code's whole transcript store, grouped by folder) |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
+| `routers/activity.py` | `GET /api/activity` (the fleet's live tool calls) |
 | `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/workspaces.py` | `GET /api/workspace`, `POST /api/workspace/switch` (the root, and the recent list) |
@@ -333,7 +335,8 @@ in-process calls where the model and the user dominate.
 | `services/pty_manager.py` | ConPTY sessions (Windows) |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
-| `services/session_index.py` | per-folder history from Claude Code's storage |
+| `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
+| `services/conversations.py` | the whole store, browsable: enumerate + mtime-cached reads, lossy-key resolution, the workspace jail |
 | `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |
 | `services/sdk_factory.py` | real SDK client + context-bridge MCP server |
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
@@ -341,6 +344,7 @@ in-process calls where the model and the user dominate.
 | `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
 | `services/worktrees.py` | the managed worktree pool: borrowed detached checkouts, leases, dirty protection |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
+| `services/activity.py` | the same tool calls one moment earlier: what every session is touching right now; bounded, coalesced, in-memory only |
 | `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn cost; in-memory only |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
@@ -619,7 +623,33 @@ item 3, PR 5).
 Session history is not ours: Claude Code and the SDK persist transcripts under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. We read that storage
 (`session_index.py`), so CLI sessions and Workbench sessions share one history,
-grouped per folder.
+grouped per folder. **Read-only, and browsable whole** — `services/conversations.py`
+walks the entire store rather than the one folder a session is bound to, which is
+what the Conversations panel renders (M5 item 12, half A).
+
+Three properties make that safe to open on a whim, and each is a constraint rather
+than a nicety. **Nothing writes.** A test watches every byte and mtime under the store
+across a browse and fails on any change; there is no delete path at all. **The cheap
+pass and the expensive one are separate.** Enumeration is one `os.scandir` per project
+directory — 17 directories and 80 transcripts measured at 1.8 ms — and yields
+everything ordering and counting need; reading a transcript for its title and turn
+count is a full pass (1.28 s for all 80, 398 MB, cold) and is therefore both bounded by
+`?limit=` (the newest N are *read*; every conversation is still listed, with the unread
+ones carrying `read: false` — a limit that dropped rows would drop whole folders) and
+cached against each file's `(mtime_ns, size)`, so a second browse of an unchanged store
+is enumeration only (93 ms including folder resolution). Append-only transcripts are
+what make that pair a sound invalidation. The scan runs in a thread; the router does
+nothing else. **What cannot be known is named.** `encode_project_dir` is lossy and not
+reversible (`C:\a\b` and `C:/a-b` collide), so a display path is *matched* against
+directories that exist — descending from the workspace, then home, then the filesystem
+anchors, pruned by the file tree's own ignore rules — and the raw encoded key is shown
+whenever nothing matches, never a reconstructed path. A transcript that will not parse
+keeps its row and carries the reason.
+
+Half A opens only what is inside the workspace jail. A conversation from a folder
+outside it is listed with its reason on screen rather than hidden — opening one needs
+the multi-root roots (M5 item 5/6), and until then knowing the conversation exists is
+most of what the browser is for.
 
 ## Provenance
 
@@ -688,6 +718,71 @@ State is **in memory only** — a server restart forgets every attribution and
 `GET /api/provenance` comes back empty — and bounded: `MAX_TRACKED_PATHS` (500,
 LRU) entries and `MAX_PENDING_CLAIMS` (200) in-flight claims, so a long session
 cannot grow it without limit.
+
+## Live agent activity
+
+**Provenance answers "who wrote this file", after the fact and conservatively;
+this answers "what is the fleet doing this second", across every session at
+once — the same signal, one moment earlier, with a different promise.** They are
+built to stay separate: provenance may never be wrong, so it stays silent
+without an exact match; activity may be incomplete (a window that forgets), so
+it is allowed to be cheap. Neither consumes the other.
+
+`services/activity.py` + `models/activity.py` + `GET /api/activity`, rendered by
+a registered tool (`ui/src/panels/ActivityPanel.tsx` + `ui/src/activity.ts`) —
+one panel, one status reading, one QuickBar command, one line in `tools.ts`.
+
+**The signal already existed; only its reach is new.** A session announces a tool
+call (`ToolUseNote`) and settles it (`ToolSettled`), and both go down
+`/ws/agent/{id}` — a socket only the windows that opened *that* conversation
+have. `AgentSession` now offers the same two moments to an `ActivityObserver`
+(the third observer on that seam, after `ToolUseObserver` and `UsageObserver`),
+which republishes a bounded row as a `SessionActivityEvent` on the shared bus,
+following the `SessionStatusEvent` precedent. So a window with no socket for a
+session still sees it working — which is the whole feature.
+
+Four properties, each with a rendering rather than a footnote:
+
+1. **Bounded by construction, and it says by how much.**
+   `MAX_ENTRIES_PER_SESSION` (8) per session, `MAX_SESSIONS` (16) sessions,
+   both served in the snapshot so the panel can state the caps it is showing
+   under. Everything evicted is *counted* (`dropped`, `dropped_sessions`) and
+   rendered — a view that silently forgets is not one you can read a number off.
+   A **running** call is the last thing a full window gives up (eviction takes
+   the oldest *settled* entry first), because "what is this agent doing now" is
+   the headline and eight quick calls must not blank it.
+2. **Coalesced, on the policy `terminal_stream.py` proves.** The first change
+   after a quiet fleet publishes immediately; after that, at most one frame per
+   `ACTIVITY_WINDOW_S` (250 ms), with every change in between folded into it and
+   only the latest state per session surviving. 250 ms rather than the
+   terminal's 8 ms because a person reads this. Measured (2026-08-06): a 40-call
+   `tool storm` is 80 changes and reaches the socket as **2 frames totalling
+   1,656 bytes** — asserted in `test_activity.py` and again in the browser
+   (`ui/e2e/perf/activity.spec.ts`: 4 frames end to end, 0 of 10 sampled frames
+   over 50 ms), because "a burst must not become a re-render storm" is a count,
+   not a claim. The client half of that promise is a **memo boundary on the
+   row**: a frame replaces the whole snapshot object, so `ActivityBody` re-runs
+   on every one of them, and without the boundary one busy session would
+   re-render every *other* session's card four times a second — the storm
+   arriving one layer after the socket that was coalesced to prevent it. It
+   works because `mergeSessions` keeps the identity of the rows a frame did not
+   carry; both halves are pinned by tests, since either one alone is inert.
+3. **Jailed, and no results.** This feed is wider than the socket its frames came
+   from, so every path argument is normalized workspace-relative with the same
+   function provenance uses, and one that escapes the workspace is redacted
+   rather than printed (`Read: (outside the workspace)`). Summaries are rebuilt
+   here rather than passed through from the chat frame, which carries the raw
+   argument. Tool *results* never cross at all — only `ok`.
+4. **Idle is a designed state.** A session is a row from the moment it is
+   created, so an idle fleet reads "three sessions open, none touching anything"
+   rather than as an empty panel, and the status-bar reading renders *nothing*
+   when nothing is in flight (§6.7: counts hide at zero). That reading is
+   deliberately not the Agent tool's working count next to it: this one counts
+   sessions with a **tool call in flight**, and names what they are on.
+
+State is **in memory only**, deliberately, on the same reasoning as the usage
+meters: live state about processes, not workspace data. Nothing is written to
+`.workbench/`, and a restart reports an empty fleet — which is the truth.
 
 ## Plan usage
 
@@ -1364,7 +1459,7 @@ Format spec: `docs/shortcuts.md`.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
-   launched in a per-run temp workspace with fake-agent mode on. Ten journeys: file
+   launched in a per-run temp workspace with fake-agent mode on. Eleven journeys: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
    ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
    tool reaching the user through the registry alone), chat streaming and
@@ -1379,9 +1474,24 @@ Format spec: `docs/shortcuts.md`.
    account really shows, then the meters a rate-limit transition produces, their
    stamps, the words next to the near-cap colour, the status reading that was
    silent a moment earlier, and a reload proving the load path agrees with the
-   socket). The one state no browser journey can reach in time — a quarter-hour-old
-   snapshot — is a `renderToStaticMarkup` test instead
-   (`ui/src/panels/UsagePanel.test.tsx`).
+   socket), and **live agent activity** (an idle fleet that says so, a session
+   appearing before it has done anything, a call asserted *while it is in
+   flight* — the `slow tool` trigger exists for exactly that — the line replaced
+   in place when it settles, the file target opening the file, three
+   conversations changing at their own rhythms, and a Grep-heavy turn that
+   leaves a capped row rather than a growing one). Journey 11 adds the
+   **conversation browser**: the suite seeds `.claude-projects` with one
+   transcript per case the browser has to tell apart (inside the workspace,
+   outside it, a folder that no longer exists, one that will not parse), then
+   asserts the folder groups render, that search filters across titles *and*
+   folder names, that a refused folder is *shown* with its reason, that a row
+   resumes into an agent pane carrying its history, that opening the same row
+   twice focuses that pane rather than cloning it, and that two browser panes —
+   one scoped to a folder, one not — stay independent through a reload. The two
+   states no browser journey can reach in time — a quarter-hour-old usage
+   snapshot, and four sessions all mid-tool-call at the same instant — are
+   `renderToStaticMarkup` tests instead (`ui/src/panels/UsagePanel.test.tsx`,
+   `ui/src/panels/ActivityPanel.test.tsx`).
    Single worker (one backend, one workspace, one PTY host); no sleeps — journeys
    wait on the app's own signals.
 5. **Perf lane** (`cd ui && npm run perf` — `ui/playwright.perf.config.ts`, its own
