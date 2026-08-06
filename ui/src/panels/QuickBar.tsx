@@ -70,6 +70,7 @@ export function QuickBar() {
   const commands = useVisibleCommands();
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
   const selRef = useRef<HTMLButtonElement>(null);
   // Held on screen for `--motion-exit-ms` after it closes, so dismissing it is
   // a movement rather than a disappearance (DESIGN.md §5).
@@ -85,6 +86,30 @@ export function QuickBar() {
       void useStore.getState().ensureFileIndex();
     }
   }, [open, prefill]);
+
+  /**
+   * The keyboard, on every open — which is not the same as on every mount.
+   *
+   * `autoFocus` is a mount-time attribute, and this overlay does not remount
+   * each time it opens: it is held on screen for `--motion-exit-ms` after it
+   * closes (`usePresence`, above), so an open inside that window reuses
+   * the input that is already there and nothing focuses it a second time. Focus
+   * is then wherever the dismissal left it — the row a mouse click just ran,
+   * most often — and the palette answers no keys at all: Escape does not close
+   * it, typing does not filter it, and the only way out is the backdrop. The
+   * window is `--motion-exit-ms` *at least*: it is a `setTimeout`, so a busy
+   * main thread (a launch, a layout switch) stretches it.
+   *
+   * Two dependencies beyond `open`, for the two ways in. `present` because the
+   * first render of an open QuickBar has no input to focus — `usePresence`
+   * flips it from an effect of its own, so the element exists one commit later.
+   * `prefill` because a chord pressed *at* an open palette (`Ctrl+Shift+P` over
+   * a file search) reopens it in the other mode, which the effect above already
+   * treats as a fresh open; the keyboard has to agree with the query it reset.
+   */
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open, prefill, present]);
 
   useEffect(() => {
     selRef.current?.scrollIntoView({ block: "nearest" });
@@ -215,7 +240,7 @@ export function QuickBar() {
           `pointer-events: none` in the stylesheet is what makes it inert. */}
       <div className={"wb-qb" + exiting} role="dialog" aria-label={pick?.label ?? "Quick open"}>
         <input
-          autoFocus
+          ref={inputRef}
           className="wb-qb-input"
           placeholder={pick?.placeholder ?? "Search files — type > for actions"}
           value={query}
