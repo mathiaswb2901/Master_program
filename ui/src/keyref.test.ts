@@ -36,12 +36,19 @@ vi.mock("./monaco", () => ({
   disposeModel: () => undefined,
   setModelContent: () => null,
   defineWorkbenchTheme: () => undefined,
-  initMonaco: () => undefined,
+  loadMonaco: () => Promise.resolve({}),
+  prefetchMonaco: () => undefined,
 }));
 
+// Deliberately thin — a store that answers nothing is the harder case. Every
+// `detail()` thunk in the registry runs against it, and `keyref.ts` treats a
+// thunk that throws as "no subtitle" precisely so this fixture never has to
+// grow a field each time another capability adds one.
 vi.mock("./store", () => ({
   useStore: Object.assign(() => undefined, { getState: () => ({ shortcuts: [] }) }),
   emptyPlanDraft: () => ({ choices: {}, annotations: {}, comment: "", verdict: null }),
+  noteText: () => "",
+  pendingPlanId: () => null,
   unchosenOptionGroups: () => [],
 }));
 
