@@ -37,7 +37,13 @@ from typing import Any, Literal, Protocol
 from pydantic import ValidationError
 
 from workbench_server.models.agents import SessionKind, UiState
-from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    WordEdit,
+    WordText,
+)
 from workbench_server.models.orchestrator import (
     MAX_TASK_CHARS,
     OrchestratorBudget,
@@ -427,6 +433,85 @@ OFFICE_READ = AgentToolSpec(
 )
 
 
+# ---- office_write -----------------------------------------------------------
+
+
+class OfficeDocumentWriter(Protocol):
+    """The narrow write surface the ``office_write`` tool needs — implemented by
+    ``OfficeHostService`` and threaded in so this module never imports it. The
+    mirror of :class:`OfficeDocumentReader`, one method wide."""
+
+    async def write_document(
+        self,
+        path: str,
+        *,
+        content: str,
+        paragraph: int | None = None,
+        sheet: str | None = None,
+        cell: str | None = None,
+    ) -> WordEdit | CellEdit: ...
+
+
+class OfficeDocumentAccess(OfficeDocumentReader, OfficeDocumentWriter, Protocol):
+    """The office-host service as the SDK wiring sees it: read and write, nothing
+    more. One handle threaded into the context bridge so ``office_read`` and
+    ``office_write`` share the service without this module importing it."""
+
+
+OFFICE_WRITE = AgentToolSpec(
+    name="office_write",
+    description=(
+        "Edit the LIVE Office document Workbench has docked in a panel — one "
+        "targeted, undoable edit that leaves the rest of the document untouched, "
+        "only in documents Workbench opened, named by workspace-relative path. "
+        "Word: pass paragraph (zero-based) and content to replace that "
+        "paragraph's whole text. Excel: pass sheet, cell (e.g. B2) and content to "
+        "set one cell; empty content clears it. The edit applies to what is on "
+        "screen, including unsaved changes, so the user can undo it. Returns the "
+        "address written and the character count; an empty or out-of-range target "
+        "says so, and if the document is not docked it says so and how to open it. "
+        "Read the target back with office_read to confirm."
+    ),
+    output_format="text",
+    # The result is one confirmation sentence: an address, a char count, a short
+    # echo of what was written and the read-back hint. 512 covers a long path and
+    # an 80-char echo with margin; the content the model *sent* is its own cost,
+    # never echoed in full here — which is why this is nowhere near office_read's.
+    max_result_bytes=512,
+    # Five small properties, two required. Measured 490 bytes; 800 leaves room
+    # to reword a description-in-schema without letting a sixth argument in
+    # unmeasured — the schema is paid on every request whether the tool runs.
+    max_schema_bytes=800,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative path of the docked document.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The new text for the target paragraph or cell.",
+            },
+            "paragraph": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Word only: zero-based paragraph to replace.",
+            },
+            "sheet": {
+                "type": "string",
+                "description": "Excel only: which worksheet.",
+            },
+            "cell": {
+                "type": "string",
+                "description": "Excel only: which cell, e.g. B2.",
+            },
+        },
+        "required": ["path", "content"],
+    },
+)
+
+
 class OrchestratorHandle(Protocol):
     """The slice of ``services/orchestrator.py`` the tool bodies below use.
 
@@ -650,11 +735,112 @@ async def handle_office_read(reader: OfficeDocumentReader, args: dict[str, Any])
     return text_result(clamp_result(text, OFFICE_READ.max_result_bytes))
 
 
+#: Chars of the written content echoed back in the confirmation. Enough for the
+#: model to recognise what it wrote without paying to have its own input quoted
+#: back in full — the echo is a courtesy, the address and count are the answer.
+OFFICE_WRITE_ECHO_CHARS = 80
+
+
+def _office_write_refusal(error: DocumentBridgeError, path: str) -> str:
+    """Turn a write refusal into a sentence the agent can act on (AXI shape 3)."""
+    if error.reason == "document_not_hosted":
+        return (
+            f"{path} is not docked in Workbench. Open it first (the Office panel or "
+            "the office host), then edit it."
+        )
+    if error.reason == "document_gone":
+        return f"{path} was closed before the edit could apply; re-open it to edit it again."
+    if error.reason == "range_invalid":
+        # The bridge's own message names the empty/invalid target the write hit.
+        return str(error)
+    return f"{path} cannot be edited right now: {error}"
+
+
+def _echo(content: str) -> str:
+    """A short, quoted preview of what was written, truncated with a stated tail."""
+    if len(content) <= OFFICE_WRITE_ECHO_CHARS:
+        return f'"{content}"'
+    return f'"{content[:OFFICE_WRITE_ECHO_CHARS]}…" ({len(content)} chars in all)'
+
+
+def _format_word_edit(edit: WordEdit, path: str, content: str) -> str:
+    """Confirm a Word paragraph write and name the read-back (AXI shapes 2 & 3)."""
+    where = f"paragraph {edit.paragraph + 1} of {path}"
+    confirm = (
+        f"emptied {where}"
+        if edit.written_chars == 0
+        else f"wrote {edit.written_chars} chars to {where}: {_echo(content)}"
+    )
+    return (
+        f"{confirm}. The document still has {edit.total_paragraphs} paragraphs; "
+        f"read it back with office_read (start_paragraph={edit.paragraph}) to confirm."
+    )
+
+
+def _format_cell_edit(edit: CellEdit, path: str, content: str) -> str:
+    """Confirm an Excel cell write and name the read-back (AXI shapes 2 & 3)."""
+    where = f"{edit.sheet}!{edit.a1_cell} of {path}"
+    confirm = (
+        f"cleared {where}"
+        if edit.written_chars == 0
+        else f"wrote {edit.written_chars} chars to {where}: {_echo(content)}"
+    )
+    return (
+        f"{confirm}. Read it back with office_read "
+        f"(sheet={edit.sheet}, range={edit.a1_cell}) to confirm."
+    )
+
+
+async def handle_office_write(writer: OfficeDocumentWriter, args: dict[str, Any]) -> dict[str, Any]:
+    """The office_write tool body, free of SDK imports so it is directly testable.
+
+    The service decides which target the document's kind requires (a paragraph
+    for Word, a sheet+cell for Excel) and refuses a missing one rather than
+    guessing — the tool only marshals the arguments and renders the confirmation.
+    A refusal comes back as a tool error the agent reads and fixes, never an
+    exception, and it names the empty/invalid target or how to dock the document.
+    """
+    path = args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return error_result("office_write needs a workspace-relative 'path' to a docked document.")
+    content = args.get("content")
+    if not isinstance(content, str):
+        return error_result("office_write needs 'content' — the new text for the target.")
+    raw_paragraph = args.get("paragraph")
+    paragraph = (
+        raw_paragraph
+        if isinstance(raw_paragraph, int)
+        and not isinstance(raw_paragraph, bool)
+        and raw_paragraph >= 0
+        else None
+    )
+    sheet = args.get("sheet") if isinstance(args.get("sheet"), str) else None
+    cell = args.get("cell") if isinstance(args.get("cell"), str) else None
+    try:
+        edit = await writer.write_document(
+            path, content=content, paragraph=paragraph, sheet=sheet, cell=cell
+        )
+    except DocumentBridgeError as error:
+        return error_result(_office_write_refusal(error, path))
+    text = (
+        _format_word_edit(edit, path, content)
+        if isinstance(edit, WordEdit)
+        else _format_cell_edit(edit, path, content)
+    )
+    return text_result(clamp_result(text, OFFICE_WRITE.max_result_bytes))
+
+
 # ---- the registry -----------------------------------------------------------
 
-#: Every session's toolset — office_read included, so every kind can read a
-#: docked document; the orchestrator-only tools live in ``ORCHESTRATOR_TOOLS``.
-AGENT_TOOLS: tuple[AgentToolSpec, ...] = (GET_WORKSPACE_STATE, PRESENT_PLAN, OFFICE_READ)
+#: Every session's toolset — office_read and office_write included, so every
+#: kind can read and edit a docked document; the orchestrator-only tools live in
+#: ``ORCHESTRATOR_TOOLS``.
+AGENT_TOOLS: tuple[AgentToolSpec, ...] = (
+    GET_WORKSPACE_STATE,
+    PRESENT_PLAN,
+    OFFICE_READ,
+    OFFICE_WRITE,
+)
 
 #: The extra toolset an ``orchestrator`` session carries. Never in the context
 #: of a chat or worker session — see the note above the specs.

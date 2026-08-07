@@ -15,16 +15,18 @@ from workbench_server.services.agent_tools import (
     LIST_WORKERS,
     MCP_SERVER_NAME,
     OFFICE_READ,
+    OFFICE_WRITE,
     PRESENT_PLAN,
     READ_WORKER,
     SEND_TO_WORKER,
     SPAWN_WORKER,
     STOP_WORKER,
-    OfficeDocumentReader,
+    OfficeDocumentAccess,
     OrchestratorHandle,
     allowed_tool_names,
     handle_list_workers,
     handle_office_read,
+    handle_office_write,
     handle_present_plan,
     handle_read_worker,
     handle_send_to_worker,
@@ -60,7 +62,7 @@ class UiStateStore:
 def build_context_bridge(
     store: UiStateStore,
     bridge: SessionBridge,
-    reader: OfficeDocumentReader,
+    reader: OfficeDocumentAccess,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -94,7 +96,11 @@ def build_context_bridge(
     async def office_read(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_office_read(reader, args)
 
-    tools: list[Any] = [get_workspace_state, present_plan, office_read]
+    @tool(OFFICE_WRITE.name, OFFICE_WRITE.description, OFFICE_WRITE.input_schema)
+    async def office_write(args: dict[str, Any]) -> dict[str, Any]:
+        return await handle_office_write(reader, args)
+
+    tools: list[Any] = [get_workspace_state, present_plan, office_read, office_write]
     if kind == "orchestrator" and orchestrator is not None:
         cost = session_cost or (lambda _worker_id: 0.0)
 
@@ -129,7 +135,7 @@ def build_agent_options(
     folder: Path,
     resume_session_id: str | None,
     bridge: SessionBridge,
-    reader: OfficeDocumentReader,
+    reader: OfficeDocumentAccess,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -220,16 +226,16 @@ def build_agent_options(
 
 def sdk_client_factory(
     store: UiStateStore,
-    reader: OfficeDocumentReader,
+    reader: OfficeDocumentAccess,
     settings: Settings | None = None,
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
 ) -> Any:
     """Returns a ClientFactory closure for SessionManager.
 
-    ``reader`` is the office-host service, narrowed to :class:`OfficeDocumentReader`
-    so a session can read the live docked document without this module importing
-    the service — the same one-way dependency the rest of the tools keep.
+    ``reader`` is the office-host service, narrowed to :class:`OfficeDocumentAccess`
+    so a session can read *and* edit the live docked document without this module
+    importing the service — the same one-way dependency the rest of the tools keep.
     """
     resolved = settings or Settings()
 
