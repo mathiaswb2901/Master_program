@@ -26,6 +26,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api";
 import { fileNameOf, hostAppKind, physicalRect, useOfficeHostStore } from "../officeHost";
+import { parsePaneId } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import { useStore, type OpenFile } from "../store";
 import type { HostAppKind, HostReason, OfficeHostInfo, PanelRect } from "../types";
@@ -36,6 +37,13 @@ const APP_NAMES: Record<HostAppKind, string> = {
   excel: "Microsoft Excel",
   powerpoint: "Microsoft PowerPoint",
 };
+
+/** States in which a real native window is docked into the pane (or on its way
+ * in) and so cannot follow it out of the main window. `detached` is not one of
+ * them — that window is already on the desktop — and neither are the terminal
+ * states, which have fallen back to an OnlyOffice editor with no native window
+ * at all. Read by the pop-out guard below. */
+const DOCKED_STATES: ReadonlySet<string> = new Set(["launching", "embedding", "embedded"]);
 
 /** What each terminal reason means, said to the person whose document it is.
  * Every one of them ends with the same offer, so the card never leaves the user
@@ -379,6 +387,37 @@ export const officeHostTool: WorkbenchTool = {
   onWorkspaceChanged: () => {
     void useOfficeHostStore.getState().resetForWorkspace();
   },
+  /**
+   * A pane holding a *real* docked window cannot pop out (M5 item 13).
+   *
+   * A native Word/Excel window is a child of the **main** window's HWND; a
+   * popped-out pane is a WebView2 window that is not in that parent chain, so
+   * the docked window cannot follow it and reparenting it there would strand a
+   * real application behind an invisible one — the exact orphan the host
+   * ownership rules exist to prevent.
+   *
+   * A docked window only ever lives in the **default (tabbed) Editor pane**: its
+   * `keepMounted` view is mounted once there, and a split `editors#<path>` pane
+   * shows a "opens in the Editor pane" note rather than a second host
+   * (`EditorArea.tsx`). So the veto is exactly that one pane — `editors` with no
+   * instance key — and only while a window is docked or on its way in (not once
+   * it is `detached` back to the desktop, which is the way out this sentence
+   * points at). The pane capability asks the registry, never the store here.
+   */
+  popoutGuard: {
+    blocks: (paneId) => {
+      const { toolId, instance } = parsePaneId(paneId);
+      if (toolId !== "editors" || instance !== null) return null;
+      const docked = dockedHostPath();
+      if (docked === null) return null;
+      const kind = hostAppKind(docked);
+      const app = kind === null ? "A document" : APP_NAMES[kind];
+      return (
+        `${app} is docked in the Editor pane as a real window, which cannot follow a pane into ` +
+        `a separate window. Run "Move the docked document to the desktop" first, then pop out.`
+      );
+    },
+  },
   statusContributions: [{ region: "right", component: OfficeHostStatus }],
   commands: [
     {
@@ -392,6 +431,16 @@ export const officeHostTool: WorkbenchTool = {
     },
   ],
 };
+
+/** The path of any open document whose native window is docked (or docking)
+ * right now, or null. Every such window lives in the default Editor pane, so
+ * this is what the pop-out guard reads to refuse popping that pane out. */
+function dockedHostPath(): string | null {
+  for (const [path, host] of Object.entries(useOfficeHostStore.getState().hosts)) {
+    if (DOCKED_STATES.has(host.state)) return path;
+  }
+  return null;
+}
 
 /** The active editor tab, if what it holds is a document docked right now.
  * Live, not snapshotted: a command's `when` is re-read on every keystroke. */

@@ -115,6 +115,13 @@ function bundleMetafile(): Plugin {
 
 export default defineConfig({
   plugins: [react(), bundleMetafile()],
+  // Two HTML entry points. `index.html` is the app; `popout.html` is the blank
+  // same-origin page dockview opens with `window.open('/popout.html')` when a
+  // pane is popped out to its own window (M5 item 13, `ui/src/panels/Panes.tsx`).
+  // It has to be a real built asset — dockview navigates a browser window to it —
+  // so it is a Rollup input rather than a file `vite build` would leave behind.
+  // Paths are relative to the config root (`ui/`), which is where both live.
+  build: { rollupOptions: { input: { main: "index.html", popout: "popout.html" } } },
   server: { proxy },
   // `vite preview` serves the built bundle; it needs the same proxy so the E2E
   // suite (and anyone eyeballing a production build) talks to a live backend.

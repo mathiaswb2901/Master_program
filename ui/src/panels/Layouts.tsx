@@ -452,6 +452,19 @@ function onDockReady(dock: DockviewApi | null): void {
       if (persistenceArmed && !switching) playDockMotion("focus");
       scheduleSave();
     }),
+    // Popping a pane out, and moving or resizing its window, are arrangement
+    // changes `onDidLayoutChange` does not fire for — the window lives outside
+    // the grid — so they are persisted here, next to the rest. `layouts.json`
+    // then brings the popped-out pane back where the user left it (M5 item 13).
+    dock.onDidPopoutGroupPositionChange(() => scheduleSave()),
+    dock.onDidPopoutGroupSizeChange(() => scheduleSave()),
+    // A saved layout with a popped-out pane, restored where the browser blocks
+    // the popup (no user gesture on load): dockview re-grids those panes into
+    // the main window and fires this. The arrangement is intact — just flatter
+    // than it was saved — so it is one quiet line, not an error.
+    dock.onDidOpenPopoutWindowFail(() =>
+      toast("info", "Popped-out panes reopened in the main window."),
+    ),
   ];
   void restore(dock);
 }

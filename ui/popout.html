@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workbench</title>
+    <script>
+      // A popped-out pane is a *separate same-origin document* that dockview
+      // opens with `window.open('/popout.html')` and then moves the pane's DOM
+      // into. dockview copies the main window's stylesheets in on `load` — so
+      // the design tokens (declared on `:root`, dark by default) arrive — but it
+      // does not copy the `data-theme` attribute that selects the light palette.
+      // Set it here, before first paint and before dockview copies anything, the
+      // same way `index.html` does, so a light-themed app pops out a light pane
+      // instead of flashing the dark default. `Panes.tsx` re-applies it from the
+      // live theme in `onDidOpen` to cover a theme the user changed but has not
+      // yet persisted.
+      try {
+        var t = localStorage.getItem("workbench-theme");
+        if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+      } catch (e) {}
+    </script>
+    <style>
+      /* Fill the window and wear the app surface. The pane's own nodes are
+       * re-parented in by dockview and painted by the stylesheets it copies on
+       * load; `--surface-app` is one of the tokens those carry, so no colour is
+       * spelled out here (DESIGN.md, zero raw hex). Until they land the window is
+       * simply empty — the same blank frame every popout opens with. */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--surface-app);
+      }
+    </style>
+  </head>
+  <body></body>
+</html>
