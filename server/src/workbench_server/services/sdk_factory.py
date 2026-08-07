@@ -12,8 +12,11 @@ from workbench_server.services.agent_sessions import SdkClient, SessionBridge
 from workbench_server.services.agent_tools import (
     GET_WORKSPACE_STATE,
     MCP_SERVER_NAME,
+    OFFICE_READ,
     PRESENT_PLAN,
+    OfficeDocumentReader,
     allowed_tool_names,
+    handle_office_read,
     handle_present_plan,
     workspace_state_result,
 )
@@ -42,7 +45,9 @@ class UiStateStore:
         self.state = UiState()
 
 
-def build_context_bridge(store: UiStateStore, bridge: SessionBridge) -> Any:
+def build_context_bridge(
+    store: UiStateStore, bridge: SessionBridge, reader: OfficeDocumentReader
+) -> Any:
     """In-process MCP server exposing the workbench tools to one session.
 
     Names, descriptions, input schemas and bodies all come from the tool
@@ -63,8 +68,14 @@ def build_context_bridge(store: UiStateStore, bridge: SessionBridge) -> Any:
     async def present_plan(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_present_plan(bridge, args)
 
+    @tool(OFFICE_READ.name, OFFICE_READ.description, OFFICE_READ.input_schema)
+    async def office_read(args: dict[str, Any]) -> dict[str, Any]:
+        return await handle_office_read(reader, args)
+
     return create_sdk_mcp_server(
-        name=MCP_SERVER_NAME, version="1.0.0", tools=[get_workspace_state, present_plan]
+        name=MCP_SERVER_NAME,
+        version="1.0.0",
+        tools=[get_workspace_state, present_plan, office_read],
     )
 
 
@@ -74,6 +85,7 @@ def build_agent_options(
     folder: Path,
     resume_session_id: str | None,
     bridge: SessionBridge,
+    reader: OfficeDocumentReader,
 ) -> Any:
     """The single construction point for ``ClaudeAgentOptions``.
 
@@ -132,7 +144,7 @@ def build_agent_options(
         permission_mode="acceptEdits",
         include_partial_messages=True,
         can_use_tool=can_use_tool,
-        mcp_servers={MCP_SERVER_NAME: build_context_bridge(store, bridge)},
+        mcp_servers={MCP_SERVER_NAME: build_context_bridge(store, bridge, reader)},
         plugins=plugins,
         setting_sources=setting_sources,
         system_prompt={
@@ -150,14 +162,21 @@ def build_agent_options(
     )
 
 
-def sdk_client_factory(store: UiStateStore, settings: Settings | None = None) -> Any:
-    """Returns a ClientFactory closure for SessionManager."""
+def sdk_client_factory(
+    store: UiStateStore, reader: OfficeDocumentReader, settings: Settings | None = None
+) -> Any:
+    """Returns a ClientFactory closure for SessionManager.
+
+    ``reader`` is the office-host service, narrowed to :class:`OfficeDocumentReader`
+    so a session can read the live docked document without this module importing
+    the service — the same one-way dependency the rest of the tools keep.
+    """
     resolved = settings or Settings()
 
     def factory(folder: Path, resume_session_id: str | None, bridge: SessionBridge) -> SdkClient:
         from claude_agent_sdk import ClaudeSDKClient
 
-        options = build_agent_options(store, resolved, folder, resume_session_id, bridge)
+        options = build_agent_options(store, resolved, folder, resume_session_id, bridge, reader)
         client: SdkClient = ClaudeSDKClient(options=options)
         return client
 
