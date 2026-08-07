@@ -94,6 +94,15 @@ const SERVER_PORT = port("WB_E2E_SERVER_PORT", 8788);
 const UI_PORT = port("WB_E2E_UI_PORT", 4173);
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
+// The per-launch auth token, now *enforced* by default (M5 item 8, PR4). The
+// app itself bootstraps it over `GET /api/auth/token`, but specs also reach the
+// API out of band through `page.request.*` (e.g. reading `/api/layouts` to
+// assert what persisted) — a context the app's token never rides. Pinning the
+// token to a known value lets the harness attach it as a default header
+// (`extraHTTPHeaders` below) so those calls authenticate, while the app still
+// exercises the real bootstrap + WS-subprotocol paths on its own traffic.
+const AUTH_TOKEN = "e2e-fixed-auth-token-do-not-ship";
+
 export default defineConfig({
   testDir: "./e2e",
   // `e2e/perf/` is the Feel perf lane and belongs to `playwright.perf.config.ts`
@@ -117,6 +126,10 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${UI_PORT}`,
     trace: "retain-on-failure",
     video: "off",
+    // Out-of-band `page.request.*` calls the specs make to inspect server state
+    // authenticate with the same token the server was launched with; the app's
+    // own REST/WS traffic carries its own token independently (token.ts/ws.ts).
+    extraHTTPHeaders: { "X-Workbench-Token": AUTH_TOKEN },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
@@ -130,6 +143,10 @@ export default defineConfig({
       cwd: E2E_WORKSPACE,
       env: {
         [WORKSPACE_ENV]: E2E_WORKSPACE,
+        // Pin the enforced token to the value the harness attaches out of band
+        // (see AUTH_TOKEN / extraHTTPHeaders above). Enforcement stays ON — the
+        // shipped default — so this run really is the run a user gets.
+        WORKBENCH_AUTH_TOKEN: AUTH_TOKEN,
         WORKBENCH_FAKE_AGENT: "1",
         // The host backend's counterpart to fake-agent mode: the whole Office
         // host lifecycle, its refusals and its fallbacks, with no Office, no

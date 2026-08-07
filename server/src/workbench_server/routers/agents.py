@@ -24,6 +24,7 @@ from workbench_server.models.agents import (
 from workbench_server.models.files import OkResponse
 from workbench_server.models.plans import PlanDecision
 from workbench_server.services.agent_sessions import SessionManager, TooManySessionsError
+from workbench_server.services.local_auth import ws_subprotocol_to_echo
 from workbench_server.services.sdk_factory import UiStateStore
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
@@ -174,7 +175,9 @@ async def agent_ws(ws: WebSocket, local_id: str) -> None:
     if session is None:
         await ws.close(code=4404, reason="unknown session")
         return
-    await ws.accept()
+    # Echo the offered token subprotocol (middleware already validated it), or a
+    # browser fails the handshake. None when none was offered.
+    await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))
     queue = session.subscribe()
     # Replay what this client missed. A session blocked on a permission prompt
     # or a plan card emitted that frame once; without this, a client connecting

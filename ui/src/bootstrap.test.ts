@@ -57,9 +57,9 @@ describe("launch token ordering", () => {
     await getUsage();
 
     expect(tokenHeader(fetchMock, "/api/usage")).toBe("T-boot");
-    // The WS offer stays empty until the server echoes the subprotocol
-    // (`OFFER_WS_TOKEN`, ws.ts) — the REST header is the only token transport
-    // that is live today, and it is the one the launch ordering must guarantee.
-    expect(wsProtocols()).toEqual([]);
+    // And every socket opened after the handshake offers the same token as its
+    // `workbench.auth.<token>` subprotocol (`OFFER_WS_TOKEN`, ws.ts) — the WS
+    // transport for the token, which the server echoes on accept.
+    expect(wsProtocols()).toEqual(["workbench.auth.T-boot"]);
   });
 });

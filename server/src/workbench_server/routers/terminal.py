@@ -13,6 +13,7 @@ from workbench_server.models.terminal import (
     TerminalOutput,
     terminal_client_message,
 )
+from workbench_server.services.local_auth import ws_subprotocol_to_echo
 from workbench_server.services.pty_manager import PtyManager, PtySession
 from workbench_server.services.terminal_stream import coalesced_output
 from workbench_server.services.workspace import Workspace
@@ -41,7 +42,9 @@ async def terminal_ws(ws: WebSocket) -> None:
     # can move now (M5 item 5), and reading the launch setting here would open
     # every new shell in the project the user had already left.
     workspace: Workspace = ws.app.state.workspace
-    await ws.accept()
+    # Echo the offered token subprotocol (middleware already validated it), or a
+    # browser fails the handshake. None when none was offered.
+    await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))
 
     session = manager.spawn(cwd=workspace.root)
     pump = asyncio.create_task(_pump_output(session, ws))
