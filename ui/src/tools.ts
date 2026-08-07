@@ -18,6 +18,7 @@ import { agentTool } from "./panels/AgentPanel";
 import { conversationsTool } from "./panels/Conversations";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
+import { keyboardTool } from "./panels/Keyboard";
 import { layoutsTool } from "./panels/Layouts";
 import { missionTool } from "./panels/MissionControl";
 import { officeHostTool } from "./panels/OfficeHostPanel";
@@ -57,6 +58,10 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // Opened on demand from a plan card's Expand: one pane per drawn artifact,
   // rendering the same scene graph the card does (M5 item 3, PR 4).
   visualTool,
+  // After every capability it describes, and before the two that arrange them:
+  // its reference is a rendering of everything above, and its status chip sits
+  // just inside the layout chip at the bar's outer edge.
+  keyboardTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its

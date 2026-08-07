@@ -3,6 +3,8 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
 import { useEffect, useRef, useState } from "react";
 
+import { chordFor, chordTooltip } from "../keyref";
+import { chordKeycaps } from "../keys";
 import { MONO_FONT } from "../monaco";
 import { paneInstance } from "../panes";
 import type { WorkbenchTool } from "../registry";
@@ -126,7 +128,10 @@ function TerminalTabs() {
           type="button"
           className="wb-term-add"
           aria-label="New terminal"
-          title="New terminal — Alt+T"
+          // The chord comes from the registry, never from this string: a
+          // tooltip that names a stale keycap teaches the wrong reflex
+          // (DESIGN.md §6.13).
+          title={chordTooltip("New terminal", "terminal.new")}
           onClick={() => useStore.getState().newTerminal()}
         >
           +
@@ -137,8 +142,12 @@ function TerminalTabs() {
           <div className="wb-empty">
             <div className="wb-empty-title">No terminal</div>
             <div className="wb-empty-hint">
-              New terminal — <span className="wb-keycap">Alt</span>{" "}
-              <span className="wb-keycap">T</span>
+              New terminal —{" "}
+              {chordKeycaps(chordFor("terminal.new")).map((cap) => (
+                <span key={cap} className="wb-keycap">
+                  {cap}
+                </span>
+              ))}
             </div>
           </div>
         ) : (

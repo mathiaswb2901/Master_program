@@ -762,6 +762,7 @@ commands and their default chords on its tool descriptor (`docs/tools.md`), and
 | `Alt+O` | Focus the next pane |
 | `Alt+X` | Close this pane |
 | `Alt+A` | Annotate the plan card — point at part of an artifact (§6.3) |
+| `Alt+K` | Keyboard reference — every command, grouped by tool (§6.13) |
 
 **Pass-through:** inside xterm and Monaco — both full keyboard applications — only
 chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the
@@ -897,6 +898,86 @@ folder, each group under an 11px uppercase label naming the folder.
 - A row is `--row-height`, the file-tree row height, with the same hover/selected washes
   and a 6px status dot (§2.6, §6.4) — hollow for a transcript on disk, filled and pulsing
   for a live session that is working.
+
+### 6.13 Discovery: the welcome card, the keyboard reference, and tooltips that teach
+
+> Added 2026-08-06 on the owner's change request — *"I am not sure how to use these
+> features."* A capability nobody can find does not exist, and everything below is
+> **generated from the tool registry** rather than written down: a hand-written cheat
+> sheet is wrong the day a tool changes a chord, and nothing on screen would say so.
+> `ui/src/keyref.test.ts` fails the build when a registered command is unreachable from
+> the reference, or when the chord it shows is not the chord that runs.
+
+**The keyboard reference** is a *panel* (`ui/src/panels/Keyboard.tsx`, `Alt+K`, a QuickBar
+command, and a status chip) — never an overlay. There is one overlay language in this app
+and it is the QuickBar (§6.5); a second full-screen surface competing with it is the thing
+this section exists not to build. Being a panel also means it splits, maximizes and sits
+beside your work like anything else, which is what you want while you are learning chords.
+
+- Layout: a search field (28px, `--surface-elevated`) over a scrolling list. One section
+  per **owning tool**, in registry order, under an 11px uppercase `--text-tertiary`
+  label — the window's own commands first, exactly the QuickBar's order (§6.5).
+- Row: 26px, 12px title on the left, the command's live detail right-aligned in
+  `--text-tertiary`, then its chords as keycaps (§6.5). A command with **no** chord keeps
+  its row: it is reachable from the QuickBar, and saying so is the point. Two chords for
+  one command are two keycap groups with a wider gap between them than inside them.
+- A command whose gate is **closed right now** (`Command.when`, e.g. `Alt+1..9` on a
+  window with no session) keeps its row and says so: title and keycaps at
+  `--text-disabled`, and *not available yet* in the detail slot — never colour alone
+  (§7). This is the QuickBar's own answer to the same question, applied here: a row that
+  cannot run keeps its place in its section, because moving or hiding it answers "where
+  did that command go?" with silence. The chord of a gated-off command is dropped
+  silently by the keymap — no `preventDefault`, no feedback — so a row that looked ready
+  to press would teach a reflex that does nothing, which is worse than teaching none.
+  The gates are re-read whenever the panel's tab is brought forward, so a session started
+  since it was opened lights those rows up.
+- Search matches the row's text, its **chord** (`alt+s`, `alt s` and `alts` all find the
+  split) and the section name (`panes` shows that whole keymap). Substring, not the
+  QuickBar's fuzzy score: a reference is read, not raced.
+- It ends with **the pass-through rule in plain words** (§6.8) — why `Ctrl+Shift+P`
+  reaches the app from anywhere and `Ctrl+P` does not reach it from a terminal. That
+  question is the first one the keymap raises and the last one a table can answer.
+- Empty search says *none* and suggests what to type, per §6.10 and the "say none
+  explicitly" rule in `CLAUDE.md`.
+
+**The welcome card** is the top of that same panel, and the panel opens itself on a window
+that has never been arranged. It is the most important empty state in the product, so
+§6.10's anatomy is widened rather than replaced: a card on `--surface-elevated` with a
+`--radius-md` rim, a 20px/600 title, one sentence of lede at ≤62ch, then **three or four
+affordances that run the command they describe** — 8px/12px rows carrying a label, a
+`--text-tertiary` hint and the command's own keycaps. Not a wall of text, and not a tour.
+
+- It **interrupts nothing**: it is a tab in the centre pane, so the whole window is
+  already there and one click leaves it. No modal, no scrim, nothing to dismiss before
+  working. This is the one hard rule of this section.
+- Every affordance is **real** — it runs a registered command and dismisses the card:
+  a user who has started does not need to be told how to start.
+- **Dismissal is permanent, and it is workspace state**
+  (`.workbench/welcome.json`, beside `layouts.json`) rather than browser storage: the
+  shell and a browser tab agree, clearing browser storage does not bring the scaffolding
+  back, and opening a *new project* is a new window — which is where a welcome belongs.
+  A file that is present but unreadable counts as dismissed; that is the failure
+  direction that never nags. `Show the welcome card` in the QuickBar is the way back.
+- Auto-open is `not dismissed && no saved arrangement`. The second half is not a
+  guess about first run, it is what keeps this deterministic against §6.9's restore:
+  a saved arrangement is the truth about which panels are open, and a panel added
+  while `fromJSON` is in flight would be removed a frame later.
+
+**Tooltips name their chord, and read it from the registry.** Where a control exists for a
+gesture that also has a chord, its `title` is `"<what it does> — <chord>"`, so the mouse
+path teaches the keyboard one: the split glyphs (§6.11), the terminal's `+`, the layout
+chip (§6.9). The chord is looked up by command id (`chordFor` in `ui/src/keyref.ts`) and
+never written into the string — a tooltip naming a stale keycap teaches the wrong reflex,
+which is worse than teaching none.
+
+**The Keys chip** (status bar, right, beside the layout chip — §6.7 anatomy) is the one
+permanent, mouse-reachable entry to all of the above, for the user who dismissed the
+welcome a month ago. A keyboard-first app owes the mouse exactly one such door.
+
+**What deliberately has no affordance.** Focus mode keeps §6.9's ruling — no maximize
+button on any tab strip; the chip states the mode and names the way out. The pane picker
+gets none, because it is the consequence of a split rather than a gesture of its own. And
+nothing new appears on a panel tab: §6.1 stands.
 
 ---
 

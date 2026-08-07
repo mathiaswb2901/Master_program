@@ -635,6 +635,9 @@ describe("the registered tools", () => {
       "Alt+Shift+ArrowUp": "pane.swap.up",
       "Alt+Shift+ArrowDown": "pane.swap.down",
       "Alt+M": "layout.focus",
+      // The chord that answers "what are the chords" — the one a user needs
+      // before they know any others (`panels/Keyboard.tsx`).
+      "Alt+K": "keys.open",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",
       "Ctrl+3": "panel.agent",
@@ -661,6 +664,7 @@ describe("the registered tools", () => {
       "activity",
       "mission",
       "visual",
+      "keys",
     ]);
   });
 
