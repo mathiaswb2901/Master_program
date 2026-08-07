@@ -184,3 +184,45 @@ test("two detached sessions reattach independently through a reload", async ({ p
     await expect(bravo.locator(".wb-msg-user", { hasText: "alpha follow" })).toHaveCount(0);
   });
 });
+
+test("detach the only pane in the dock — it stays and becomes its own Resume tombstone", async ({
+  page,
+}) => {
+  // The one case the `dock.panels.length > 1` guard in `detachFocusedSession`
+  // exists for: with the AgentBrowser closed and a single `agent#<id>` pane left
+  // in the whole window, closing that pane on detach would land the user on an
+  // empty dock with no route back — the Detached list lives only in the
+  // AgentBrowser. So the pane must NOT close; it re-renders as its own Resume
+  // tombstone in place. Every other detach test has >1 pane present, so this
+  // branch had no coverage.
+  await openApp(page);
+
+  await test.step("one agent pane, then strip the dock down to just it", async () => {
+    await splitNewSession(page);
+    await sendInActivePane(page, "solo one");
+    await expect(page.locator(".wb-panel-tab", { hasText: "solo one" })).toBeVisible();
+
+    // Close every default panel. The floor refuses to close the last pane, so
+    // this stops at exactly one — the `agent#<id>` — and no AgentBrowser.
+    for (const name of ["Files", "Editor", "Terminal", "Agent"]) {
+      await page.locator(".wb-panel-tab", { hasText: name }).first().click();
+      await page.keyboard.press("Alt+X");
+      await expect(page.locator(".wb-panel-tab", { hasText: name })).toHaveCount(0);
+    }
+    await expect(page.locator(".wb-panel-tab")).toHaveCount(1);
+  });
+
+  await test.step("detach it: the sole pane is not closed, it shows Resume in place", async () => {
+    await page.locator(".wb-panel-tab", { hasText: "solo one" }).click();
+    await runCommand(page, "Detach this session");
+
+    // The guard held: the pane survived rather than emptying the dock…
+    await expect(page.locator(".wb-pane-single")).toHaveCount(1);
+    await expect(page.locator(".wb-panel-tab", { hasText: "solo one" })).toHaveCount(1);
+    // …and re-rendered as its own Resume tombstone, the only route back — the
+    // AgentBrowser and its Detached list are closed.
+    await expect(page.getByText("This session is detached")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
+    await expect(reattachButtons(page)).toHaveCount(0);
+  });
+});
