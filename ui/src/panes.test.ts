@@ -50,6 +50,9 @@ const emptyState = {
   openFiles: [],
   folders: [],
   terminals: [],
+  // A fresh workspace holds no plans, so the artifact tool offers no instance
+  // rows — the same shape `useStore.getState().chats` has before any agent runs.
+  chats: {} as Record<string, unknown>,
   activePath: null,
   sessionLimits: null as SessionLimits | null,
   nextTerminalPaneKey: () => "1",
@@ -235,7 +238,13 @@ describe("the picker's rows, against the registry the app ships", () => {
     // session").
     expect(options.some((option) => option.toolId === "files")).toBe(true);
     expect(options.filter((option) => option.toolId === "files")).toHaveLength(1);
-    expect([...plural].sort()).toEqual(["agent", "conversations", "editors", "terminal"]);
+    expect([...plural].sort()).toEqual([
+      "agent",
+      "conversations",
+      "editors",
+      "terminal",
+      "visual",
+    ]);
     expect(options.some((option) => option.id === "terminal.new")).toBe(true);
     expect(options.some((option) => option.id === "agent.new")).toBe(true);
   });
