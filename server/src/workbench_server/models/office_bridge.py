@@ -1,18 +1,22 @@
-"""Read models for the Office COM bridge — the *live* docked document.
+"""Read and write models for the Office COM bridge — the *live* docked document.
 
-These describe what an agent gets back when it reads the real Word or Excel
-document Workbench has hosted in a panel (``services/office_host/``). They are
-the typed return values of the ``DocumentBridge`` seam
+These describe what an agent gets back when it reads or edits the real Word or
+Excel document Workbench has hosted in a panel (``services/office_host/``). They
+are the typed values of the ``DocumentBridge`` seam
 (``services/office_host/document_bridge.py``), and they are **not** mirrored in
 ``ui/src/types.ts``: nothing on the wire carries them. They are consumed
-in-process by the ``office_read`` agent tool (``services/agent_tools.py``), which
-renders them to the compact text the model reads. Modelling them anyway keeps the
-seam honest — the fake and the real COM implementation must both produce the same
-shape — and keeps every field ``mypy --strict`` can check.
+in-process by the ``office_read`` and ``office_write`` agent tools
+(``services/agent_tools.py``), which render them to the compact text the model
+reads. Modelling them anyway keeps the seam honest — the fake and the real COM
+implementation must both produce the same shape — and keeps every field
+``mypy --strict`` can check.
 
-The read half deliberately arrives before any write path (PR 3+): reading the
-live document, including the user's unsaved on-screen edits, is the whole point
-of hosting a real Word instead of a preview.
+The read half arrived first (PR 1), because reading the live document — including
+the user's unsaved on-screen edits — is the whole point of hosting a real Word
+instead of a preview. The write half (PR 2, the ``*Edit`` return values below) is
+its mirror: a *targeted* edit — one addressed paragraph or one cell — that leaves
+the rest of the document untouched, applied to the live in-memory instance so the
+user can undo it, never a whole-file rewrite.
 """
 
 from pydantic import BaseModel, Field
@@ -87,3 +91,37 @@ class CellWindow(BaseModel):
     #: Row-major grid of cell text, ``rows`` lists of ``cols`` strings. Blank
     #: cells are the empty string, never null, so the grid is always rectangular.
     cells: list[list[str]] = Field(default_factory=list)
+
+
+class WordEdit(BaseModel):
+    """Confirmation of a single, targeted write to a Word paragraph.
+
+    The write replaces the text of one addressed paragraph and nothing else —
+    the mirror of :class:`WordText`'s windowed read. ``total_paragraphs`` travels
+    back so the caller knows the write did not change the document's shape (a
+    replace never adds or removes a paragraph), and ``written_chars`` is
+    ``len(new text)`` so a truncated echo in the tool result is self-describing.
+    """
+
+    #: Zero-based index of the paragraph whose text was replaced.
+    paragraph: int = Field(ge=0)
+    #: ``len`` of the new paragraph text — 0 means the paragraph was emptied.
+    written_chars: int = Field(ge=0)
+    #: The document's paragraph count after the edit (unchanged by a replace).
+    total_paragraphs: int = Field(ge=0)
+
+
+class CellEdit(BaseModel):
+    """Confirmation of a single, targeted write to one Excel cell.
+
+    The write sets the text of one addressed cell and nothing else — the mirror
+    of :class:`CellWindow`'s windowed read. Empty content clears the cell, which
+    ``written_chars == 0`` records, so the tool can say "cleared" rather than
+    leave the reader guessing.
+    """
+
+    sheet: str
+    #: A1 address written, e.g. ``"B2"``.
+    a1_cell: str
+    #: ``len`` of the value written — 0 means the cell was cleared.
+    written_chars: int = Field(ge=0)
