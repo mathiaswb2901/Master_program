@@ -269,6 +269,19 @@ export function requestWorkspaceSwitch(path: string, onSwitched?: () => void): v
   void performSwitch(trimmed, onSwitched);
 }
 
+/**
+ * True while a switch is actually mid-flight — past every guard, before `adopt`
+ * has settled the new root.
+ *
+ * The conversation browser reads this to stop a second switchable row (or the
+ * same one, clicked twice) from re-entering `requestWorkspaceSwitch` while the
+ * first switch is still running: `performSwitch`'s own `busy` guard would
+ * silently drop the second click's resume continuation, so the row disables
+ * itself instead of letting the click reach a no-op. It is deliberately *not*
+ * the dirty-buffer wait — that path already shows a modal that blocks the list.
+ */
+export const useWorkspaceSwitching = (): boolean => useWorkspaceUi((s) => s.busy);
+
 async function resolvePendingSwitch(action: "save" | "discard" | "cancel"): Promise<void> {
   const path = useWorkspaceUi.getState().pending;
   const onSwitched = useWorkspaceUi.getState().onSwitched;

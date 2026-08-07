@@ -59,7 +59,7 @@ import { relativeTime, relativeTimePhrase } from "../relativeTime";
 import { useStore } from "../store";
 import type { ConversationInfo, ConversationStore, ProjectGroup } from "../types";
 import { revealPane } from "./Panes";
-import { requestWorkspaceSwitch } from "./Workspaces";
+import { requestWorkspaceSwitch, useWorkspaceSwitching } from "./Workspaces";
 
 import "../styles/conversations.css";
 
@@ -123,6 +123,13 @@ function reveal(outcome: OpenOutcome): void {
 
 function Row({ group, conversation }: { group: ProjectGroup; conversation: ConversationInfo }) {
   const [busy, setBusy] = useState(false);
+  // A switch is a window-wide event, not a per-row one: `performSwitch`'s own
+  // `busy` guard drops any second switch's resume continuation, and this row's
+  // local `busy` clears the moment `openConversation` resolves the `switch`
+  // outcome — long before the re-root actually lands. So a switchable row reads
+  // the shared switch state and refuses the click while one is in flight,
+  // rather than letting a double-click (this row or a sibling) reach a no-op.
+  const switching = useWorkspaceSwitching();
   const live = conversation.live_session_id !== null;
   // Two kinds of "cannot open right here". A folder that resolved but sits
   // outside the workspace is *switchable* — clicking re-roots the window there
@@ -130,9 +137,12 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
   // there is nothing to switch to, so the click only surfaces the reason.
   const switchable = !group.openable && !live && group.folder !== null;
   const blocked = !group.openable && !live && group.folder === null;
+  // A switchable row is inert while any switch runs; its own `busy` covers the
+  // rest, and both together are what disables the button below.
+  const inert = busy || (switchable && switching);
 
   const open = (): void => {
-    if (busy) return;
+    if (inert) return;
     setBusy(true);
     void openConversation(group, conversation)
       .then((outcome) => {
@@ -166,10 +176,13 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
         "wb-conv-row" +
         (blocked ? " is-blocked" : "") +
         (switchable ? " is-switch" : "") +
-        (busy ? " is-busy" : "") +
+        (inert ? " is-busy" : "") +
         // Listed but not read: it exists and it opens, it just has no title yet.
         (conversation.read ? "" : " is-unread")
       }
+      // A native `disabled` is what makes the guard real rather than advisory:
+      // the second click of a double-click never fires, so no resume is dropped.
+      disabled={switchable && switching}
       onClick={open}
       // The reason travels with the control: a pointer user gets it on hover,
       // and a screen reader gets it as this button's description rather than as
@@ -179,9 +192,11 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
         ? { "aria-describedby": reasonId(group) }
         : {})}
       title={
-        switchable
-          ? `Open ${conversation.title} — switches the workspace to ${group.folder ?? groupLabel(group)} first.`
-          : blocked
+        switchable && switching
+          ? "A workspace switch is already in progress — this will be openable once it lands."
+          : switchable
+            ? `Open ${conversation.title} — switches the workspace to ${group.folder ?? groupLabel(group)} first.`
+            : blocked
             ? (group.reason ?? "")
             : !conversation.read
               ? "This conversation has not been read yet — “Read them all” fetches " +

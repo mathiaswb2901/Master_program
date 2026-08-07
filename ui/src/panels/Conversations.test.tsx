@@ -10,15 +10,20 @@
  */
 
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConversationInfo, ConversationStore, ProjectGroup } from "../types";
 
 // The imports that would otherwise pull in dockview's runtime, Monaco, the app
 // store and — through the switcher — the whole tools graph. Nothing here clicks
-// anything, so the row's switch action is stubbed to a no-op.
+// anything, so the row's switch action is stubbed to a no-op. `switching` is a
+// mutable seam so a test can render the browser mid-switch.
+const ws = vi.hoisted(() => ({ switching: false }));
 vi.mock("./Panes", () => ({ revealPane: () => undefined }));
-vi.mock("./Workspaces", () => ({ requestWorkspaceSwitch: () => undefined }));
+vi.mock("./Workspaces", () => ({
+  requestWorkspaceSwitch: () => undefined,
+  useWorkspaceSwitching: () => ws.switching,
+}));
 vi.mock("../store", () => ({
   useStore: Object.assign(() => undefined, {
     getState: () => ({ pushToast: () => undefined, resumeConversation: () => Promise.resolve(null) }),
@@ -168,6 +173,42 @@ describe("what it will not open", () => {
     );
     expect(html).toContain("unreadable");
     expect(html).toContain("0 turns");
+  });
+});
+
+describe("a switch already in flight", () => {
+  // Regression: a switchable row clicked while an earlier switch is still
+  // running used to re-enter `requestWorkspaceSwitch`, whose `busy` guard then
+  // dropped the second click's resume with no feedback. The row now disables
+  // itself for the duration, so the second click never fires.
+  afterEach(() => {
+    ws.switching = false;
+  });
+
+  const switchable = () =>
+    store({
+      projects: [
+        group({
+          openable: false,
+          workspace_relative: null,
+          reason: "Outside this workspace. Opening a conversation here switches…",
+        }),
+      ],
+    });
+
+  it("disables a switchable row while a switch is in flight, and says why", () => {
+    ws.switching = true;
+    const html = show(switchable());
+    expect(html).toContain("is-switch");
+    expect(html).toContain("disabled");
+    expect(html).toContain("already in progress");
+  });
+
+  it("leaves the row clickable when no switch is running", () => {
+    ws.switching = false;
+    const html = show(switchable());
+    expect(html).toContain("is-switch");
+    expect(html).not.toContain("disabled");
   });
 });
 
