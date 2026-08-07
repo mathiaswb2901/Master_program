@@ -137,6 +137,27 @@ mod tests {
     }
 
     #[test]
+    fn malformed_token_is_none_not_a_panic() {
+        // The contract is "degrade to None on anything unreadable", and the
+        // implementation leans on `read_to_string` collapsing every `Err` to
+        // `None`. Pin the two failure modes that a naive refactor
+        // (`read` + `String::from_utf8(...).unwrap()`, or assuming the path is a
+        // file) would turn back into a panic.
+        let root = temp_root("malformed");
+
+        // Invalid UTF-8 bytes: `read_to_string` errors, so the token is None.
+        fs::write(token_path(&root, 8787), [0xFF, 0xFE, 0x00]).unwrap();
+        assert_eq!(read_token(&root, 8787), None);
+
+        // The token path is a directory, not a file: reading it errors too.
+        let dir_port = 8788;
+        fs::create_dir_all(token_path(&root, dir_port)).unwrap();
+        assert_eq!(read_token(&root, dir_port), None);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn trailing_newline_is_trimmed() {
         let root = temp_root("newline");
         fs::write(token_path(&root, 8787), "tok\n").unwrap();
