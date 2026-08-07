@@ -1438,6 +1438,25 @@ Build for real external users, not just the author. Consequences, tracked as wor
   bar for reopening the list is a defect or a decision the owner makes, not a better
   idea. (The author of this entry is the party most likely to break it.)
 
+- 2026-08-07 — **Office account identity + multi-account switching** (owner; reopens the
+  freeze on the owner-decision ground, like new-document types). The docked native Office is
+  the user's *local* install, so it runs as their signed-in Microsoft account — identity on
+  saved documents, license, templates, OneDrive — **inherited by construction**. The work:
+  *verify* a private automation-launched instance inherits it (a COM read of the active
+  identity/license, self-checkable on the machine), and *surface* it —
+  `GET /api/office/capabilities` gains the active account + license state, the document panel
+  shows "signed in as X", and an unsigned/unlicensed instance degrades to a "sign into Word to
+  edit" card rather than a silently limited one. **Multi-account switching is spike-first**:
+  Office identity/licensing is user-profile-level (Office's own Identity service), with no
+  clean documented COM property to pin an automation instance to a chosen account. The spike
+  enumerates the signed-in accounts (feasible — Office caches them under
+  `HKCU\...\Common\Identity\Identities`) and determines whether a hosted instance can be
+  pinned to a chosen one (a launch/identity mechanism, a per-document association, or the
+  fallback of driving Word's own account switch, which persists to the next launch). Hard
+  rule: **never silently save under the wrong account** — work-vs-personal is a real hazard.
+  → folded into the M4 Office-host sequence, sequenced with the COM bridge; the identity/
+  license read is self-verifiable, the switch UX and docking look need the owner's eye.
+
 ## Deferred ideas
 
 Recorded, not scheduled. Nothing here is worked on until M7 ships — see the scope
