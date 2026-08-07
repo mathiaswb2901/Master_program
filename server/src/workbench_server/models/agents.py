@@ -8,6 +8,16 @@ from workbench_server.models.plans import PlanDecision, PlanPresented, PlanResol
 
 SessionState = Literal["idle", "working", "needs_attention"]
 
+#: What a session *is*, which decides what it may do and how Mission Control
+#: draws it.
+#:
+#: ``chat`` is every session Workbench has ever had, and stays the default on
+#: every path. ``orchestrator`` is one the user started that carries the
+#: mission-control toolset (``services/orchestrator.py``). ``worker`` is one an
+#: orchestrator spawned — it carries no toolset of its own, which is what stops
+#: an orchestrator building a tree of orchestrators out of one budget.
+SessionKind = Literal["chat", "orchestrator", "worker"]
+
 
 class SessionInfo(BaseModel):
     session_id: str
@@ -21,6 +31,9 @@ class SessionInfo(BaseModel):
     live: bool  # True = running in this process; False = resumable transcript on disk
     title: str  # first user message or a fallback
     updated_at: float  # unix mtime of the transcript (or creation time for live)
+    #: What this session is. A transcript on disk is always ``chat``: kinds are
+    #: live state about a running process, not something the store records.
+    kind: SessionKind = "chat"
 
 
 class FolderSessions(BaseModel):
@@ -59,6 +72,90 @@ class SessionLimits(BaseModel):
 class CreateSessionRequest(BaseModel):
     folder: str = ""  # workspace-relative
     resume_session_id: str | None = None
+    #: ``orchestrator`` gives this session the mission-control toolset. A client
+    #: may **not** ask for ``worker``: a worker is bound to a pooled worktree
+    #: outside the workspace jail, and only ``services/orchestrator.py`` — which
+    #: holds the lease — is allowed to create one (``routers/agents.py``).
+    kind: Literal["chat", "orchestrator"] = "chat"
+
+
+# ---- permissions, fleet-wide -----------------------------------------------
+#
+# A permission prompt reaches the human over ``/ws/agent/{id}``, which exists
+# only for conversations a window has opened. That is the gap Mission Control
+# closes: a blocked agent in a session nobody is looking at is invisible until
+# it times out ten minutes later, and with an orchestrator spawning workers the
+# session that blocks is *by definition* one the user never opened.
+
+
+class PendingPermission(BaseModel):
+    """One prompt awaiting the human, addressed to the whole window.
+
+    The same ``request_id``, ``tool`` and ``description`` as
+    :class:`PermissionRequest` — answering from the board and answering from the
+    chat are the same call into the same future, not two mechanisms.
+
+    **The description is not redacted, and that is deliberate.** The activity
+    feed jails every path it publishes because it is a firehose of things the
+    user never asked to see. This is the opposite: an approval the user cannot
+    read is one they cannot give informedly, and a permission card that hid the
+    command it is about would be worse than no card. What crosses here is
+    exactly what the session's own card shows.
+    """
+
+    request_id: str
+    tool: str
+    description: str
+    #: Unix seconds when the agent blocked. The board ages it, because a prompt
+    #: that has been waiting nine minutes is about to be denied by timeout.
+    requested_at: float
+
+
+class SessionPermissions(BaseModel):
+    """Every prompt one session is blocked on, with enough to render a row."""
+
+    session_id: str
+    title: str
+    folder: str
+    kind: SessionKind = "chat"
+    pending: list[PendingPermission] = Field(default_factory=list)
+
+
+class PermissionsSnapshot(BaseModel):
+    """``GET /api/agents/permissions``: the fleet's open prompts.
+
+    Load and reconnect, in the same row shape :class:`SessionPermissionEvent`
+    carries live — the pattern ``GET /api/activity`` established.
+    """
+
+    sessions: list[SessionPermissions] = Field(default_factory=list)
+
+
+class SessionPermissionEvent(BaseModel):
+    """Bus event: one session's set of open prompts changed.
+
+    Rows, not deltas, and **always the whole set for that session** — including
+    the empty set, which is how a board learns a prompt was answered somewhere
+    else (or timed out). A delta would leave a card standing for a future that
+    is already resolved, and the user would "allow" something the agent gave up
+    on minutes ago.
+    """
+
+    type: Literal["session_permission"] = "session_permission"
+    session: SessionPermissions
+
+
+class PermissionAnswer(BaseModel):
+    """``POST /api/agents/sessions/{id}/permission`` — the board's own answer.
+
+    The same decision :class:`PermissionDecision` carries over the agent socket.
+    A second door onto one future rather than a second mechanism: the board has
+    no socket for the session it is answering for, and opening one to answer a
+    single card would mean subscribing to a whole conversation to click Deny.
+    """
+
+    request_id: str
+    allow: bool
 
 
 class TranscriptMessage(BaseModel):

@@ -19,6 +19,7 @@ import { conversationsTool } from "./panels/Conversations";
 import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { layoutsTool } from "./panels/Layouts";
+import { missionTool } from "./panels/MissionControl";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
@@ -49,6 +50,10 @@ export const TOOLS: readonly WorkbenchTool[] = [
   scratchpadTool,
   usageTool,
   activityTool,
+  // After Activity and Usage, because it is the board *over* them: it renders
+  // their rows rather than deriving its own, so it reads as the wide view of
+  // the two capabilities above it.
+  missionTool,
   // Opened on demand from a plan card's Expand: one pane per drawn artifact,
   // rendering the same scene graph the card does (M5 item 3, PR 4).
   visualTool,

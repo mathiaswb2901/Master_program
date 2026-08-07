@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
+from workbench_server.models.orchestrator import OrchestratorBudget
 from workbench_server.routers import (
     activity,
     agents,
@@ -22,6 +23,7 @@ from workbench_server.routers import (
     layouts,
     office,
     office_host,
+    orchestrator,
     provenance,
     shortcuts,
     terminal,
@@ -32,6 +34,7 @@ from workbench_server.routers import (
 from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.conversations import ConversationBrowser
+from workbench_server.services.documents import DocumentService
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
@@ -43,6 +46,7 @@ from workbench_server.services.office_host import (
     build_bridge,
 )
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
+from workbench_server.services.orchestrator import OrchestratorService
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
@@ -92,7 +96,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # one says who wrote a file after the fact, this one says what is happening
     # this second, across every session, whether or not a window has that
     # conversation open. In-memory and bounded, like usage.
-    activity_service = ActivityService(workspace.root, event_bus)
+    activity_service = ActivityService(
+        workspace.root,
+        event_bus,
+        # A Mission Control worker's cwd is a pooled slot, which is outside the
+        # workspace by design — so without this every row of a working worker
+        # would read "(outside the workspace)". Naming, not opening: the feed's
+        # clickable target is still workspace-only (services/activity.py).
+        extra_roots=[("", worktree_service.root)],
+    )
     ui_state_store = UiStateStore()
     # Native Office hosting, constructed before the session manager because a
     # session reads the live docked document through it (narrowed to
@@ -124,6 +136,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fake=settings.office_fake,
         channel=host_channel,
     )
+    # Mission Control's second half. Built before the session manager because
+    # the client factory needs it (an orchestrator session's toolset is created
+    # with the client), and handed the manager through `bind` a few lines below.
+    orchestrator_service = OrchestratorService(
+        event_bus,
+        usage_service,
+        OrchestratorBudget(
+            max_workers=settings.orchestrator_max_workers,
+            max_worker_turns=settings.orchestrator_worker_turns,
+            max_worker_cost_usd=settings.orchestrator_worker_cost_usd,
+            max_fleet_turns=settings.orchestrator_fleet_turns,
+            max_fleet_cost_usd=settings.orchestrator_fleet_cost_usd,
+        ),
+        worktree_service,
+    )
     session_index = SessionIndex(settings.resolved_projects_dir())
     # The same storage, browsed whole instead of one folder at a time. Read-only
     # and lazy: nothing scans until a client asks, so this costs a bare object
@@ -137,9 +164,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "agent.fake_mode_enabled",
             detail="WORKBENCH_FAKE_AGENT is set: replies are scripted, no agent is running",
         )
-        client_factory = fake_client_factory()
+        client_factory = fake_client_factory(orchestrator_service)
     else:
-        client_factory = sdk_client_factory(ui_state_store, office_host_service, settings)
+        client_factory = sdk_client_factory(
+            ui_state_store,
+            office_host_service,
+            settings,
+            orchestrator_service,
+            # What a worker has spent, read from the *one* accumulator: the same
+            # figure the budget is enforced against and the board renders.
+            lambda worker_id: (
+                entry.cost_usd
+                if (entry := usage_service.session_entry(worker_id)) is not None
+                else 0.0
+            ),
+        )
     session_manager = SessionManager(
         workspace.root,
         client_factory,
@@ -159,6 +198,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # opened each conversation.
         activity_observer=activity_service,
     )
+    # The other half of the construction cycle above: the factory closes over
+    # the orchestrator, and the orchestrator needs the manager the factory built.
+    orchestrator_service.bind(session_manager)
     office_service = OfficeService(
         workspace,
         server_url=settings.onlyoffice_url,
@@ -169,6 +211,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # has to hear about it or an open agent claim would take the credit.
         provenance=provenance_service,
     )
+    # Blank-document creation (M5 item 16). Stateless and workspace-agnostic: it
+    # provides bundled templates and is handed the live `Workspace` per call, so
+    # it copies no root of its own and owes no `set_workspace_root`.
+    document_service = DocumentService()
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
     # this list is the *only* place a switch is coordinated — a service added
@@ -216,6 +262,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # a `problem` on GET /api/worktrees and the rest of the app starts.
         await worktree_service.start()
         yield
+        # Before `close_all`: stopping a crew *releases its worktree leases*,
+        # and once the sessions are gone the roster has nothing left to release
+        # them with — the slots would sit held until their leases expired.
+        await orchestrator_service.stop_all()
         await session_manager.close_all()
         # Before the watcher: a hosted window outliving the server would be an
         # Office instance nobody owns, still wearing our panel's chrome.
@@ -255,7 +305,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.worktrees = worktree_service
     app.state.usage = usage_service
     app.state.activity = activity_service
+    app.state.orchestrator = orchestrator_service
     app.state.workspaces = workspace_service
+    app.state.documents = document_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -279,6 +331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(worktrees.router)
     app.include_router(usage.router)
     app.include_router(activity.router)
+    app.include_router(orchestrator.router)
     app.include_router(workspaces.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)

@@ -18,6 +18,7 @@ from workbench_server.main import create_app
 from workbench_server.models.agents import (
     AgentError,
     PermissionRequest,
+    SessionKind,
     TextDelta,
     ToolSettled,
     ToolUseNote,
@@ -141,7 +142,9 @@ def make_factory(
 ) -> Any:
     created: list[FakeClient] = []
 
-    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> FakeClient:
+    def factory(
+        folder: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> FakeClient:
         client = FakeClient(script, bridge, ask_for, plan)
         created.append(client)
         return client
@@ -257,7 +260,9 @@ async def test_second_message_rejected_while_working(tmp_path: Path) -> None:
             await gate.wait()
             yield ResultMessage()
 
-    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> SlowClient:
+    def factory(
+        folder: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> SlowClient:
         return SlowClient([], bridge)
 
     manager = SessionManager(tmp_path, factory, max_sessions=4)
@@ -336,7 +341,9 @@ async def test_orphaned_permission_timeout_never_resurrects_a_finished_turn(
             await asyncio.sleep(0)
             yield ResultMessage()
 
-    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> OrphanClient:
+    def factory(
+        folder: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> OrphanClient:
         return OrphanClient([], bridge)
 
     manager = SessionManager(tmp_path, factory, max_sessions=4)
@@ -959,11 +966,17 @@ def test_session_status_reaches_the_events_websocket(
     """
     factory = make_factory([delta("ok"), ResultMessage()])
 
-    # Mirrors the real signature, reader and Settings included: main.py passes
-    # the office-host reader (for office_read) and the settings through, so a
-    # session's options are configurable, and a stub that drops an argument
-    # fails at call time.
-    def fake_sdk_client_factory(_ui_state_store: Any, _reader: Any, _settings: Any = None) -> Any:
+    # Mirrors the real signature, reader/Settings/orchestrator included: main.py
+    # passes the office-host reader (for office_read), the settings, and the
+    # orchestrator handle + cost callback through, so a session's options are
+    # configurable and a stub that drops an argument fails at call time.
+    def fake_sdk_client_factory(
+        _ui_state_store: Any,
+        _reader: Any,
+        _settings: Any = None,
+        _orchestrator: Any = None,
+        _session_cost: Any = None,
+    ) -> Any:
         return factory
 
     monkeypatch.setattr(main, "sdk_client_factory", fake_sdk_client_factory)

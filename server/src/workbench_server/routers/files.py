@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from workbench_server.models.documents import CreateDocumentRequest, CreateDocumentResponse
 from workbench_server.models.files import (
     CreateRequest,
     DirListing,
@@ -11,6 +12,11 @@ from workbench_server.models.files import (
     TreeNode,
     WriteRequest,
     WriteResponse,
+)
+from workbench_server.services.documents import (
+    DocumentExtensionError,
+    DocumentService,
+    TemplateUnavailableError,
 )
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.workspace import (
@@ -30,6 +36,11 @@ def _ws(request: Request) -> Workspace:
 
 def _provenance(request: Request) -> ProvenanceService:
     service: ProvenanceService = request.app.state.provenance
+    return service
+
+
+def _documents(request: Request) -> DocumentService:
+    service: DocumentService = request.app.state.documents
     return service
 
 
@@ -101,6 +112,30 @@ def create(request: Request, body: CreateRequest) -> OkResponse:
     # produces must not land on an agent claim for that path.
     _provenance(request).note_user_write(body.path)
     return OkResponse()
+
+
+@router.post("/document")
+def create_document(request: Request, body: CreateDocumentRequest) -> CreateDocumentResponse:
+    """Create a valid blank document of a named kind — not a zero-byte file.
+
+    ``.docx``/``.xlsx``/``.pptx`` come from bundled OOXML templates, ``.ipynb``
+    from a bundled nbformat skeleton, and ``.py``/``.txt``/``.md`` are empty. The
+    write goes through the same jail and atomic replace as every other create.
+    """
+    try:
+        digest = _documents(request).create(_ws(request), body.path, body.kind)
+    except PathOutsideWorkspaceError as e:
+        raise HTTPException(400, "path escapes workspace") from e
+    except DocumentExtensionError as e:
+        raise HTTPException(400, "path extension must match the document kind") from e
+    except FileExistsError as e:
+        raise HTTPException(409, "already exists") from e
+    except TemplateUnavailableError as e:
+        raise HTTPException(500, "document template unavailable") from e
+    # The user's doing, like `create`: the `added` event this produces must not
+    # land on an agent claim for that path.
+    _provenance(request).note_user_write(body.path)
+    return CreateDocumentResponse(path=body.path, hash=digest)
 
 
 @router.post("/rename")

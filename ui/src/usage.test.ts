@@ -56,6 +56,7 @@ function snapshot(patch: Partial<UsageSnapshot> = {}): UsageSnapshot {
       models: [],
       observed_at: null,
     },
+    sessions: [],
     ...patch,
   };
 }

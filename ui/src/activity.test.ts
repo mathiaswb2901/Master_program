@@ -41,6 +41,7 @@ function session(id: string, entries: ActivityEntry[], activeAt = T): SessionAct
     session_id: id,
     folder: "",
     title: id,
+    kind: "chat",
     entries,
     dropped: 0,
     active_at: activeAt,

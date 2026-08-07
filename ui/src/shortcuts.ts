@@ -59,6 +59,9 @@ export function promptInsertText(draft: string, body: string): string {
  */
 export function entryDetail(entry: ShortcutEntry): string {
   if (entry.kind === "layout") return `layout · ${entry.body}`;
+  // A command row shows the id it will run, not the file's `detail:` — same
+  // reason as shell/layout: the label is attacker-controlled, the action is not.
+  if (entry.kind === "command") return `command · ${entry.body}`;
   if (entry.kind !== "shell") return entry.detail ?? PROMPT_DETAIL;
   const text = shellInsertText(entry.body);
   return text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text;

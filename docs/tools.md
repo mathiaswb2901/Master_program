@@ -210,6 +210,34 @@ Size that one from the measured payload plus a margin you can state — a number
 for anything is a test that cannot fail. Prefer compact JSON or plain text over
 pretty-printed JSON; prefer a thin call over a wrapped API.
 
+### A toolset only some sessions get
+
+Mission Control added the first of these, and it is a pattern rather than a special
+case. Its five tools (`spawn_worker`, `list_workers`, …) live in their own tuple,
+`ORCHESTRATOR_TOOLS`, and reach a session through `tools_for(kind)` and
+`build_context_bridge(store, bridge, kind, handle)` — not through a `when` on each spec.
+
+**The reason is the budget, not tidiness.** A description is paid once per session, but
+an *input schema* rides along with every request whether the tool is ever called or not.
+Five toolsets in every chat session's context would be that cost on every message every
+user of the app ever sends, for a capability that session cannot use. The split is held
+by a test that measures what it saves.
+
+Two rules if you add one:
+
+- **`ALL_AGENT_TOOLS` is what the budget tests iterate.** A tool in neither tuple is a
+  tool that dodged its ceiling — add yours to the union, or `test_agent_tools.py` will
+  not measure it and nothing else will either.
+- **The tool bodies take a `Protocol`, never the service.** `OrchestratorHandle` is the
+  slice of `services/orchestrator.py` those five bodies use, for the same reason
+  `SessionBridge` is one: it keeps `agent_tools.py` free of the service, so every body is
+  testable against a fake and the SDK wiring cannot import the world by accident.
+
+A session's kind reaches the client factory as its fourth argument
+(`ClientFactory = (folder, resume, bridge, kind) -> SdkClient`), because what a session
+*is* decides what it may do, and there is no later moment at which a chat session could
+acquire a toolset it was not built with.
+
 ## State
 
 zustand, always — it is the only state library, and adding a second one is not a call a

@@ -50,7 +50,7 @@ to ``.workbench/`` (the usage meters set that precedent).
 import asyncio
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -63,6 +63,7 @@ from workbench_server.models.activity import (
     SessionActivity,
     SessionActivityEvent,
 )
+from workbench_server.models.agents import SessionKind
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.provenance import workspace_relative
 
@@ -113,7 +114,11 @@ def _on_loop(loop: asyncio.AbstractEventLoop) -> bool:
 
 
 def describe(
-    root: Path, folder: Path, tool: str, tool_input: dict[str, Any]
+    root: Path,
+    folder: Path,
+    tool: str,
+    tool_input: dict[str, Any],
+    extra_roots: Sequence[tuple[str, Path]] = (),
 ) -> tuple[str, str | None]:
     """One capped, jailed line for this call, and the file it names (or None).
 
@@ -121,13 +126,29 @@ def describe(
     string is ``f"{tool}: {value[:120]}"`` over the *raw* argument, which for a
     ``Read`` of ``C:\\Users\\me\\.ssh\\config`` is exactly the disclosure this
     feed must not make to every window in the workspace.
+
+    ``extra_roots`` are **server-owned** directories outside the workspace that
+    this feed may still *name*: today exactly one, the worktree pool root, so a
+    Mission Control worker reads as ``Read: slot-01/server/main.py`` rather than
+    as a row of ``(outside the workspace)`` (``services/orchestrator.py``). The
+    jail is not widened by it — the second element of the tuple, the path the UI
+    makes clickable, stays ``None`` for anything outside the workspace, and a
+    path in neither the workspace nor a named root is still redacted. Naming is
+    what the board needs; opening is what the jail governs, and they are
+    separate answers.
     """
     for key in _PATH_KEYS:
         raw = tool_input.get(key)
         if isinstance(raw, str) and raw:
             target = workspace_relative(root, folder, raw)
-            shown = OUTSIDE_WORKSPACE if target is None else target
-            return f"{tool}: {shown}"[:SUMMARY_LIMIT], target
+            if target is not None:
+                return f"{tool}: {target}"[:SUMMARY_LIMIT], target
+            for label, extra in extra_roots:
+                inside = workspace_relative(extra, folder, raw)
+                if inside is not None:
+                    shown = f"{label}/{inside}" if label else inside
+                    return f"{tool}: {shown}"[:SUMMARY_LIMIT], None
+            return f"{tool}: {OUTSIDE_WORKSPACE}"[:SUMMARY_LIMIT], None
     for key in _DETAIL_KEYS:
         raw = tool_input.get(key)
         if isinstance(raw, str) and raw:
@@ -143,6 +164,7 @@ class _Window:
     folder: str
     title: str
     active_at: float
+    kind: SessionKind = "chat"
     entries: OrderedDict[str, ActivityEntry] = field(default_factory=OrderedDict)
     dropped: int = 0
 
@@ -152,6 +174,7 @@ class _Window:
             session_id=self.session_id,
             folder=self.folder,
             title=self.title,
+            kind=self.kind,
             entries=list(reversed(self.entries.values())),
             dropped=self.dropped,
             active_at=self.active_at,
@@ -196,8 +219,14 @@ class ActivityService:
         window_s: float = ACTIVITY_WINDOW_S,
         max_entries: int = MAX_ENTRIES_PER_SESSION,
         max_sessions: int = MAX_SESSIONS,
+        extra_roots: Sequence[tuple[str, Path]] = (),
     ) -> None:
         self._root = root.resolve()
+        #: Server-owned directories outside the workspace this feed may *name*
+        #: but never make clickable — see :func:`describe`. One today: the
+        #: worktree pool root, so a Mission Control worker's row says which slot
+        #: and file it is on instead of ``(outside the workspace)``.
+        self._extra_roots = [(label, path.resolve()) for label, path in extra_roots]
         self._bus = bus
         #: Wall clock, for the stamps the UI renders as "3s ago". Injectable
         #: because ordering and ageing are rules a test has to be able to drive.
@@ -229,24 +258,31 @@ class ActivityService:
 
     # ---- the signal, from the two call sites that build the chat frames -----
 
-    def note_session(self, *, session_id: str, title: str, folder: str) -> None:
+    def note_session(
+        self, *, session_id: str, title: str, folder: str, kind: SessionKind = "chat"
+    ) -> None:
         """A session exists (or has just been named).
 
         Called when a session is created and again when its first message
         derives its title, so the fleet view lists a session that has not run a
         tool yet — an idle fleet is the common case and "three sessions open,
         none touching anything" is a reading, while an empty panel is not.
+
+        ``kind`` is stamped once, at creation: it is what lets Mission Control
+        tell an orchestrator from a chat before either has run a tool.
         """
         # Stamped now, applied on the loop: the row's age is when the session was
         # created, not whenever the loop next gets a slice.
         at = self._clock()
-        self._dispatch(lambda: self._apply_session(session_id, title, folder, at))
+        self._dispatch(lambda: self._apply_session(session_id, title, folder, kind, at))
 
-    def _apply_session(self, session_id: str, title: str, folder: str, at: float) -> None:
+    def _apply_session(
+        self, session_id: str, title: str, folder: str, kind: SessionKind, at: float
+    ) -> None:
         window = self._windows.get(session_id)
         if window is None:
             self._windows[session_id] = _Window(
-                session_id=session_id, folder=folder, title=title, active_at=at
+                session_id=session_id, folder=folder, title=title, kind=kind, active_at=at
             )
         elif window.title == title:
             return  # nothing a client would render differently
@@ -270,7 +306,7 @@ class ActivityService:
         now = self._clock()
         # Jailed here, before the value is stored anywhere — the raw argument
         # never reaches the window, so no later code path can leak it.
-        summary, target = describe(self._root, folder, tool, tool_input)
+        summary, target = describe(self._root, folder, tool, tool_input, self._extra_roots)
         entry = ActivityEntry(
             entry_id=call_id, tool=tool, summary=summary, target=target, started_at=now
         )
