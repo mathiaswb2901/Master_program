@@ -1,5 +1,6 @@
 """Application factory and entrypoint."""
 
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +17,7 @@ from workbench_server.models.orchestrator import OrchestratorBudget
 from workbench_server.routers import (
     activity,
     agents,
+    auth,
     conversations,
     events,
     files,
@@ -33,11 +35,13 @@ from workbench_server.routers import (
 )
 from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
+from workbench_server.services.app_data import app_data_dir
 from workbench_server.services.conversations import ConversationBrowser
 from workbench_server.services.documents import DocumentService
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
+from workbench_server.services.local_auth import LocalAuthMiddleware, is_local_origin
 from workbench_server.services.office import OfficeService
 from workbench_server.services.office_host import (
     OfficeHostService,
@@ -284,6 +288,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.info("workbench.stopped")
 
     app = FastAPI(title="Workbench", lifespan=lifespan)
+    # Per-launch auth token (M5 item 8 / OSS-bar item 1). Minted fresh unless
+    # one was configured out of band (an attaching desktop shell). Stashed on
+    # app.state so the token-handout router can read it; the middleware is
+    # handed its own copy at construction. This PR ships enforce_auth=False, so
+    # the middleware is a pass-through and nothing here changes behavior yet.
+    token = settings.auth_token or secrets.token_urlsafe(32)
+    app.state.auth_token = token
     app.state.settings = settings
     app.state.pty_manager = pty_manager
     app.state.workspace = workspace
@@ -311,7 +322,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Local-API security hardening (M5 item 8): require the per-launch token on
+    # REST + WS and gate the WS handshake on Origin. Inert while
+    # settings.enforce_auth is False (this PR's shipped default) — see
+    # services/local_auth.py.
+    app.add_middleware(
+        LocalAuthMiddleware,
+        token=token,
+        enforce=settings.enforce_auth,
+        is_local_origin=is_local_origin,
+    )
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(terminal.router)
     app.include_router(files.router)
     app.include_router(events.router)
@@ -343,4 +365,37 @@ def run() -> None:
     import uvicorn
 
     settings = load_settings()
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_config=None)
+    app = create_app(settings)
+    # Drop the per-launch token where a *later*-attaching desktop shell — one
+    # that did not spawn this backend and so never saw the token in an env var —
+    # can read it. Written owner-only, and only from the real entrypoint: the
+    # in-process test app is built through create_app, which touches no disk, so
+    # a test run never writes (or races on) this file. Removed on the way out so
+    # a token never outlives the process that owns it.
+    token_path = (settings.app_data_root or app_data_dir()) / "runtime" / "auth-token"
+    _write_runtime_token(token_path, app.state.auth_token)
+    try:
+        uvicorn.run(app, host=settings.host, port=settings.port, log_config=None)
+    finally:
+        token_path.unlink(missing_ok=True)
+
+
+def _write_runtime_token(path: Path, token: str) -> None:
+    """Write the launch token where only this user can read it back.
+
+    The directory already sits under a per-user app-data root
+    (``%LOCALAPPDATA%\\Workbench`` on Windows), so the token is not exposed to
+    other accounts by its location. ``chmod(0o600)`` narrows it further where
+    the OS honours POSIX bits; on NTFS it only clears the read-only flag, which
+    is why the per-user directory — not this call — is the real guarantee.
+    """
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token, encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        # Best effort: the file is still under a per-user directory. Log and
+        # carry on rather than refuse to start over a permissions tightening.
+        log.warning("auth.token_file_chmod_failed", path=str(path), error=str(exc))
