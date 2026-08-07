@@ -21,6 +21,7 @@ import { documentTheme, THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
   AgentServerMessage,
   AnnotationAnchor,
+  DocumentKind,
   FileChangedEvent,
   FileProvenanceEvent,
   FolderSessions,
@@ -371,6 +372,10 @@ interface WorkbenchStore {
   resolveShellClose: (action: "save" | "discard" | "cancel") => Promise<void>;
   closeFile: (path: string) => void;
   createEntry: (path: string, kind: "file" | "dir") => Promise<void>;
+  /** Create a valid blank document (M5 item 16) and open it. Unlike
+   * `createEntry`, the server writes real content — a Word/Excel/PowerPoint OOXML
+   * skeleton or an nbformat notebook — so the file opens without a repair prompt. */
+  createDocument: (path: string, kind: DocumentKind) => Promise<void>;
   renameEntry: (path: string, newPath: string) => Promise<void>;
   deleteEntry: (path: string) => Promise<void>;
   setActiveFile: (path: string) => void;
@@ -993,6 +998,21 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       // name should not wait a debounce window to see it.
       await get().loadDir(parentPath(path));
       if (kind === "file") void get().openFile(path);
+    },
+
+    createDocument: async (path, kind) => {
+      try {
+        await api.createDocument({ path, kind });
+      } catch (err) {
+        get().pushToast("error", `Create failed: ${errorDetail(err)}`);
+        return;
+      }
+      // Same as `createEntry`: reveal the new row now rather than after the
+      // watcher's debounce, then open it — the Office host for .docx/.xlsx/.pptx,
+      // Monaco for the rest (a .ipynb opens as JSON today; a notebook view is
+      // future work, ROADMAP M5 item 16).
+      await get().loadDir(parentPath(path));
+      void get().openFile(path);
     },
 
     renameEntry: async (path, newPath) => {

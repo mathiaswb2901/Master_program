@@ -80,6 +80,21 @@ export interface OkResponse {
   ok: true;
 }
 
+/** The document kinds the tree can create (M5 item 16). The token *is* the file
+ * extension; the UI offers them by name (Word / Excel / …). Mirror of
+ * `server/src/workbench_server/models/documents.py`. */
+export type DocumentKind = "docx" | "xlsx" | "pptx" | "ipynb" | "py" | "txt" | "md";
+
+export interface CreateDocumentRequest {
+  path: string;
+  kind: DocumentKind;
+}
+
+export interface CreateDocumentResponse {
+  path: string;
+  hash: string;
+}
+
 /** Directories appear here only when added or deleted — the two changes the
  * tree has a row for. */
 export interface FileChangedEvent {

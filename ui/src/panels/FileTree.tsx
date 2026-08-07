@@ -10,6 +10,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 
+import { newDocumentFlow } from "../documents";
 import { FileTypeIcon } from "../fileIcons";
 import { type TreeRow, joinPath, parentPath, visibleRows } from "../filetree";
 import type { WorkbenchTool } from "../registry";
@@ -361,6 +362,27 @@ function TreeRowView({
 
 // ---- panel ------------------------------------------------------------------
 
+function NewDocumentIcon() {
+  // A document with a small sparkle — this makes a *valid* document, not an
+  // empty file, and the plus glyphs are already spent on New file / New folder.
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 1.5h5L12.5 5v9a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-12a.5.5 0 0 1 .5-.5ZM9 1.5V5h3.5" />
+      <path d="M6 8.2 6.6 9.7 8.1 10.3 6.6 10.9 6 12.4 5.4 10.9 3.9 10.3 5.4 9.7Z" />
+    </svg>
+  );
+}
+
 function NewEntryIcon({ kind }: { kind: "file" | "dir" }) {
   return (
     <svg
@@ -530,6 +552,7 @@ export function FileTreePanel(_props: IDockviewPanelProps) {
   const menuItems = (row: TreeRow): MenuItem[] => {
     if (row.kind === "dir") {
       return [
+        { label: "New document…", run: () => newDocumentFlow(row.path) },
         { label: "New file…", run: () => startCreate(row.path, "file") },
         { label: "New folder…", run: () => startCreate(row.path, "dir") },
         {
@@ -612,6 +635,15 @@ export function FileTreePanel(_props: IDockviewPanelProps) {
       <div className="wb-filetree-toolbar">
         <span className="u-label">Files</span>
         <span className="wb-filetree-toolbar-actions">
+          <button
+            type="button"
+            className="wb-icon-btn"
+            aria-label="New document in workspace root"
+            title="New document…"
+            onClick={() => newDocumentFlow("")}
+          >
+            <NewDocumentIcon />
+          </button>
           <button
             type="button"
             className="wb-icon-btn"
@@ -723,6 +755,19 @@ export const filesTool: WorkbenchTool = {
     component: FileTreePanel,
     defaultLocation: { area: "left", size: 240 },
   },
+  // No chord on purpose: a registered chord beats a `shortcuts.md` one and `Alt`
+  // is all that file may bind, so a chord taken here is one the user cannot have
+  // — and creating a document is a considered act, not a reflex (the Scratchpad's
+  // and the Workspaces switcher's reasoning). Reachable from the QuickBar, the
+  // tree's context menu, and the tree toolbar.
+  commands: [
+    {
+      id: "files.newDocument",
+      title: "New document…",
+      detail: () => "Word, Excel, PowerPoint, notebook, and more",
+      run: () => newDocumentFlow(""),
+    },
+  ],
   // The workspace name used to be this tool's status item, as a label. It moved
   // to the Workspaces tool in M5 item 5, where it is a *control*: the workspace
   // is no longer "the folder this tree happens to show" but something the user
