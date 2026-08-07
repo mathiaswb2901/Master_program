@@ -120,11 +120,33 @@ test("a four-card board rides out a Grep-heavy turn", async ({ page }, info) => 
   ).json();
   const baseline = folders.reduce((total, folder) => total + folder.sessions.length, 0);
   await expect(cards).toHaveCount(baseline);
+  // Each "New session" makes the created session the focused one (`store.ts`
+  // sets `activeSessionId` to the new id), and the last one made is the one
+  // the storm below is typed into. Capture its id from the create response so
+  // the "Grep:" assertion can be scoped to *that* card: `.wb-mission-then` is a
+  // per-card element, and a full perf lane's shared backend leaves earlier
+  // specs' sessions on the board with settled activity of their own — an
+  // unscoped `.wb-mission .wb-mission-then` matches every one of them and trips
+  // strict mode. Scope by session identity, not `.first()`: the storm card is
+  // not guaranteed to sort first (a blocked or more-recent card sorts above it).
+  let stormSessionId = "";
   for (let index = 0; index < CARDS; index += 1) {
-    await page.getByRole("button", { name: "New session", exact: true }).click();
+    const [created] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/agents/sessions",
+      ),
+      page.getByRole("button", { name: "New session", exact: true }).click(),
+    ]);
+    stormSessionId = ((await created.json()) as { session_id: string }).session_id;
     await expect(input).toBeVisible();
     await expect(cards).toHaveCount(baseline + index + 1);
   }
+  // The card the storm lands on — located by the session id it renders into
+  // `data-session`, so extra cards from the shared backend are irrelevant.
+  const stormCard = page.locator(`.wb-mission .wb-mission-card[data-session="${stormSessionId}"]`);
+  await expect(stormCard).toHaveCount(1);
 
   const before = await readCounts(page);
 
@@ -133,8 +155,8 @@ test("a four-card board rides out a Grep-heavy turn", async ({ page }, info) => 
     // the whole point — an unmemoized board re-renders all four per frame.
     await input.fill("tool storm please");
     await input.press("Enter");
-    // The storm has landed when the last call is on the card and settled.
-    await expect(page.locator(".wb-mission .wb-mission-then")).toContainText("Grep:");
+    // The storm has landed when the last call is on *this* card and settled.
+    await expect(stormCard.locator(".wb-mission-then")).toContainText("Grep:");
   });
 
   const after = await readCounts(page);
