@@ -16,10 +16,11 @@ because it must gate the WebSocket handshake as well as HTTP — and the
 handshake is only visible at the ASGI ``scope['type'] == 'websocket'`` layer,
 before any route runs.
 
-``enforce`` is the rollout seam. When it is ``False`` — the shipped default of
-the first PR — every request passes through untouched, so the plumbing lands
-with zero behavior change. A later PR flips it on once the client injects the
-token and sends a local Origin.
+``enforce`` is the rollout seam, now ON by default (M5 item 8, PR4). With it
+on, the token is required on REST + WS and the WS handshake is gated on Origin;
+the whole client and both test harnesses present the token. Setting it to
+``False`` — ``WORKBENCH_ENFORCE_AUTH=0`` — makes the middleware a pass-through
+again, kept as a debugging escape hatch, not the shipped default.
 """
 
 from collections.abc import Callable
@@ -123,7 +124,7 @@ class LocalAuthMiddleware:
         self._is_local_origin = is_local_origin
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # The whole point of the rollout flag: wired but inert until flipped.
+        # The rollout flag: a pass-through only when forced off for debugging.
         if not self._enforce:
             await self._app(scope, receive, send)
             return

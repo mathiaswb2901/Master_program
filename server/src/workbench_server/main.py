@@ -337,8 +337,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # auth layer rejects still passes back out through CORS, which attaches the
     # Access-Control-Allow-Origin header to the 403. Reversed, LocalAuth's 403
     # would never reach CORS and a browser XHR with a missing/wrong token would
-    # surface as an opaque CORS failure instead of a readable 403 body once
-    # enforce_auth is flipped on.
+    # surface as an opaque CORS failure instead of a readable 403 body now that
+    # enforce_auth is on by default.
     #
     # Local-API security hardening (M5 item 8): require the per-launch token on
     # REST + WS and gate the WS handshake on Origin. Active by default now
