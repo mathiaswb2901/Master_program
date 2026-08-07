@@ -11,7 +11,7 @@ import { registerTerminal } from "../terminalInput";
 import { attachRenderer } from "../terminalRenderer";
 import { xtermTheme } from "../theme";
 import type { TerminalClientMessage, TerminalServerMessage } from "../types";
-import { wsUrl } from "../ws";
+import { wsProtocols, wsUrl } from "../ws";
 
 /**
  * The Terminal tool renders two ways, decided by the pane's id (`../panes.ts`).
@@ -227,7 +227,7 @@ function TerminalInstance({ id, visible }: { id: number; visible: boolean }) {
     fitTerminal(fit);
 
     // Terminal sockets never auto-reconnect: the PTY behind them is stateful.
-    const ws = new WebSocket(wsUrl("/ws/terminal"));
+    const ws = new WebSocket(wsUrl("/ws/terminal"), wsProtocols());
     const send = (message: TerminalClientMessage): boolean => {
       if (ws.readyState !== WebSocket.OPEN) return false;
       ws.send(JSON.stringify(message));

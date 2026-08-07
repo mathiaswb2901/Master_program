@@ -167,6 +167,33 @@ export interface WorkspaceSwitchGuard {
   settle: () => Promise<string[]>;
 }
 
+/**
+ * A tool's veto over popping a pane into a separate window (M5 item 13).
+ *
+ * A popped-out pane is a separate WebView2 window with **no HWND in the main
+ * window's parent chain** — so a native Office window docked into a pane cannot
+ * follow it out, and reparenting it there would orphan a real Word behind an
+ * invisible window (the exact class of bug the host-ownership rules exist to
+ * prevent). The ROADMAP's exit criterion is "either follows or refuses with a
+ * reason on screen"; this is the refusal.
+ *
+ * Modelled on `WorkspaceSwitchGuard`: the tool that *owns the resource* declares
+ * the guard, and the pane capability asks the registry rather than reaching into
+ * that tool's store — the office host is not even a panel tool, so nothing but
+ * the registry knows to ask it about an `editors#…` pane holding a live document.
+ */
+export interface PopoutGuard {
+  /**
+   * A sentence explaining why this pane may not pop out, or null to allow it.
+   *
+   * Called once per panel in the group being popped out, with that panel's pane
+   * id (`editors#report.docx`). Reads state already in memory — it runs on the
+   * pop-out gesture, not on every render — and a non-null answer refuses the
+   * whole group, so the sentence should name the way to unblock it.
+   */
+  blocks: (paneId: string) => string | null;
+}
+
 export type StatusRegion = "left" | "center" | "right";
 
 export interface StatusContribution {
@@ -322,6 +349,14 @@ export interface WorkbenchTool {
    */
   workspaceSwitchGuard?: WorkspaceSwitchGuard;
   /**
+   * Refuse to pop one of this tool's panes into a separate window, with a reason
+   * (see `PopoutGuard`). The native Office host is the one user: a real Word
+   * docked in a pane cannot follow the pane into a WebView2 window that is not
+   * in the main window's parent chain, so it refuses rather than orphan it. The
+   * pane capability consults the registry, never the office store directly.
+   */
+  popoutGuard?: PopoutGuard;
+  /**
    * A control at the right end of **every pane's** tab strip, for a tool that
    * acts on panes rather than living in one — the split affordance is the one
    * (DESIGN.md §6.11). Contributed here so `App.tsx` hands dockview a component
@@ -473,6 +508,30 @@ export async function settleBeforeWorkspaceSwitch(
     }
   }
   return stranded;
+}
+
+/**
+ * Why the group holding these panes may not pop out, or null if it may.
+ *
+ * Asked of every enabled tool's `popoutGuard` for every pane in the group: the
+ * office host vetoes an `editors#…` pane it holds a live window for, and it is
+ * not a panel tool, so the pane capability cannot find it by walking the panels
+ * alone — it asks the registry, which walks the tools. First reason wins; a
+ * group is refused whole, because one native window that cannot follow is enough.
+ */
+export function popoutRefusal(
+  tools: readonly WorkbenchTool[],
+  paneIds: readonly string[],
+): string | null {
+  for (const tool of tools.filter(isEnabled)) {
+    const guard = tool.popoutGuard;
+    if (guard === undefined) continue;
+    for (const id of paneIds) {
+      const reason = guard.blocks(id);
+      if (reason !== null) return reason;
+    }
+  }
+  return null;
 }
 
 /** The panel a `shortcuts.md` entry of this kind is typed into, or null if no

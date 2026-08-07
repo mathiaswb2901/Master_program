@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  authToken,
   awaitBackendReady,
   cancelShellClose,
   closeShellWindow,
@@ -62,5 +63,12 @@ describe("browser mode", () => {
   // to ask, so a wait here would be a permanently blank page.
   it("does not make the app wait for a backend it cannot ask about", async () => {
     await expect(awaitBackendReady()).resolves.toBeUndefined();
+  });
+
+  // A browser tab has no shell to hand it a token, so it must fall back to the
+  // `/api/auth/token` handshake — `authToken()` returning null is what triggers
+  // that fallback in `token.ts`.
+  it("returns a null auth token so the browser falls back to the handshake", async () => {
+    await expect(authToken()).resolves.toBeNull();
   });
 });

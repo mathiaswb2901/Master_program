@@ -1320,6 +1320,14 @@ export interface WorkspaceChangedEvent {
   name: string;
 }
 
+// ---- auth.py ----------------------------------------------------------------
+
+/** `GET /api/auth/token` — the per-launch token, fetched once at startup and
+ * sent on every REST call and WebSocket. Mirrors `AuthTokenResponse`. */
+export interface AuthTokenResponse {
+  token: string;
+}
+
 // ---- sessions.py ------------------------------------------------------------
 // Detachable working sessions (M5 item 15). A named session is a manifest that
 // ties a workspace + an arrangement + its live agents/leases into one thing a
