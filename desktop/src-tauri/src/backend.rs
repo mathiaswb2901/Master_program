@@ -245,10 +245,7 @@ fn unavailable() -> Backend {
 /// the same pair, so one override moves the shell, the server it spawns and the
 /// proxy the page talks through together.
 fn backend_addr() -> SocketAddr {
-    let port = std::env::var("WORKBENCH_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_PORT);
+    let port = backend_port();
     let configured = std::env::var("WORKBENCH_HOST").unwrap_or_default();
     // A server bound to the wildcard is still reached over loopback from here.
     let host = match configured.as_str() {
@@ -258,6 +255,16 @@ fn backend_addr() -> SocketAddr {
     format!("{host}:{port}")
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)))
+}
+
+/// The backend port this shell talks to: `WORKBENCH_PORT` if set and parseable,
+/// else the default. Shared with `auth_token`, which reads the token file the
+/// server keys by exactly this port.
+pub(crate) fn backend_port() -> u16 {
+    std::env::var("WORKBENCH_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT)
 }
 
 /// What holds the backend port.
