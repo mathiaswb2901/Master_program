@@ -27,21 +27,19 @@ export function wsTokenProtocol(token: string): string {
 }
 
 /**
- * Whether a browser socket may yet OFFER the token subprotocol.
+ * Whether a browser socket OFFERS the token subprotocol.
  *
- * Held OFF, and this is load-bearing, not a stub: a browser *fails* any
- * WebSocket whose offered subprotocol the server does not echo back in the 101
- * response — verified live in Chrome, `new WebSocket(url,
- * ["workbench.auth.…"])` fires `onerror` while the server logs the handshake
- * `[accepted]`. Every WS endpoint today (`events`, `agents`, `office_host`,
- * `terminal`) calls `ws.accept()` with no subprotocol, so offering the label
- * now would break *every* socket in the app, enforcement on or off. Turning
- * this on is the WebSocket half of enabling enforcement (PR4) and pairs with a
- * server-side `accept(subprotocol=…)` that echoes the label. The REST token
- * already rides every call today (`api.ts`); only the WS transport waits on
- * that server echo.
+ * ON (PR4). A browser *fails* any WebSocket whose offered subprotocol the
+ * server does not echo back in the 101 response, so this pairs one-to-one with
+ * the server-side `accept(subprotocol=…)` that echoes the label on every WS
+ * endpoint (`events`, `agents`, `office_host`, `terminal` — `ws_subprotocol_to_echo`
+ * in `services/local_auth.py`). With enforcement on the middleware also reads
+ * the token from this same offered subprotocol to authenticate the handshake, so
+ * offering it is what lets a browser socket connect at all. The REST token rides
+ * a header instead (`api.ts`) — a `fetch` can set headers; a `new WebSocket`
+ * cannot, which is why the socket carries it as a subprotocol.
  */
-const OFFER_WS_TOKEN = false;
+const OFFER_WS_TOKEN = true;
 
 /**
  * The subprotocol list every socket opens with: the token once it may be

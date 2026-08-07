@@ -181,9 +181,19 @@ export default function App() {
   // Only the panels wait for the backend — the modals stay mounted throughout,
   // so a window closed while it is still starting is still a window that asks
   // first. Nothing is dirty this early, but the guard must not depend on that.
+  //
+  // The panels wait for the *token* as well, not just the backend: a default
+  // panel opens its WebSocket the moment it mounts (the terminal's PTY socket,
+  // an agent chat socket), and with enforcement on (M5 item 8, PR4) a handshake
+  // offers the token as its subprotocol — so a socket opened before `initToken`
+  // resolves is rejected 4403, and the terminal (which does not reconnect) stays
+  // dead. In a browser `backendReady` is true on the first render, so gating the
+  // dock on it alone would mount panels before the token existed; `tokenReady`
+  // is the missing half. It resolves in one same-origin GET, so this is a blink.
+  const ready = backendReady && tokenReady;
   return (
     <div className="wb-root">
-      {backendReady ? (
+      {ready ? (
         <>
           <div className="wb-dock">
             <DockviewReact
