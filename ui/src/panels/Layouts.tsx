@@ -31,6 +31,7 @@ import { create } from "zustand";
 
 import * as api from "../api";
 import { dockApiHandle } from "../dock";
+import { chordFor } from "../keyref";
 import {
   DEFAULT_LAYOUT_NAME,
   LAYOUT_PRESETS,
@@ -601,10 +602,14 @@ function LayoutStatus() {
         className={"wb-status-chip wb-layout-chip" + (maximized ? " is-focused" : "")}
         aria-haspopup="dialog"
         aria-expanded={menu !== "closed"}
+        // The way out of a filled window is the one thing this chip has to say
+        // exactly right, so the chord is read from the registry rather than
+        // written here (DESIGN.md §6.13) — and the way *in* is named too, which
+        // is the only place the app states it outside the reference.
         title={
           maximized
-            ? "Focus mode — Alt+M restores the arrangement"
-            : "Layouts — save, switch, reset"
+            ? `Focus mode — ${chordFor("layout.focus")} restores the arrangement`
+            : `Layouts — save, switch, reset. Fill the window: ${chordFor("layout.focus")}`
         }
         onClick={() =>
           useLayoutUi.setState({ menu: menu === "closed" ? "list" : "closed" })
