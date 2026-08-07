@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
+from workbench_server.services import sessions as sessions_service
 from workbench_server.services import shortcuts as shortcuts_service
 from workbench_server.services import workspaces as workspaces_service
 
@@ -61,6 +62,10 @@ def app_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     path = tmp_path.parent / f"{tmp_path.name}-appdata"
     monkeypatch.setattr(workspaces_service, "app_data_dir", lambda: path)
+    # Same throwaway home for the named-session store: it too falls back to the
+    # real ``%LOCALAPPDATA%\\Workbench`` when nothing names a directory, so
+    # without this a test run would read and rewrite the developer's sessions.
+    monkeypatch.setattr(sessions_service, "app_data_dir", lambda: path)
     return path
 
 

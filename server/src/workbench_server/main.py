@@ -27,6 +27,7 @@ from workbench_server.routers import (
     office_host,
     orchestrator,
     provenance,
+    sessions,
     shortcuts,
     terminal,
     usage,
@@ -55,6 +56,7 @@ from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.session_index import SessionIndex
+from workbench_server.services.sessions import SessionsStore
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
 from workbench_server.services.watcher import Watcher
@@ -219,6 +221,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # provides bundled templates and is handed the live `Workspace` per call, so
     # it copies no root of its own and owes no `set_workspace_root`.
     document_service = DocumentService()
+    # Detachable working sessions (M5 item 15, PR2). A named session ties a
+    # workspace + an arrangement + its live agents and leases into one thing a
+    # user can leave and return to. GLOBAL on purpose: it lives once under the
+    # machine's app data dir and is queried *by* workspace, so it is deliberately
+    # NOT in the rootables below and owns no `set_workspace_root` — switching the
+    # current project must not change which sessions exist, only which ones a
+    # window asks to see. One project can host more than one named session.
+    sessions_store = SessionsStore(settings.app_data_root)
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
     # this list is the *only* place a switch is coordinated — a service added
@@ -315,6 +325,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.orchestrator = orchestrator_service
     app.state.workspaces = workspace_service
     app.state.documents = document_service
+    app.state.sessions = sessions_store
     # Order matters, and Starlette inverts it: add_middleware inserts at the head
     # of the list, so the LAST middleware added is the OUTERMOST layer. We add
     # LocalAuth *first* and CORS *second* so CORS ends up outer — a request the
@@ -360,6 +371,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(activity.router)
     app.include_router(orchestrator.router)
     app.include_router(workspaces.router)
+    app.include_router(sessions.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
