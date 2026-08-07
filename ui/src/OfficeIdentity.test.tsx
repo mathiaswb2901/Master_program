@@ -75,10 +75,12 @@ describe("identityLine — the one quiet line, reduced", () => {
     });
   });
 
-  it("still names the account, no claim of edit rights, when the license is unknown", () => {
+  it("degrades exactly as unlicensed — names the account, nudges to sign in — when the license is unknown", () => {
+    // An unconfirmed license is degraded, never a fabricated "licensed": the
+    // unknown case must NOT look like the confirmed-licensed line above.
     expect(identityLine(identity({ license: "unknown" }))).toEqual({
-      text: "Signed in as Analyst",
-      degraded: false,
+      text: "Signed in as Analyst — sign in to Word to edit",
+      degraded: true,
     });
   });
 

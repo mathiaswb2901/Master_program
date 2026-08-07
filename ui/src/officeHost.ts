@@ -216,10 +216,13 @@ export interface IdentityLine {
  * Honest by construction, matching the endpoint (`models/office_host.py`):
  *
  * * not signed in → the honest degrade, "Sign into Word to edit";
- * * signed in, licensed (or license `unknown`) → "Signed in as X", where X is
- *   the friendly name or, failing that, the email — we show *who*, and never
- *   claim an edit right we cannot confirm;
- * * signed in but `unlicensed` → the same name with a gentle nudge to sign in;
+ * * signed in, licensed → "Signed in as X", where X is the friendly name or,
+ *   failing that, the email — we show *who*, and never claim an edit right we
+ *   cannot confirm;
+ * * signed in but `unlicensed` **or** `unknown` → the same name with a gentle
+ *   nudge to sign in: an unconfirmed license degrades exactly as an absent one,
+ *   never a fabricated "licensed" (the contract `models/office_host.py` and
+ *   `LicenseState` in `types.ts` both state);
  * * signed in but no nameable active account (several accounts, registry cannot
  *   say which) → `null`: show nothing rather than fabricate a name.
  *
@@ -230,7 +233,7 @@ export function identityLine(identity: OfficeIdentity | null): IdentityLine | nu
   if (!identity.signed_in) return { text: "Sign into Word to edit", degraded: true };
   const friendly = identity.active?.display_name ?? identity.active?.email ?? null;
   if (friendly === null) return null;
-  if (identity.license === "unlicensed") {
+  if (identity.license === "unlicensed" || identity.license === "unknown") {
     return { text: `Signed in as ${friendly} — sign in to Word to edit`, degraded: true };
   }
   return { text: `Signed in as ${friendly}`, degraded: false };
