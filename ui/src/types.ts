@@ -1319,3 +1319,11 @@ export interface WorkspaceChangedEvent {
   root: string;
   name: string;
 }
+
+// ---- auth.py ----------------------------------------------------------------
+
+/** `GET /api/auth/token` — the per-launch token, fetched once at startup and
+ * sent on every REST call and WebSocket. Mirrors `AuthTokenResponse`. */
+export interface AuthTokenResponse {
+  token: string;
+}

@@ -15,6 +15,7 @@ import { Toasts } from "./panels/Toasts";
 import { groupActionsComponent, panelComponents, panelTabInfo } from "./registry";
 import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
+import { initToken } from "./token";
 import { TOOLS } from "./tools";
 
 // Which panels exist, what they are called and where they dock are properties
@@ -95,11 +96,20 @@ export default function App() {
   // still be starting — the window opens first, deliberately — and nothing
   // below may open a socket until it answers: the terminal does not reconnect.
   const [backendReady, setBackendReady] = useState(!isTauri());
+  // The per-launch auth token must exist before the first REST call or socket
+  // opens — every one of them carries it (`api.ts`, `ws.ts`). Fetched
+  // concurrently with the backend-ready wait rather than after it, so it never
+  // adds to the launch: the shell hands it over with no HTTP, and in a browser
+  // the page's own origin already serves the handshake.
+  const [tokenReady, setTokenReady] = useState(false);
 
   useEffect(() => {
     let live = true;
     void awaitBackendReady().then(() => {
       if (live) setBackendReady(true);
+    });
+    void initToken().then(() => {
+      if (live) setTokenReady(true);
     });
     return () => {
       live = false;
@@ -107,8 +117,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (backendReady) useStore.getState().init();
-  }, [backendReady]);
+    if (backendReady && tokenReady) useStore.getState().init();
+  }, [backendReady, tokenReady]);
 
   // Attention badge in the window/taskbar title; cleared once attended. The
   // document title is what a browser tab shows; the shell retitles the native

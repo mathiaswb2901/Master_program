@@ -16,7 +16,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ReconnectingSocket } from "./ws";
+const { getTokenMock } = vi.hoisted(() => ({ getTokenMock: vi.fn<() => string | null>() }));
+vi.mock("./token", () => ({ getToken: getTokenMock }));
+
+import { ReconnectingSocket, wsProtocols, wsTokenProtocol } from "./ws";
 
 interface CloseLike {
   code: number;
@@ -33,7 +36,11 @@ class FakeSocket {
   onmessage: ((ev: { data: string }) => void) | null = null;
   onclose: ((ev: CloseLike) => void) | null = null;
 
-  constructor(readonly url: string) {
+  // The real WebSocket takes an optional subprotocol arg; the token rides it.
+  constructor(
+    readonly url: string,
+    readonly protocols?: string | string[],
+  ) {
     sockets.push(this);
   }
 
@@ -67,6 +74,10 @@ beforeEach(() => {
   globals.location = { protocol: "http:", host: "workbench.test" };
   // `window.setTimeout` is the faked global here, so backoff is advanceable.
   globals.window = globalThis;
+  // No token by default: the socket tests below assert reconnect behaviour, not
+  // auth, and an empty protocol list is exactly what "no token yet" produces.
+  getTokenMock.mockReset();
+  getTokenMock.mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -154,5 +165,41 @@ describe("ReconnectingSocket", () => {
     latest().onmessage?.({ data: '{"type":"ping"}' });
     latest().onmessage?.({ data: "not json" });
     expect(seen).toEqual([{ type: "ping" }]);
+  });
+
+  it("opens every socket with the subprotocol list wsProtocols() decides", () => {
+    // Gated off today (the server does not echo the label yet), so the list is
+    // empty and a reconnect re-reads the same empty list — the socket is still
+    // wired through wsProtocols(), which is what flips when the server echoes.
+    getTokenMock.mockReturnValue("T-sock");
+    new ReconnectingSocket("/ws/events", { onMessage: () => undefined });
+    expect(latest().protocols).toEqual([]);
+
+    latest().ended(1006);
+    vi.advanceTimersByTime(500);
+    expect(latest().protocols).toEqual([]);
+  });
+});
+
+describe("wsTokenProtocol", () => {
+  it("builds the workbench.auth.<token> label", () => {
+    expect(wsTokenProtocol("abc123")).toBe("workbench.auth.abc123");
+  });
+});
+
+describe("wsProtocols", () => {
+  // Held off until the server echoes the subprotocol: a browser fails a
+  // handshake whose offered subprotocol is not echoed back, and the WS
+  // endpoints accept() with none today. So the offer is empty even with a
+  // token — the REST path carries it instead (api.ts). Flipping OFFER_WS_TOKEN
+  // on is the WS half of enabling enforcement (PR4), paired with a server echo.
+  it("does not offer the token while the server does not echo it", () => {
+    getTokenMock.mockReturnValue("abc123");
+    expect(wsProtocols()).toEqual([]);
+  });
+
+  it("is empty when no token has resolved", () => {
+    getTokenMock.mockReturnValue(null);
+    expect(wsProtocols()).toEqual([]);
   });
 });
