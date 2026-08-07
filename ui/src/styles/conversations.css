@@ -178,6 +178,23 @@
   color: var(--warn);
 }
 
+/* A conversation whose folder is outside the workspace: it opens, but clicking
+   re-roots the window there first. The affordance is a word, not just a colour
+   (DESIGN.md §7); the accent marks it as the one row in a refused group that
+   actually does something. */
+.wb-conv-switch {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--accent-muted);
+  border-radius: var(--radius-xs);
+  font-size: var(--type-xs-size);
+  color: var(--accent);
+}
+
+.wb-conv-row.is-switch {
+  color: var(--text-secondary);
+}
+
 /* ---- states ---------------------------------------------------------------- */
 
 .wb-conv-error {
