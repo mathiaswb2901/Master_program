@@ -1,9 +1,10 @@
 import {
+  type DockviewApi,
   DockviewReact,
   type DockviewReadyEvent,
   type IDockviewPanelHeaderProps,
 } from "dockview";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { applyCaptionTint } from "./captionTint";
 import { installCommandKeys } from "./commands";
@@ -78,17 +79,6 @@ function PanelTab(props: IDockviewPanelHeaderProps) {
 
 const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbench" };
 
-function onReady(event: DockviewReadyEvent): void {
-  const { api } = event;
-  // The default arrangement first, so the window is never blank — then the
-  // handle. Handing it over is what starts layout restore (a tool declaring
-  // `onDockReady`), which arranges over the default rather than instead of it.
-  layoutDefaultPanels(api);
-  // The registry needs the dock handle: panel focus (Ctrl+1..N), opening a
-  // panel that is not in the startup layout, and the layout system.
-  setDockApi(api);
-}
-
 export default function App() {
   const attention = useStore((s) => anyNeedsAttention(s.sessionStates));
   const theme = useStore((s) => s.theme);
@@ -102,6 +92,9 @@ export default function App() {
   // adds to the launch: the shell hands it over with no HTTP, and in a browser
   // the page's own origin already serves the handshake.
   const [tokenReady, setTokenReady] = useState(false);
+  // The live dock handle, captured on `onReady` but not handed to the registry
+  // until the token exists (see the effect below).
+  const [dockApi, setLocalDockApi] = useState<DockviewApi | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -119,6 +112,25 @@ export default function App() {
   useEffect(() => {
     if (backendReady && tokenReady) useStore.getState().init();
   }, [backendReady, tokenReady]);
+
+  // Paint the default arrangement immediately, so the window is never blank —
+  // but do not hand the dock to the registry yet. Registering it is what starts
+  // layout restore (Layouts' `onDockReady` → `GET /api/layouts`), and that call
+  // must carry the token like every other REST call. Gated on `tokenReady` the
+  // same way `init()` is: with enforcement on (PR4) an un-tokened restore is
+  // 403'd every launch, disarming persistence and reverting the saved
+  // arrangement to default — the regression this PR exists to prevent.
+  const onDockReady = useCallback((event: DockviewReadyEvent): void => {
+    layoutDefaultPanels(event.api);
+    setLocalDockApi(event.api);
+  }, []);
+
+  useEffect(() => {
+    // The registry needs the dock handle for panel focus (Ctrl+1..N), opening a
+    // panel outside the startup layout, and the layout system — none of which a
+    // user can reach before the handshake resolves anyway.
+    if (dockApi !== null && tokenReady) setDockApi(dockApi);
+  }, [dockApi, tokenReady]);
 
   // Attention badge in the window/taskbar title; cleared once attended. The
   // document title is what a browser tab shows; the shell retitles the native
@@ -181,7 +193,7 @@ export default function App() {
                 ? { rightHeaderActionsComponent: groupActions }
                 : {})}
               theme={WORKBENCH_THEME}
-              onReady={onReady}
+              onReady={onDockReady}
             />
           </div>
           <StatusBar />
