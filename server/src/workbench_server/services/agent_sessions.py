@@ -593,6 +593,19 @@ class AgentSession:
             self._set_state("idle")
 
     def _handle_sdk_message(self, message: Any) -> None:
+        # Claude Code reveals this turn's transcript id at the *start* of the
+        # turn (its init frame carries session_id), not only at ResultMessage.
+        # Capture it here, off every message that carries one, so the id is in
+        # `sdk_session_ids` while the turn is still running — which is what lets
+        # `transcript_sources()` find the partially-written transcript on disk
+        # when a client reattaches mid-turn (a reload during a first turn that
+        # has not finished). Waiting for ResultMessage stranded the user's
+        # just-sent message for the whole of that turn: it only ever lived in
+        # the reloaded window's memory, and the empty replay wiped it.
+        sdk_id = getattr(message, "session_id", None)
+        if isinstance(sdk_id, str) and sdk_id:
+            self.sdk_session_id = sdk_id
+            self.sdk_session_ids.add(sdk_id)
         kind = type(message).__name__
         if kind == "StreamEvent":
             event = getattr(message, "event", None) or {}
@@ -676,10 +689,8 @@ class AgentSession:
             if self._usage_observer is not None:
                 self._usage_observer.note_rate_limit(getattr(message, "rate_limit_info", None))
         elif kind == "ResultMessage":
-            sdk_id = getattr(message, "session_id", None)
-            if isinstance(sdk_id, str):
-                self.sdk_session_id = sdk_id
-                self.sdk_session_ids.add(sdk_id)
+            # session_id is captured at the top of this method now, off the
+            # turn's first frame — not deferred to here.
             cost = getattr(message, "total_cost_usd", None)
             cost_usd = cost if isinstance(cost, int | float) else None
             if self._usage_observer is not None:

@@ -1246,3 +1246,74 @@ def test_live_transcript_of_a_session_that_has_run_nothing_is_empty_not_an_error
         body = client.get(f"/api/agents/{local_id}/transcript")
         assert body.status_code == 200
         assert body.json() == {"session_id": local_id, "messages": []}
+
+
+class SystemInit:
+    """The SDK's turn-start frame — carries the transcript id before any output.
+
+    Duck-typed on `session_id` like the other fakes here: the session captures
+    the id off *any* message that has one, so the class name does not matter."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+
+
+async def test_first_turn_transcript_is_replayable_before_the_turn_finishes(
+    tmp_path: Path,
+) -> None:
+    """A brand-new session reloaded WHILE its first turn is still running — no
+    ResultMessage yet — must not lose the user's just-sent message.
+
+    That message only ever lived in the reloaded window's memory, so the sole
+    recovery path is the transcript Claude Code is already writing to disk. The
+    SDK reveals the transcript id at the *start* of the turn (its init frame),
+    and the session now captures it then rather than at ResultMessage — so
+    `transcript_sources()` finds the in-flight transcript mid-turn and the reload
+    replay serves the user's message instead of an empty chat. This is the exact
+    gap that let a first turn's reply appear with no question above it.
+    """
+    folder = tmp_path / "ws"
+    folder.mkdir()
+    projects = tmp_path / "projects"
+    project_dir = projects / encode_project_dir(folder.resolve())
+    project_dir.mkdir(parents=True)
+    index = SessionIndex(projects)
+
+    started: asyncio.Event = asyncio.Event()
+    release: asyncio.Event = asyncio.Event()
+
+    class MidTurnClient(FakeClient):
+        async def receive_response(self) -> AsyncIterator[Any]:
+            yield SystemInit("sdk-live")  # id knowable at turn start
+            yield delta("working on it")
+            started.set()
+            await release.wait()  # the turn is genuinely still in flight here
+            yield ResultMessage(session_id="sdk-live")
+
+    def factory(
+        folder_: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> MidTurnClient:
+        return MidTurnClient([], bridge)
+
+    manager = SessionManager(folder, factory, max_sessions=4, session_index=index)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("the first question")
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    # Mid-turn, before ResultMessage: the id is already captured.
+    assert session.sdk_session_ids == {"sdk-live"}
+
+    # Claude Code has written the user's message to disk by now (it is the first
+    # line of the transcript). A reload lands here — chat memory is gone.
+    (project_dir / "sdk-live.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "the first question"}}),
+        encoding="utf-8",
+    )
+    replay_folder, sdk_ids = session.transcript_sources()
+    messages = index.read_transcripts(replay_folder, sdk_ids)
+    assert [(m.role, m.text) for m in messages] == [("user", "the first question")]
+
+    release.set()
+    await drain(queue, TurnDone)
+    assert session.sdk_session_id == "sdk-live"  # still the resume id afterwards
