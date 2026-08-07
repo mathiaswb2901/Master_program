@@ -12,7 +12,13 @@ from pathlib import Path
 import pytest
 
 from workbench_server.models.agents import TextDelta, TurnDone
-from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    WordEdit,
+    WordText,
+)
 from workbench_server.services.agent_sessions import SessionManager
 from workbench_server.services.office_host.document_bridge import DocNotHostedError
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
@@ -24,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 
 
 class _NoReader:
-    """No document is docked in this smoke test — office_read just refuses."""
+    """No document is docked in this smoke test — office_read/write just refuse."""
 
     async def document_structure(self, path: str) -> DocStructure:
         raise DocNotHostedError(path)
@@ -39,6 +45,17 @@ class _NoReader:
         a1_range: str | None = None,
         start_paragraph: int = 0,
     ) -> WordText | CellWindow:
+        raise DocNotHostedError(path)
+
+    async def write_document(
+        self,
+        path: str,
+        *,
+        content: str,
+        paragraph: int | None = None,
+        sheet: str | None = None,
+        cell: str | None = None,
+    ) -> WordEdit | CellEdit:
         raise DocNotHostedError(path)
 
 

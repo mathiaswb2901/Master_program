@@ -16,7 +16,14 @@ from typing import Any
 
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
-from workbench_server.models.office_bridge import CellWindow, DocStructure, SheetDim, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    SheetDim,
+    WordEdit,
+    WordText,
+)
 from workbench_server.models.plans import (
     AnnotationAnchor,
     PlanAnnotation,
@@ -31,11 +38,13 @@ from workbench_server.services.agent_tools import (
     OFFICE_READ,
     OFFICE_READ_MAX_CELLS,
     OFFICE_READ_MAX_CHARS,
+    OFFICE_WRITE,
     ORCHESTRATOR_TOOLS,
     PRESENT_PLAN,
     allowed_tool_names,
     clamp_result,
     handle_office_read,
+    handle_office_write,
     handle_present_plan,
     workspace_state_result,
 )
@@ -90,19 +99,24 @@ class _Bridge:
 
 
 class _Reader:
-    """OfficeDocumentReader stub: canned structure + one read result.
+    """OfficeDocumentAccess stub: canned structure + one read/write result.
 
     The office bridge's own branches (empty, unknown sheet, gone, windowing) are
     exercised end-to-end against the real service and fake in
-    ``test_office_document_bridge.py``; here it only has to stand in so the SDK
-    wiring builds and the result budget is measured against a worst-case window.
+    ``test_office_document_bridge.py`` and its write sibling; here it only has to
+    stand in so the SDK wiring builds and the result budget is measured against a
+    worst-case window.
     """
 
     def __init__(
-        self, structure: DocStructure, result: WordText | CellWindow | None = None
+        self,
+        structure: DocStructure,
+        result: WordText | CellWindow | None = None,
+        edit: WordEdit | CellEdit | None = None,
     ) -> None:
         self._structure = structure
         self._result = result
+        self._edit = edit
 
     async def document_structure(self, path: str) -> DocStructure:
         return self._structure
@@ -119,6 +133,18 @@ class _Reader:
     ) -> WordText | CellWindow:
         assert self._result is not None
         return self._result
+
+    async def write_document(
+        self,
+        path: str,
+        *,
+        content: str,
+        paragraph: int | None = None,
+        sheet: str | None = None,
+        cell: str | None = None,
+    ) -> WordEdit | CellEdit:
+        assert self._edit is not None
+        return self._edit
 
 
 def representative_plan_payload() -> dict[str, Any]:
@@ -170,6 +196,7 @@ class TestRegistry:
             "get_workspace_state",
             "present_plan",
             "office_read",
+            "office_write",
         ]
         for spec in AGENT_TOOLS:
             # ``output_format``, ``max_result_bytes`` and ``max_schema_bytes``
@@ -204,6 +231,7 @@ class TestRegistry:
             "mcp__workbench__get_workspace_state",
             "mcp__workbench__present_plan",
             "mcp__workbench__office_read",
+            "mcp__workbench__office_write",
         ]
 
     def test_a_chat_session_pays_nothing_for_the_orchestrator_toolset(self) -> None:
@@ -453,3 +481,43 @@ class TestOfficeReadBudget:
         )
         result = await handle_office_read(reader, {"path": "notes.xlsx", "sheet": "Notes"})
         assert len(result_text(result).encode()) <= OFFICE_READ.max_result_bytes
+
+
+class TestOfficeWriteBudget:
+    """office_write is ``text``, and its confirmation is a single sentence — an
+    address, a char count, a short echo and the read-back hint. These pin that
+    the confirmation stays inside the declared ceiling even when the content
+    written is far larger than the tool would ever echo, and that the schema fits
+    the ceiling paid on every request."""
+
+    def test_the_office_write_schema_fits_its_ceiling(self) -> None:
+        assert OFFICE_WRITE.schema_bytes <= OFFICE_WRITE.max_schema_bytes
+        assert OFFICE_WRITE.input_schema["required"] == ["path", "content"]
+
+    async def test_a_huge_content_write_confirms_within_budget(self) -> None:
+        # The content the model sends can be a whole 32k-char Excel cell; the
+        # confirmation must not quote it back in full — it echoes a short preview
+        # and stays inside max_result_bytes regardless of what was written.
+        giant = "Åsen 2 " * 5_000
+        reader = _Reader(
+            DocStructure(kind="excel", sheets=[SheetDim(name="Notes", rows=1, cols=1)]),
+            edit=CellEdit(sheet="Notes", a1_cell="A1", written_chars=len(giant)),
+        )
+        result = await handle_office_write(
+            reader, {"path": "notes.xlsx", "sheet": "Notes", "cell": "A1", "content": giant}
+        )
+        text = result_text(result)
+        assert len(text.encode()) <= OFFICE_WRITE.max_result_bytes
+        # AXI shape 3: the confirmation ends with the read-back next step.
+        assert "office_read" in text
+
+    async def test_a_word_confirmation_stays_within_budget(self) -> None:
+        body = "Para. " * 1000  # ~6 kB of content the model sent
+        reader = _Reader(
+            DocStructure(kind="word", paragraph_count=5),
+            edit=WordEdit(paragraph=2, written_chars=len(body), total_paragraphs=5),
+        )
+        result = await handle_office_write(
+            reader, {"path": "notes.docx", "paragraph": 2, "content": body}
+        )
+        assert len(result_text(result).encode()) <= OFFICE_WRITE.max_result_bytes
