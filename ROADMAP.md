@@ -950,6 +950,49 @@ because other sections and five running lanes reference these numbers.
     there is no notebook rendering panel in the app yet, so a `.ipynb` opens in Monaco
     as raw JSON, not the notebook view the exit line asks for — that last clause is the
     one open sub-piece.
+17. ~~**Discoverability — the app tells you what it can do**~~ **done** (2026-08-06), on
+    the owner's change request below: after a day of features landing, *"I am not sure how
+    to use these features."* That is a product failure, not a user failure — we shipped a
+    keyboard-driven window with no welcome, no shortcut reference and no hint that `Alt+S`
+    splits a pane or `Alt+M` fills the window. The insight that made it small: **the
+    registry already knows everything the app can do**, so this was a rendering problem
+    and not a documentation one, and everything below is *generated*. A hand-written cheat
+    sheet is wrong the day a tool changes a chord — the same argument as "a budget that
+    lives outside the quality gate does not bind".
+    What landed, as one registered tool (`ui/src/panels/Keyboard.tsx` plus one line in
+    `tools.ts`): a **keyboard reference** panel — every command grouped by the tool that
+    owns it, chords as keycaps, searchable by text *or* by chord (`alt+s`, `alt s` and
+    `alts` all find the split), opened by `Alt+K`, by a QuickBar command and by a
+    permanent **Keys chip** in the status bar, and ending with the pass-through rule in
+    plain words (why `Ctrl+P` reaches the terminal and `Ctrl+Shift+P` reaches the app); a
+    **welcome card** at the top of that same panel, which opens itself on a window nobody
+    has arranged, offers four affordances that *run the command* instead of describing it,
+    and is dismissed permanently the moment one is used; and **tooltips that teach** — the
+    split glyphs, the terminal's `+` and the layout chip now name their chord and read it
+    from the registry (`chordFor`) rather than spelling it out.
+    The anti-rot guarantee is a test, not a promise: `ui/src/keyref.test.ts` fails the
+    build if a registered command is unreachable from the reference, or if the chord it
+    shows is not the chord that runs. Dismissal is **workspace** state
+    (`.workbench/welcome.json`, through the existing files API — no new endpoint), so the
+    shell and a browser tab agree and opening a new project is a new window. Auto-open is
+    gated on *no saved arrangement*, which is what makes it deterministic against the
+    layout system's restore rather than a race with it.
+    **Covers half of OSS-bar item 3 (first-run experience)**: a stranger now meets a
+    window that explains itself and a complete keymap. What item 3 still owes — and what
+    this deliberately does not do — is the *setup* half: the workspace picker (item 5) and
+    the Claude-login and Office/OnlyOffice detection walkthroughs, which are about getting
+    the machine ready rather than about finding what is already there.
+    **Deliberately not built**: a tour, an interrupting modal, anything that must be
+    dismissed before working, or a second overlay language competing with the QuickBar;
+    a maximize button on tab strips (DESIGN.md §6.9 had already decided against it, and
+    the layout chip states the mode and names the way out); an affordance for the pane
+    picker (it is the consequence of a split, not a gesture of its own); and the plan
+    card's annotate toggle, which names `Alt+A` in its tooltip but hardcodes it — that
+    file belonged to another lane this cycle, so converting it to `chordTooltip` is the
+    one loose end (`ui/src/panels/PlanCard.tsx`, DESIGN.md §6.13). It is **monitored,
+    not merely disclosed**: `keyref.test.ts` reads that tooltip's literal and fails if it
+    stops matching the chord `plan.annotate` actually runs on, and the check retires
+    itself the moment the line is converted.
 
 **Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
 infrastructure read as nothing produced, so the order below front-loads visible shape
@@ -1029,10 +1072,12 @@ without forking — the difference between a fixed app and an instrument.
   under another). Built before that choice, it gets built twice.
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
   vocabulary initial prompt).
-- Remaining OSS product bar: first-run experience — the **workspace picker half is
-  done** (M5 item 5: the app says which folder it is showing and whether anybody chose
-  it, and every way to open another is in the app), leaving the Claude-login and
-  Office/OnlyOffice detection walkthroughs; cross-platform PTY + 3-OS CI matrix,
+- Remaining OSS product bar: first-run experience — the find-what-exists half (a welcome
+  surface and a complete keyboard reference) landed as M5 item 17, and the **workspace
+  picker half is done** too (M5 item 5: the app says which folder it is showing and whether
+  anybody chose it, and every way to open another is in the app), leaving only the
+  Claude-login and Office/OnlyOffice detection walkthroughs; cross-platform PTY + 3-OS CI
+  matrix,
   CONTRIBUTING/templates, versioned Tauri releases with signed installers,
   zero-telemetry README stance, and the real product name.
 - Exit criterion: a stranger on a fresh Windows machine reaches a working, secured,
@@ -1427,6 +1472,21 @@ Build for real external users, not just the author. Consequences, tracked as wor
   work, and it carries `host/class.rs`'s `PANEL_SURFACE` with it — still the retired
   graphite `#1A1D22`, and now *more* visible than before, since the launch flash shows
   against the paper mat's pale surround rather than against dark chrome.
+
+- 2026-08-06 — **"I am not sure how to use these features"** (user), after a day of
+  features landing. Read as a product failure rather than a user failure: we had shipped
+  a keyboard-driven window whose capabilities were invisible — no welcome surface, no
+  shortcut reference, and nothing on screen saying that `Alt+S` splits a pane or `Alt+M`
+  fills the window. A capability nobody can find does not exist. The answer is not
+  documentation: the **tool registry already holds every command, its chord, its panel
+  and its status items**, so the surfaces are *generated* from it and a test fails the
+  build when a registered command is unreachable from them. → **M5 item 16** (welcome
+  card, keyboard reference, registry-derived tooltips), which also covers the
+  find-what-exists half of OSS-bar item 3; the setup half of that item stays in M7.
+  Logged and built against the scope freeze below on the one ground the freeze itself
+  names: this is a **defect the owner reported in shipped work**, not a better idea —
+  everything M5 had already landed was unreachable, so the items above were not finished
+  in the sense that matters.
 
 - 2026-08-06 — **Scope freeze** (owner: "continue with our plan and add stuff
   afterwards"). M5 grew from seven items to fifteen in a single day — every addition

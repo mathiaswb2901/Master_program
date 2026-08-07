@@ -82,6 +82,26 @@ import { test } from "./window";
  * `GET /api/files/tree` walking 5,005 files and by rendering them
  * unvirtualised, and two queued Feel items own that. This one owns the paint.
  *
+ * **The fixture was first run, 2026-08-06.** Not a code change — a measurement
+ * that was wrong. The discovery panel opens itself on a window with no
+ * `.workbench/welcome.json` and no saved arrangement, which is precisely what
+ * this fixture was, so every launch here was being timed with a welcome card
+ * and 48 rows of keyboard reference opening over it. `fixture.ts` now seeds the
+ * dismissal (`seedWindowState`), the way `e2e/workspace.ts` always has for the
+ * journey suite. Same machine, `WB_PERF_WORKSPACE` pinned, `.workbench/` wiped
+ * between the two runs so neither inherited the other's arrangement:
+ *
+ * | | cold launch | warm reload |
+ * |---|---|---|
+ * | fixture with no `.workbench/` | **failed** — no number recorded: the click on `notes.md` never reached an editor tab (30 s) | 258 ms |
+ * | dismissal seeded | 838 ms tree rows, FCP 812 ms, shift 0.003 | 248 ms |
+ *
+ * Warm reload is unmoved, which is the control: it never restores an
+ * arrangement, so the welcome could not have been in its way. Three other specs
+ * in the lane (`interaction`, `motion`, `watcher`) failed *identically* in both
+ * runs and are not this — `watcher` passes on its own, so what it is measuring
+ * is the arrangement an earlier spec left in the shared fixture.
+ *
  * **What the lane was doing to this number, 2026-08-06.** Until `./window`
  * landed, the window this test launched into was whatever the spec before it had
  * saved — a launch measured against no fixed starting point at all. Same machine,
