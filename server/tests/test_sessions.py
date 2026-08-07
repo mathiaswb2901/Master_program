@@ -157,6 +157,21 @@ def test_an_unusable_sessions_file_costs_the_list_and_nothing_else(
     assert [s.id for s in SessionsStore(appdata).entries()] == [created.id]
 
 
+def test_a_healing_write_clears_the_reported_problem_on_the_same_store(
+    tmp_path: Path,
+) -> None:
+    """The store is a process-lived singleton (`main.py`), so a bad-file problem
+    seen on first load must not outlive the create that rewrites the file clean —
+    checked on the *same* instance the router keeps, not a fresh one."""
+    appdata = tmp_path / "appdata"
+    appdata.mkdir()
+    (appdata / SESSIONS_FILE).write_text("not json at all", encoding="utf-8")
+    store = SessionsStore(appdata)
+    assert store.problem is not None  # poisoned by the corrupt first read
+    store.create(_create("fresh", str(tmp_path / "p")))
+    assert store.problem is None  # the self-healing write cleared it
+
+
 def test_an_oversized_file_is_ignored_not_read(tmp_path: Path) -> None:
     appdata = tmp_path / "appdata"
     appdata.mkdir()

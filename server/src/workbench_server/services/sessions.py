@@ -224,6 +224,11 @@ class SessionsStore:
         except BaseException:
             Path(tmp_name).unlink(missing_ok=True)
             raise
+        # A successful write heals the reported problem: the file on disk is now a
+        # fresh, valid document, so a corrupt/oversized/wrong-version read that
+        # poisoned `problem` on first load must not keep being reported once the
+        # store — a process-lived singleton in `main.py` — has rewritten it clean.
+        self._problem = None
 
     def _replace(self, tmp_name: str) -> None:
         """`os.replace`, retried past a transient Windows lock — see the constants."""
