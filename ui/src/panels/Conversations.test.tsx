@@ -10,13 +10,20 @@
  */
 
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConversationInfo, ConversationStore, ProjectGroup } from "../types";
 
-// The two imports that would otherwise pull in dockview's runtime, Monaco and
-// the app store. Nothing here clicks anything.
+// The imports that would otherwise pull in dockview's runtime, Monaco, the app
+// store and — through the switcher — the whole tools graph. Nothing here clicks
+// anything, so the row's switch action is stubbed to a no-op. `switching` is a
+// mutable seam so a test can render the browser mid-switch.
+const ws = vi.hoisted(() => ({ switching: false }));
 vi.mock("./Panes", () => ({ revealPane: () => undefined }));
+vi.mock("./Workspaces", () => ({
+  requestWorkspaceSwitch: () => undefined,
+  useWorkspaceSwitching: () => ws.switching,
+}));
 vi.mock("../store", () => ({
   useStore: Object.assign(() => undefined, {
     getState: () => ({ pushToast: () => undefined, resumeConversation: () => Promise.resolve(null) }),
@@ -106,23 +113,27 @@ describe("the folder groups", () => {
 });
 
 describe("what it will not open", () => {
-  // The half-A boundary, on screen: the conversation is visible, and the reason
-  // it cannot be opened is a sentence next to it rather than an absence.
-  it("shows a folder outside the workspace with its reason, and keeps the rows", () => {
+  // The half-B boundary, on screen: a folder that resolved but sits outside the
+  // workspace is not blocked — it is *actionable*, and says in words that it
+  // opens by switching there first. The reason and the rows stay.
+  it("shows a folder outside the workspace as switchable, with its reason and rows", () => {
     const html = show(
       store({
         projects: [
           group({
             openable: false,
             workspace_relative: null,
-            reason: "Outside this workspace. Workbench opens conversations only from…",
+            reason: "Outside this workspace. Opening a conversation here switches…",
           }),
         ],
       }),
     );
     expect(html).toContain("Outside this workspace");
     expect(html).toContain("Fix the DST bug");
-    expect(html).toContain("is-blocked");
+    // Actionable, not blocked, and the affordance is a word not only a colour.
+    expect(html).toContain("is-switch");
+    expect(html).not.toContain("is-blocked");
+    expect(html).toContain("switch &amp; open");
     // …and the reason is the *control's* description, not just a paragraph
     // above it: colour and position are never the only signal (§7).
     expect(html).toContain('aria-describedby="wb-conv-reason-C--work-repo"');
@@ -162,6 +173,42 @@ describe("what it will not open", () => {
     );
     expect(html).toContain("unreadable");
     expect(html).toContain("0 turns");
+  });
+});
+
+describe("a switch already in flight", () => {
+  // Regression: a switchable row clicked while an earlier switch is still
+  // running used to re-enter `requestWorkspaceSwitch`, whose `busy` guard then
+  // dropped the second click's resume with no feedback. The row now disables
+  // itself for the duration, so the second click never fires.
+  afterEach(() => {
+    ws.switching = false;
+  });
+
+  const switchable = () =>
+    store({
+      projects: [
+        group({
+          openable: false,
+          workspace_relative: null,
+          reason: "Outside this workspace. Opening a conversation here switches…",
+        }),
+      ],
+    });
+
+  it("disables a switchable row while a switch is in flight, and says why", () => {
+    ws.switching = true;
+    const html = show(switchable());
+    expect(html).toContain("is-switch");
+    expect(html).toContain("disabled");
+    expect(html).toContain("already in progress");
+  });
+
+  it("leaves the row clickable when no switch is running", () => {
+    ws.switching = false;
+    const html = show(switchable());
+    expect(html).toContain("is-switch");
+    expect(html).not.toContain("disabled");
   });
 });
 

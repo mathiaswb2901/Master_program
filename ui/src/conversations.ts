@@ -133,6 +133,10 @@ export const countRows = (groups: ProjectGroup[]): number =>
 export type OpenOutcome =
   | { kind: "focus"; sessionId: string }
   | { kind: "resumed"; sessionId: string }
+  // Half B (M5 item 12): the folder resolves but sits outside the workspace, so
+  // it opens by switching the workspace to it first. `folder` is the absolute
+  // path to switch to; `label` is how the panel names it in the confirmation.
+  | { kind: "switch"; folder: string; label: string }
   | { kind: "refused"; reason: string }
   | { kind: "failed" };
 
@@ -195,12 +199,13 @@ export const forgetResumes = (): void => {
 /**
  * What opening a row *means*, with no dock and no React in it.
  *
- * Four answers, and the first two are the reason this is not one line at the
+ * Five answers, and the first two are the reason this is not one line at the
  * call site: a conversation a live session already continues must be *focused*
  * rather than resumed a second time (resuming again forks one history into two
- * sessions), and a folder outside the workspace is refused **with its reason**
- * rather than quietly doing nothing. Half B lifts the third case; until then
- * the row exists, says why, and stays where you can see it.
+ * sessions). A folder that resolves but sits outside the workspace returns
+ * `switch` — half B opens it by re-rooting the window there first, and the
+ * panel drives that; a folder that matches no directory at all is still
+ * `refused` **with its reason**, because there is nothing to switch to.
  *
  * "Already continues" has three tenses, and all three are checked here: the
  * server's `live_session_id` (settled, and the authority), this window's
@@ -223,6 +228,13 @@ export async function openConversation(
     return joined === null ? { kind: "failed" } : { kind: "focus", sessionId: joined };
   }
   if (!group.openable || group.workspace_relative === null) {
+    // A folder that resolved to a real directory outside the workspace is not a
+    // dead end any more: half B opens it by switching the workspace there first.
+    // One that matches no directory at all cannot be switched to, so it stays a
+    // refusal with its reason.
+    if (group.folder !== null) {
+      return { kind: "switch", folder: group.folder, label: groupLabel(group) };
+    }
     return {
       kind: "refused",
       reason: group.reason ?? "This conversation's folder cannot be opened from here.",

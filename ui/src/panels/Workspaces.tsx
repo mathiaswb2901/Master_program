@@ -105,6 +105,17 @@ interface WorkspaceUiState {
   busy: boolean;
   /** The typed-path prompt in a browser tab, where there is no folder dialog. */
   prompting: boolean;
+  /**
+   * What to run once the switch has actually landed, or null.
+   *
+   * Carried across the confirm modal because that is where a continuation is
+   * most at risk: the conversation browser asks to switch *and then* resume, and
+   * a dirty buffer can put a whole round trip of user decisions between the two.
+   * It runs only after `adopt` succeeds — a switch the guards blocked, a save
+   * that failed, or a cancel leaves it un-run, which is what makes "do not
+   * bypass the switch guard" true rather than hoped for.
+   */
+  onSwitched: (() => void) | null;
 }
 
 /**
@@ -120,6 +131,7 @@ const useWorkspaceUi = create<WorkspaceUiState>()(() => ({
   pending: null,
   busy: false,
   prompting: false,
+  onSwitched: null,
 }));
 
 const toast = (kind: "error" | "warn" | "info" | "success", message: string): void =>
@@ -175,8 +187,9 @@ async function refresh(): Promise<WorkspaceState | null> {
   }
 }
 
-/** Switch, having already settled whatever the user had unsaved. */
-async function performSwitch(path: string): Promise<void> {
+/** Switch, having already settled whatever the user had unsaved. `onSwitched`
+ * runs only if the root actually moved — after `adopt`, past every guard. */
+async function performSwitch(path: string, onSwitched?: () => void): Promise<void> {
   if (useWorkspaceUi.getState().busy) return;
   useWorkspaceUi.setState({ busy: true });
   try {
@@ -194,6 +207,11 @@ async function performSwitch(path: string): Promise<void> {
     const state = await api.switchWorkspace({ path });
     await adopt(state);
     toast("success", `Workspace: ${state.name}`);
+    // The root has moved and the window has adopted it: only now is it sound to
+    // resume a conversation into the folder we switched to (its `folder` is the
+    // new root, so it resolves inside the jail). A throw above never reaches
+    // here, so a failed switch cannot open anything.
+    onSwitched?.();
   } catch (err) {
     // A refused root is the common case here and the server's sentence is the
     // useful part of it — "does not exist", "is a file, not a folder", the OS's
@@ -232,22 +250,42 @@ function atRisk(): { dirty: string[]; held: string[] } {
  * every dirty buffer at once: after the switch those paths resolve into another
  * project, so a buffer that was not saved here cannot be saved at all.
  */
-export function requestWorkspaceSwitch(path: string): void {
+export function requestWorkspaceSwitch(path: string, onSwitched?: () => void): void {
   const trimmed = path.trim();
   if (trimmed === "") return;
   const current = useWorkspaceUi.getState().current;
-  if (current !== null && samePath(current.root, trimmed)) return;
-  const { dirty, held } = atRisk();
-  if (dirty.length > 0 || held.length > 0) {
-    useWorkspaceUi.setState({ pending: trimmed });
+  if (current !== null && samePath(current.root, trimmed)) {
+    // Already here: nothing to switch, but a caller that wanted to *do* something
+    // in this workspace (open the conversation whose folder this is) still
+    // should. The row that raced ahead of the browser's re-read lands here.
+    onSwitched?.();
     return;
   }
-  void performSwitch(trimmed);
+  const { dirty, held } = atRisk();
+  if (dirty.length > 0 || held.length > 0) {
+    useWorkspaceUi.setState({ pending: trimmed, onSwitched: onSwitched ?? null });
+    return;
+  }
+  void performSwitch(trimmed, onSwitched);
 }
+
+/**
+ * True while a switch is actually mid-flight — past every guard, before `adopt`
+ * has settled the new root.
+ *
+ * The conversation browser reads this to stop a second switchable row (or the
+ * same one, clicked twice) from re-entering `requestWorkspaceSwitch` while the
+ * first switch is still running: `performSwitch`'s own `busy` guard would
+ * silently drop the second click's resume continuation, so the row disables
+ * itself instead of letting the click reach a no-op. It is deliberately *not*
+ * the dirty-buffer wait — that path already shows a modal that blocks the list.
+ */
+export const useWorkspaceSwitching = (): boolean => useWorkspaceUi((s) => s.busy);
 
 async function resolvePendingSwitch(action: "save" | "discard" | "cancel"): Promise<void> {
   const path = useWorkspaceUi.getState().pending;
-  useWorkspaceUi.setState({ pending: null });
+  const onSwitched = useWorkspaceUi.getState().onSwitched;
+  useWorkspaceUi.setState({ pending: null, onSwitched: null });
   if (path === null || action === "cancel") return;
   if (action === "save") {
     for (const file of useStore.getState().openFiles.filter((f) => f.dirty)) {
@@ -273,7 +311,7 @@ async function resolvePendingSwitch(action: "save" | "discard" | "cancel"): Prom
       useStore.getState().closeFile(file.path);
     }
   }
-  await performSwitch(path);
+  await performSwitch(path, onSwitched ?? undefined);
 }
 
 // ---- opening a folder -------------------------------------------------------
