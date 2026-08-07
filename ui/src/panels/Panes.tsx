@@ -46,6 +46,7 @@ import type {
 } from "dockview";
 
 import { dockApiHandle } from "../dock";
+import { chordTooltip } from "../keyref";
 import {
   cyclePane,
   oppositeDirection,
@@ -538,6 +539,11 @@ function SplitDownIcon() {
  * Only the focused one: chrome recedes (DESIGN.md §1.1), and a control on every
  * tab strip in a six-pane window is five controls nobody is looking at. Where
  * the keyboard is, is exactly where the mouse path belongs.
+ *
+ * Each tooltip names its chord, and asks the registry for it rather than
+ * spelling it out (DESIGN.md §6.13): a hardcoded keycap in a tooltip is stale
+ * the day the chord below moves, and a mouse path that teaches the wrong
+ * keyboard path is worse than one that teaches none.
  */
 function PaneActions(props: IDockviewHeaderActionsProps) {
   if (!props.isGroupActive) return null;
@@ -547,7 +553,7 @@ function PaneActions(props: IDockviewHeaderActionsProps) {
         type="button"
         className="wb-pane-action"
         aria-label="Split this pane to the right"
-        title="Split right — Alt+S"
+        title={chordTooltip("Split right", "pane.split.right")}
         onClick={() => splitGroup(props.group, "right")}
       >
         <SplitRightIcon />
@@ -556,7 +562,7 @@ function PaneActions(props: IDockviewHeaderActionsProps) {
         type="button"
         className="wb-pane-action"
         aria-label="Split this pane downwards"
-        title="Split down — Alt+Shift+S"
+        title={chordTooltip("Split down", "pane.split.down")}
         onClick={() => splitGroup(props.group, "down")}
       >
         <SplitDownIcon />

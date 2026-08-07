@@ -5,7 +5,9 @@
  * the pytest budgets import it and this shells out to it, so both halves of the
  * lane measure the same workspace. A second definition in TypeScript would
  * drift, and two lanes measuring two different workspaces is worse than one
- * lane.
+ * lane. The one thing added on this side is the app's own `.workbench/` state,
+ * which is not workspace content and not part of the counted shape — see
+ * `seedWindowState`.
  *
  * Fresh per run by default. A perf journey writes into the workspace (the
  * watcher budget creates files), so reusing a directory a previous run left
@@ -66,6 +68,34 @@ function generate(root: string): FixtureStamp {
 }
 
 /**
+ * The window state a *used* workspace already has, seeded before the first
+ * launch is timed.
+ *
+ * This lane measures the app, not its scaffolding. A workspace with no
+ * `.workbench/welcome.json` is first run by definition, so the discovery panel
+ * opens itself over every `page.goto("/")` here — an extra `GET`, an extra
+ * panel and 48 more rows on a page whose whole purpose is a launch budget
+ * (`launch.spec.ts`), and, once the layout autosave has run, a Keyboard pane
+ * baked into the saved arrangement every later spec restores. Seeding it says
+ * what is true of the workspace being measured: somebody has been here before.
+ * `ui/e2e/workspace.ts` does exactly this for the journey suite and for exactly
+ * the same reason.
+ *
+ * Why here and not in `perf_fixture.py`, which owns the shape: `.workbench/` is
+ * the *app's* state directory, not workspace content — the running app creates
+ * it itself a second later. The generator's counted shape is the walk the
+ * pytest budgets assert against (5,005 files, 16 directories), and those
+ * budgets never launch a browser, so a browser's window state has no business
+ * moving their numbers.
+ */
+function seedWindowState(root: string): void {
+  const dir = path.join(root, ".workbench");
+  fs.mkdirSync(dir, { recursive: true });
+  const welcome = `${JSON.stringify({ dismissed: true }, null, 2)}\n`;
+  fs.writeFileSync(path.join(dir, "welcome.json"), welcome, "utf-8");
+}
+
+/**
  * Remove the fixture when this process ends.
  *
  * Not Playwright's `globalTeardown`, and the reason is ordering. Playwright
@@ -104,6 +134,9 @@ function ensureFixture(): FixtureStamp {
   if (owned) pruneStaleWorkspaces(os.tmpdir());
   const root = owned ? fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX)) : path.resolve(requested);
   const stamp = generate(root);
+  // After `generate`, and unconditionally: a pinned workspace skips the rebuild
+  // but its `.workbench/` is the one thing a previous run *did* change.
+  seedWindowState(stamp.root);
   process.env[ACTIVE_ENV] = stamp.root;
   process.env[STAMP_ENV] = JSON.stringify(stamp);
   process.env[OWNED_ENV] = owned ? "1" : "";

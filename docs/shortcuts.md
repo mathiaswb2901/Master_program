@@ -78,7 +78,10 @@ plain keys are never intercepted, and inside the terminal or editor only `Alt` a
 `Ctrl+Shift` chords reach Workbench (`DESIGN.md` §6.8). Everywhere else Workbench takes
 *any* `Ctrl` chord, which is why a file cannot have one — `Ctrl+V` would stop pasting
 into the chat box. Built-in bindings win too: ask for `Alt+T` and the entry keeps its
-QuickBar row, loses the chord, and says so.
+QuickBar row, loses the chord, and says so. **Which `Alt` chords are already taken is
+never a guess**: the keyboard reference (`Alt+K`, or the `Keys` chip in the status bar)
+lists every chord the app binds, generated from the registry — search it for `alt` before
+choosing one.
 
 Anything inside a fenced code block is example text, not shortcuts — including `##`
 lines. The starter below can be pasted into your file as a reference without arming it.
