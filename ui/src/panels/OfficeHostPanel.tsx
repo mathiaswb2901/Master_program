@@ -25,7 +25,14 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api";
-import { fileNameOf, hostAppKind, physicalRect, useOfficeHostStore } from "../officeHost";
+import {
+  fileNameOf,
+  hostAppKind,
+  identityLine,
+  physicalRect,
+  useOfficeHostStore,
+  type IdentityLine,
+} from "../officeHost";
 import { parsePaneId } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import { useStore, type OpenFile } from "../store";
@@ -266,6 +273,35 @@ function sameRect(a: PanelRect, b: PanelRect): boolean {
 }
 
 /**
+ * The one quiet line about the machine's Office sign-in, at the foot of the doc
+ * panel's chrome (a real Word window would cover an overlay on the surface, so
+ * this sits in the mat, not on the page).
+ *
+ * **Singular on purpose.** Office signs in *per machine*, not per document, so a
+ * single shared line is correct even with several documents docked at once —
+ * this is not a per-pane singleton assumption but the true shape of the
+ * resource. It reads the store, which `init()` fetched and re-reads whenever a
+ * window docks (`officeHost.ts`), and renders nothing until there is something
+ * honest to say. `role="status"`, never a modal.
+ */
+export function OfficeIdentityLine() {
+  const identity = useOfficeHostStore((s) => s.identity);
+  return <IdentityLineView line={identityLine(identity)} />;
+}
+
+/** The presentational half — pure in its one prop, so the three states render
+ * without a store. `null` renders nothing, which is how "not fetched yet" and
+ * "nothing honest to say" both reach the screen. */
+export function IdentityLineView({ line }: { line: IdentityLine | null }) {
+  if (line === null) return null;
+  return (
+    <div className="wb-office-identity" role="status" data-degraded={line.degraded}>
+      <span className="wb-office-identity-msg u-truncate">{line.text}</span>
+    </div>
+  );
+}
+
+/**
  * The document view itself: decide once what can open this file, then stay
  * decided until the file (or the machine's answer) changes.
  */
@@ -316,6 +352,7 @@ export function OfficeDocument({ file }: { file: OpenFile }) {
         </div>
       )}
       <NativeHost file={file} kind={kind} onFallback={setFallback} />
+      <OfficeIdentityLine />
     </div>
   );
 }
