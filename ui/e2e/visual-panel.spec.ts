@@ -134,3 +134,76 @@ test("expand an artifact into its own pane, annotate it, and restore it", async 
     await expect(tombstone.getByRole("button", { name: "Close" })).toBeVisible();
   });
 });
+
+/**
+ * The plural-tool contract (CLAUDE.md, product principle 4): *two* instances,
+ * bound to *different* artifacts, that survive a save/restore round trip
+ * **independently**. This is the twin of `panes.spec.ts`'s two-agent /
+ * two-terminal journey, aimed at the one bug a single-pane test cannot see — a
+ * persistence path that keys on the tool id rather than the full pane id would
+ * collapse two `visual` panes into one on reload, and nothing above would catch
+ * it because it only ever opens one.
+ *
+ * Two sessions, each presenting its own visual plan: `fake_visual_plan()` mints
+ * a fresh `plan_id` per call, so the two Expand affordances open panes bound to
+ * `visual#<planId1>:scene` and `visual#<planId2>:scene` — two distinct ids that
+ * must both come back, as two distinct tombstones, after a restart forgets the
+ * live plans behind them.
+ */
+test("two artifacts expand into two independent panes that both restore", async ({ page }) => {
+  // Start from a clean arrangement: the journey above leaves an artifact pane
+  // persisted in the shared workspace, and counting `visual#` panes here must
+  // see only the two this test opens.
+  await page.request.put("/api/layouts", {
+    data: { current: null, current_name: null, saved: [] },
+  });
+
+  await openApp(page);
+
+  // Expand the artifact of a fresh session into its own pane — the card's own
+  // gesture. Returns nothing; the pane is bound by the plan's server-minted id.
+  const expandFreshArtifact = async (): Promise<void> => {
+    await newSession(page);
+    await sendChat(page, "visual please");
+    const card = page.locator(".wb-plan-card");
+    await expect(card.locator(".wb-vis")).toBeVisible();
+    await card.getByRole("button", { name: "Expand" }).click();
+  };
+
+  await expandFreshArtifact();
+  await expect(page.locator(".wb-artifact-pane")).toHaveCount(1);
+
+  // The Expand made the artifact the front tab; bring the Agent browser back to
+  // start a second session in it.
+  await page.locator(".wb-panel-tab", { hasText: "Agent" }).first().click();
+  await expandFreshArtifact();
+
+  // Two panes on screen, two distinct bindings on disk — both `scene` nodes,
+  // different plan ids. Different ids is the assertion: a path that keyed on the
+  // tool id would leave one.
+  await expect(page.locator(".wb-artifact-pane")).toHaveCount(2);
+  await expect
+    .poll(async () => (await persistedPaneIds(page)).filter((id) => id.startsWith("visual#")).length, {
+      timeout: 10_000,
+    })
+    .toBe(2);
+  const visualPanes = (await persistedPaneIds(page)).filter((id) => id.startsWith("visual#"));
+  for (const id of visualPanes) expect(id, "a pane bound to a scene node").toMatch(/^visual#[0-9a-f]+:scene$/);
+  const planIds = visualPanes.map((id) => id.slice("visual#".length, -":scene".length));
+  expect(planIds[0], "two independent bindings, not one collapsed").not.toBe(planIds[1]);
+
+  await test.step("a reload restores BOTH panes, independently", async () => {
+    await page.reload();
+    await workspaceReady(page);
+
+    // Both ids back — not "an artifact pane came back" but *those two*.
+    await expect
+      .poll(() => persistedPaneIds(page), { timeout: 10_000 })
+      .toEqual(expect.arrayContaining(visualPanes));
+    // Two named tombstones, one per pane: the live plans are forgotten across
+    // the restart, and each pane says so on its own.
+    await expect(
+      page.locator(".wb-pane-note", { hasText: "This artifact is no longer loaded" }),
+    ).toHaveCount(2);
+  });
+});

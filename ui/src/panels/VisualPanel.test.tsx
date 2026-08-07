@@ -12,7 +12,7 @@
  */
 
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { paneId, paneInstance } from "../panes";
 import type { PlanArtifact, VisualLeaf, VisualNode } from "../types";
@@ -26,6 +26,12 @@ vi.mock("./Panes", () => ({ revealPane }));
 // The real store reads `document` at import (node-only suite). Actions are only
 // reached from click handlers, which static rendering never fires; a draft
 // factory and a `getState` stub are all the module touches at load and render.
+// `getState().chats` is what the pane picker (`options`) and restored-pane title
+// (`titleFor`) read, so it is a mutable holder the registration tests below drive.
+const storeMock = vi.hoisted(() => ({
+  chats: {} as Record<string, { items: { kind: string; plan?: unknown }[] }>,
+}));
+
 vi.mock("../store", () => ({
   emptyPlanDraft: () => ({
     choices: {},
@@ -35,7 +41,7 @@ vi.mock("../store", () => ({
     annotating: false,
     editing: null,
   }),
-  useStore: Object.assign(() => undefined, { getState: () => ({}) }),
+  useStore: Object.assign(() => undefined, { getState: () => ({ chats: storeMock.chats }) }),
 }));
 
 const {
@@ -44,6 +50,7 @@ const {
   findArtifact,
   openArtifactPane,
   parseArtifactKey,
+  visualTool,
 } = await import("./VisualPanel");
 
 type Draft = Parameters<typeof ArtifactView>[0]["draft"];
@@ -235,5 +242,56 @@ describe("ArtifactView", () => {
     expect(markup).not.toContain(">Remove<");
     // The note is still shown, just not editable.
     expect(markup).toContain("looks right");
+  });
+});
+
+// ---- registration: the pane picker's rows and a restored pane's title -------
+
+describe("visualTool.panel.instances", () => {
+  const instances = visualTool.panel?.instances;
+
+  afterEach(() => {
+    storeMock.chats = {};
+  });
+
+  it("options() lists a row per live visual artifact, keyed by its full binding", () => {
+    // Two plans, two scenes — the picker offers both, each opening *its* artifact.
+    storeMock.chats = {
+      s1: { items: [{ kind: "plan", plan: plan("plana1b2c3d4", "scene") }] },
+      s2: { items: [{ kind: "plan", plan: plan("planaaaa0000", "other") }] },
+    };
+    const rows = instances?.options?.() ?? [];
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.key())).toEqual(["plana1b2c3d4:scene", "planaaaa0000:other"]);
+    for (const row of rows) {
+      expect(row).toMatchObject({
+        id: `visual.${row.key()}`,
+        title: "Day-ahead result",
+        detail: "expand this artifact",
+        category: "Artifacts",
+      });
+    }
+  });
+
+  it("options() says nothing when no plan is drawing an artifact", () => {
+    expect(instances?.options?.()).toEqual([]);
+  });
+
+  it("titleFor() names a live artifact by its node title", () => {
+    storeMock.chats = { s1: { items: [{ kind: "plan", plan: plan("plana1b2c3d4", "scene") }] } };
+    expect(instances?.titleFor?.("plana1b2c3d4:scene")).toBe("Day-ahead result");
+  });
+
+  it("titleFor() falls back to the node id when the artifact is gone", () => {
+    // A restored pane whose live plan the restart forgot: the node id still reads
+    // as something, unlike a raw pane id.
+    storeMock.chats = {};
+    expect(instances?.titleFor?.("plana1b2c3d4:scene")).toBe("scene");
+  });
+
+  it("titleFor() returns 'Artifact' for a bare or malformed key", () => {
+    // No colon, and empty — neither names a `planId:nodeId` binding.
+    expect(instances?.titleFor?.("nocolon")).toBe("Artifact");
+    expect(instances?.titleFor?.("")).toBe("Artifact");
   });
 });
