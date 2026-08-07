@@ -94,6 +94,16 @@
   outline-offset: -2px;
 }
 
+/* A detached row is a label plus its own Reattach button, not a clickable row —
+ * so it does not take the row hover that would imply the whole row acts. */
+.wb-session-row.is-detached {
+  cursor: default;
+}
+
+.wb-session-row.is-detached:hover {
+  background: transparent;
+}
+
 /* Hollow marker for non-live (on-disk) sessions. */
 .wb-dot-disk {
   background: transparent;

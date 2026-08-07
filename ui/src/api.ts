@@ -9,6 +9,7 @@ import type {
   ConversationStore,
   CreateDocumentRequest,
   CreateDocumentResponse,
+  CreateNamedSessionRequest,
   CreateRequest,
   CreateSessionRequest,
   DirListing,
@@ -29,10 +30,12 @@ import type {
   PanelRect,
   PermissionAnswer,
   PermissionsSnapshot,
+  NamedSession,
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
   SessionLimits,
+  SessionsResponse,
   ShortcutsState,
   SwitchWorkspaceRequest,
   TranscriptResponse,
@@ -74,6 +77,26 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;
+}
+
+/** Like `request`, but for an endpoint that answers 204 No Content — parsing an
+ * empty body as JSON would throw. The token header and error handling are the
+ * same; only the success path differs. */
+async function requestVoid(url: string, init?: RequestInit): Promise<void> {
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token !== null) headers.set("X-Workbench-Token", token);
+  const res = await fetch(url, { ...init, headers });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // non-JSON error body — keep the status line
+    }
+    throw new ApiError(res.status, detail);
+  }
 }
 
 const jsonInit = (method: string, body: unknown): RequestInit => ({
@@ -174,6 +197,19 @@ export const getLiveTranscript = (localId: string): Promise<TranscriptResponse> 
 
 export const putUiState = (body: UiState): Promise<unknown> =>
   request("/api/agents/ui-state", jsonInit("PUT", body));
+
+/** The named-session store (M5 item 15). A detached agent session is recorded
+ * here as a one-agent manifest so it survives having no pane and can be
+ * reattached from the Detached list. `workspace` filters to this project's
+ * sessions — the store is global and queried by workspace, never re-rooted. */
+export const listNamedSessions = (workspace: string): Promise<SessionsResponse> =>
+  request(`/api/sessions?workspace=${encodeURIComponent(workspace)}`);
+
+export const createNamedSession = (body: CreateNamedSessionRequest): Promise<NamedSession> =>
+  request("/api/sessions", jsonInit("POST", body));
+
+export const deleteNamedSession = (id: string): Promise<void> =>
+  requestVoid(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
 
 /** Every Claude conversation on this machine, grouped by the folder it ran in.
  * `limit` bounds only the expensive half — everything that exists is counted,
