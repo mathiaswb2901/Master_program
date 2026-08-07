@@ -18,8 +18,10 @@ from typing import Any
 import pytest
 
 from workbench_server.config import Settings
+from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
 from workbench_server.models.plans import PlanArtifact, PlanResponse
 from workbench_server.services import skills_bundle
+from workbench_server.services.office_host.document_bridge import DocNotHostedError
 from workbench_server.services.sdk_factory import UiStateStore, build_agent_options
 from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
 
@@ -36,6 +38,9 @@ EXPECTED_REFERENCES = {"plan-visual/reference/visual.md"}
 class StubBridge:
     """SessionBridge stub — the factory only stores the callbacks."""
 
+    #: The orchestrator toolset acts *as* a session, so the bridge names one.
+    session_id = "stub-session"
+
     async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool:
         return True
 
@@ -43,8 +48,29 @@ class StubBridge:
         raise AssertionError("not exercised")
 
 
+class StubReader:
+    """OfficeDocumentReader stub — the factory only stores it on the options."""
+
+    async def document_structure(self, path: str) -> DocStructure:  # pragma: no cover
+        raise DocNotHostedError(path)
+
+    async def read_document(  # pragma: no cover
+        self,
+        path: str,
+        *,
+        max_chars: int,
+        max_cells: int,
+        sheet: str | None = None,
+        a1_range: str | None = None,
+        start_paragraph: int = 0,
+    ) -> WordText | CellWindow:
+        raise DocNotHostedError(path)
+
+
 def options_for(settings: Settings, resume: str | None = None) -> Any:
-    return build_agent_options(UiStateStore(), settings, Path.cwd(), resume, StubBridge())
+    return build_agent_options(
+        UiStateStore(), settings, Path.cwd(), resume, StubBridge(), StubReader()
+    )
 
 
 def parse_frontmatter(text: str) -> dict[str, str]:

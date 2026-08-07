@@ -20,12 +20,14 @@ import { editorTool } from "./panels/EditorArea";
 import { filesTool } from "./panels/FileTree";
 import { keyboardTool } from "./panels/Keyboard";
 import { layoutsTool } from "./panels/Layouts";
+import { missionTool } from "./panels/MissionControl";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
 import { usageTool } from "./panels/UsagePanel";
+import { visualTool } from "./panels/VisualPanel";
 import { workspacesTool } from "./panels/Workspaces";
 
 export const TOOLS: readonly WorkbenchTool[] = [
@@ -49,6 +51,13 @@ export const TOOLS: readonly WorkbenchTool[] = [
   scratchpadTool,
   usageTool,
   activityTool,
+  // After Activity and Usage, because it is the board *over* them: it renders
+  // their rows rather than deriving its own, so it reads as the wide view of
+  // the two capabilities above it.
+  missionTool,
+  // Opened on demand from a plan card's Expand: one pane per drawn artifact,
+  // rendering the same scene graph the card does (M5 item 3, PR 4).
+  visualTool,
   // After every capability it describes, and before the two that arrange them:
   // its reference is a rendering of everything above, and its status chip sits
   // just inside the layout chip at the bar's outer edge.

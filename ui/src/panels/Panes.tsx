@@ -418,7 +418,7 @@ function SplitDownIcon() {
  * the keyboard is, is exactly where the mouse path belongs.
  *
  * Each tooltip names its chord, and asks the registry for it rather than
- * spelling it out (DESIGN.md §6.12): a hardcoded keycap in a tooltip is stale
+ * spelling it out (DESIGN.md §6.13): a hardcoded keycap in a tooltip is stale
  * the day the chord below moves, and a mouse path that teaches the wrong
  * keyboard path is worse than one that teaches none.
  */

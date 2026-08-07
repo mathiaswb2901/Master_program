@@ -33,6 +33,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from workbench_server.models.agents import SessionKind
+
 
 class ActivityEntry(BaseModel):
     """One tool call, from the moment it was announced to the moment it settled.
@@ -72,6 +74,11 @@ class SessionActivity(BaseModel):
     #: this endpoint alone answers the whole fleet view — a window that has
     #: never listed sessions still renders readable rows.
     title: str
+    #: What kind of session this is. Carried here because the activity feed is
+    #: the fleet's per-session identity from the moment a session is created —
+    #: so Mission Control can tell an orchestrator from a chat before it has run
+    #: a tool or raised a prompt, without a second fleet-wide source to join.
+    kind: SessionKind = "chat"
     #: Newest first, capped. Entries keep the order their calls *started* in;
     #: a settle patches an entry where it stands rather than moving it, so the
     #: list never reshuffles under a reader.

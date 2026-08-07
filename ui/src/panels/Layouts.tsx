@@ -585,7 +585,7 @@ function LayoutStatus() {
         aria-expanded={menu !== "closed"}
         // The way out of a filled window is the one thing this chip has to say
         // exactly right, so the chord is read from the registry rather than
-        // written here (DESIGN.md §6.12) — and the way *in* is named too, which
+        // written here (DESIGN.md §6.13) — and the way *in* is named too, which
         // is the only place the app states it outside the reference.
         title={
           maximized

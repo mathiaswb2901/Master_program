@@ -73,6 +73,7 @@ from workbench_server.models.usage import (
     UsageModelCost,
     UsageOverage,
     UsageSessionCost,
+    UsageSessionEntry,
     UsageSnapshot,
     UsageStatus,
 )
@@ -107,6 +108,18 @@ _STATUS_BY_NAME: Final[dict[str, UsageStatus]] = {status: status for status in S
 #: Cap on per-model cost rows kept in the degraded view. A long-lived server
 #: sees a handful of model ids; this only stops an unbounded map.
 MAX_MODELS: Final = 12
+
+#: Cap on per-session cost rows in the degraded *view*. This is a display and
+#: memory bound, not a ledger: it is LRU by last turn across the whole server
+#: (every chat and every worker of every orchestrator share these slots), so a
+#: session's row falls out once enough others have taken a turn. Mission
+#: Control's budget therefore does **not** trust a row to survive here — the
+#: orchestrator keeps its own high-water mark of each worker's spend
+#: (``services/orchestrator.py``), because a budget that read an evicted row as
+#: zero would let a churn of cheap workers spend a ceiling many times over.
+#: Kept comfortably above the concurrent-session ceiling all the same, so the
+#: rows a user is actively looking at do not churn under them.
+MAX_SESSION_COSTS: Final = 32
 
 
 def _finite(value: Any) -> float | None:
@@ -156,6 +169,10 @@ class UsageService:
         self._overage: UsageOverage | None = None
         self._cost = UsageSessionCost()
         self._models: OrderedDict[str, UsageModelCost] = OrderedDict()
+        #: Per-session spend, LRU by last turn. The one authority Mission
+        #: Control's per-worker budget is enforced against — see
+        #: :data:`MAX_SESSION_COSTS` and ``services/orchestrator.py``.
+        self._sessions: OrderedDict[str, UsageSessionEntry] = OrderedDict()
         #: Keys of ``RateLimitInfo.raw`` we have already reported as unmodeled,
         #: so a new CLI field is logged once rather than on every event.
         self._unmodeled_seen: set[str] = set()
@@ -220,18 +237,27 @@ class UsageService:
         )
         self._publish()
 
-    def note_turn(self, *, cost_usd: float | None, model_usage: Any = None) -> None:
+    def note_turn(
+        self, *, session_id: str, cost_usd: float | None, model_usage: Any = None
+    ) -> None:
         """Record what one finished turn cost — the *degraded* view's whole
         supply, and the only figure we have for an account that never emits a
         rate-limit event.
 
         Called for every turn regardless, because "what has this window cost"
         is worth showing next to plan usage even when plan usage is known.
+
+        ``session_id`` splits the same arithmetic per conversation. It is the
+        budget Mission Control enforces (``services/orchestrator.py``) and the
+        cost its board renders — deliberately the *same* number, because two
+        accumulators for one figure is the duplication ROADMAP item 7 was
+        re-scoped to prevent.
         """
         cost = _finite(cost_usd)
         models = self._merge_model_usage(model_usage)
         if cost is None and not models:
             return
+        now = self._clock()
         # ``models`` stays empty here and is filled from the live map in
         # ``snapshot`` — one place builds the sorted list, so the two cannot
         # disagree about which model led.
@@ -239,9 +265,29 @@ class UsageService:
             turns=self._cost.turns + 1,
             total_cost_usd=self._cost.total_cost_usd + (cost or 0.0),
             last_turn_cost_usd=cost,
-            observed_at=self._clock(),
+            observed_at=now,
         )
+        previous = self._sessions.get(session_id)
+        self._sessions[session_id] = UsageSessionEntry(
+            session_id=session_id,
+            turns=(previous.turns if previous else 0) + 1,
+            cost_usd=(previous.cost_usd if previous else 0.0) + (cost or 0.0),
+            observed_at=now,
+        )
+        self._sessions.move_to_end(session_id)
+        while len(self._sessions) > MAX_SESSION_COSTS:
+            self._sessions.popitem(last=False)
         self._publish()
+
+    def session_entry(self, session_id: str) -> UsageSessionEntry | None:
+        """What one session has spent, or None if it has never finished a turn.
+
+        The read half of the budget check. ``None`` is not zero: a worker that
+        has not settled a turn yet has spent nothing *we know of*, and a caller
+        that treated it as a measured zero would be claiming knowledge it does
+        not have.
+        """
+        return self._sessions.get(session_id)
 
     def _merge_model_usage(self, model_usage: Any) -> bool:
         """Fold ``ResultMessage.model_usage`` into the per-model totals.
@@ -316,6 +362,9 @@ class UsageService:
             observed_at=observed_at,
             age_s=None if observed_at is None else max(0.0, self._clock() - observed_at),
             session_cost=cost,
+            # Most expensive first: the board reads this to answer "which worker
+            # is eating the budget", and that question has one obvious order.
+            sessions=sorted(self._sessions.values(), key=lambda e: e.cost_usd, reverse=True),
         )
 
     def _publish(self) -> None:

@@ -109,6 +109,36 @@ class Settings(BaseSettings):
         default=3600.0, ge=MIN_LEASE_SECONDS, le=MAX_LEASE_SECONDS
     )
 
+    # Mission Control (M5 item 7): the ceilings an orchestrator session's crew
+    # works under. Enforced in `services/orchestrator.py` *before* a worker is
+    # spawned, and every refusal names the variable below that raises it — a cap
+    # a user cannot see the way out of is the dead button the pane rules forbid.
+    #
+    # Defaults are deliberately modest. An orchestrator is the one capability
+    # here that can spend money without a human in the loop for each step, so
+    # the out-of-the-box numbers are ones a mistake can survive: four workers is
+    # the worktree pool's own default, and the dollar ceilings are roughly a
+    # morning's work rather than a plan's weekly limit.
+    orchestrator_max_workers: int = Field(default=4, ge=1, le=16)
+    orchestrator_worker_turns: int = Field(default=40, ge=1)
+    orchestrator_worker_cost_usd: float = Field(default=5.0, gt=0.0)
+    orchestrator_fleet_turns: int = Field(default=200, ge=1)
+    orchestrator_fleet_cost_usd: float = Field(default=20.0, gt=0.0)
+
+    # Local-API security hardening (M5 item 8 / OSS-bar item 1). The server
+    # binds loopback, but the attacker is remote web content (drive-by/CSRF and
+    # DNS-rebinding) that can still send REST/WS requests to 127.0.0.1. Two
+    # defenses, wired in services/local_auth.py: a per-launch token required on
+    # REST + WS, and a strict WS Origin allowlist. None = mint a fresh
+    # `secrets.token_urlsafe(32)` per launch (the common case; an explicit value
+    # lets an attaching desktop shell be told the token out of band).
+    auth_token: str | None = None
+    # The rollout flag. False (the shipped default for this PR) makes the
+    # middleware a pass-through: everything is wired but nothing is enforced, so
+    # this lands with zero behavior change. A later PR flips it on once the
+    # client injects the token and sends a local Origin.
+    enforce_auth: bool = False
+
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""
         root = self.workspace_root or Path.cwd()

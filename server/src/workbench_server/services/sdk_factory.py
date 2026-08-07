@@ -3,18 +3,33 @@
 Isolated here so nothing else imports the SDK — sessions stay testable with fakes.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from workbench_server.config import Settings
-from workbench_server.models.agents import UiState
+from workbench_server.models.agents import SessionKind, UiState
 from workbench_server.services.agent_sessions import SdkClient, SessionBridge
 from workbench_server.services.agent_tools import (
     GET_WORKSPACE_STATE,
+    LIST_WORKERS,
     MCP_SERVER_NAME,
+    OFFICE_READ,
     PRESENT_PLAN,
+    READ_WORKER,
+    SEND_TO_WORKER,
+    SPAWN_WORKER,
+    STOP_WORKER,
+    OfficeDocumentReader,
+    OrchestratorHandle,
     allowed_tool_names,
+    handle_list_workers,
+    handle_office_read,
     handle_present_plan,
+    handle_read_worker,
+    handle_send_to_worker,
+    handle_spawn_worker,
+    handle_stop_worker,
     workspace_state_result,
 )
 from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
@@ -42,12 +57,24 @@ class UiStateStore:
         self.state = UiState()
 
 
-def build_context_bridge(store: UiStateStore, bridge: SessionBridge) -> Any:
+def build_context_bridge(
+    store: UiStateStore,
+    bridge: SessionBridge,
+    reader: OfficeDocumentReader,
+    kind: SessionKind = "chat",
+    orchestrator: OrchestratorHandle | None = None,
+    session_cost: Callable[[str], float] | None = None,
+) -> Any:
     """In-process MCP server exposing the workbench tools to one session.
 
     Names, descriptions, input schemas and bodies all come from the tool
     registry (``services/agent_tools.py``); this function is only the SDK
     wiring, so adding a tool never means editing an allow-list here as well.
+
+    An ``orchestrator`` session gets five more tools. They are added here rather
+    than gated inside each body because a tool the model can *see* is a tool it
+    will try, and five "you are not an orchestrator" errors are five round trips
+    plus five schemas paid on every request of every chat session.
     """
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -63,9 +90,37 @@ def build_context_bridge(store: UiStateStore, bridge: SessionBridge) -> Any:
     async def present_plan(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_present_plan(bridge, args)
 
-    return create_sdk_mcp_server(
-        name=MCP_SERVER_NAME, version="1.0.0", tools=[get_workspace_state, present_plan]
-    )
+    @tool(OFFICE_READ.name, OFFICE_READ.description, OFFICE_READ.input_schema)
+    async def office_read(args: dict[str, Any]) -> dict[str, Any]:
+        return await handle_office_read(reader, args)
+
+    tools: list[Any] = [get_workspace_state, present_plan, office_read]
+    if kind == "orchestrator" and orchestrator is not None:
+        cost = session_cost or (lambda _worker_id: 0.0)
+
+        @tool(SPAWN_WORKER.name, SPAWN_WORKER.description, SPAWN_WORKER.input_schema)
+        async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await handle_spawn_worker(orchestrator, bridge.session_id, args)
+
+        @tool(LIST_WORKERS.name, LIST_WORKERS.description, LIST_WORKERS.input_schema)
+        async def list_workers(args: dict[str, Any]) -> dict[str, Any]:
+            return handle_list_workers(orchestrator, bridge.session_id, cost)
+
+        @tool(READ_WORKER.name, READ_WORKER.description, READ_WORKER.input_schema)
+        async def read_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return handle_read_worker(orchestrator, bridge.session_id, args)
+
+        @tool(SEND_TO_WORKER.name, SEND_TO_WORKER.description, SEND_TO_WORKER.input_schema)
+        async def send_to_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return handle_send_to_worker(orchestrator, bridge.session_id, args)
+
+        @tool(STOP_WORKER.name, STOP_WORKER.description, STOP_WORKER.input_schema)
+        async def stop_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await handle_stop_worker(orchestrator, bridge.session_id, args)
+
+        tools += [spawn_worker, list_workers, read_worker, send_to_worker, stop_worker]
+
+    return create_sdk_mcp_server(name=MCP_SERVER_NAME, version="1.0.0", tools=tools)
 
 
 def build_agent_options(
@@ -74,6 +129,10 @@ def build_agent_options(
     folder: Path,
     resume_session_id: str | None,
     bridge: SessionBridge,
+    reader: OfficeDocumentReader,
+    kind: SessionKind = "chat",
+    orchestrator: OrchestratorHandle | None = None,
+    session_cost: Callable[[str], float] | None = None,
 ) -> Any:
     """The single construction point for ``ClaudeAgentOptions``.
 
@@ -125,14 +184,23 @@ def build_agent_options(
         cwd=str(folder),
         resume=resume_session_id,
         allowed_tools=[
+            # Never widened for a worker, and that is the whole permission story
+            # of Mission Control: `Bash` is absent here, so a worker's shell
+            # request falls through to `can_use_tool`, blocks, and escalates to
+            # the board for a human to answer. An orchestrator adds its own five
+            # tools below and nothing else — it gains no way to run anything.
             *_AUTO_ALLOWED,
             *(_AUTO_ALLOWED_SKILLS if plugins else []),
-            *allowed_tool_names(),
+            *allowed_tool_names(kind),
         ],
         permission_mode="acceptEdits",
         include_partial_messages=True,
         can_use_tool=can_use_tool,
-        mcp_servers={MCP_SERVER_NAME: build_context_bridge(store, bridge)},
+        mcp_servers={
+            MCP_SERVER_NAME: build_context_bridge(
+                store, bridge, reader, kind, orchestrator, session_cost
+            )
+        },
         plugins=plugins,
         setting_sources=setting_sources,
         system_prompt={
@@ -150,14 +218,40 @@ def build_agent_options(
     )
 
 
-def sdk_client_factory(store: UiStateStore, settings: Settings | None = None) -> Any:
-    """Returns a ClientFactory closure for SessionManager."""
+def sdk_client_factory(
+    store: UiStateStore,
+    reader: OfficeDocumentReader,
+    settings: Settings | None = None,
+    orchestrator: OrchestratorHandle | None = None,
+    session_cost: Callable[[str], float] | None = None,
+) -> Any:
+    """Returns a ClientFactory closure for SessionManager.
+
+    ``reader`` is the office-host service, narrowed to :class:`OfficeDocumentReader`
+    so a session can read the live docked document without this module importing
+    the service — the same one-way dependency the rest of the tools keep.
+    """
     resolved = settings or Settings()
 
-    def factory(folder: Path, resume_session_id: str | None, bridge: SessionBridge) -> SdkClient:
+    def factory(
+        folder: Path,
+        resume_session_id: str | None,
+        bridge: SessionBridge,
+        kind: SessionKind = "chat",
+    ) -> SdkClient:
         from claude_agent_sdk import ClaudeSDKClient
 
-        options = build_agent_options(store, resolved, folder, resume_session_id, bridge)
+        options = build_agent_options(
+            store,
+            resolved,
+            folder,
+            resume_session_id,
+            bridge,
+            reader,
+            kind,
+            orchestrator,
+            session_cost,
+        )
         client: SdkClient = ClaudeSDKClient(options=options)
         return client
 

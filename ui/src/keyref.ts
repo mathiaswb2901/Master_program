@@ -200,7 +200,7 @@ export const rowCount = (groups: readonly KeyRefGroup[]): number =>
  * tooltip names its chord teaches the keyboard path to someone using the mouse
  * — but a *hardcoded* chord in a tooltip is the same staleness this module
  * exists to remove, one control at a time. Every tooltip that names a chord
- * asks for it here (DESIGN.md §6.12).
+ * asks for it here (DESIGN.md §6.13).
  *
  * Static commands only (`builtinCommands`), which is exactly right: a chord has
  * to be declared statically to be bound at all (`registry.ts`, `DynamicCommands`).

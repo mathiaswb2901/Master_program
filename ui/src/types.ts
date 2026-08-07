@@ -80,6 +80,21 @@ export interface OkResponse {
   ok: true;
 }
 
+/** The document kinds the tree can create (M5 item 16). The token *is* the file
+ * extension; the UI offers them by name (Word / Excel / …). Mirror of
+ * `server/src/workbench_server/models/documents.py`. */
+export type DocumentKind = "docx" | "xlsx" | "pptx" | "ipynb" | "py" | "txt" | "md";
+
+export interface CreateDocumentRequest {
+  path: string;
+  kind: DocumentKind;
+}
+
+export interface CreateDocumentResponse {
+  path: string;
+  hash: string;
+}
+
 /** Directories appear here only when added or deleted — the two changes the
  * tree has a row for. */
 export interface FileChangedEvent {
@@ -105,6 +120,8 @@ export type WorkspaceEvent =
   | WorktreeChangedEvent
   | UsageEvent
   | SessionActivityEvent
+  | SessionPermissionEvent
+  | OrchestratorEvent
   | WorkspaceChangedEvent;
 
 // ---- provenance.py ----------------------------------------------------------
@@ -201,6 +218,17 @@ export interface UsageSessionCost {
   observed_at: number | null;
 }
 
+/** What one *session* has cost this process. The same arithmetic as
+ * `UsageSessionCost`, split by session — and the one authority Mission
+ * Control's per-worker budget is enforced against, so the board renders exactly
+ * the number the server refuses on. Absent (not zero) until a turn settles. */
+export interface UsageSessionEntry {
+  session_id: string;
+  turns: number;
+  cost_usd: number;
+  observed_at: number;
+}
+
 /** GET /api/usage. In-memory server-side: a restart returns it empty. */
 export interface UsageSnapshot {
   /** Fixed presentation order, not arrival order. Empty = never emitted. */
@@ -211,6 +239,8 @@ export interface UsageSnapshot {
    * depend on the browser's clock agreeing with it. */
   age_s: number | null;
   session_cost: UsageSessionCost;
+  /** Per-session spend, most expensive first and bounded. */
+  sessions: UsageSessionEntry[];
 }
 
 /** Broadcast on /ws/events whenever the snapshot changes. */
@@ -248,6 +278,10 @@ export interface SessionActivity {
   session_id: string;
   folder: string;
   title: string;
+  /** What kind of session this is. Carried on the fleet's per-session identity
+   * so Mission Control can tell an orchestrator from a chat before it has run a
+   * tool — mirrors `SessionActivity.kind` in `models/activity.py`. */
+  kind: SessionKind;
   /** Newest first, capped. Ordered by when each call *started*; a settle
    * patches an entry where it stands rather than moving it. */
   entries: ActivityEntry[];
@@ -281,13 +315,14 @@ export interface SessionActivityEvent {
 // `layout` names one of the user's own saved arrangements and moves panels.
 // There is no "run" field by design.
 
-export type ShortcutKind = "shell" | "prompt" | "layout";
+export type ShortcutKind = "shell" | "prompt" | "layout" | "command";
 export type ShortcutSource = "workspace" | "global";
 
 export interface ShortcutEntry {
   name: string;
   kind: ShortcutKind;
-  /** shell/prompt: the text that is inserted. layout: the layout's name. */
+  /** shell/prompt: the text that is inserted. layout: the layout's name.
+   * command: the id of a registered command the UI resolves and runs. */
   body: string;
   /** Single chord ("Alt+G"); null = reachable from the QuickBar only. */
   keys: string | null;
@@ -710,6 +745,12 @@ export interface ConversationStore {
 
 export type SessionState = "idle" | "working" | "needs_attention";
 
+/** What a session *is*. `chat` is every session Workbench has ever had and is
+ * the default everywhere; `orchestrator` carries Mission Control's toolset;
+ * `worker` is one an orchestrator spawned, bound to a pooled worktree. A
+ * transcript on disk is always `chat` — a kind is live state about a process. */
+export type SessionKind = "chat" | "orchestrator" | "worker";
+
 export interface SessionInfo {
   session_id: string;
   /** Workspace-relative folder the session is bound to ("" = root). */
@@ -720,6 +761,53 @@ export interface SessionInfo {
   title: string;
   /** Unix mtime of the transcript (or creation time for live sessions). */
   updated_at: number;
+  kind: SessionKind;
+}
+
+// ---- permissions, fleet-wide ------------------------------------------------
+// A permission prompt reaches the human over /ws/agent/{id}, a socket that
+// exists only for conversations a window has opened. That is the gap Mission
+// Control closes: a blocked agent in a session nobody is looking at is
+// invisible until it times out, and with an orchestrator spawning workers the
+// session that blocks is by definition one the user never opened.
+
+export interface PendingPermission {
+  request_id: string;
+  tool: string;
+  /** Not redacted, deliberately: an approval you cannot read is one you cannot
+   * give informedly. Exactly what the session's own card shows. */
+  description: string;
+  /** Unix seconds when the agent blocked. The board ages it — a prompt that has
+   * waited nine minutes is one minute from being denied by timeout. */
+  requested_at: number;
+}
+
+export interface SessionPermissions {
+  session_id: string;
+  title: string;
+  folder: string;
+  kind: SessionKind;
+  pending: PendingPermission[];
+}
+
+/** GET /api/agents/permissions — every session blocked on the human. */
+export interface PermissionsSnapshot {
+  sessions: SessionPermissions[];
+}
+
+/** Broadcast on /ws/events when one session's set of open prompts changes.
+ * Always the **whole set** for that session, including the empty set: a delta
+ * would leave a card standing for a future that is already resolved. */
+export interface SessionPermissionEvent {
+  type: "session_permission";
+  session: SessionPermissions;
+}
+
+/** POST /api/agents/sessions/{id}/permission — answering from the board, for a
+ * session this window holds no chat socket for. */
+export interface PermissionAnswer {
+  request_id: string;
+  allow: boolean;
 }
 
 export interface FolderSessions {
@@ -747,6 +835,11 @@ export interface SessionLimits {
 export interface CreateSessionRequest {
   folder: string;
   resume_session_id?: string | null;
+  /** `orchestrator` gives the session Mission Control's toolset. A client may
+   * **not** ask for `worker`: a worker is bound to a pooled worktree outside the
+   * workspace jail, and only the orchestrator service — which holds the lease —
+   * may create one (the server refuses it at the schema). */
+  kind?: "chat" | "orchestrator";
 }
 
 export interface TranscriptMessage {
@@ -1070,6 +1163,85 @@ export interface WorktreePool {
 export interface WorktreeChangedEvent {
   type: "worktree_changed";
   worktree: WorktreeInfo;
+}
+
+// ---- orchestrator.py --------------------------------------------------------
+// Mission Control's second half: a session that runs other sessions. The board
+// *composes* the activity feed, the usage service and the worktree pool for
+// everything else about a session — this is only what none of them can answer:
+// who asked for this session, and under what ceiling.
+
+/** The ceilings an orchestrator works under, as the server enforces them.
+ * Served rather than restated here: what a ceiling counts is a server rule. */
+export interface OrchestratorBudget {
+  max_workers: number;
+  max_worker_turns: number;
+  max_worker_cost_usd: number;
+  max_fleet_turns: number;
+  max_fleet_cost_usd: number;
+}
+
+export type WorkerOutcome = "stopped" | "failed";
+
+export interface WorkerInfo {
+  /** The worker session's local id — the same key as its agent pane. */
+  worker_id: string;
+  orchestrator_id: string;
+  task: string;
+  /** Pool slot name, or null when there was no pool to borrow from. */
+  slot: string | null;
+  /** Absolute, and outside the workspace by construction: shown, never opened. */
+  path: string;
+  /** From the usage service, not a counter of the orchestrator's own. */
+  turns: number;
+  outcome: WorkerOutcome | null;
+  detail: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type SpawnRefusalReason =
+  | "worker_limit"
+  | "worker_turns"
+  | "worker_cost"
+  | "fleet_turns"
+  | "fleet_cost"
+  | "session_limit"
+  | "no_worktree"
+  | "unavailable";
+
+/** A cap that bound, with everything the pane needs to render it — never a bare
+ * message. `setting` is the environment variable that raises the ceiling, which
+ * is what keeps a hit cap from being a dead button (DESIGN.md, CLAUDE.md). */
+export interface SpawnRefusal {
+  reason: SpawnRefusalReason;
+  detail: string;
+  limit: number | null;
+  observed: number | null;
+  setting: string | null;
+}
+
+export interface OrchestratorInfo {
+  orchestrator_id: string;
+  workers: WorkerInfo[];
+  /** The most recent cap this orchestrator met, so the board shows it where the
+   * user is looking rather than only inside a transcript they may not have open. */
+  last_refusal: SpawnRefusal | null;
+}
+
+/** GET /api/orchestrator — load and reconnect. */
+export interface OrchestratorSnapshot {
+  orchestrators: OrchestratorInfo[];
+  budget: OrchestratorBudget;
+  max_concurrent_sessions: number;
+  /** null when there is no worktree pool (no git, or not a repository). */
+  worktree_capacity: number | null;
+}
+
+/** Broadcast on /ws/events whenever an orchestrator's roster changes. */
+export interface OrchestratorEvent {
+  type: "orchestrator";
+  snapshot: OrchestratorSnapshot;
 }
 
 export interface AcquireWorktreeRequest {

@@ -66,6 +66,16 @@ by inverting these values rather than re-deriving them from the same four rules 
    in tabular figures (`font-variant-numeric: tabular-nums`) or the mono font.
 8. **Keyboard-first.** Every interactive element has a visible 2px focus ring; every
    surface is reachable without a mouse; QuickBar (Ctrl+K) can reach anything.
+9. **Late content lands in a box that is already there.** Anything that arrives after
+   first paint — a listing, a transcript, a document — is drawn into geometry the shell
+   already reserved, and the amount reserved may depend only on what is known before the
+   request answers (tokens, the window's own size), never on what comes back. A panel
+   sized by its response is a panel that shoves the rest of the window aside a moment
+   after the user's eyes land on it, and it is invisible in development, where the
+   response is local and instant. This is §5.1's "content never fades" in the layout
+   dimension, and it is measured rather than trusted: `ui/e2e/perf/launch.spec.ts` holds
+   the whole window to a cumulative layout shift under 0.02 at launch, in an empty
+   workspace *and* in one with sessions.
 
 ---
 
@@ -752,7 +762,7 @@ commands and their default chords on its tool descriptor (`docs/tools.md`), and
 | `Alt+O` | Focus the next pane |
 | `Alt+X` | Close this pane |
 | `Alt+A` | Annotate the plan card — point at part of an artifact (§6.3) |
-| `Alt+K` | Keyboard reference — every command, grouped by tool (§6.12) |
+| `Alt+K` | Keyboard reference — every command, grouped by tool (§6.13) |
 
 **Pass-through:** inside xterm and Monaco — both full keyboard applications — only
 chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the
@@ -865,7 +875,31 @@ arrangement belongs to the user. The whole system is one capability
 - **The default arrangement is unchanged.** A new workspace still opens Files / Editor /
   Agent / Terminal in the same four places; nobody has to build a layout to start.
 
-### 6.12 Discovery: the welcome card, the keyboard reference, and tooltips that teach
+### 6.12 The Agent session picker
+
+The strip above the chat in the Agent panel: an 11px uppercase **Sessions** label, the
+*New session* button (§6.5's disabled-row rule applies — a picker that cannot make one
+says the ceiling and the setting that raises it), and the list of sessions grouped by
+folder, each group under an 11px uppercase label naming the folder.
+
+- **The list area is reserved** (`--sessions-list-height`, principle 1.9): one folder
+  label and four `--row-height` rows, always, whether the listing has arrived or not and
+  whatever it holds. Sessions past that scroll **inside** the box; the box does not grow.
+  The whole picker is still capped at **40% of the pane** — a cap on the window's own
+  size, which is known before the listing is — so a short pane keeps its chat.
+- **Reserved means reserved when empty too.** "No sessions yet" centers in the box
+  (§6.10) rather than sitting on top of a gap. The alternative — a strip that is small
+  until the response lands and then twice the size — is the exact reflow 1.9 forbids, and
+  it is what shipped through M5: 0.064 measured against a 0.02 ceiling, on every launch
+  by anyone who had ever run an agent.
+- **Four rows is a switcher, not a browser.** Enough to hit the session you were just in
+  without scrolling; the answer to "show me everything I have ever run" is the
+  Conversations panel, which is a browser and has the room to be one.
+- A row is `--row-height`, the file-tree row height, with the same hover/selected washes
+  and a 6px status dot (§2.6, §6.4) — hollow for a transcript on disk, filled and pulsing
+  for a live session that is working.
+
+### 6.13 Discovery: the welcome card, the keyboard reference, and tooltips that teach
 
 > Added 2026-08-06 on the owner's change request — *"I am not sure how to use these
 > features."* A capability nobody can find does not exist, and everything below is

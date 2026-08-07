@@ -40,9 +40,13 @@ import {
 } from "./app";
 import {
   BROKEN_SHORTCUT_NAME,
+  COMMAND_SHORTCUT_CHORD,
+  COMMAND_SHORTCUT_NAME,
+  COMMAND_SHORTCUT_TARGET,
   OWN_TARGET_FILE,
   SHORTCUT_BODY,
   SHORTCUT_NAME,
+  UNSAFE_COMMAND_SHORTCUT_CHORD,
 } from "./workspace";
 
 const MARKER = "e2e-shortcut-marker";
@@ -162,6 +166,38 @@ test("command mode, shortcut categories, and a snippet that never runs", async (
     const text = await terminalText(page);
     const occurrences = text.split(MARKER).length - 1;
     expect(occurrences, "the snippet was typed and never run").toBe(1);
+  });
+
+  await test.step("a command entry binds a registered command and runs it", async () => {
+    // M5 item 4, end to end: an untrusted workspace file names a *registered*
+    // command by id and the registry runs it — the row shows the command it will
+    // run (not the file's own words), and its chord fires the real command.
+    await page.keyboard.press("Control+Shift+P");
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    const row = quickbar.locator(".wb-qb-row", { hasText: COMMAND_SHORTCUT_NAME }).first();
+    await expect(row).toContainText(`command · ${COMMAND_SHORTCUT_TARGET}`);
+    await page.keyboard.press("Escape");
+    await expect(quickbar).toBeHidden();
+
+    const theme = (): Promise<string> =>
+      page.evaluate(() => document.documentElement.getAttribute("data-theme") ?? "dark");
+    const before = await theme();
+    await page.keyboard.press(COMMAND_SHORTCUT_CHORD);
+    await expect.poll(theme).not.toBe(before);
+  });
+
+  await test.step("a command entry that reaches the jail is refused, never run", async () => {
+    // The bar that makes "bind anything" safe (ROADMAP item 5): `workspace.open`
+    // re-points the path jail, so a project's own `.workbench/shortcuts.md` may
+    // not fire it. Pressing its chord raises a refusal — and does not open the
+    // workspace picker the command would have.
+    await page.keyboard.press(UNSAFE_COMMAND_SHORTCUT_CHORD);
+    await expect(
+      page.locator(".wb-toast.is-warn").filter({ hasText: "cannot be bound" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "Open a folder as the workspace" }),
+    ).toHaveCount(0);
   });
 
   await test.step("a registered tool brings its own command and panel", async () => {

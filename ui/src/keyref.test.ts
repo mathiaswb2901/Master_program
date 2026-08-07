@@ -342,7 +342,7 @@ describe("the shipped registry", () => {
   /**
    * The last chord in the app still written by hand.
    *
-   * Every other tooltip that names one asks `chordFor` (DESIGN.md §6.12), so
+   * Every other tooltip that names one asks `chordFor` (DESIGN.md §6.13), so
    * rebinding a command relabels its controls and nothing can go stale. The
    * plan card's **Annotate** button is the exception — `PlanCard.tsx` belongs to
    * another lane while this lands, so the conversion to `chordTooltip` waits
@@ -359,7 +359,7 @@ describe("the shipped registry", () => {
     expect(
       written === undefined || written === chordFor("plan.annotate"),
       `PlanCard's tooltip says ${String(written)}; plan.annotate runs on ` +
-        `${chordFor("plan.annotate")}. Use chordTooltip() (DESIGN.md §6.12).`,
+        `${chordFor("plan.annotate")}. Use chordTooltip() (DESIGN.md §6.13).`,
     ).toBe(true);
   });
 });

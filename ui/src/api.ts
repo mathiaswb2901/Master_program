@@ -6,6 +6,8 @@ import type {
   ActivitySnapshot,
   CallbackResponse,
   ConversationStore,
+  CreateDocumentRequest,
+  CreateDocumentResponse,
   CreateRequest,
   CreateSessionRequest,
   DirListing,
@@ -21,7 +23,10 @@ import type {
   OfficeStatus,
   OkResponse,
   OpenHostRequest,
+  OrchestratorSnapshot,
   PanelRect,
+  PermissionAnswer,
+  PermissionsSnapshot,
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
@@ -33,6 +38,7 @@ import type {
   UiState,
   UsageSnapshot,
   WorkspaceState,
+  WorktreePool,
   WriteRequest,
   WriteResponse,
 } from "./types";
@@ -85,6 +91,10 @@ export const putFileContent = (body: WriteRequest): Promise<WriteResponse> =>
 export const createEntry = (body: CreateRequest): Promise<OkResponse> =>
   request("/api/files/create", jsonInit("POST", body));
 
+/** Create a valid blank document of a named kind — not a zero-byte file. */
+export const createDocument = (body: CreateDocumentRequest): Promise<CreateDocumentResponse> =>
+  request("/api/files/document", jsonInit("POST", body));
+
 export const renameEntry = (body: RenameRequest): Promise<OkResponse> =>
   request("/api/files/rename", jsonInit("POST", body));
 
@@ -98,6 +108,29 @@ export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provena
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 
 export const getActivity = (): Promise<ActivitySnapshot> => request("/api/activity");
+
+export const getOrchestrators = (): Promise<OrchestratorSnapshot> => request("/api/orchestrator");
+
+/** The worktree pool. First UI reader: Mission Control, which shows which slot
+ * each worker holds (the pool shipped backend-only in #46). */
+export const getWorktrees = (): Promise<WorktreePool> => request("/api/worktrees");
+
+export const stopOrchestrator = (id: string): Promise<OrchestratorSnapshot> =>
+  request(`/api/orchestrator/sessions/${encodeURIComponent(id)}/stop`, { method: "POST" });
+
+export const getPendingPermissions = (): Promise<PermissionsSnapshot> =>
+  request("/api/agents/permissions");
+
+/** Answer a permission prompt without holding that session's chat socket — the
+ * whole point of Mission Control's inline chips. */
+export const answerPermission = (
+  sessionId: string,
+  body: PermissionAnswer,
+): Promise<SessionInfo> =>
+  request(
+    `/api/agents/sessions/${encodeURIComponent(sessionId)}/permission`,
+    jsonInit("POST", body),
+  );
 
 export const getLayouts = (): Promise<LayoutsResponse> => request("/api/layouts");
 
@@ -124,6 +157,12 @@ export const getTranscript = (folder: string, sessionId: string): Promise<Transc
   request(
     `/api/agents/transcript?folder=${encodeURIComponent(folder)}&session_id=${encodeURIComponent(sessionId)}`,
   );
+
+/** A LIVE session's transcript, keyed by its local id — the union of every SDK
+ * transcript it has lived under. Used to rehydrate a chat a reload emptied, so a
+ * reattached pane shows the conversation the socket only carries forward. */
+export const getLiveTranscript = (localId: string): Promise<TranscriptResponse> =>
+  request(`/api/agents/${encodeURIComponent(localId)}/transcript`);
 
 export const putUiState = (body: UiState): Promise<unknown> =>
   request("/api/agents/ui-state", jsonInit("PUT", body));

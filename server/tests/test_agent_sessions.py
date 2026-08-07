@@ -4,6 +4,7 @@ live smoke test in test_live_agent.py)."""
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from workbench_server.main import create_app
 from workbench_server.models.agents import (
     AgentError,
     PermissionRequest,
+    SessionKind,
     TextDelta,
     ToolSettled,
     ToolUseNote,
@@ -141,7 +143,9 @@ def make_factory(
 ) -> Any:
     created: list[FakeClient] = []
 
-    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> FakeClient:
+    def factory(
+        folder: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> FakeClient:
         client = FakeClient(script, bridge, ask_for, plan)
         created.append(client)
         return client
@@ -257,7 +261,9 @@ async def test_second_message_rejected_while_working(tmp_path: Path) -> None:
             await gate.wait()
             yield ResultMessage()
 
-    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> SlowClient:
+    def factory(
+        folder: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> SlowClient:
         return SlowClient([], bridge)
 
     manager = SessionManager(tmp_path, factory, max_sessions=4)
@@ -336,7 +342,9 @@ async def test_orphaned_permission_timeout_never_resurrects_a_finished_turn(
             await asyncio.sleep(0)
             yield ResultMessage()
 
-    def factory(folder: Path, resume: str | None, bridge: SessionBridge) -> OrphanClient:
+    def factory(
+        folder: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> OrphanClient:
         return OrphanClient([], bridge)
 
     manager = SessionManager(tmp_path, factory, max_sessions=4)
@@ -959,10 +967,17 @@ def test_session_status_reaches_the_events_websocket(
     """
     factory = make_factory([delta("ok"), ResultMessage()])
 
-    # Mirrors the real signature, Settings included: main.py passes the settings
-    # through so a session's options (bundled skills, setting sources) are
-    # configurable, and a stub that drops the argument fails at call time.
-    def fake_sdk_client_factory(_ui_state_store: Any, _settings: Any = None) -> Any:
+    # Mirrors the real signature, reader/Settings/orchestrator included: main.py
+    # passes the office-host reader (for office_read), the settings, and the
+    # orchestrator handle + cost callback through, so a session's options are
+    # configurable and a stub that drops an argument fails at call time.
+    def fake_sdk_client_factory(
+        _ui_state_store: Any,
+        _reader: Any,
+        _settings: Any = None,
+        _orchestrator: Any = None,
+        _session_cost: Any = None,
+    ) -> Any:
         return factory
 
     monkeypatch.setattr(main, "sdk_client_factory", fake_sdk_client_factory)
@@ -1129,3 +1144,176 @@ def test_resumed_transcript_stays_suppressed_after_a_turn(tmp_path: Path) -> Non
         assert local_id in ids  # the live entry represents the conversation
         assert "old-transcript" not in ids  # resumed-from transcript still suppressed
         assert "sdk-fresh" not in ids  # fresh-id transcript suppressed as well
+
+
+@pytest.mark.timeout(60)
+def test_live_transcript_replays_the_union_of_a_resumed_conversation_in_order(
+    tmp_path: Path,
+) -> None:
+    """``GET /api/agents/{local_id}/transcript`` is what a reloaded window replays
+    from: the socket only carries a session forward, so without this a reload
+    opens a live socket over a blank chat. It must resolve the live session's SDK
+    ids and return the *union* of their transcripts, oldest leg first — a resumed
+    conversation lives under more than one id and both halves are the same chat."""
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    projects = tmp_path / "projects"
+    settings = Settings(workspace_root=workspace_root, claude_projects_dir=projects)
+    app = create_app(settings)
+    script = [delta("continuing"), ResultMessage(session_id="sdk-fresh")]
+    app.state.session_manager = SessionManager(
+        settings.resolved_workspace(),
+        make_factory(script),
+        max_sessions=4,
+        session_index=app.state.session_index,
+    )
+
+    project_dir = projects / encode_project_dir(settings.resolved_workspace())
+    project_dir.mkdir(parents=True)
+
+    def user_line(text: str) -> str:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+
+    def assistant_line(text: str) -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            }
+        )
+
+    # The resumed-from leg (older on disk).
+    old = project_dir / "old-transcript.jsonl"
+    old.write_text(user_line("original ask") + "\n" + assistant_line("first answer"), "utf-8")
+
+    with TestClient(app) as client:
+        resumed = client.post(
+            "/api/agents/sessions",
+            json={"folder": "", "resume_session_id": "old-transcript"},
+        )
+        local_id = resumed.json()["session_id"]
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "keep going"}))
+            while json.loads(ws.receive_text())["type"] != "turn_done":
+                pass
+
+        # The SDK persisted the resumed conversation under its fresh id (newer leg).
+        fresh = project_dir / "sdk-fresh.jsonl"
+        fresh.write_text(user_line("keep going") + "\n" + assistant_line("second answer"), "utf-8")
+        # Pin the order the union is read in: fresh is strictly newer than old.
+        os.utime(old, (1_000, 1_000))
+        os.utime(fresh, (2_000, 2_000))
+
+        body = client.get(f"/api/agents/{local_id}/transcript")
+        assert body.status_code == 200
+        payload = body.json()
+        assert payload["session_id"] == local_id
+        assert [(m["role"], m["text"]) for m in payload["messages"]] == [
+            ("user", "original ask"),
+            ("assistant", "first answer"),
+            ("user", "keep going"),
+            ("assistant", "second answer"),
+        ]
+
+    # A local id no live session holds is a 404, not an empty transcript: the
+    # disk-only path is `GET /transcript`, and conflating them would let a dead
+    # pane look like a live one with nothing said in it.
+    with TestClient(app) as client:
+        assert client.get("/api/agents/does-not-exist/transcript").status_code == 404
+
+
+@pytest.mark.timeout(60)
+def test_live_transcript_of_a_session_that_has_run_nothing_is_empty_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """A brand-new live session has no SDK id and no transcript yet. Replaying it
+    is a normal "nothing to show", never a 404 or a crash — the reload guard on
+    the client fetches unconditionally and must get an empty list, not an error."""
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    settings = Settings(workspace_root=workspace_root, claude_projects_dir=tmp_path / "projects")
+    app = create_app(settings)
+    app.state.session_manager = SessionManager(
+        settings.resolved_workspace(),
+        make_factory([ResultMessage()]),
+        max_sessions=4,
+        session_index=app.state.session_index,
+    )
+
+    with TestClient(app) as client:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        body = client.get(f"/api/agents/{local_id}/transcript")
+        assert body.status_code == 200
+        assert body.json() == {"session_id": local_id, "messages": []}
+
+
+class SystemInit:
+    """The SDK's turn-start frame — carries the transcript id before any output.
+
+    Duck-typed on `session_id` like the other fakes here: the session captures
+    the id off *any* message that has one, so the class name does not matter."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+
+
+async def test_first_turn_transcript_is_replayable_before_the_turn_finishes(
+    tmp_path: Path,
+) -> None:
+    """A brand-new session reloaded WHILE its first turn is still running — no
+    ResultMessage yet — must not lose the user's just-sent message.
+
+    That message only ever lived in the reloaded window's memory, so the sole
+    recovery path is the transcript Claude Code is already writing to disk. The
+    SDK reveals the transcript id at the *start* of the turn (its init frame),
+    and the session now captures it then rather than at ResultMessage — so
+    `transcript_sources()` finds the in-flight transcript mid-turn and the reload
+    replay serves the user's message instead of an empty chat. This is the exact
+    gap that let a first turn's reply appear with no question above it.
+    """
+    folder = tmp_path / "ws"
+    folder.mkdir()
+    projects = tmp_path / "projects"
+    project_dir = projects / encode_project_dir(folder.resolve())
+    project_dir.mkdir(parents=True)
+    index = SessionIndex(projects)
+
+    started: asyncio.Event = asyncio.Event()
+    release: asyncio.Event = asyncio.Event()
+
+    class MidTurnClient(FakeClient):
+        async def receive_response(self) -> AsyncIterator[Any]:
+            yield SystemInit("sdk-live")  # id knowable at turn start
+            yield delta("working on it")
+            started.set()
+            await release.wait()  # the turn is genuinely still in flight here
+            yield ResultMessage(session_id="sdk-live")
+
+    def factory(
+        folder_: Path, resume: str | None, bridge: SessionBridge, kind: SessionKind = "chat"
+    ) -> MidTurnClient:
+        return MidTurnClient([], bridge)
+
+    manager = SessionManager(folder, factory, max_sessions=4, session_index=index)
+    session = manager.create("")
+    queue = session.subscribe()
+    session.send_user_message("the first question")
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    # Mid-turn, before ResultMessage: the id is already captured.
+    assert session.sdk_session_ids == {"sdk-live"}
+
+    # Claude Code has written the user's message to disk by now (it is the first
+    # line of the transcript). A reload lands here — chat memory is gone.
+    (project_dir / "sdk-live.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "the first question"}}),
+        encoding="utf-8",
+    )
+    replay_folder, sdk_ids = session.transcript_sources()
+    messages = index.read_transcripts(replay_folder, sdk_ids)
+    assert [(m.role, m.text) for m in messages] == [("user", "the first question")]
+
+    release.set()
+    await drain(queue, TurnDone)
+    assert session.sdk_session_id == "sdk-live"  # still the resume id afterwards

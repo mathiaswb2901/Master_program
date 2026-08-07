@@ -304,6 +304,23 @@ criterion), the terminal's renderer and frame coalescing, and a virtualised file
 the last two now the largest things left in the entry chunk (xterm 285 kB, dockview-core
 423 kB attributed) as well as the reason a *row* still costs ~900 ms.
 
+**The picker that moved the pane** (landed): the launch layout-shift budget existed to
+catch a webfont swap and caught something better. Measured 2026-08-06 on the pinned
+fixture: an empty workspace shifts **0.003**, a workspace with one agent session
+**0.064** — 3x the ceiling, on every launch, for everyone who had ever run an agent. The
+session picker was sized by its rows (`flex: none; max-height: 40%`), so
+`GET /api/agents/sessions` answering after first paint pushed the chat down the pane. Its
+list area is now *reserved* — one folder label and four rows, rows scrolling inside it,
+`--sessions-list-height` — which is **0.003 with six sessions seeded**. Two things came
+with it: the lane only ever launched into an *empty* workspace, so the case every
+returning user is in is now its own budget (untagged, so it blocks — a shift score is
+geometry, not wall-clock); and `instrument.ts` now records **which nodes moved**, so the
+next one names itself instead of sending someone to a trace. The general rule is
+DESIGN.md principle 1.9, and it has one known outstanding violation: the file tree's
+centred "Loading workspace…" swaps for a toolbar 322 px higher, which is the 0.003 that
+remains and is what priced the picker's 19.5 px at 0.064 (a shift entry takes its
+distance from the largest mover in the frame).
+
 **Motion, and a hard interlock.** The track is not only speed: an instrument that moves
 *well* reads as fast even when it is not. The **motion vocabulary** — the durations,
 easings and transition primitives, as `DESIGN.md` tokens — must land **before** the
@@ -646,7 +663,7 @@ because other sections and five running lanes reference these numbers.
    real `worktree add` through the API produces no watcher event) — inside `.workbench/`
    it would put N copies of the project in the file tree and turn every checkout into a
    watcher storm.
-7. **Mission Control board** (registers as a tool, per item 1): all sessions as cards
+7. ~~**Mission Control board** (registers as a tool, per item 1): all sessions as cards
    (status, current activity, cost), inline permission chips answerable from the board;
    orchestrator session kind with a mission-control MCP toolset
    (spawn/list/read/send/wait/stop workers), worker budget + cost ceiling,
@@ -654,7 +671,56 @@ because other sections and five running lanes reference these numbers.
    2026-08-05**: it is *the board over the activity feed*, not a board that grows its own
    feed — it renders item 10's `SessionActivityEvent` and reads item 11's usage service
    for its per-worker ceiling rather than deriving numbers a second time. Two live-fleet
-   views is the duplication the composability principle exists to prevent.
+   views is the duplication the composability principle exists to prevent.~~ **done** —
+   the "captain with a crew" view, and the re-scope held: `ui/src/mission.ts` computes
+   the **join** and nothing else. What a session is doing comes from item 10's feed, what
+   it cost from item 11's service, which slot it holds from item 6's pool, and its state
+   from the `session_status` map every window already tracks; a card is one module plus
+   one line in `tools.ts` (`ui/src/panels/MissionControl.tsx`).
+   **One figure genuinely had to be added, and it went into the usage service rather
+   than beside it**: `UsageSessionEntry` splits the same per-turn arithmetic by session,
+   so the number the budget refuses on and the number the card renders are the same
+   number by construction. Deriving a second one is exactly what this item was
+   re-scoped to forbid.
+   **The half that is new is the permission channel, and it is the point.** A prompt
+   travels `/ws/agent/{id}`, a socket that exists only for conversations a window has
+   *opened* — so a blocked agent in a session nobody opened was invisible until it timed
+   out ten minutes later, and once an orchestrator spawns workers the session that blocks
+   is by definition one the user never opened. `SessionPermissionEvent` on the shared bus
+   plus `POST /api/agents/sessions/{id}/permission` make it visible and answerable from
+   the board, and three properties are load-bearing: the frame carries a session's
+   *whole* pending set (a delta leaves a card offering Allow for a settled future); the
+   description is **not** redacted the way the activity feed's paths are (an approval you
+   cannot read is one you cannot give informedly); and a stale answer is **404**, never a
+   200 the user reads as a decision.
+   **The orchestrator** (`services/orchestrator.py`, `models/orchestrator.py`,
+   `routers/orchestrator.py`) is a session kind carrying five MCP tools built exactly as
+   the context bridge is, each worker bound to a pooled worktree. The four constraints
+   are enforced, with a test named after each: *never auto-allow shell* — nothing in the
+   service resolves a permission (asserted by absence, and `Bash` is in no kind's
+   allow-list); *a budget that binds* — per-worker and per-fleet turn/dollar ceilings
+   checked **before** spawning, every refusal carrying the limit, the observation and the
+   environment variable that raises it, and a stopped worker's spend still counted;
+   *bounded concurrency* — `max_concurrent_sessions` and the pool's own cap are asked
+   rather than duplicated, and an exhausted pool is a **refusal, never a quiet fallback
+   to the shared checkout**; *a worker's death is not the orchestrator's* — a raising turn
+   is that worker's `failed` outcome and stops there, while stopping the orchestrator
+   closes its crew **and releases their leases** (before `close_all()` at shutdown, or the
+   roster would have nothing left to release with).
+   Two smaller decisions worth carrying: `SessionManager.create_at` skips the workspace
+   jail because a pooled slot is outside it by design, and is reachable from exactly one
+   place — HTTP cannot mint a worker, because `CreateSessionRequest.kind` is narrowed at
+   the schema. And the orchestrator toolset is a **separate tuple** from `AGENT_TOOLS`:
+   a description is paid once per session but a schema on *every request*, so five tools
+   a chat session can never call would be a cost every user pays on every message.
+   **Deliberately deferred**: `wait_for_worker` (the plan's sixth tool) — an orchestrator
+   polls `list_workers`/`read_worker` today, and a blocking wait needs a timeout policy
+   that interacts with the permission future's own, which is a design worth doing on its
+   own rather than smuggling in here. A worker cannot itself be an orchestrator (one
+   level, on purpose). A failed worker keeps its slot until stopped, because its checkout
+   is usually the most interesting thing on the machine. And there is no per-worker
+   "resume after the budget was raised" — raising the ceiling and spawning again is the
+   whole recovery path today.
 8. **Security hardening pulled forward** (OSS bar item 1): per-launch auth token
    injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
    access and a workspace switcher all widen the unauthenticated localhost surface
@@ -876,6 +942,14 @@ because other sections and five running lanes reference these numbers.
     not have to know that a spreadsheet is spelled `.xlsx`. Exit: every listed kind is
     created from inside the app, opens in its own editor or native host without a repair
     prompt, and a `.ipynb` opens in the notebook view rather than as raw JSON.
+    **Partially landed (PR #62): template creation, the `POST /api/files/document` API,
+    and the "New document…" UI landed** — the owner-preferred answer won, blank OOXML +
+    `.ipynb` templates shipped as package data (a few KB each, valid with no Office
+    installed, zero new runtime dependencies), offered by name from the tree context
+    menu, the tree toolbar and the QuickBar. **The notebook-view half is deferred**:
+    there is no notebook rendering panel in the app yet, so a `.ipynb` opens in Monaco
+    as raw JSON, not the notebook view the exit line asks for — that last clause is the
+    one open sub-piece.
 17. ~~**Discoverability — the app tells you what it can do**~~ **done** (2026-08-06), on
     the owner's change request below: after a day of features landing, *"I am not sure how
     to use these features."* That is a product failure, not a user failure — we shipped a
@@ -915,7 +989,7 @@ because other sections and five running lanes reference these numbers.
     picker (it is the consequence of a split, not a gesture of its own); and the plan
     card's annotate toggle, which names `Alt+A` in its tooltip but hardcodes it — that
     file belonged to another lane this cycle, so converting it to `chordTooltip` is the
-    one loose end (`ui/src/panels/PlanCard.tsx`, DESIGN.md §6.12). It is **monitored,
+    one loose end (`ui/src/panels/PlanCard.tsx`, DESIGN.md §6.13). It is **monitored,
     not merely disclosed**: `keyref.test.ts` reads that tooltip's literal and fails if it
     stops matching the chord `plan.annotate` actually runs on, and the check retires
     itself the moment the line is converted.

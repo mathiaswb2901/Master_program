@@ -130,7 +130,7 @@ function TerminalTabs() {
           aria-label="New terminal"
           // The chord comes from the registry, never from this string: a
           // tooltip that names a stale keycap teaches the wrong reflex
-          // (DESIGN.md §6.12).
+          // (DESIGN.md §6.13).
           title={chordTooltip("New terminal", "terminal.new")}
           onClick={() => useStore.getState().newTerminal()}
         >
