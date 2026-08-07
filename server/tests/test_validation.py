@@ -36,7 +36,7 @@ from workbench_server.models.validation import (
 )
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.validation import (
-    MAX_PAYLOADS_PER_KIND,
+    MAX_EVIDENCE,
     PayloadStore,
     ValidationContext,
     ValidationService,
@@ -226,8 +226,83 @@ def test_the_payload_store_is_bounded_per_kind_and_round_trips() -> None:
     assert store.get("numeric", refs[0]) is None
     assert store.get("numeric", refs[1]) is not None
     assert store.get("numeric", refs[2]) is not None
-    # A different kind has its own budget.
-    assert MAX_PAYLOADS_PER_KIND >= 1
+    # A different kind has its *own* budget: filling 'numeric' to its cap and then
+    # putting under 'gate' must not evict the surviving 'numeric' entries, and vice
+    # versa. A single shared OrderedDict would fail this.
+    gate_ref = store.put("gate", _subject())
+    assert store.get("gate", gate_ref) is not None
+    assert store.get("numeric", refs[1]) is not None  # gate activity did not evict numeric
+    assert store.get("numeric", refs[2]) is not None
+    # And the numeric ref is not visible under the wrong kind's namespace.
+    assert store.get("gate", refs[2]) is None
+
+
+# ---- risk is derived over the full evidence, not the truncated view ---------
+
+
+@pytest.mark.asyncio
+async def test_a_fail_past_the_evidence_cap_still_drives_the_risk(tmp_path: Path) -> None:
+    """The silent-green trap: a fail produced *after* MAX_EVIDENCE passes must not
+    be dropped from the risk just because the stored list is capped. Risk is
+    derived over the full pre-truncation evidence; only the returned list is cut.
+    """
+    service, _, _, _ = _service(tmp_path)
+    # 'a' runs first and floods the evidence with passes up to the cap; 'b' runs
+    # after and produces the single fail that sits past index MAX_EVIDENCE.
+    service.register(FakeCheck("a", [_ev("pass")] * MAX_EVIDENCE))
+    service.register(FakeCheck("b", [_ev("fail")]))
+
+    result = await service.run(ValidationSpec(subject=_subject(), checks=["a", "b"]))
+
+    assert result.risk == "high"  # the fail past the cap still counts
+    # The stored list is capped, and it says so and by how much.
+    assert len(result.evidence) == MAX_EVIDENCE
+    assert result.truncated is not None
+    assert result.truncated.shown == MAX_EVIDENCE
+    assert result.truncated.total == MAX_EVIDENCE + 1
+
+
+# ---- a stored payload round-trips through the service -----------------------
+
+
+class StoringCheck:
+    """A check that stashes a detail payload and references it from its evidence,
+    exactly as the reconciliation gate will."""
+
+    id = "storing"
+
+    def __init__(self, payload: BaseModel) -> None:
+        self._payload = payload
+        self.ref: str | None = None
+
+    async def run(self, ctx: ValidationContext) -> list[EvidenceItem]:
+        self.ref = ctx.store_payload("numeric", self._payload)
+        return [
+            EvidenceItem(
+                kind="numeric", label="recon", outcome="warn", detail="d", payload_ref=self.ref
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_checks_stored_payload_reads_back_through_the_service(tmp_path: Path) -> None:
+    """The write side (ctx.store_payload -> PayloadStore.put) and the read side
+    (service.payload) are one round trip: a check stores under the service's own
+    store, and service.payload(kind, ref) hands the same payload back."""
+    service, _, _, _ = _service(tmp_path)
+    payload = _subject()  # any BaseModel serves as a stand-in detail payload
+    check = StoringCheck(payload)
+    service.register(check)
+
+    result = await service.run(ValidationSpec(subject=_subject(), checks=["storing"]))
+
+    ref = result.evidence[0].payload_ref
+    assert ref is not None
+    assert check.ref == ref
+    assert service.payload("numeric", ref) == payload
+    # A ref that was never stored, or the wrong kind, reads as None (not a guess).
+    assert service.payload("numeric", "numeric_deadbeef") is None
+    assert service.payload("gate", ref) is None
 
 
 # ---- re-rooting forgets results ---------------------------------------------

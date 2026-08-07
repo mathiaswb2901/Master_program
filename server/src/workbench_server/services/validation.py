@@ -253,6 +253,12 @@ class ValidationService:
                     )
                 )
 
+        # Risk is derived over the *full* evidence the checks produced, before any
+        # display cap. Truncating first would let a fail/warn past index MAX_EVIDENCE
+        # be silently dropped from the risk — the same silent-green failure this gate
+        # exists to refuse. Only the stored/returned list is capped.
+        risk = derive_risk(evidence)
+
         truncated: EvidenceTruncation | None = None
         if len(evidence) > MAX_EVIDENCE:
             total = len(evidence)
@@ -265,8 +271,6 @@ class ValidationService:
                     "run fewer checks to see the rest"
                 ),
             )
-
-        risk = derive_risk(evidence)
         result = ValidationResult(
             validation_id=self._id_factory(),
             subject=spec.subject,
