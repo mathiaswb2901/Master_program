@@ -221,20 +221,25 @@ test("a new window says what it is, and the reference teaches the chords", async
   });
 
   await test.step("a chord that would do nothing right now says so", async () => {
-    // `Alt+9` jumps to the ninth most recent session, and no window in this
-    // suite has nine — so the command is registered, listed, and inert.
-    // `resolveCommand` drops a command whose `when()` is false without so much
-    // as a `preventDefault`, so a row that read like every other one would be
-    // teaching a reflex that silently fails: worse than teaching nothing
-    // (§6.12). Chosen over `Alt+1` deliberately — whether *one* session exists
-    // depends on which journeys ran first, and a test may not depend on that.
-    await search(page).fill("jump to session 9");
-    const jump = reference(page).locator(".wb-keys-row");
-    await expect(jump).toHaveCount(1);
-    await expect(jump).toHaveClass(/is-unavailable/);
-    await expect(jump).toContainText("not available yet");
+    // `Alt+A` annotates a plan the agent is waiting on an answer for, and no
+    // session in this window is holding one — so the command is registered,
+    // listed, and inert. `resolveCommand` drops a command whose `when()` is
+    // false without so much as a `preventDefault`, so a row that read like every
+    // other one would be teaching a reflex that silently fails: worse than
+    // teaching nothing (§6.12). Chosen because its gate is a *transient window
+    // condition* this journey controls (there is no pending plan on a freshly
+    // relaunched window) rather than an ambient count of what earlier journeys
+    // left behind: `Alt+9` — "jump to the ninth session" — read as unavailable
+    // only while fewer than nine sessions existed, and a suite that grew past
+    // that made a passing assertion fail with nothing about this feature having
+    // changed. A test may not depend on how many journeys ran first.
+    await search(page).fill("annotate the plan");
+    const inert = reference(page).locator(".wb-keys-row");
+    await expect(inert).toHaveCount(1);
+    await expect(inert).toHaveClass(/is-unavailable/);
+    await expect(inert).toContainText("not available yet");
     // Still listed, still carrying its chord: the reference teaches what exists.
-    await expect(jump.locator(".wb-keycap")).toHaveText(["Alt", "9"]);
+    await expect(inert.locator(".wb-keycap")).toHaveText(["Alt", "A"]);
 
     // And a command that is live right now carries no such mark.
     await search(page).fill("new terminal");
