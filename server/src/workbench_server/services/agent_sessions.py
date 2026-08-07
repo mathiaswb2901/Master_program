@@ -20,8 +20,12 @@ from pydantic import BaseModel
 
 from workbench_server.models.agents import (
     AgentError,
+    PendingPermission,
     PermissionRequest,
     SessionInfo,
+    SessionKind,
+    SessionPermissionEvent,
+    SessionPermissions,
     SessionState,
     SessionStatusEvent,
     StatusChange,
@@ -72,8 +76,17 @@ class EventPublisher(Protocol):
 
 class SessionBridge(Protocol):
     """What a live session offers the client factory: every callback that has to
-    reach the human. Bundled into one object so adding the next one (plans were
-    the second) does not widen the factory signature again."""
+    reach the human, plus the one thing a tool needs to act *as* this session.
+    Bundled into one object so adding the next one (plans were the second) does
+    not widen the factory signature again."""
+
+    #: This session's local id. The orchestrator toolset spawns, reads and stops
+    #: workers **on behalf of one orchestrator**, and refuses to touch another's
+    #: — so its tool bodies have to be able to name the session they are running
+    #: inside (``services/orchestrator.py``). Not a callback, which is why it is
+    #: the only non-callback member here.
+    @property
+    def session_id(self) -> str: ...
 
     async def ask_permission(self, tool: str, tool_input: dict[str, Any]) -> bool: ...
     async def present_plan(self, artifact: PlanArtifact) -> PlanResponse: ...
@@ -140,7 +153,9 @@ class ActivityObserver(Protocol):
     fleet rather than as an empty panel.
     """
 
-    def note_session(self, *, session_id: str, title: str, folder: str) -> None: ...
+    def note_session(
+        self, *, session_id: str, title: str, folder: str, kind: SessionKind = "chat"
+    ) -> None: ...
 
     def note_tool_started(
         self,
@@ -175,10 +190,16 @@ class UsageObserver(Protocol):
 
     def note_rate_limit(self, info: Any) -> None: ...
 
-    def note_turn(self, *, cost_usd: float | None, model_usage: Any = None) -> None: ...
+    def note_turn(
+        self, *, session_id: str, cost_usd: float | None, model_usage: Any = None
+    ) -> None: ...
 
 
-ClientFactory = Callable[[Path, str | None, SessionBridge], SdkClient]
+#: How a session gets its SDK client. ``kind`` is the fourth argument rather
+#: than something the client discovers, because what a session *is* decides what
+#: it may do — an orchestrator's toolset is built at construction time and there
+#: is no later moment a chat session could acquire one (``sdk_factory.py``).
+ClientFactory = Callable[[Path, str | None, SessionBridge, SessionKind], SdkClient]
 
 
 class PlanAlreadyPendingError(Exception):
@@ -222,10 +243,12 @@ class AgentSession:
         tool_observer: ToolUseObserver | None = None,
         usage_observer: UsageObserver | None = None,
         activity_observer: ActivityObserver | None = None,
+        kind: SessionKind = "chat",
     ) -> None:
         self.local_id = local_id
         self.folder = folder
         self.folder_relative = folder_relative
+        self.kind = kind
         self.sdk_session_id: str | None = resume_session_id
         # Every SDK id this conversation has lived under. Claude Code mints a
         # NEW id on resume (and can again on later turns), leaving one on-disk
@@ -246,12 +269,20 @@ class AgentSession:
         # The emitted frames for those futures, kept so a client that connects
         # after emission still gets the card (see pending_attention).
         self._pending_permission_events: dict[str, PermissionRequest] = {}
+        # Wall clock per open prompt. Mission Control ages the card, because a
+        # prompt that has waited nine minutes is one minute from being denied.
+        self._permission_started_at: dict[str, float] = {}
         self._pending_plan: _PendingPlan | None = None
         # Last plan verdict and when it settled — replayed to a client that was
         # away while the card resolved (see pending_attention).
         self._last_plan_resolution: PlanResolved | None = None
         self._last_plan_resolved_at = 0.0
         self._turn_task: asyncio.Task[None] | None = None
+
+    @property
+    def session_id(self) -> str:
+        """The :class:`SessionBridge` half of ``local_id`` — see that Protocol."""
+        return self.local_id
 
     # ---- listener plumbing -------------------------------------------------
 
@@ -318,8 +349,14 @@ class AgentSession:
         )
         self._pending_permissions[request_id] = fut
         self._pending_permission_events[request_id] = request
+        self._permission_started_at[request_id] = time.time()
         self._set_state("needs_attention")
         self._emit(request)
+        # And to every window, not only the ones holding this conversation's
+        # socket. Without this a blocked agent in a session nobody opened is
+        # invisible until it times out ten minutes later — which is the normal
+        # case once an orchestrator is spawning workers (Mission Control).
+        self._publish_permissions()
         try:
             allowed = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT_S)
         except TimeoutError:
@@ -328,7 +365,13 @@ class AgentSession:
         finally:
             self._pending_permissions.pop(request_id, None)
             self._pending_permission_events.pop(request_id, None)
+            self._permission_started_at.pop(request_id, None)
             self._restore_state_after_prompt()
+            # Answered, timed out or abandoned — all three retract the card from
+            # every board. The set is republished whole (see
+            # ``SessionPermissionEvent``): a delta would leave a board offering
+            # Allow for a future that is already resolved.
+            self._publish_permissions()
         if not allowed and self._tool_observer is not None:
             # The tool will not run, so the claim its announcement made is not
             # true. Withdraw it now: a user who just refused a write is exactly
@@ -338,10 +381,46 @@ class AgentSession:
             )
         return allowed
 
-    def resolve_permission(self, request_id: str, allow: bool) -> None:
+    def permissions(self) -> SessionPermissions:
+        """Every prompt this session is blocked on, as the board reads them.
+
+        Built from the same two maps ``pending_attention`` replays from, so a
+        card on the board and a card in the chat are one prompt in two places
+        rather than two records that can disagree.
+        """
+        return SessionPermissions(
+            session_id=self.local_id,
+            title=self.title or FALLBACK_TITLE,
+            folder=self.folder_relative,
+            kind=self.kind,
+            pending=[
+                PendingPermission(
+                    request_id=request.request_id,
+                    tool=request.tool,
+                    description=request.description,
+                    requested_at=self._permission_started_at.get(request.request_id, 0.0),
+                )
+                for request in self._pending_permission_events.values()
+            ],
+        )
+
+    def _publish_permissions(self) -> None:
+        if self._publisher is not None:
+            self._publisher.publish(SessionPermissionEvent(session=self.permissions()))
+
+    def resolve_permission(self, request_id: str, allow: bool) -> bool:
+        """Answer one prompt. ``False`` when there was nothing to answer.
+
+        The return value is what lets ``POST …/permission`` tell "denied" from
+        "that card is gone" — the board is answering for a session it has no
+        socket for, so a stale click has to come back as a 404 rather than as a
+        silent success the user reads as a decision.
+        """
         fut = self._pending_permissions.get(request_id)
-        if fut is not None and not fut.done():
-            fut.set_result(allow)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(allow)
+        return True
 
     def _abandon_pending_permissions(self, reason: str) -> None:
         """Deny every prompt still awaiting the human so ``can_use_tool`` unwinds
@@ -360,6 +439,14 @@ class AgentSession:
                     request=request_id,
                     reason=reason,
                 )
+        # Belt and braces for the board. ``ask_permission``'s own ``finally``
+        # normally retracts the card, but this is also the close path, where the
+        # turn task is cancelled a moment later — and a board still offering
+        # Allow for a session that no longer exists is the exact lie this whole
+        # channel was added to prevent.
+        self._pending_permission_events.clear()
+        self._permission_started_at.clear()
+        self._publish_permissions()
 
     def _restore_state_after_prompt(self) -> None:
         """Leave ``needs_attention`` once a prompt settles — but only back into a
@@ -457,7 +544,7 @@ class AgentSession:
 
     async def _ensure_client(self) -> SdkClient:
         if self._client is None:
-            self._client = self._factory(self.folder, self.sdk_session_id, self)
+            self._client = self._factory(self.folder, self.sdk_session_id, self, self.kind)
             await self._client.connect()
         return self._client
 
@@ -473,7 +560,10 @@ class AgentSession:
             # stay stale until the turn happens to call a tool.
             if self._activity_observer is not None:
                 self._activity_observer.note_session(
-                    session_id=self.local_id, title=self.title, folder=self.folder_relative
+                    session_id=self.local_id,
+                    title=self.title,
+                    folder=self.folder_relative,
+                    kind=self.kind,
                 )
         self._turn_task = asyncio.create_task(self._run_turn(text))
 
@@ -585,7 +675,9 @@ class AgentSession:
                 # What the turn cost, and per model. The only usage figure an
                 # account that never emits a rate-limit event ever produces.
                 self._usage_observer.note_turn(
-                    cost_usd=cost_usd, model_usage=getattr(message, "model_usage", None)
+                    session_id=self.local_id,
+                    cost_usd=cost_usd,
+                    model_usage=getattr(message, "model_usage", None),
                 )
             self._emit(
                 TurnDone(
@@ -603,6 +695,7 @@ class AgentSession:
             live=True,
             title=self.title or FALLBACK_TITLE,
             updated_at=self.created_at,
+            kind=self.kind,
         )
 
     async def interrupt(self) -> None:
@@ -713,23 +806,54 @@ class SessionManager:
         """
         return sum(1 for s in self._sessions.values() if s.state != "idle")
 
-    def create(self, folder_relative: str, resume_session_id: str | None = None) -> AgentSession:
-        if self.active_count() >= self._max:
-            raise TooManySessionsError(self._max)
+    def create(
+        self,
+        folder_relative: str,
+        resume_session_id: str | None = None,
+        kind: SessionKind = "chat",
+    ) -> AgentSession:
+        """A session in a folder a *client* named — so the jail applies."""
         folder = (self._root / folder_relative).resolve()
         if folder != self._root and self._root not in folder.parents:
             raise ValueError("folder escapes workspace")
+        return self.create_at(folder, folder_relative, resume_session_id, kind)
+
+    def create_at(
+        self,
+        folder: Path,
+        folder_label: str,
+        resume_session_id: str | None = None,
+        kind: SessionKind = "chat",
+    ) -> AgentSession:
+        """A session in a folder the **server** chose, jail not applied.
+
+        The workspace jail on :meth:`create` exists to stop a *client-supplied*
+        folder escaping the workspace. This entry point is reached from exactly
+        one place — ``services/orchestrator.py``, with a path the worktree pool
+        just handed it under a lease it holds — and a pooled slot is outside the
+        workspace by design (``services/worktrees.py``: a slot inside it would
+        put N copies of the project in the file tree). Routing a worker through
+        :meth:`create` would therefore have meant either weakening the jail or
+        not using the pool, and the pool exists for exactly this.
+
+        Nothing reaches this from HTTP: ``POST /api/agents/sessions`` refuses
+        ``kind="worker"`` at the schema and calls :meth:`create`, which is what
+        ``test_orchestrator.py`` asserts rather than assumes.
+        """
+        if self.active_count() >= self._max:
+            raise TooManySessionsError(self._max)
         local_id = uuid.uuid4().hex[:12]
         session = AgentSession(
             local_id=local_id,
             folder=folder,
-            folder_relative=folder_relative,
+            folder_relative=folder_label,
             factory=self._factory,
             resume_session_id=resume_session_id,
             event_publisher=self._publisher,
             tool_observer=self._tool_observer,
             usage_observer=self._usage_observer,
             activity_observer=self._activity_observer,
+            kind=kind,
         )
         if resume_session_id is not None and self._index is not None:
             # A resumed conversation keeps the title of the transcript it continues.
@@ -746,9 +870,10 @@ class SessionManager:
             self._activity_observer.note_session(
                 session_id=local_id,
                 title=session.title or FALLBACK_TITLE,
-                folder=folder_relative,
+                folder=folder_label,
+                kind=session.kind,
             )
-        log.info("agent.session_created", local_id=local_id, folder=folder_relative)
+        log.info("agent.session_created", local_id=local_id, folder=folder_label, kind=kind)
         return session
 
     def set_workspace_root(self, root: Path) -> None:
@@ -788,6 +913,20 @@ class SessionManager:
 
     def live_infos(self) -> list[SessionInfo]:
         return [s.info() for s in self._sessions.values()]
+
+    def pending_permissions(self) -> list[SessionPermissions]:
+        """Every session currently blocked on the human, oldest prompt first.
+
+        The load-and-reconnect half of the fleet-wide permission channel: the
+        live path (:class:`SessionPermissionEvent`) fires when a prompt opens or
+        closes, and a board that connects in between would otherwise show an
+        idle fleet while an agent sat blocked. Only sessions with something
+        pending appear — an empty list is a fleet nobody is waiting on.
+        """
+        rows = [s.permissions() for s in self._sessions.values()]
+        blocked = [row for row in rows if row.pending]
+        blocked.sort(key=lambda row: min(p.requested_at for p in row.pending))
+        return blocked
 
     def live_sdk_ids(self) -> set[str]:
         """Every SDK id any live session has consumed — their on-disk transcripts

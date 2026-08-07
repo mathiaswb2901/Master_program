@@ -32,6 +32,7 @@
  * convention as the perf lane's fixture.
  */
 
+import child_process from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -179,6 +180,18 @@ echo two
 /** Where the backend is told to read transcripts from, for a given workspace. */
 export const projectsDirFor = (root: string): string => `${root}-projects`;
 
+/**
+ * Where the worktree pool puts this run's slots.
+ *
+ * A *sibling* of the workspace, for both of the reasons the real pool root is
+ * outside it (`services/worktrees.py`): a slot inside the workspace would put a
+ * whole second checkout in journey 1's file tree and turn every `worktree add`
+ * into a watcher storm. Overriding the default matters here too — the shipped
+ * one is under `%LOCALAPPDATA%`, keyed by workspace, and a suite that used it
+ * would accumulate a real checkout per E2E run on the developer's machine.
+ */
+export const worktreeRootFor = (root: string): string => `${root}-worktrees`;
+
 /** Claude Code's project-dir encoding, mirrored from
  * `services/session_index.py`. Lossy on purpose: it is what makes the browser's
  * "resolved or honestly encoded" distinction necessary in the first place. */
@@ -289,6 +302,40 @@ function seed(root: string): void {
   fs.writeFileSync(path.join(root, ".workbench", "shortcuts.md"), SHORTCUTS_FILE, "utf-8");
   seedTargetFolders(root);
   seedConversations(root);
+  seedRepository(root);
+}
+
+/**
+ * Make the workspace a real git repository, so the worktree pool can serve.
+ *
+ * Mission Control's workers each run in a **borrowed worktree** — that is the
+ * whole reason two of them cannot step on each other (`services/worktrees.py`)
+ * — and the pool refuses to hand out a slot when the workspace is not a
+ * repository. Without this, journey 12 would test the refusal rather than the
+ * feature, and a refusal is already covered by `test_orchestrator.py`.
+ *
+ * `.git` is in the file tree's `IGNORED_DIRS`, so nothing else in the suite
+ * sees it. If git is missing (it never is on a machine that checked this repo
+ * out) the seed is skipped and the journey's own preflight says why.
+ */
+function seedRepository(root: string): void {
+  const git = (...args: string[]): void => {
+    child_process.execFileSync("git", args, { cwd: root, stdio: "ignore" });
+  };
+  try {
+    git("init", "-b", "main");
+    git("config", "user.email", "e2e@workbench.invalid");
+    git("config", "user.name", "Workbench E2E");
+    // `core.autocrlf` off for the same reason `test_worktrees.py` sets it: a
+    // developer machine with it on globally would check the slot out with CRLF
+    // and change bytes the journeys read.
+    git("config", "core.autocrlf", "false");
+    git("add", "-A");
+    git("-c", "commit.gpgsign=false", "commit", "-m", "e2e workspace");
+  } catch {
+    // Left to the journey to report — a seed that threw here would take the
+    // other eleven journeys down with it.
+  }
 }
 
 /** The build cache that must vanish, and the folder of the same name that must not. */

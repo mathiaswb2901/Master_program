@@ -60,6 +60,7 @@ function session(
     session_id: id,
     folder: "",
     title: `session ${id}`,
+    kind: "chat",
     entries,
     dropped: 0,
     active_at: T,

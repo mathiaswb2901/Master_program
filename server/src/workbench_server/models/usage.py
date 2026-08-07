@@ -107,6 +107,27 @@ class UsageSessionCost(BaseModel):
     observed_at: float | None = None
 
 
+class UsageSessionEntry(BaseModel):
+    """What one *session* has cost this process, from its own turns.
+
+    The same arithmetic as :class:`UsageSessionCost`, split by the session that
+    produced it — and it exists for one reason: Mission Control's per-worker
+    budget has to be enforced against a number, and a second accumulator
+    somewhere else would be two authorities on what a worker spent (ROADMAP
+    item 7 re-scope). ``services/orchestrator.py`` checks its ceiling against
+    exactly what the board renders.
+
+    Still **not plan usage**: these are dollars this server watched go by, the
+    same caveat :class:`UsageSessionCost` carries.
+    """
+
+    session_id: str
+    turns: int = 0
+    cost_usd: float = 0.0
+    #: Unix seconds of the last turn this session reported.
+    observed_at: float
+
+
 class UsageSnapshot(BaseModel):
     """``GET /api/usage`` and the payload of :class:`UsageEvent`.
 
@@ -127,6 +148,10 @@ class UsageSnapshot(BaseModel):
     #: None when nothing has ever been observed.
     age_s: float | None = None
     session_cost: UsageSessionCost = Field(default_factory=UsageSessionCost)
+    #: Per-session spend, most expensive first and bounded. A session that has
+    #: never finished a turn is absent — zero and "not yet" are different
+    #: statements, and the board renders them differently.
+    sessions: list[UsageSessionEntry] = Field(default_factory=list)
 
 
 class UsageEvent(BaseModel):

@@ -361,7 +361,7 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host, usage, worktrees |
+| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host, usage, worktrees, orchestrator |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
@@ -370,6 +370,7 @@ in-process calls where the model and the user dominate.
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
 | `routers/activity.py` | `GET /api/activity` (the fleet's live tool calls) |
+| `routers/orchestrator.py` | `GET /api/orchestrator` (crews + budget), stop an orchestrator's crew |
 | `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/workspaces.py` | `GET /api/workspace`, `POST /api/workspace/switch` (the root, and the recent list) |
@@ -394,7 +395,8 @@ in-process calls where the model and the user dominate.
 | `services/worktrees.py` | the managed worktree pool: borrowed detached checkouts, leases, dirty protection |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 | `services/activity.py` | the same tool calls one moment earlier: what every session is touching right now; bounded, coalesced, in-memory only |
-| `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn cost; in-memory only |
+| `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn and per-session cost; in-memory only |
+| `services/orchestrator.py` | Mission Control's crews: spawn/read/send/stop workers in pooled worktrees, the budget that binds, the reaping |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 
 ## The file tree
@@ -822,6 +824,13 @@ Four properties, each with a rendering rather than a footnote:
    rather than printed (`Read: (outside the workspace)`). Summaries are rebuilt
    here rather than passed through from the chat frame, which carries the raw
    argument. Tool *results* never cross at all — only `ok`.
+   One deliberate widening, added with Mission Control: `extra_roots` is a list
+   of **server-owned** directories the feed may *name* — today exactly one, the
+   worktree pool root, so a worker reads `Read: slot-01/server/main.py` instead
+   of a row of `(outside the workspace)`. The jail itself is unchanged: the
+   clickable `target` stays workspace-only, and a path in neither the workspace
+   nor a named root is still redacted. **Naming and opening are separate
+   answers**, and only the first one widened.
 4. **Idle is a designed state.** A session is a row from the moment it is
    created, so an idle fleet reads "three sessions open, none touching anything"
    rather than as an empty panel, and the status-bar reading renders *nothing*
@@ -1163,6 +1172,99 @@ writes to disk and re-enters the normal watcher flow. `document.key` derives fro
 content hash so external changes (e.g. agent edits) force a reopen instead of serving
 a stale cached copy. Absent OnlyOffice, documents degrade to read-only preview +
 "Open in Word".
+
+## Mission Control (the board, and the orchestrator seam)
+
+Two halves, separable on purpose: a **board** that renders the fleet, and an
+**orchestrator** session kind that can put agents in it.
+
+**The board composes; it does not derive.** `ui/src/panels/MissionControl.tsx` +
+`ui/src/mission.ts` join four services that already own their halves — the live
+activity feed says what each session is *doing*, the usage service what it has
+*cost*, the worktree pool which *slot* it holds, and the `session_status` map
+every window already tracks what *state* it is in. The only thing computed in
+this capability is the join (`buildCards`). That is ROADMAP M5 item 7's own
+re-scope, and the reason for it is not tidiness: two live-fleet views that
+disagree is worse than one, and a second cost accumulator would be a second
+authority to keep honest with a budget enforced against it.
+
+The one figure that genuinely had to be added is **per-session cost**, and it was
+added *to the usage service* (`UsageSessionEntry`, `UsageService.session_entry`)
+rather than beside it — so the number the orchestrator's budget refuses on and
+the number the card renders are the same number by construction.
+
+**What is new is the fleet-wide permission channel**, and it is the point of the
+feature rather than decoration on it. A `PermissionRequest` reaches the human
+over `/ws/agent/{id}`, a socket that exists only for conversations a window has
+*opened*; so a blocked agent in a session nobody opened is invisible until it
+times out ten minutes later — and once an orchestrator is spawning workers, the
+session that blocks is *by definition* one the user never opened.
+`AgentSession.ask_permission` therefore also publishes a `SessionPermissionEvent`
+on the shared bus (with `GET /api/agents/permissions` for load and reconnect),
+and `POST /api/agents/sessions/{id}/permission` is a **second door onto the same
+future** — not a second mechanism. Three properties are load-bearing: the frame
+always carries a session's *whole* pending set (a delta would leave a card
+offering Allow for a future already resolved); the description is **not**
+redacted the way the activity feed's paths are, because an approval you cannot
+read is one you cannot give informedly; and a stale answer comes back **404**
+rather than 200, so a click that changed nothing is never reported as a decision.
+
+### The orchestrator (`services/orchestrator.py`)
+
+An orchestrator is an ordinary `AgentSession` with `kind="orchestrator"`,
+carrying five extra MCP tools built exactly the way the context bridge is
+(`services/agent_tools.py` → `sdk_factory.build_context_bridge`): `spawn_worker`,
+`list_workers`, `read_worker`, `send_to_worker`, `stop_worker`. A worker is an
+ordinary session it started, bound to a **borrowed worktree slot** so two of them
+cannot write to one checkout. Nothing about a worker is special downstream —
+its status, activity, cost and permission prompts travel the channels every
+session already travels, which is why the board sees a worker without knowing it
+is one.
+
+Four constraints, each *enforced* rather than described (`test_orchestrator.py`
+names a test after each):
+
+1. **Never auto-allow shell.** There is no code path in the service that
+   resolves a permission — asserted by absence, because that absence is the
+   whole threat model. `Bash` is not in any session kind's `allowed_tools`, so a
+   worker's shell request blocks on the same future a chat session's does and is
+   answered by a human on the board. An orchestrator that could approve its own
+   workers' shell access is a different product.
+2. **A budget that binds, checked before spawning.** Per-worker and per-fleet
+   ceilings on turns and dollars (`WORKBENCH_ORCHESTRATOR_*`), read from the
+   usage service. Every refusal is a `SpawnRefusal` carrying the limit, the
+   observation and **the environment variable that raises it**, so a hit cap
+   renders with its way out and never as a dead button. A stopped worker's spend
+   still counts, or the ceiling could be spent repeatedly by restarting.
+3. **Bounded concurrency, honouring caps this service does not own.**
+   `max_concurrent_sessions` belongs to the session manager and the pool size to
+   `services/worktrees.py`; both are *asked* rather than duplicated, and either
+   one binding produces its own named refusal. An exhausted pool is a **refusal,
+   never a quiet fallback to the workspace** — two workers in one checkout is
+   exactly the failure the pool exists to prevent.
+4. **A worker's death is not the orchestrator's, and stopping the orchestrator
+   is not an orphaning.** A turn that raises inside a worker becomes that
+   worker's `failed` outcome (noticed by the per-worker pump that also feeds
+   `read_worker`) and never propagates. `stop()` closes every worker of an
+   orchestrator *and releases their leases* — a slot held by a process that is
+   no longer working in it is what the pool's two idle signals exist to bound,
+   and the honest way to avoid needing them is to give it back. `stop_all()`
+   runs in the lifespan **before** `close_all()`, because once the sessions are
+   gone the roster has nothing left to release with.
+
+Two seams worth knowing. The service is constructed *before* `SessionManager`
+(the client factory closes over it, since an orchestrator's toolset is built with
+its client) and receives the manager through `bind()`. And `SessionManager` gained
+`create_at(folder, label, …)`, which skips the workspace jail: the jail exists to
+stop a *client-supplied* folder escaping, and this is reached from one place with
+a path the pool just handed it under a lease this process holds. Nothing reaches
+it from HTTP — `CreateSessionRequest.kind` is narrowed to `chat | orchestrator`
+at the schema, which `test_orchestrator.py` asserts rather than assumes.
+
+The orchestrator toolset is a **separate tuple** from `AGENT_TOOLS`, not a flag on
+each spec, and the reason is the ergonomics budget: a description is paid once per
+session but a schema is paid on **every request**, so five tools a chat session
+can never call would be a cost every user pays on every message.
 
 ## Layouts
 

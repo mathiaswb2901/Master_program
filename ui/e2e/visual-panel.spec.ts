@@ -61,6 +61,20 @@ test("expand an artifact into its own pane, annotate it, and restore it", async 
   const card = page.locator(".wb-plan-card");
   await expect(card.locator(".wb-vis")).toBeVisible();
 
+  // The turn's session-status churn schedules a debounced sessions+limits
+  // refresh (store.ts scheduleSessionsRefresh, 400 ms after an unlisted session
+  // is seen). It is control-plane, not the artifact, but it lands ~here — so
+  // drain it before recording, for the same reason the layout PUT is awaited
+  // above: a poll caught mid-window would be misread as the pane fetching to
+  // render. Awaiting the paired /api/agents/limits is awaiting the whole refresh
+  // (refreshSessions issues both together).
+  await page
+    .waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/agents/limits",
+      { timeout: 2_000 },
+    )
+    .catch(() => undefined);
+
   const pane = page.locator(".wb-artifact-pane");
 
   await test.step("Expand opens a pane, and no request is issued to render it", async () => {

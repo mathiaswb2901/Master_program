@@ -73,6 +73,8 @@ from typing import Any
 
 import structlog
 
+from workbench_server.models.agents import SessionKind
+from workbench_server.models.orchestrator import SpawnRefusal
 from workbench_server.models.plans import (
     AnnotationAnchor,
     FileRef,
@@ -102,6 +104,7 @@ from workbench_server.models.visuals import (
     VisualBlock,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SdkClient, SessionBridge
+from workbench_server.services.agent_tools import OrchestratorHandle
 
 log = structlog.get_logger()
 
@@ -116,6 +119,27 @@ PERMISSION_TRIGGER = "ask permission"
 PLAN_TRIGGER = "plan please"
 VISUAL_TRIGGER = "visual please"
 USAGE_TRIGGER = "usage please"
+#: Only meaningful in an ``orchestrator`` session: really calls the real
+#: orchestrator service, which really borrows two worktree slots and really
+#: starts two worker sessions. The E2E journey drives Mission Control through
+#: this, so what it proves is the production path with a scripted client on the
+#: far side of it — not a simulation of a crew.
+SPAWN_TRIGGER = "spawn workers"
+#: The same service's stop path, so the journey can assert the crew is reaped.
+REAP_TRIGGER = "reap workers"
+
+#: How many workers ``spawn workers`` starts. Two, because one proves nothing
+#: about parallel isolation and the board's whole claim is that it stays
+#: readable with a crew in it.
+SPAWN_WORKER_COUNT = 2
+
+#: The task each fake worker is given, and both halves of it are load-bearing.
+#: ``use tool`` makes the worker do something the fleet-wide **activity** feed
+#: can report (a real ``Read`` inside its own slot), and ``ask permission`` makes
+#: it block on a prompt it cannot answer itself — which is exactly the state
+#: Mission Control exists to make visible and answerable. One spawn therefore
+#: exercises both halves of the board.
+WORKER_TASK = "worker {index}: use tool, then ask permission before touching anything"
 
 #: How long ``stay busy`` holds the turn open (before the reply, or after the
 #: tool result when ``use tool`` is asked for too). Long enough for a UI test to
@@ -540,9 +564,17 @@ def first_workspace_file(folder: Path) -> Path | None:
 class FakeAgentClient:
     """One scripted conversation. Satisfies the ``SdkClient`` protocol."""
 
-    def __init__(self, folder: Path, bridge: SessionBridge) -> None:
+    def __init__(
+        self,
+        folder: Path,
+        bridge: SessionBridge,
+        kind: SessionKind = "chat",
+        orchestrator: OrchestratorHandle | None = None,
+    ) -> None:
         self._folder = folder
         self._bridge = bridge
+        self._kind = kind
+        self._orchestrator = orchestrator
         self._session_id = f"fake-{uuid.uuid4().hex[:8]}"
         self._prompt = ""
         self._writes = 0
@@ -618,7 +650,41 @@ class FakeAgentClient:
             # rate-limit transition arrives mid-stream, not at the end of a turn.
             for event in fake_rate_limit_events(self._session_id):
                 yield event
+        if SPAWN_TRIGGER in lowered:
+            yield _delta(await self._spawn_workers())
+        if REAP_TRIGGER in lowered:
+            yield _delta(await self._reap_workers())
         yield ResultMessage(self._session_id)
+
+    async def _spawn_workers(self) -> str:
+        """Call the *real* orchestrator, and report what it said.
+
+        A refusal is reported as a refusal, cap and all — the fake must not
+        paper over a budget or a pool that could not serve, because "the board
+        shows two workers" is only evidence if two workers really started.
+        """
+        if self._kind != "orchestrator" or self._orchestrator is None:
+            return "\n\nspawn: this session is not an orchestrator\n"
+        lines: list[str] = []
+        for index in range(1, SPAWN_WORKER_COUNT + 1):
+            outcome = await self._orchestrator.spawn(
+                self._bridge.session_id, WORKER_TASK.format(index=index)
+            )
+            if isinstance(outcome, SpawnRefusal):
+                lines.append(f"refused: {outcome.detail}")
+            else:
+                lines.append(f"spawned {outcome.worker_id} in {outcome.slot or 'the workspace'}")
+        return "\n\n" + "\n".join(lines) + "\n"
+
+    async def _reap_workers(self) -> str:
+        if self._kind != "orchestrator" or self._orchestrator is None:
+            return "\n\nreap: this session is not an orchestrator\n"
+        stopped = 0
+        for worker in self._orchestrator.workers_of(self._bridge.session_id):
+            if worker.outcome is None:
+                await self._orchestrator.stop_worker(self._bridge.session_id, worker.worker_id)
+                stopped += 1
+        return f"\n\nreaped {stopped} worker(s)\n"
 
     def _read_a_file(self) -> list[Any]:
         """A tool-use note and its result, as two separate messages — the same
@@ -677,11 +743,21 @@ class FakeAgentClient:
         self.disconnected = True
 
 
-def fake_client_factory() -> ClientFactory:
-    """The factory ``main.py`` wires in instead of ``sdk_client_factory``."""
+def fake_client_factory(orchestrator: OrchestratorHandle | None = None) -> ClientFactory:
+    """The factory ``main.py`` wires in instead of ``sdk_client_factory``.
 
-    def factory(folder: Path, resume_session_id: str | None, bridge: SessionBridge) -> SdkClient:
-        log.info("agent.fake_client", folder=str(folder), resume=resume_session_id)
-        return FakeAgentClient(folder, bridge)
+    ``orchestrator`` is handed through unchanged so a fake *orchestrator*
+    session drives the real service — same seam, same production code, a
+    scripted client on the far side of it.
+    """
+
+    def factory(
+        folder: Path,
+        resume_session_id: str | None,
+        bridge: SessionBridge,
+        kind: SessionKind = "chat",
+    ) -> SdkClient:
+        log.info("agent.fake_client", folder=str(folder), resume=resume_session_id, kind=kind)
+        return FakeAgentClient(folder, bridge, kind, orchestrator)
 
     return factory

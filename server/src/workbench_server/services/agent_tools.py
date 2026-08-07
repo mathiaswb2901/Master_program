@@ -36,12 +36,25 @@ from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
-from workbench_server.models.agents import UiState
+from workbench_server.models.agents import SessionKind, UiState
 from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.orchestrator import (
+    MAX_TASK_CHARS,
+    OrchestratorBudget,
+    SpawnRefusal,
+    WorkerInfo,
+)
 from workbench_server.models.plans import PlanArtifact, plan_input_schema
 from workbench_server.services.agent_sessions import PlanAlreadyPendingError, SessionBridge
 from workbench_server.services.office_host.a1 import cell_ref, column_letter, parse_cell
 from workbench_server.services.office_host.document_bridge import DocumentBridgeError
+
+#: Characters of a worker's output one ``read_worker`` returns by default, and
+#: the widest window it will serve. Named here rather than imported from
+#: ``services/orchestrator.py`` because that module imports *this* one's sibling
+#: and the tool's own schema quotes both numbers to the model.
+READ_WINDOW_CHARS = 2_000
+MAX_READ_WINDOW_CHARS = 8_000
 
 #: How a tool's result reaches the model. ``compact-json`` means no indent and
 #: no pretty separators. Measured on the representative payload the tests use
@@ -221,6 +234,108 @@ async def handle_present_plan(bridge: SessionBridge, args: dict[str, Any]) -> di
     return text_result(response.model_dump_json())
 
 
+# ---- the orchestrator toolset (Mission Control) ------------------------------
+#
+# Five tools that only an ``orchestrator`` session ever sees. A *separate* tuple
+# from ``AGENT_TOOLS`` rather than a `when` on each spec, and the reason is the
+# budget this module exists to enforce: a description is paid once per session
+# but **a schema is paid on every request**, so putting five toolsets in every
+# chat session's context would cost every user of the app for a capability that
+# session cannot use. ``build_context_bridge`` takes the kind and hands over
+# exactly one of the two lists.
+
+SPAWN_WORKER = AgentToolSpec(
+    name="spawn_worker",
+    description=(
+        "Start a worker agent on one task, in its own git worktree. Returns "
+        "{worker_id, slot} or a refusal naming the ceiling and the setting that "
+        "raises it. Workers cannot run shell commands without the user "
+        "approving each one on the Mission Control board — plan for that."
+    ),
+    output_format="text",
+    # A spawn answers with an id, a slot and a sentence; a refusal answers with
+    # the cap, the observation and a setting name. 512 covers the longer of the
+    # two (a refusal measured 190 bytes) with room for a slot path.
+    max_result_bytes=512,
+    max_schema_bytes=420,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "The worker's first message. Self-contained: it has your context.",
+                "maxLength": MAX_TASK_CHARS,
+            },
+            "base": {"type": "string", "description": "Commit or ref to check out. Default HEAD."},
+        },
+        "required": ["task"],
+    },
+)
+
+LIST_WORKERS = AgentToolSpec(
+    name="list_workers",
+    description="Your workers: id, state, slot, turns, cost, and the task each is on.",
+    output_format="text",
+    # One line per worker; the ceiling is the worker cap (8) times a ~90-byte
+    # line plus the budget footer. 1,024 is that with margin, and it fails the
+    # moment a per-worker line grows a field nobody costed.
+    max_result_bytes=1_024,
+    max_schema_bytes=8,
+)
+
+READ_WORKER = AgentToolSpec(
+    name="read_worker",
+    description=(
+        "The tail of one worker's output. Says how much it withheld and how to "
+        "ask for more; says so explicitly when there is nothing yet."
+    ),
+    output_format="text",
+    # The window is the budget: MAX_READ_WINDOW_CHARS plus the header and the
+    # withheld-count sentence.
+    max_result_bytes=MAX_READ_WINDOW_CHARS + 256,
+    max_schema_bytes=340,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "worker_id": {"type": "string"},
+            "chars": {
+                "type": "integer",
+                "description": (
+                    f"Tail size, default {READ_WINDOW_CHARS}, max {MAX_READ_WINDOW_CHARS}."
+                ),
+            },
+        },
+        "required": ["worker_id"],
+    },
+)
+
+SEND_TO_WORKER = AgentToolSpec(
+    name="send_to_worker",
+    description="Send a follow-up message to a running worker. Refused once its budget is spent.",
+    output_format="text",
+    max_result_bytes=384,
+    max_schema_bytes=200,
+    input_schema={
+        "type": "object",
+        "properties": {"worker_id": {"type": "string"}, "text": {"type": "string"}},
+        "required": ["worker_id", "text"],
+    },
+)
+
+STOP_WORKER = AgentToolSpec(
+    name="stop_worker",
+    description="Stop one worker and return its worktree slot to the pool.",
+    output_format="text",
+    max_result_bytes=256,
+    max_schema_bytes=120,
+    input_schema={
+        "type": "object",
+        "properties": {"worker_id": {"type": "string"}},
+        "required": ["worker_id"],
+    },
+)
+
+
 # ---- office_read ------------------------------------------------------------
 
 #: Server-side window bounds, applied before the read reaches the bridge so a
@@ -310,6 +425,116 @@ OFFICE_READ = AgentToolSpec(
         "required": ["path"],
     },
 )
+
+
+class OrchestratorHandle(Protocol):
+    """The slice of ``services/orchestrator.py`` the tool bodies below use.
+
+    A Protocol for the same reason :class:`SessionBridge` is one: it keeps this
+    module free of the service, so every tool body is testable against a fake
+    and the real service is not importable from the SDK wiring by accident.
+    """
+
+    async def spawn(
+        self, orchestrator_id: str, task: str, base: str | None = None
+    ) -> "WorkerInfo | SpawnRefusal": ...
+    def workers_of(self, orchestrator_id: str) -> "list[WorkerInfo]": ...
+    def read(self, orchestrator_id: str, worker_id: str, window: int) -> str: ...
+    def send(self, orchestrator_id: str, worker_id: str, text: str) -> "str | SpawnRefusal": ...
+    async def stop_worker(self, orchestrator_id: str, worker_id: str) -> str: ...
+    @property
+    def budget(self) -> OrchestratorBudget: ...
+
+
+def _arg_str(args: dict[str, Any], key: str) -> str:
+    value = args.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+async def handle_spawn_worker(
+    orchestrator: OrchestratorHandle, orchestrator_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    task = _arg_str(args, "task")
+    if not task:
+        return error_result("spawn_worker needs a `task` — the worker's first message.")
+    base = _arg_str(args, "base") or None
+    outcome = await orchestrator.spawn(orchestrator_id, task[:MAX_TASK_CHARS], base)
+    if isinstance(outcome, SpawnRefusal):
+        # A refusal is a tool *error*, so the model does not read it as a
+        # worker it can talk to — and it carries the way out, never a bare no.
+        return error_result(clamp_result(outcome.detail, SPAWN_WORKER.max_result_bytes))
+    where = outcome.slot or "the workspace"
+    return text_result(f"worker {outcome.worker_id} started in {where} on: {outcome.task[:120]}")
+
+
+def handle_list_workers(
+    orchestrator: OrchestratorHandle, orchestrator_id: str, session_cost: Any
+) -> dict[str, Any]:
+    """One line per worker plus the ceiling — compact text, never JSON.
+
+    ``session_cost`` is a callable answering "what has this worker spent", kept
+    as an argument rather than read here so this module stays free of the usage
+    service. It is the same figure the board renders.
+    """
+    workers = orchestrator.workers_of(orchestrator_id)
+    budget = orchestrator.budget
+    if not workers:
+        # "None" said out loud, with the next step (CLAUDE.md's three shapes).
+        return text_result(
+            f"no workers — spawn_worker starts one (up to {budget.max_workers} at a time)"
+        )
+    lines = []
+    for worker in workers:
+        state = worker.outcome or "running"
+        cost = session_cost(worker.worker_id)
+        lines.append(
+            f"{worker.worker_id} {state} {worker.slot or '-'} "
+            f"turns={worker.turns} cost=${cost:.2f} :: {worker.task[:60]}"
+        )
+    running = sum(1 for worker in workers if worker.outcome is None)
+    lines.append(
+        f"-- {running}/{budget.max_workers} running, fleet ceiling "
+        f"{budget.max_fleet_turns} turns / ${budget.max_fleet_cost_usd:.2f}"
+    )
+    return text_result(clamp_result("\n".join(lines), LIST_WORKERS.max_result_bytes))
+
+
+def handle_read_worker(
+    orchestrator: OrchestratorHandle, orchestrator_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    worker_id = _arg_str(args, "worker_id")
+    if not worker_id:
+        return error_result("read_worker needs a `worker_id` — list_workers has them.")
+    raw = args.get("chars")
+    window = raw if isinstance(raw, int) and not isinstance(raw, bool) else READ_WINDOW_CHARS
+    return text_result(
+        clamp_result(
+            orchestrator.read(orchestrator_id, worker_id, window), READ_WORKER.max_result_bytes
+        )
+    )
+
+
+def handle_send_to_worker(
+    orchestrator: OrchestratorHandle, orchestrator_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    worker_id = _arg_str(args, "worker_id")
+    text = _arg_str(args, "text")
+    if not worker_id or not text:
+        return error_result("send_to_worker needs `worker_id` and `text`.")
+    outcome = orchestrator.send(orchestrator_id, worker_id, text)
+    if isinstance(outcome, SpawnRefusal):
+        return error_result(clamp_result(outcome.detail, SEND_TO_WORKER.max_result_bytes))
+    return text_result(clamp_result(outcome, SEND_TO_WORKER.max_result_bytes))
+
+
+async def handle_stop_worker(
+    orchestrator: OrchestratorHandle, orchestrator_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    worker_id = _arg_str(args, "worker_id")
+    if not worker_id:
+        return error_result("stop_worker needs a `worker_id` — list_workers has them.")
+    answer = await orchestrator.stop_worker(orchestrator_id, worker_id)
+    return text_result(clamp_result(answer, STOP_WORKER.max_result_bytes))
 
 
 def _office_read_refusal(error: DocumentBridgeError, path: str) -> str:
@@ -427,10 +652,33 @@ async def handle_office_read(reader: OfficeDocumentReader, args: dict[str, Any])
 
 # ---- the registry -----------------------------------------------------------
 
+#: Every session's toolset — office_read included, so every kind can read a
+#: docked document; the orchestrator-only tools live in ``ORCHESTRATOR_TOOLS``.
 AGENT_TOOLS: tuple[AgentToolSpec, ...] = (GET_WORKSPACE_STATE, PRESENT_PLAN, OFFICE_READ)
 
+#: The extra toolset an ``orchestrator`` session carries. Never in the context
+#: of a chat or worker session — see the note above the specs.
+ORCHESTRATOR_TOOLS: tuple[AgentToolSpec, ...] = (
+    SPAWN_WORKER,
+    LIST_WORKERS,
+    READ_WORKER,
+    SEND_TO_WORKER,
+    STOP_WORKER,
+)
 
-def allowed_tool_names() -> list[str]:
-    """Allow-list entries for every registered tool — the session's own tools
-    are not what ``can_use_tool`` exists to gate."""
-    return [spec.qualified_name for spec in AGENT_TOOLS]
+#: Everything the budget test must measure. One list, so a tool that ships in
+#: neither tuple is a tool that does not exist rather than one that dodged the
+#: ceiling.
+ALL_AGENT_TOOLS: tuple[AgentToolSpec, ...] = AGENT_TOOLS + ORCHESTRATOR_TOOLS
+
+
+def tools_for(kind: SessionKind) -> tuple[AgentToolSpec, ...]:
+    """The toolset this kind of session gets. A worker gets the base set: a
+    worker that could spawn workers is a fork bomb with a budget attached."""
+    return AGENT_TOOLS + ORCHESTRATOR_TOOLS if kind == "orchestrator" else AGENT_TOOLS
+
+
+def allowed_tool_names(kind: SessionKind = "chat") -> list[str]:
+    """Allow-list entries for this session's own tools — they are not what
+    ``can_use_tool`` exists to gate."""
+    return [spec.qualified_name for spec in tools_for(kind)]
