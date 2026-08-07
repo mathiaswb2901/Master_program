@@ -1,13 +1,14 @@
 import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
 import { useEffect } from "react";
 
-import { focusPanel } from "../dock";
-import { paneInstance } from "../panes";
+import { dockApiHandle, focusPanel } from "../dock";
+import { paneId, paneInstance, parsePaneId } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
 import type { SessionInfo, SessionState } from "../types";
 import { Chat, statusVisual, TranscriptView } from "./Chat";
+import { revealPane } from "./Panes";
 import { planCommands, planShortcuts } from "./PlanCard";
 
 function SessionRow({ session }: { session: SessionInfo }) {
@@ -58,6 +59,43 @@ function recentSessions(): SessionInfo[] {
 
 /** The ones a pane can be bound to: a pane is somewhere you work. */
 const liveSessions = (): SessionInfo[] => recentSessions().filter((session) => session.live);
+
+/** The session the detach command acts on: the focused agent *pane* if there is
+ * one, else the browser's active chat. Null when neither names a session. */
+function detachTargetSessionId(): string | null {
+  const dock = dockApiHandle();
+  const panelId = dock?.activeGroup?.activePanel?.id ?? dock?.activePanel?.id;
+  if (panelId !== undefined) {
+    const { toolId, instance } = parsePaneId(panelId);
+    if (toolId === "agent" && instance !== null) return instance;
+  }
+  return useStore.getState().activeSessionId;
+}
+
+/**
+ * Detach the focused agent session: record it as reattachable and close the pane
+ * that viewed it, leaving the session running headless (M5 item 15). The pane is
+ * closed only once the record is made, and never when it is the last pane in the
+ * window — an empty dock has no way back — in which case the pane stays and
+ * becomes its own Resume tombstone.
+ */
+function detachFocusedSession(): void {
+  const sessionId = detachTargetSessionId();
+  if (sessionId === null) {
+    useStore.getState().pushToast("warn", "Focus an agent session to detach it.");
+    return;
+  }
+  void useStore
+    .getState()
+    .detachSession(sessionId)
+    .then(() => {
+      if (!(sessionId in useStore.getState().detachedSessions)) return; // detach failed
+      const dock = dockApiHandle();
+      if (dock === null) return;
+      const panel = dock.getPanel(paneId("agent", sessionId));
+      if (panel !== undefined && dock.panels.length > 1) panel.api.close();
+    });
+}
 
 /**
  * Whether a new session would be refused, and what the picker says instead.
@@ -123,34 +161,44 @@ function SessionPane({ sessionId, api }: { sessionId: string; api: DockviewPanel
         .flatMap((group) => group.sessions)
         .find((session) => session.session_id === sessionId)?.title ?? null,
   );
+  // Detached-but-alive: the session is still running here, but the user detached
+  // it (M5 item 15), so a pane onto it must *offer* Resume rather than silently
+  // reconnect — "a restored pane is vetted before it is believed". Distinct from
+  // the truly-gone case below, which is the quiet dead tombstone.
+  const detached = useStore((s) => sessionId in s.detachedSessions);
   // Sessions arrive after the layout does, so "not in the list" means "not yet"
   // until the list has something in it. Judging a restored pane before then
   // would put a "stopped" note over a conversation that is about to appear.
   const loaded = useStore((s) => s.folders.length > 0);
+  // The one condition under which this pane talks to the server: a session that
+  // is running here and has not been detached out from under the pane.
+  const attachable = live && !detached;
 
-  // Both effects wait for `live`, and that gate is the whole discipline:
+  // Both effects wait for `attachable`, and that gate is the whole discipline:
   // `attachSession` opens a socket to `/ws/agent/<id>`, and a restored pane is
   // a *claim* about a session, not evidence of one. A layout saved before the
   // server restarted names an id `SessionManager` no longer has (its sessions
   // are in memory only) — the server answers 4404 and the socket would retry
   // for as long as the tab stayed open, once per dead pane, behind a note
-  // correctly saying the session is gone. `openSession`/`openLiveSession`/
-  // `openSessionById` have always looked the session up before connecting;
-  // this is a pane doing the same. (`ws.ts` refuses to retry a 4404 too — belt
-  // and braces, for a session that dies while its pane is open.)
+  // correctly saying the session is gone. A *detached* session is alive but the
+  // user chose to leave it, so the pane waits for Resume before connecting.
+  // `openSession`/`openLiveSession`/`openSessionById` have always looked the
+  // session up before connecting; this is a pane doing the same. (`ws.ts`
+  // refuses to retry a 4404 too — belt and braces, for a session that dies
+  // while its pane is open.)
   useEffect(() => {
-    if (!live) return;
+    if (!attachable) return;
     useStore.getState().attachSession(sessionId);
-  }, [live, sessionId]);
+  }, [attachable, sessionId]);
 
   useEffect(() => {
-    if (!live) return;
+    if (!attachable) return;
     if (api.isActive) useStore.getState().focusSession(sessionId);
     const subscription = api.onDidActiveChange((event) => {
       if (event.isActive) useStore.getState().focusSession(sessionId);
     });
     return () => subscription.dispose();
-  }, [api, live, sessionId]);
+  }, [api, attachable, sessionId]);
 
   // The tab follows the conversation: a session is "new session" until its
   // first message names it, and a pane still calling it that is a pane you
@@ -158,6 +206,28 @@ function SessionPane({ sessionId, api }: { sessionId: string; api: DockviewPanel
   useEffect(() => {
     if (title !== null) api.setTitle(title);
   }, [api, title]);
+
+  // A detached-but-alive session shows only the Resume tombstone — no chat over
+  // it, because the socket is deliberately not open. Resume clears the mark,
+  // which lets the attach effect above connect and hydrate (#68).
+  if (loaded && attachable === false && live && detached) {
+    return (
+      <div className="wb-pane-single">
+        <div className="wb-pane-note">
+          <span className="wb-pane-note-msg u-truncate">
+            This session is detached — still running, waiting for you.
+          </span>
+          <button
+            type="button"
+            className="wb-btn wb-btn-sm wb-btn-outline"
+            onClick={() => useStore.getState().reattachSession(sessionId)}
+          >
+            Resume
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="wb-pane-single">
@@ -183,8 +253,59 @@ function SessionPane({ sessionId, api }: { sessionId: string; api: DockviewPanel
   );
 }
 
+/** Reattach a detached session into a pane: open (or focus) its pane, then clear
+ * the detached mark so the pane attaches and hydrates its transcript (#68). */
+function reattachIntoPane(sessionId: string): void {
+  revealPane("agent", sessionId);
+  useStore.getState().reattachSession(sessionId);
+}
+
+/** One detached session, offered for reattach. Kept out of the folder list below
+ * so a session is in exactly one place — its own section when detached. */
+function DetachedRow({ session }: { session: SessionInfo }) {
+  return (
+    <div className="wb-session-row is-detached">
+      <span className="wb-dot wb-dot-disk" aria-hidden="true" />
+      <span className="wb-session-title u-truncate" title={session.title}>
+        {session.title}
+      </span>
+      <button
+        type="button"
+        className="wb-btn wb-btn-sm wb-btn-outline"
+        onClick={() => reattachIntoPane(session.session_id)}
+      >
+        Reattach
+      </button>
+    </div>
+  );
+}
+
+/** The detached-but-alive sessions, newest first, with their own header — the
+ * "Detached" affordance a user returns to. Empty renders nothing. */
+function DetachedSessions() {
+  // Select the raw slices and derive in the render body — a selector that
+  // returned the `.filter().sort()` array would hand `useSyncExternalStore` a
+  // fresh reference every call and loop (the pattern `SessionChips` uses).
+  const folders = useStore((s) => s.folders);
+  const detached = useStore((s) => s.detachedSessions);
+  const sessions = folders
+    .flatMap((group) => group.sessions)
+    .filter((session) => session.session_id in detached)
+    .sort((a, b) => b.updated_at - a.updated_at);
+  if (sessions.length === 0) return null;
+  return (
+    <div>
+      <div className="wb-sessions-folder u-label">Detached</div>
+      {sessions.map((session) => (
+        <DetachedRow key={session.session_id} session={session} />
+      ))}
+    </div>
+  );
+}
+
 function AgentBrowser() {
   const folders = useStore((s) => s.folders);
+  const detached = useStore((s) => s.detachedSessions);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const hasTranscript = useStore((s) => s.transcriptView !== null);
   // Same ceiling, same answer as the pane picker's row — a button that is live
@@ -214,16 +335,23 @@ function AgentBrowser() {
         </div>
         <div className="wb-sessions-list">
           {folders.length === 0 && <div className="wb-sessions-none">No sessions yet</div>}
-          {folders.map((group) => (
-            <div key={group.folder}>
-              <div className="wb-sessions-folder u-label u-truncate" title={group.folder}>
-                {group.folder === "" ? "workspace root" : group.folder}
+          <DetachedSessions />
+          {folders.map((group) => {
+            // A detached session lives in its own section above, not here — one
+            // session, one place in the list.
+            const rows = group.sessions.filter((s) => !(s.session_id in detached));
+            if (rows.length === 0) return null;
+            return (
+              <div key={group.folder}>
+                <div className="wb-sessions-folder u-label u-truncate" title={group.folder}>
+                  {group.folder === "" ? "workspace root" : group.folder}
+                </div>
+                {rows.map((session) => (
+                  <SessionRow key={session.session_id} session={session} />
+                ))}
               </div>
-              {group.sessions.map((session) => (
-                <SessionRow key={session.session_id} session={session} />
-              ))}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
       <div className="wb-chat-area">
@@ -422,6 +550,16 @@ export const agentTool: WorkbenchTool = {
       title: "New agent session here",
       detail: () => activeFolder() || "workspace root",
       run: () => void useStore.getState().createSessionIn(activeFolder()),
+    },
+    {
+      // Detach the focused session: it keeps running headless and its pane
+      // closes as a view (M5 item 15). Chordless — a deliberate, occasional act,
+      // not a reflex worth spending an `Alt` a `shortcuts.md` file could bind.
+      id: "session.detach",
+      title: "Detach this session",
+      detail: () => "keeps it running; reattach from Detached",
+      when: () => detachTargetSessionId() !== null,
+      run: detachFocusedSession,
     },
     ...sessionJumps,
     // The plan card lives inside this panel's chat, so its commands are this
