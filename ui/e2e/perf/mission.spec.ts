@@ -107,10 +107,23 @@ test("a four-card board rides out a Grep-heavy turn", async ({ page }, info) => 
 
   const cards = page.locator(".wb-mission .wb-mission-card");
   const input = page.locator(".wb-chat-input textarea");
+  // A full perf lane shares one backend, so earlier specs' sessions are already
+  // on the board — launch.spec seeds six, and a just-created session is a card
+  // the moment it exists (an idle fleet is the common case; services/activity.py
+  // notes a session on creation). The budget is four *added* cards, so count
+  // them against whatever is already here rather than assume the board opened
+  // empty — the same shared-backend reality launch.spec documents. The baseline
+  // is the backend's own session count, and the board is held to it first, so it
+  // is read from a fully-loaded board rather than a half-arrived one.
+  const folders: { sessions: unknown[] }[] = await (
+    await page.request.get("/api/agents/sessions")
+  ).json();
+  const baseline = folders.reduce((total, folder) => total + folder.sessions.length, 0);
+  await expect(cards).toHaveCount(baseline);
   for (let index = 0; index < CARDS; index += 1) {
     await page.getByRole("button", { name: "New session", exact: true }).click();
     await expect(input).toBeVisible();
-    await expect(cards).toHaveCount(index + 1);
+    await expect(cards).toHaveCount(baseline + index + 1);
   }
 
   const before = await readCounts(page);
@@ -130,15 +143,24 @@ test("a four-card board rides out a Grep-heavy turn", async ({ page }, info) => 
   await record(
     info,
     "mission-burst",
-    `${String(CHANGES)} changes reached a ${String(CARDS)}-card board as ` +
+    `${String(CHANGES)} changes reached a ${String(baseline + CARDS)}-card board ` +
+      `(${String(CARDS)} focused-crew cards over a ${String(baseline)}-session backend) as ` +
       `${String(activityFrames)} session_activity frames ` +
       `(${String(after.events - before.events)} /ws/events frames in all); ` +
       `p95 frame ${String(frames.p95Ms)} ms, longest ${String(frames.longestMs)} ms, ` +
       `${String(frames.over50ms)}/${String(frames.frames)} frames over 50 ms`,
-    { fixture: FIXTURE, cards: CARDS, changes: CHANGES, activityFrames, counts: after, frames },
+    {
+      fixture: FIXTURE,
+      cards: baseline + CARDS,
+      added: CARDS,
+      changes: CHANGES,
+      activityFrames,
+      counts: after,
+      frames,
+    },
   );
 
-  await expect(cards).toHaveCount(CARDS); // the fleet really was four cards deep
+  await expect(cards).toHaveCount(baseline + CARDS); // the fleet really was four cards deeper
   expect(
     activityFrames,
     "the burst is being coalesced, not fanned out one frame per call",
