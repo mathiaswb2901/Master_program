@@ -54,6 +54,7 @@ import type {
   StepListNode,
 } from "../types";
 import { VisualView } from "../visual/Visual";
+import { openArtifactPane } from "./VisualPanel";
 
 /** Server caps (models/plans.py) — enforced here so a decision never bounces. */
 const MAX_ANNOTATION = 600;
@@ -423,6 +424,16 @@ function NodeView({
     case "visual":
       return (
         <div className="wb-plan-node">
+          <div className="wb-plan-node-actions">
+            <button
+              type="button"
+              className="wb-btn wb-btn-ghost wb-btn-sm"
+              title="Open this artifact in its own pane for full-screen review"
+              onClick={() => openArtifactPane(planId, node.node_id)}
+            >
+              Expand
+            </button>
+          </div>
           <VisualView
             node={node}
             annotation={{
