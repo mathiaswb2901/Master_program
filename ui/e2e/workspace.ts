@@ -95,6 +95,17 @@ export const BROKEN_SHORTCUT_NAME = "Broken entry";
 export const LAYOUT_SHORTCUT_NAME = "Fleet view";
 export const LAYOUT_SHORTCUT_TARGET = "Agents";
 export const LAYOUT_SHORTCUT_CHORD = "Alt+Y";
+/** The `command` kind (M5 item 4): a file binds a *registered* command by id.
+ * Journey 3 presses its chord and asserts the safe command ran. */
+export const COMMAND_SHORTCUT_NAME = "Flip the theme";
+export const COMMAND_SHORTCUT_TARGET = "view.toggleTheme";
+export const COMMAND_SHORTCUT_CHORD = "Alt+J";
+/** …and one binding a command that re-points the path jail (`workspace.open`,
+ * ROADMAP item 5). It parses fine but the UI refuses to run it — the whole point
+ * of the untrusted-file bar. */
+export const UNSAFE_COMMAND_SHORTCUT_NAME = "Escape the jail";
+export const UNSAFE_COMMAND_SHORTCUT_TARGET = "workspace.open";
+export const UNSAFE_COMMAND_SHORTCUT_CHORD = "Alt+U";
 
 /**
  * Two folders called `target`, seeded to be told apart only by `CACHEDIR.TAG`.
@@ -125,6 +136,22 @@ keys: ${LAYOUT_SHORTCUT_CHORD}
 
 \`\`\`
 ${LAYOUT_SHORTCUT_TARGET}
+\`\`\`
+
+## ${COMMAND_SHORTCUT_NAME}
+type: command
+keys: ${COMMAND_SHORTCUT_CHORD}
+
+\`\`\`
+${COMMAND_SHORTCUT_TARGET}
+\`\`\`
+
+## ${UNSAFE_COMMAND_SHORTCUT_NAME}
+type: command
+keys: ${UNSAFE_COMMAND_SHORTCUT_CHORD}
+
+\`\`\`
+${UNSAFE_COMMAND_SHORTCUT_TARGET}
 \`\`\`
 
 ## ${BROKEN_SHORTCUT_NAME}

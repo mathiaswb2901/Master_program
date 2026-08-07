@@ -19,6 +19,11 @@ const mocks = vi.hoisted(() => ({
     activeTerminalId: null,
     shortcuts: [] as unknown[],
     runShortcut: () => undefined,
+    // A `command` entry runs a registered command; a refused one toasts. Both
+    // are observable here — `toggleTheme` is the safe target, `pushToast` the
+    // refusal channel.
+    pushToast: vi.fn(),
+    toggleTheme: vi.fn(),
   },
   /** Every selector handed to `useStore` — i.e. every subscription taken out.
    * The node suite has no DOM to re-render, so this is where a hook's *claim*
@@ -350,5 +355,88 @@ describe("shortcuts.md extension", () => {
     );
     expect(merged.map((command) => command.keys)).toEqual([["Alt+G"], undefined]);
     expectRegistryInvariants(merged);
+  });
+});
+
+// The `command` kind (M5 item 4): a file binds anything the registry knows, with
+// the untrusted-input bar intact — an unsafe or unknown command never runs.
+describe("shortcuts.md command kind", () => {
+  const runByTitle = (title: string): void => {
+    const command = allCommands().find((candidate) => candidate.title === title);
+    expect(command, `no command titled ${title}`).toBeDefined();
+    command?.run();
+  };
+
+  beforeEach(() => {
+    mocks.state.pushToast.mockClear();
+    mocks.state.toggleTheme.mockClear();
+  });
+
+  it("runs a safe registered command the file names", () => {
+    mocks.state.shortcuts = [entry({ name: "Theme", kind: "command", body: "view.toggleTheme" })];
+    runByTitle("Theme");
+    expect(mocks.state.toggleTheme).toHaveBeenCalledTimes(1);
+    expect(mocks.state.pushToast).not.toHaveBeenCalled();
+  });
+
+  it("refuses a command that reaches a file and does not run it", () => {
+    // `workspace.open` re-points the path jail; a project's own file must not
+    // bind it (ROADMAP item 5). It is a real registered command, so this proves
+    // the *refusal*, not a missing target.
+    mocks.state.shortcuts = [entry({ name: "Escape", kind: "command", body: "workspace.open" })];
+    runByTitle("Escape");
+    expect(mocks.state.pushToast).toHaveBeenCalledTimes(1);
+    expect(mocks.state.pushToast.mock.calls[0]?.[1]).toContain("cannot be bound");
+  });
+
+  // Each registered unsafe command is refused through the *bindability* branch,
+  // not merely "some toast fired": asserting the wording is what tells the
+  // refusal path apart from the unknown-command path, so this would fail if the
+  // denylist were deleted rather than passing on a coincidental toast. The
+  // dynamic recents (`workspace.open.<path>`) are unregistered in this node
+  // context — the recents store is empty and never seeded here — so their
+  // refusal by prefix is proven directly in registry.test.ts against
+  // `isBindableFromFile`, not through this end-to-end wiring.
+  it("refuses each registered unsafe workspace command with a bindability message", () => {
+    for (const id of ["workspace.switch", "workspace.open"]) {
+      mocks.state.pushToast.mockClear();
+      mocks.state.shortcuts = [entry({ name: "Nope", kind: "command", body: id })];
+      runByTitle("Nope");
+      expect(mocks.state.pushToast, id).toHaveBeenCalledTimes(1);
+      expect(mocks.state.pushToast.mock.calls[0]?.[1], id).toContain("cannot be bound");
+    }
+  });
+
+  it("refuses an unknown command with a message rather than running anything", () => {
+    mocks.state.shortcuts = [entry({ name: "Ghost", kind: "command", body: "does.not.exist" })];
+    runByTitle("Ghost");
+    expect(mocks.state.pushToast).toHaveBeenCalledTimes(1);
+    expect(mocks.state.pushToast.mock.calls[0]?.[1]).toContain("no command");
+    expect(mocks.state.toggleTheme).not.toHaveBeenCalled();
+  });
+
+  it("shows the target command id in the QuickBar row, not the file's detail", () => {
+    mocks.state.shortcuts = [
+      entry({ name: "Theme", kind: "command", body: "view.toggleTheme", detail: "totally safe" }),
+    ];
+    const row = allCommands().find((candidate) => candidate.title === "Theme");
+    expect(row?.detail?.()).toBe("command · view.toggleTheme");
+  });
+
+  it("binds an Alt chord to a command entry", () => {
+    mocks.state.shortcuts = [
+      entry({ name: "Theme", kind: "command", body: "view.toggleTheme", keys: "Alt+L" }),
+    ];
+    const resolved = resolveCommand(press("l", { altKey: true }), "terminal", allCommands());
+    expect(resolved?.title).toBe("Theme");
+  });
+
+  it("drops a non-Alt chord from a command entry, keeping the row", () => {
+    mocks.state.shortcuts = [
+      entry({ name: "Theme", kind: "command", body: "view.toggleTheme", keys: "Ctrl+V" }),
+    ];
+    const row = allCommands().find((candidate) => candidate.title === "Theme");
+    expect(row).toBeDefined();
+    expect(row?.keys).toBeUndefined();
   });
 });
