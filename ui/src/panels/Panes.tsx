@@ -377,8 +377,9 @@ export function splitFocusedPane(direction: SplitDirection): void {
 
 /**
  * Where dockview opens a popped-out pane. It is a real same-origin page
- * (`ui/popout.html`, a Rollup input) because dockview navigates a browser window
- * to it and then re-parents the pane's DOM in — Monaco and xterm are *moved*,
+ * (`ui/public/popout.html`, copied verbatim to the build — no module script, so
+ * it is not a Rollup entry) because dockview navigates a browser window to it and
+ * then re-parents the pane's DOM in — Monaco and xterm are *moved*,
  * not recreated, so they survive the trip (asserted in `e2e/popout.spec.ts`).
  */
 const POPOUT_URL = "/popout.html";
@@ -435,14 +436,37 @@ export async function popOutFocusedPane(): Promise<void> {
     toast("warn", reason);
     return;
   }
-  const opened = await dock.addPopoutGroup(group, {
-    popoutUrl: POPOUT_URL,
-    onDidOpen: ({ window }) => themePopoutWindow(window),
-  });
+  // dockview fires `onDidOpenPopoutWindowFail` *synchronously* inside
+  // `addPopoutGroup` when the browser blocks the popup. That event is the layout
+  // system's only signal for the restore case, so `Layouts.tsx` toasts on it —
+  // but it fires on this interactive path too, and this path already reports the
+  // block below with wording aimed at the click the user just made. The guard
+  // tells the restore handler to stay quiet so only one, correctly-worded toast
+  // shows (`popoutInProgress`, read in `Layouts.tsx`'s `onDidOpenPopoutWindowFail`).
+  popoutInProgress = true;
+  let opened: boolean;
+  try {
+    opened = await dock.addPopoutGroup(group, {
+      popoutUrl: POPOUT_URL,
+      onDidOpen: ({ window }) => themePopoutWindow(window),
+    });
+  } finally {
+    popoutInProgress = false;
+  }
   if (!opened) {
     toast("warn", "The browser blocked the pop-out window — allow pop-ups for Workbench and try again.");
   }
 }
+
+/**
+ * True only while an interactive `popOutFocusedPane` is awaiting `addPopoutGroup`.
+ *
+ * `Layouts.tsx`'s `onDidOpenPopoutWindowFail` handler reads it to tell an
+ * interactive pop-out block (which reports itself) from a restore-time one (which
+ * has no other signal) and so avoid stacking two toasts on the same failure.
+ */
+let popoutInProgress = false;
+export const isPoppingOut = (): boolean => popoutInProgress;
 
 /**
  * Return a popped-out pane to the grid — the keyboard path for what closing the

@@ -432,11 +432,21 @@ export const officeHostTool: WorkbenchTool = {
   ],
 };
 
-/** The path of any open document whose native window is docked (or docking)
- * right now, or null. Every such window lives in the default Editor pane, so
- * this is what the pop-out guard reads to refuse popping that pane out. */
+/** The path of the document whose native window is docked (or docking) right
+ * now, or null. Every such window lives in the default Editor pane, so this is
+ * what the pop-out guard reads to refuse popping that pane out — and to name the
+ * *right* application when it does. Several documents can be docked at once (each
+ * `office` tab keeps its `NativeHost` mounted, `EditorArea.tsx`), so the active
+ * tab's host wins when it is itself docked: the refusal then names what the user
+ * is actually looking at, not whichever host was inserted first. It falls back to
+ * any docked host — the pane is blocked regardless of which one it names. */
 function dockedHostPath(): string | null {
-  for (const [path, host] of Object.entries(useOfficeHostStore.getState().hosts)) {
+  const hosts = useOfficeHostStore.getState().hosts;
+  const active = useStore.getState().activePath;
+  if (active !== null && active in hosts && DOCKED_STATES.has(hosts[active].state)) {
+    return active;
+  }
+  for (const [path, host] of Object.entries(hosts)) {
     if (DOCKED_STATES.has(host.state)) return path;
   }
   return null;

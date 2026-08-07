@@ -55,6 +55,8 @@ import { useStore } from "../store";
 import { TOOLS } from "../tools";
 import type { LayoutsResponse, LayoutsState, NamedLayout } from "../types";
 
+import { isPoppingOut } from "./Panes";
+
 import "../styles/layouts.css";
 
 /** Long enough that a drag-resize is one write, short enough that a reload
@@ -461,10 +463,14 @@ function onDockReady(dock: DockviewApi | null): void {
     // A saved layout with a popped-out pane, restored where the browser blocks
     // the popup (no user gesture on load): dockview re-grids those panes into
     // the main window and fires this. The arrangement is intact — just flatter
-    // than it was saved — so it is one quiet line, not an error.
-    dock.onDidOpenPopoutWindowFail(() =>
-      toast("info", "Popped-out panes reopened in the main window."),
-    ),
+    // than it was saved — so it is one quiet line, not an error. dockview also
+    // fires this on the *interactive* pop-out path when a popup is blocked, and
+    // that path (`popOutFocusedPane`) reports the block itself with wording for
+    // the click — so stay quiet while it is in flight and never stack two toasts.
+    dock.onDidOpenPopoutWindowFail(() => {
+      if (isPoppingOut()) return;
+      toast("info", "Popped-out panes reopened in the main window.");
+    }),
   ];
   void restore(dock);
 }
