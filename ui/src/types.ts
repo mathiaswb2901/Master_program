@@ -281,13 +281,14 @@ export interface SessionActivityEvent {
 // `layout` names one of the user's own saved arrangements and moves panels.
 // There is no "run" field by design.
 
-export type ShortcutKind = "shell" | "prompt" | "layout";
+export type ShortcutKind = "shell" | "prompt" | "layout" | "command";
 export type ShortcutSource = "workspace" | "global";
 
 export interface ShortcutEntry {
   name: string;
   kind: ShortcutKind;
-  /** shell/prompt: the text that is inserted. layout: the layout's name. */
+  /** shell/prompt: the text that is inserted. layout: the layout's name.
+   * command: the id of a registered command the UI resolves and runs. */
   body: string;
   /** Single chord ("Alt+G"); null = reachable from the QuickBar only. */
   keys: string | null;

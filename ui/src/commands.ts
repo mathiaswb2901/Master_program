@@ -37,6 +37,7 @@ import { focusPanel } from "./dock";
 import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
 import {
   dynamicCommandsKey,
+  isBindableFromFile,
   panelFocusCommands,
   shortcutAction,
   shortcutHost,
@@ -59,6 +60,17 @@ export interface Command {
   detail?: () => string;
   /** QuickBar grouping. Built-ins are uncategorized and listed first. */
   category?: string;
+  /**
+   * This command must never be bound from a `shortcuts.md` `command` entry.
+   * Default (undefined/false) is bindable — most commands are. Set true on any
+   * command that reaches a filesystem path or re-points the path jail, because a
+   * project's own `.workbench/shortcuts.md` is untrusted input and a binding for
+   * one there would let it move the jail on a keystroke (ROADMAP item 5's
+   * warning about `workspace.open`). The check lives in `registry.ts`
+   * (`isBindableFromFile`), which also carries a denylist for the unsafe
+   * commands whose tool module this layer does not own.
+   */
+  unsafeFromFile?: boolean;
   run: () => void;
 }
 
@@ -176,6 +188,10 @@ export function mergeCommands(
  * acts, `layout`, can do nothing but move panels — see `docs/shortcuts.md`.
  */
 function runShortcut(entry: ShortcutEntry): void {
+  if (entry.kind === "command") {
+    runCommandEntry(entry);
+    return;
+  }
   const action = shortcutAction(TOOLS, entry.kind);
   if (action !== null) {
     action(entry.body);
@@ -184,6 +200,43 @@ function runShortcut(entry: ShortcutEntry): void {
   const host = shortcutHost(TOOLS, entry.kind);
   if (host !== null) focusPanel(host);
   useStore.getState().runShortcut(entry);
+}
+
+/**
+ * The registered commands a `command` entry may target: built-ins plus the
+ * registry's dynamic commands, and deliberately **not** the file's own entries —
+ * a `shortcuts.md` command cannot chain into another shortcut, only into
+ * something the app itself registered. This is the same list `allCommands`
+ * resolves against, so what a file can bind is exactly what the registry knows.
+ */
+function registeredCommands(): Command[] {
+  return [...builtinCommands(), ...toolDynamicCommands(TOOLS)];
+}
+
+/**
+ * Carry out a `command` entry: resolve its body against the registry and run the
+ * command it names — but only if it is known, bindable from a file, and
+ * available right now. A file is untrusted input, so an entry naming an unknown
+ * or unsafe command is refused with a toast and **never runs** (ROADMAP item 4);
+ * this is the UI half of the bar the server cannot enforce, because only this
+ * side holds the registry.
+ */
+function runCommandEntry(entry: ShortcutEntry): void {
+  const warn = (message: string): void => useStore.getState().pushToast("warn", message);
+  const target = registeredCommands().find((command) => command.id === entry.body);
+  if (target === undefined) {
+    warn(`${entry.name}: no command “${entry.body}”`);
+    return;
+  }
+  if (!isBindableFromFile(target)) {
+    warn(`${entry.name}: “${entry.body}” cannot be bound from a shortcuts file`);
+    return;
+  }
+  if (target.when?.() === false) {
+    warn(`${entry.name}: “${entry.body}” is not available right now`);
+    return;
+  }
+  target.run();
 }
 
 /**

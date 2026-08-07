@@ -2,8 +2,8 @@
 
 Your personal shortcuts, in one markdown file you write like a note. Every entry shows
 up in the QuickBar (`Ctrl+Shift+P`), can carry its own keybinding, and either inserts a
-shell snippet or a prompt template into whatever you are working in, or switches the
-window to one of your saved layouts.
+shell snippet or a prompt template into whatever you are working in, switches the window
+to one of your saved layouts, or runs one of the commands the app already knows.
 
 ## Where it lives
 
@@ -28,17 +28,29 @@ This is a rule, not a default:
 - A `prompt` entry is **appended to the chat box** of the active agent session. You press
   Send.
 - A `layout` entry **switches the window to one of your saved layouts**, by name. It is
-  the one kind that acts rather than inserts, and the reason it may is that moving panels
-  is the only thing it can do: no text reaches a shell or an agent, no file is touched,
-  and a name you never saved is a message, not a guess. Its body is one line, no longer
-  than a layout name — it cannot carry a payload.
-- The QuickBar shows a shell entry's **actual snippet** next to its name, and a layout
-  entry's **actual layout**, not the `detail:` line from the file, so a row cannot
-  describe itself as one thing and do another.
+  one of the two kinds that act rather than insert, and the reason it may is that moving
+  panels is the only thing it can do: no text reaches a shell or an agent, no file is
+  touched, and a name you never saved is a message, not a guess. Its body is one line, no
+  longer than a layout name — it cannot carry a payload.
+- A `command` entry **runs one of the commands the app already knows**, named by its id
+  (`layout.save`, `pane.split.right`, `view.toggleTheme`, …). This is the kind that lets
+  your file reach *anything the registry knows* — a command is bindable the day it is
+  added, with no change here. Its safety is the same bar `layout` clears, drawn one place
+  tighter: a command that could **reach a file or move the workspace** — opening a folder
+  and deleting a saved layout are the ones — declares itself off-limits to a shortcuts
+  file, because your project's own
+  `.workbench/shortcuts.md` is untrusted input. An entry naming such a command, or a
+  command that does not exist, is refused with a message and never runs.
+- The QuickBar shows a shell entry's **actual snippet** next to its name, a layout
+  entry's **actual layout**, and a command entry's **actual command id**, not the
+  `detail:` line from the file, so a row cannot describe itself as one thing and do
+  another.
 
-There is no `run: true` option and there will not be one. Opening someone else's
-workspace can add rows to your QuickBar and rearrange your panels; it cannot run a
-command, send a prompt, or read a file.
+There is no `run: true` option and there will not be one. A `command` entry does run a
+command — but only one the app itself registered and marked safe for a file, never a
+shell line, a prompt, or a path. Opening someone else's workspace can add rows to your
+QuickBar, rearrange your panels, and fire safe registered commands; it cannot type into a
+shell, send a prompt, open a folder, or read a file.
 
 ## Format
 
@@ -47,13 +59,19 @@ code block is the body. Anything else in the file — a title, prose, notes — 
 
 | Key | Meaning |
 |---|---|
-| `type` | `shell` (default), `prompt` or `layout`. A fence tagged with a kind selects it too — ` ```prompt `, ` ```layout ` — while ` ```powershell ` stays a shell body. |
+| `type` | `shell` (default), `prompt`, `layout` or `command`. A fence tagged with a kind selects it too — ` ```prompt `, ` ```layout `, ` ```command ` — while ` ```powershell ` stays a shell body. |
 | `keys` | One chord, e.g. `Alt+G`. **Must include `Alt`.** Optional. |
-| `detail` | One line shown next to the name in the QuickBar — `prompt` entries only; `shell` and `layout` rows show what they will actually do instead. Optional. |
+| `detail` | One line shown next to the name in the QuickBar — `prompt` entries only; `shell`, `layout` and `command` rows show what they will actually do instead. Optional. |
 
 A `layout` body is the name of a layout: one of the built-ins (`Default`, `Review`,
 `Focus`, `Agents`) or one you saved yourself from the layout chip in the status bar.
 Names are matched without case.
+
+A `command` body is a registered command's id. The QuickBar's command mode
+(`Ctrl+Shift+P`) is the catalogue: every row there is a command you can bind by id. Most
+are bindable; the few that open a folder, move the workspace, or delete a saved layout
+are not, and an entry naming one — or an id that does not exist — becomes a message
+rather than a binding.
 
 `Alt` is the only modifier a shortcuts file may take, and it is the one that works:
 plain keys are never intercepted, and inside the terminal or editor only `Alt` and
@@ -102,6 +120,14 @@ keys: Alt+Y
 ```
 Agents
 ```
+
+## Save this layout
+type: command
+keys: Alt+L
+
+```
+layout.save
+```
 ````
 
 ## When something is wrong
@@ -113,11 +139,18 @@ the app toasts the first problem with a count of the others. Common ones:
 |---|---|
 | `no fenced code block` | heading with no ``` block under it |
 | `unterminated code fence` | a ``` that never closes — everything below it is swallowed |
-| `unknown type 'x'` | `type:` is not `shell`, `prompt` or `layout` |
+| `unknown type 'x'` | `type:` is not `shell`, `prompt`, `layout` or `command` |
 | `shell body must be a single line` | see the safety rule above |
 | `shell body must be printable text` | the snippet carries a control byte (tab, `Esc`, …) |
 | `layout body must be a single line naming a layout` | a `layout` body is one name, nothing else |
 | `layout name longer than 60 characters` | no layout can be called that |
+| `command body must be a single line naming a command` | a `command` body is one id, nothing else |
 | `chord … must include Alt` | `Alt` is the only modifier a file may bind |
 | `chord … is a built-in shortcut` | pick another chord; built-ins win |
 | `duplicate name in this file` | two `##` headings with the same text |
+
+A `command` entry naming an unknown command, or one that opens a folder, moves the
+workspace, or deletes a saved layout, loads fine but shows its refusal when you run it
+(`no command "…"`, or
+`"…" cannot be bound from a shortcuts file`) — the file is never the place those decide
+what runs, so the row is inert rather than silently missing.

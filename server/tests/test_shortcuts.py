@@ -144,6 +144,55 @@ def test_layout_fence_language_selects_the_layout_kind() -> None:
     assert parsed.entries[0].kind == "layout"
 
 
+def test_command_entry_carries_the_command_id() -> None:
+    """The kind that binds anything the registry knows. Its body is a command id,
+    and the parser guarantees only its shape — the UI resolves and vets the id."""
+    parsed = parse_shortcuts(
+        _file(_block("Save layout", "type: command\nkeys: Alt+L", "layout.save")),
+        "workspace",
+        "f.md",
+    )
+    assert parsed.problems == []
+    assert [(e.name, e.kind, e.body, e.keys) for e in parsed.entries] == [
+        ("Save layout", "command", "layout.save", "Alt+L")
+    ]
+
+
+def test_command_fence_language_selects_the_command_kind() -> None:
+    parsed = parse_shortcuts(
+        _file("## Split\n\n```command\npane.split.right\n```"), "workspace", "f.md"
+    )
+    assert parsed.problems == []
+    assert parsed.entries[0].kind == "command"
+    assert parsed.entries[0].body == "pane.split.right"
+
+
+@pytest.mark.parametrize("body", ["view.toggleTheme\nlayout.save", "view.\ttoggleTheme"])
+def test_multi_line_command_body_is_refused(body: str) -> None:
+    """A command entry names one command; anything else is not a command id."""
+    parsed = parse_shortcuts(_file(_block("Sneaky", "type: command", body)), "workspace", "f.md")
+    assert parsed.entries == []
+    assert "single line" in parsed.problems[0].message
+
+
+def test_overlong_command_id_is_refused() -> None:
+    parsed = parse_shortcuts(_file(_block("Long", "type: command", "x" * 200)), "workspace", "f.md")
+    assert parsed.entries == []
+    assert "longer than" in parsed.problems[0].message
+
+
+def test_a_command_chord_without_alt_is_still_rejected() -> None:
+    """The Alt-only rule is per file, not per kind: a command entry cannot take a
+    plain or Ctrl chord any more than a shell one can."""
+    parsed = parse_shortcuts(
+        _file(_block("Grabby", "type: command\nkeys: Ctrl+V", "view.toggleTheme")),
+        "workspace",
+        "f.md",
+    )
+    assert parsed.entries[0].keys is None  # the row survives, only the binding goes
+    assert "must include Alt" in parsed.problems[0].message
+
+
 def test_a_fenced_shell_language_is_still_a_shell_entry() -> None:
     """Widening the fence rule to every kind must not reclassify ```powershell."""
     text = _file("## Build\n\n```powershell\nuv run pytest\n```")
