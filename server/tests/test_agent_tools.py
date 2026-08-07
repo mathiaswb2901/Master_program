@@ -521,3 +521,24 @@ class TestOfficeWriteBudget:
             reader, {"path": "notes.docx", "paragraph": 2, "content": body}
         )
         assert len(result_text(result).encode()) <= OFFICE_WRITE.max_result_bytes
+
+    async def test_a_confirmation_over_budget_is_clamped_without_mojibake(self) -> None:
+        # The echo is capped at OFFICE_WRITE_ECHO_CHARS, but the confirmation
+        # interpolates the *path* verbatim, so a pathological path (deep,
+        # non-ASCII) pushes the sentence past the ceiling. This forces
+        # clamp_result's truncation branch on the write path — the mirror of the
+        # read path's forced-overflow tests — and asserts the byte-budget
+        # backstop holds and a cut mid-character produces no mojibake.
+        path = "Åsen 2/" * 100 + "notes.xlsx"  # ~800 chars, over the 512-byte cap
+        edit = CellEdit(sheet="Notes", a1_cell="A1", written_chars=7)
+        reader = _Reader(
+            DocStructure(kind="excel", sheets=[SheetDim(name="Notes", rows=1, cols=1)]),
+            edit=edit,
+        )
+        result = await handle_office_write(
+            reader, {"path": path, "sheet": "Notes", "cell": "A1", "content": "Åsen 2"}
+        )
+        text = result_text(result)
+        assert len(text.encode()) <= OFFICE_WRITE.max_result_bytes
+        assert text.endswith("…")  # proof the truncation branch actually engaged
+        assert "�" not in text

@@ -792,7 +792,7 @@ class OfficeHostService:
         ("reading"/"writing"). One guard, so read and write refuse identically."""
         host = self._live_host_for(path)
         if host is None:
-            verb = gerund[:-3] if gerund.endswith("ing") else gerund
+            verb = {"reading": "read", "writing": "write"}[gerund]
             raise DocNotHostedError(
                 f"{path} is not docked in Workbench; open it first, then {verb} it"
             )

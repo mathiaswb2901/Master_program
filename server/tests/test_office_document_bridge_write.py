@@ -233,8 +233,12 @@ class TestExcel:
 class TestRefusals:
     async def test_a_document_that_is_not_docked(self, tmp_path: Path) -> None:
         service, _ = _service(tmp_path)
-        with pytest.raises(DocNotHostedError):
+        with pytest.raises(DocNotHostedError) as caught:
             await service.write_document("missing.docx", content="x", paragraph=0)
+        # The shared _live_document guard phrases the imperative verb per caller;
+        # the write path must read "then write it", not the "then writ it" a naive
+        # gerund[:-3] slice would produce.
+        assert "then write it" in str(caught.value)
         text = _text(
             await handle_office_write(
                 service, {"path": "missing.docx", "content": "x", "paragraph": 0}
