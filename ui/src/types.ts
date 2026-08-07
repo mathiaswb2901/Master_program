@@ -1327,3 +1327,66 @@ export interface WorkspaceChangedEvent {
 export interface AuthTokenResponse {
   token: string;
 }
+
+// ---- sessions.py ------------------------------------------------------------
+// Detachable working sessions (M5 item 15). A named session is a manifest that
+// ties a workspace + an arrangement + its live agents/leases into one thing a
+// user can leave and return to. Held server-side under the machine's app data
+// dir, GLOBAL: queried by workspace, never re-rooted by a switch. This is the
+// PR2 persistence surface only — no UI wired yet (PR3). `arrangement` is
+// dockview's `api.toJSON()` output, opaque here exactly as a layout's `state`.
+
+/** A live agent a session owns, by reference — the SDK session is server-side. */
+export interface AgentRef {
+  /** dockview panel id of the pane that views this agent. */
+  pane_key: string;
+  /** The server-side SDK session id the pane is a view onto. */
+  sdk_session_id: string;
+  /** Workspace-relative folder the agent is bound to ("" = root). */
+  folder: string;
+}
+
+/** A worktree lease a session holds, by reference — the slot lives in the pool. */
+export interface LeaseRef {
+  slot: string;
+  lease_id: string;
+}
+
+export interface NamedSession {
+  id: string;
+  name: string;
+  /** Absolute path of the workspace this session belongs to, OS-native form. */
+  workspace: string;
+  /** dockview's `api.toJSON()` arrangement. Opaque; null = none captured yet. */
+  arrangement: unknown;
+  agents: AgentRef[];
+  leases: LeaseRef[];
+  created_at: number;
+  last_attached_at: number;
+}
+
+/** POST body — the server assigns id/created_at/last_attached_at. Named
+ * distinctly from the agent-session `CreateSessionRequest` above: the wire's TS
+ * namespace is flat where the server's is per-module. */
+export interface CreateNamedSessionRequest {
+  name: string;
+  workspace: string;
+  arrangement?: unknown;
+  agents?: AgentRef[];
+  leases?: LeaseRef[];
+}
+
+/** PUT body — the whole manifest minus the fields the server owns. */
+export interface UpdateNamedSessionRequest {
+  name: string;
+  workspace: string;
+  arrangement?: unknown;
+  agents?: AgentRef[];
+  leases?: LeaseRef[];
+}
+
+export interface SessionsResponse {
+  sessions: NamedSession[];
+  /** Why the sessions file was ignored, if it was. Never fatal. */
+  problem: string | null;
+}
