@@ -11,6 +11,15 @@ Four measured facts shape it:
   **private** instance: a pid that did not exist before. Plain ``Dispatch``
   would hand back whatever Word the user already had open, which is the one
   thing hosting must never touch.
+* Excel needs one more wall. ``DispatchEx`` gives us its own Excel process, but
+  Excel is a DDE server: the next workbook the user double-clicks in Explorer
+  (or ``start book.xlsx``) is routed to *some* running instance, and a fresh
+  automation one is a candidate — the same isolation the ``excel.exe /x``
+  command-line flag exists for. ``Application.IgnoreRemoteRequests = True`` is
+  the in-process equivalent and is set the moment the instance is identified
+  (:func:`_isolate_instance`), so the user's workbooks open in *their* Excel and
+  never land in the one Workbench is hosting. Word has no such server and needs
+  no such wall.
 * The window is reached through ``doc.ActiveWindow.Hwnd`` and then
   ``GetAncestor(GA_ROOT)`` — Word has no ``Application.Hwnd``. Excel does, and
   is asked directly.
@@ -392,6 +401,9 @@ def _identify(
     # Alerts off before anything is opened: a "file in use" prompt would block
     # the open behind a modal on a window the user cannot see yet.
     _silence_alerts(app, kind)
+    # And, for Excel, walled off from the user's other workbooks before the open
+    # — the `/x` isolation, done in-process (see the module docstring).
+    _isolate_instance(app, kind)
     deadline = time.monotonic() + FRAME_WAIT_S
     seen: dict[int, int] = {}
     while time.monotonic() < deadline:
@@ -528,6 +540,28 @@ def _silence_alerts(app: Any, kind: HostAppKind) -> None:
         _com_call(setattr, app, "DisplayAlerts", with_value)
     except Exception as error:  # not fatal: it only changes what a failure looks like
         log.debug("office_host.alerts_not_silenced", kind=kind, detail=str(error))
+
+
+def _isolate_instance(app: Any, kind: HostAppKind) -> None:
+    """Keep the user's other workbooks out of the instance we launched.
+
+    The in-process equivalent of ``excel.exe /x``. Excel answers DDE open
+    requests, so a workbook launched from Explorer or the shell can land in *any*
+    running instance, ours included — which would put a document the user opened
+    into the window Workbench is hosting, exactly the takeover the ownership
+    rules exist to prevent. ``IgnoreRemoteRequests = True`` closes that door.
+
+    Excel only: Word runs no such server, and the property does not exist on it.
+    Non-fatal — a wall that will not go up only widens what a stray open could
+    do, it does not fail the launch — and set on the same principle as
+    :func:`_silence_alerts`: before ``Documents.Open`` can be raced.
+    """
+    if kind != "excel":
+        return
+    try:
+        _com_call(setattr, app, "IgnoreRemoteRequests", True)
+    except Exception as error:  # not fatal: it only changes what a stray open does
+        log.debug("office_host.excel_not_isolated", detail=str(error))
 
 
 def _restore_alerts(app: Any, kind: HostAppKind) -> None:
