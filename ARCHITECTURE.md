@@ -374,11 +374,12 @@ in-process calls where the model and the user dominate.
 | `routers/usage.py` | `GET /api/usage` (the account's plan limits, as last reported) |
 | `routers/layouts.py` | `GET`/`PUT /api/layouts` (this workspace's saved arrangements) |
 | `routers/workspaces.py` | `GET /api/workspace`, `POST /api/workspace/switch` (the root, and the recent list) |
+| `routers/sessions.py` | `GET/POST/PUT/DELETE /api/sessions`: named detachable working sessions (M5 item 15), queried by workspace |
 | `routers/worktrees.py` | list/acquire/release/renew/prune the managed worktree pool |
 | `routers/office_host.py` | open/list/move/detach/close a hosted document; `GET /api/office/capabilities` |
 | `services/workspace.py` | path jail (root is mutable — see below), atomic writes, hashing, `list_dir` (one listing), `top_level_dirs`, `tree` (the search index's walk) |
 | `services/workspaces.py` | switching the root at runtime: validation, the one list of everything that re-roots, the recent list |
-| `services/app_data.py` | where machine-local state lives (`%LOCALAPPDATA%\Workbench`) — the pool root and the recent workspaces, never a `.workbench/` folder |
+| `services/app_data.py` | where machine-local state lives (`%LOCALAPPDATA%\Workbench`) — the pool root, the recent workspaces (`workspaces.json`) and the named sessions (`sessions.json`), never a `.workbench/` folder |
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
@@ -392,6 +393,7 @@ in-process calls where the model and the user dominate.
 | `services/skills_bundle.py` | locates `skills_bundle/`, the bundled skills plugin shipped as package data |
 | `services/shortcuts.py` | shortcuts.md parser + merge + live reload |
 | `services/layouts.py` | `.workbench/layouts.json`: atomic write, and a read that never raises |
+| `services/sessions.py` | `<app data>/sessions.json`: named working sessions, CRUD, version-stamped, atomic write, a read that never raises; GLOBAL (queried by workspace, not re-rooted) |
 | `services/worktrees.py` | the managed worktree pool: borrowed detached checkouts, leases, dirty protection |
 | `services/provenance.py` | correlates agent tool calls with watcher events; who changed a file |
 | `services/activity.py` | the same tool calls one moment earlier: what every session is touching right now; bounded, coalesced, in-memory only |
@@ -1399,6 +1401,20 @@ root that actually won.
   case-insensitively because Windows paths are, and a folder that is gone is
   listed as unavailable rather than forgotten. An unreadable or foreign-version
   file costs the history and nothing else.
+- **Named sessions live beside the recents, and are global for the same reason —
+  but are *not* re-rooted by a switch.** `<app data>/sessions.json`
+  (`services/sessions.py`, M5 item 15 PR2) holds the detachable working sessions:
+  each is a manifest tying a workspace + a dockview arrangement + references to
+  its live agents and worktree leases into one thing a user can leave and return
+  to. It copies the recents file's discipline exactly (version-stamped, atomic
+  tmp-then-`os.replace` with the Windows-lock retry, utf-8-sig read, never raises
+  on a bad file). Unlike `layouts.json` it is machine-local, not per-project: one
+  project can host more than one named session, and a session is a thing you
+  return to from anywhere. So the store is **queried by** workspace rather than
+  **rooted at** one — it owns no `set_workspace_root` and is deliberately absent
+  from `WorkspaceService`'s rootables. Switching the current project changes which
+  sessions a window asks to see, never which sessions exist. (PR2 is the headless
+  persistence + REST surface; the attach/detach UI is PR3.)
 - **The UI adopts, it does not reload.** `store.adoptWorkspace()` throws away
   everything keyed to the old root (open editors, the tree, provenance, session
   groups) and re-reads; then `notifyWorkspaceChanged(TOOLS, root)` tells every
