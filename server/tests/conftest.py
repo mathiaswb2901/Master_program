@@ -29,6 +29,17 @@ def no_ambient_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for key in [k for k in os.environ if k.startswith("WORKBENCH_")]:
         monkeypatch.delenv(key, raising=False)
+    # Enforcement is the shipped default now (config.enforce_auth=True, M5 item 8
+    # PR4), but the broad unit/integration suite asserts behavior orthogonal to
+    # auth and builds dozens of apps/clients that send no token. Rather than
+    # thread a token through every one, this run is enforcement-OFF by default —
+    # the same "a working machine behaves like a bare runner" reasoning as the
+    # scrub above. Enforcement itself is proven where it belongs: the dedicated
+    # middleware tests in test_local_auth.py opt in with Settings(enforce_auth=True)
+    # (init kwargs beat env), and the live E2E + perf suites run the shipped
+    # default ON with the browser self-authenticating. A test that wants the
+    # default value reads it after delenv-ing this var (see test_config.py).
+    monkeypatch.setenv("WORKBENCH_ENFORCE_AUTH", "0")
 
 
 @pytest.fixture
@@ -73,5 +84,10 @@ def app_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 async def client(settings: Settings) -> AsyncIterator[AsyncClient]:
     app = create_app(settings)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    # Present the per-launch token on every REST call by default, so this client
+    # authenticates whether or not the app it drives enforces (a test that flips
+    # Settings(enforce_auth=True) still gets 2xx here). Ignored when enforcement
+    # is off, which is this suite's default (see no_ambient_settings).
+    headers = {"X-Workbench-Token": app.state.auth_token}
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c

@@ -16,10 +16,11 @@ because it must gate the WebSocket handshake as well as HTTP — and the
 handshake is only visible at the ASGI ``scope['type'] == 'websocket'`` layer,
 before any route runs.
 
-``enforce`` is the rollout seam. When it is ``False`` — the shipped default of
-the first PR — every request passes through untouched, so the plumbing lands
-with zero behavior change. A later PR flips it on once the client injects the
-token and sends a local Origin.
+``enforce`` is the rollout seam, now ON by default (M5 item 8, PR4). With it
+on, the token is required on REST + WS and the WS handshake is gated on Origin;
+the whole client and both test harnesses present the token. Setting it to
+``False`` — ``WORKBENCH_ENFORCE_AUTH=0`` — makes the middleware a pass-through
+again, kept as a debugging escape hatch, not the shipped default.
 """
 
 from collections.abc import Callable
@@ -83,6 +84,25 @@ def _ws_subprotocol_token(scope: Scope) -> str | None:
     return None
 
 
+def ws_subprotocol_to_echo(scope: Scope) -> str | None:
+    """The full ``workbench.auth.<token>`` label a WS endpoint must echo on accept.
+
+    A browser **fails** any handshake whose offered subprotocol the server does
+    not echo back in the 101 response, so every WS endpoint accepts with this:
+    ``await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))``. It returns
+    the label verbatim (not just the token) because that whole string is what the
+    ``Sec-WebSocket-Protocol`` response header must repeat. ``None`` when the
+    client offered no token label — native and test clients that authenticate by
+    header, or don't authenticate at all — which accepts with no subprotocol,
+    exactly as before this PR. The token *validation* already happened in the
+    middleware before the endpoint ran; this only mirrors the label back.
+    """
+    for proto in scope.get("subprotocols", []):
+        if proto.startswith(WS_TOKEN_SUBPROTOCOL_PREFIX):
+            return str(proto)
+    return None
+
+
 class LocalAuthMiddleware:
     """Gate REST + WS on a per-launch token, and WS additionally on Origin.
 
@@ -104,7 +124,7 @@ class LocalAuthMiddleware:
         self._is_local_origin = is_local_origin
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # The whole point of the rollout flag: wired but inert until flipped.
+        # The rollout flag: a pass-through only when forced off for debugging.
         if not self._enforce:
             await self._app(scope, receive, send)
             return

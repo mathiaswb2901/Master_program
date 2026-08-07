@@ -27,6 +27,7 @@ from workbench_server.models.office_host import (
     SetBoundsRequest,
     SetVisibleRequest,
 )
+from workbench_server.services.local_auth import ws_subprotocol_to_echo
 from workbench_server.services.office import OfficeService
 from workbench_server.services.office_host import (
     HostNotFoundError,
@@ -162,6 +163,9 @@ async def host_channel(ws: WebSocket) -> None:
     if channel is None:
         await ws.close(code=1011, reason="native Office hosting is not configured")
         return
-    await ws.accept()
+    # Echo the offered token subprotocol (middleware already validated it), or a
+    # browser fails the handshake. The desktop shell is the only real client; it
+    # offers the token as a subprotocol like every other socket.
+    await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))
     with contextlib.suppress(WebSocketDisconnect, RuntimeError):
         await channel.serve(ws)
