@@ -254,3 +254,66 @@ class OfficeCapabilities(BaseModel):
     fallback: Literal["native", "onlyoffice", "preview"]
     #: One line naming the reason for the verdict, for the UI and the logs.
     detail: str
+
+
+#: Whether Office considers itself licensed to edit. ``unknown`` is a first-class
+#: answer, not a failure: the honest report when the machine will not say (a
+#: registry that does not carry it, a probe that could not run, a non-Windows
+#: host). Never guessed — an ``unknown`` degrades the UI to "sign into Word to
+#: edit", which is safe, where a fabricated ``licensed`` would strand the user
+#: at a read-only window with no explanation.
+LicenseState = Literal["licensed", "unlicensed", "unknown"]
+
+
+class OfficeAccount(BaseModel):
+    """One Microsoft account this machine's Office has cached.
+
+    Both halves are best-effort: Office stores a ``FriendlyName`` and an
+    ``EmailAddress`` per identity, but either can be absent, so either can be
+    ``None``. An account with neither is not reported at all — it would name
+    nobody.
+    """
+
+    #: The account's display name, e.g. "Ada Lovelace". None when Office has
+    #: cached no friendly name for it.
+    display_name: str | None = None
+    #: The account's email / UPN. None when Office has cached no address.
+    email: str | None = None
+
+
+class OfficeIdentity(BaseModel):
+    """GET /api/office/identity — which Microsoft account the machine's Office is
+    signed in as, and whether it is licensed to edit.
+
+    Reported honestly, never guessed, in the same spirit as
+    :class:`OfficeCapabilities`: where a value cannot be determined it is
+    ``None`` / ``unknown``, not fabricated. A docked native Office is the user's
+    own local install and runs as their signed-in account — this is the read
+    that lets the UI show "signed in as X" and degrade an unsigned or unlicensed
+    instance to a "sign into Word to edit" card rather than a silently limited
+    one.
+
+    This PR **reads** identity only. Multi-account *switching* — pinning a hosted
+    instance to a chosen account — is a separate, spike-first problem (there is
+    no clean COM property for it), and nothing here attempts it.
+    """
+
+    #: A Microsoft account is signed into Office on this machine. False when none
+    #: is cached, when the probe could not run, or off Windows.
+    signed_in: bool
+    #: The account a launched instance would run as, when it can be told apart
+    #: from the rest. None when nobody is signed in, or when several accounts are
+    #: signed in and the registry alone does not say which is active — an honest
+    #: "cannot tell", never a guess.
+    active: OfficeAccount | None = None
+    #: Every Microsoft account Office has cached on this machine. Empty when none
+    #: is signed in — read the ``detail`` to tell "none signed in" from "could
+    #: not read".
+    accounts: list[OfficeAccount] = Field(default_factory=list)
+    #: Whether Office reports itself licensed to edit. ``unknown`` where the
+    #: machine will not say; the UI degrades on ``unknown`` exactly as on
+    #: ``unlicensed``.
+    license: LicenseState = "unknown"
+    #: One line naming what was found, for the UI and the logs, in the same
+    #: honest style as :attr:`OfficeCapabilities.detail`.
+    detail: str
