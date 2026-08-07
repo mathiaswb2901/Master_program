@@ -284,6 +284,17 @@ class AgentSession:
         """The :class:`SessionBridge` half of ``local_id`` — see that Protocol."""
         return self.local_id
 
+    def transcript_sources(self) -> tuple[Path, list[str]]:
+        """Where this conversation's transcripts live: its folder and every SDK
+        id it has run under. The transcript reader (``session_index``) stitches
+        those files into one replay so a client reattaching after a reload sees
+        the whole conversation, not the empty chat a forward-only socket leaves.
+
+        Read-only, and deliberately a plain accessor: it observes the session,
+        it does not touch the state machine. More than one id is the resume case
+        (Claude Code mints a fresh id per resume — see ``sdk_session_ids``)."""
+        return self.folder, list(self.sdk_session_ids)
+
     # ---- listener plumbing -------------------------------------------------
 
     def subscribe(self) -> asyncio.Queue[BaseModel]:

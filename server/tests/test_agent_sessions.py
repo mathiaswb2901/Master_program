@@ -4,6 +4,7 @@ live smoke test in test_live_agent.py)."""
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -1143,3 +1144,105 @@ def test_resumed_transcript_stays_suppressed_after_a_turn(tmp_path: Path) -> Non
         assert local_id in ids  # the live entry represents the conversation
         assert "old-transcript" not in ids  # resumed-from transcript still suppressed
         assert "sdk-fresh" not in ids  # fresh-id transcript suppressed as well
+
+
+@pytest.mark.timeout(60)
+def test_live_transcript_replays_the_union_of_a_resumed_conversation_in_order(
+    tmp_path: Path,
+) -> None:
+    """``GET /api/agents/{local_id}/transcript`` is what a reloaded window replays
+    from: the socket only carries a session forward, so without this a reload
+    opens a live socket over a blank chat. It must resolve the live session's SDK
+    ids and return the *union* of their transcripts, oldest leg first — a resumed
+    conversation lives under more than one id and both halves are the same chat."""
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    projects = tmp_path / "projects"
+    settings = Settings(workspace_root=workspace_root, claude_projects_dir=projects)
+    app = create_app(settings)
+    script = [delta("continuing"), ResultMessage(session_id="sdk-fresh")]
+    app.state.session_manager = SessionManager(
+        settings.resolved_workspace(),
+        make_factory(script),
+        max_sessions=4,
+        session_index=app.state.session_index,
+    )
+
+    project_dir = projects / encode_project_dir(settings.resolved_workspace())
+    project_dir.mkdir(parents=True)
+
+    def user_line(text: str) -> str:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+
+    def assistant_line(text: str) -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            }
+        )
+
+    # The resumed-from leg (older on disk).
+    old = project_dir / "old-transcript.jsonl"
+    old.write_text(user_line("original ask") + "\n" + assistant_line("first answer"), "utf-8")
+
+    with TestClient(app) as client:
+        resumed = client.post(
+            "/api/agents/sessions",
+            json={"folder": "", "resume_session_id": "old-transcript"},
+        )
+        local_id = resumed.json()["session_id"]
+
+        with client.websocket_connect(f"/ws/agent/{local_id}") as ws:
+            ws.send_text(json.dumps({"type": "user_message", "text": "keep going"}))
+            while json.loads(ws.receive_text())["type"] != "turn_done":
+                pass
+
+        # The SDK persisted the resumed conversation under its fresh id (newer leg).
+        fresh = project_dir / "sdk-fresh.jsonl"
+        fresh.write_text(user_line("keep going") + "\n" + assistant_line("second answer"), "utf-8")
+        # Pin the order the union is read in: fresh is strictly newer than old.
+        os.utime(old, (1_000, 1_000))
+        os.utime(fresh, (2_000, 2_000))
+
+        body = client.get(f"/api/agents/{local_id}/transcript")
+        assert body.status_code == 200
+        payload = body.json()
+        assert payload["session_id"] == local_id
+        assert [(m["role"], m["text"]) for m in payload["messages"]] == [
+            ("user", "original ask"),
+            ("assistant", "first answer"),
+            ("user", "keep going"),
+            ("assistant", "second answer"),
+        ]
+
+    # A local id no live session holds is a 404, not an empty transcript: the
+    # disk-only path is `GET /transcript`, and conflating them would let a dead
+    # pane look like a live one with nothing said in it.
+    with TestClient(app) as client:
+        assert client.get("/api/agents/does-not-exist/transcript").status_code == 404
+
+
+@pytest.mark.timeout(60)
+def test_live_transcript_of_a_session_that_has_run_nothing_is_empty_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """A brand-new live session has no SDK id and no transcript yet. Replaying it
+    is a normal "nothing to show", never a 404 or a crash — the reload guard on
+    the client fetches unconditionally and must get an empty list, not an error."""
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    settings = Settings(workspace_root=workspace_root, claude_projects_dir=tmp_path / "projects")
+    app = create_app(settings)
+    app.state.session_manager = SessionManager(
+        settings.resolved_workspace(),
+        make_factory([ResultMessage()]),
+        max_sessions=4,
+        session_index=app.state.session_index,
+    )
+
+    with TestClient(app) as client:
+        local_id = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+        body = client.get(f"/api/agents/{local_id}/transcript")
+        assert body.status_code == 200
+        assert body.json() == {"session_id": local_id, "messages": []}

@@ -138,6 +138,28 @@ def transcript(request: Request, folder: str = "", session_id: str = "") -> Tran
     return TranscriptResponse(session_id=session_id, messages=messages)
 
 
+@router.get("/{local_id}/transcript")
+def live_transcript(request: Request, local_id: str) -> TranscriptResponse:
+    """A LIVE session's transcript, so a client that (re)connects after a reload
+    can replay the conversation that streamed while it was away.
+
+    ``/ws/agent/{id}`` only carries a session *forward* — it replays pending
+    permission and plan cards on connect but never the text and tool rows
+    already streamed — so a reloaded window opens a live socket over a blank
+    chat (the client holds chat state in memory). This fills that gap from disk:
+    the union of the session's SDK transcripts (a resume adds a fresh id, hence
+    more than one) read in mtime order. 404 when no live session has this id —
+    a transcript that is only on disk is served by ``GET /transcript`` instead.
+    """
+    manager: SessionManager = request.app.state.session_manager
+    index: SessionIndex = request.app.state.session_index
+    session = manager.get(local_id)
+    if session is None:
+        raise HTTPException(404, "unknown session")
+    folder, sdk_ids = session.transcript_sources()
+    return TranscriptResponse(session_id=local_id, messages=index.read_transcripts(folder, sdk_ids))
+
+
 @router.put("/ui-state")
 def put_ui_state(request: Request, body: UiState) -> OkResponse:
     store: UiStateStore = request.app.state.ui_state_store
