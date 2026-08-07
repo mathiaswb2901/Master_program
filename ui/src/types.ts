@@ -1102,6 +1102,43 @@ export interface OfficeCapabilities {
   detail: string;
 }
 
+// ---- office identity (M4) ---------------------------------------------------
+// Mirrors server/models/office_host.py: which Microsoft account the machine's
+// Office is signed in as, read-only and best-effort. The panel degrades from
+// this, never from a guess — `null`/`unknown` where the machine will not say.
+
+/** Whether Office reports itself licensed to edit. `unknown` is a first-class
+ * answer, not a failure: the honest report when the machine will not say. The UI
+ * degrades on `unknown` exactly as on `unlicensed`, never a fabricated
+ * `licensed`. */
+export type LicenseState = "licensed" | "unlicensed" | "unknown";
+
+/** One Microsoft account Office has cached. Both halves are best-effort — either
+ * can be null — and an account with neither is not reported at all. */
+export interface OfficeAccount {
+  /** Display name, e.g. "Ada Lovelace"; null when Office cached none. */
+  display_name: string | null;
+  /** Email / UPN; null when Office cached none. */
+  email: string | null;
+}
+
+/** GET /api/office/identity — which account the machine's Office is signed in as,
+ * and whether it is licensed to edit. Read-only and never guessed. */
+export interface OfficeIdentity {
+  /** A Microsoft account is signed into Office on this machine. */
+  signed_in: boolean;
+  /** The account a launched instance would run as, when it can be told apart
+   * from the rest; null when nobody is signed in, or several are and the
+   * registry alone cannot say which — an honest "cannot tell", never a guess. */
+  active: OfficeAccount | null;
+  /** Every account Office has cached; empty when none is signed in (read
+   * `detail` to tell "none signed in" from "could not read"). */
+  accounts: OfficeAccount[];
+  license: LicenseState;
+  /** One line naming what was found, for the UI and the logs. */
+  detail: string;
+}
+
 // ---- worktrees.py -----------------------------------------------------------
 // The managed worktree pool: borrowed git worktrees so parallel agents get one
 // writer per checkout. Slots live OUTSIDE the workspace (under the machine's

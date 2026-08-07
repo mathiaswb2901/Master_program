@@ -20,6 +20,7 @@ import type {
   OfficeCapabilities,
   OfficeHostInfo,
   OfficeHostList,
+  OfficeIdentity,
   OfficeLastSave,
   OfficeStatus,
   OkResponse,
@@ -196,6 +197,11 @@ export const postOfficeForcesave = (path: string): Promise<CallbackResponse> =>
 
 export const getOfficeCapabilities = (): Promise<OfficeCapabilities> =>
   request("/api/office/capabilities");
+
+/** Which Microsoft account this machine's Office is signed in as, and whether it
+ * is licensed to edit. Read-only and best-effort; the panel degrades from it. */
+export const getOfficeIdentity = (): Promise<OfficeIdentity> =>
+  request("/api/office/identity");
 
 export const openOfficeHost = (body: OpenHostRequest): Promise<OfficeHostInfo> =>
   request("/api/office/host", jsonInit("POST", body));

@@ -46,6 +46,11 @@ test("a .docx docks, and the panel names the application holding it", async ({ p
   // the fake must never be quiet about.
   await expect(page.locator(".wb-office-note")).toContainText("Simulated host");
 
+  // The machine's Office sign-in shows as one quiet line: the fake backend
+  // reports a signed-in, licensed "Analyst", so the panel says who is signed in
+  // rather than the "sign into Word to edit" degrade.
+  await expect(page.locator(".wb-office-identity")).toHaveText(/Signed in as Analyst/);
+
   await expect(page.locator(".wb-editor-tab").filter({ hasText: DOCX_FILE })).toBeVisible();
   expect(consoleErrors).toEqual([]);
 });
