@@ -1,0 +1,59 @@
+/* A visual artifact expanded into its own pane (M5 item 3, PR 4).
+
+   Zero raw colours: every value is a token from design/tokens.css. The artifact
+   itself is drawn by the shared `.wb-vis` renderer (visual.css) and annotated by
+   the shared `.wb-plan-note*` chrome (plan.css); this file is only the pane's own
+   frame — a scrolling column with a heading, so a full-screen review has room to
+   scroll rather than the chat column's 760px cap. */
+
+.wb-artifact-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-panel);
+  overflow: auto;
+}
+
+.wb-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-6);
+  /* Room to breathe at full screen, but never edge-to-edge on a wide window —
+     a chart 1800px wide is unreadable, not impressive (DESIGN.md §6.3). */
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.wb-artifact-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.wb-artifact-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-artifact-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The Expand affordance on a plan card's visual node: a ghost control at the
+   top-right of the drawing, so it recedes until wanted (DESIGN.md §1.1). Lives
+   here rather than in plan.css because it only exists for this pane. */
+.wb-plan-node-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-3);
+}
