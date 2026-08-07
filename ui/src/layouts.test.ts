@@ -332,6 +332,85 @@ describe("a layout with several panes of the same tool", () => {
   });
 });
 
+// ---- popping a pane out to its own window (M5 item 13) -----------------------
+
+/**
+ * A saved layout with one pane popped out to its own window. dockview serializes
+ * a popout as an entry under `popoutGroups`, whose `data` is the group in the
+ * other window and whose `gridReferenceGroup` names the grid group it re-grids
+ * into when the window closes or the layout restores (`dockviewComponent.toJSON`).
+ */
+const poppedOutLayout = (gridReferenceGroup: string): Json => ({
+  grid: {
+    root: {
+      type: "branch",
+      size: 600,
+      data: [leaf("g1", ["files"], "files"), leaf("g2", ["editors"], "editors")],
+    },
+    width: 1040,
+    height: 600,
+    orientation: "HORIZONTAL",
+  },
+  panels: {
+    files: { id: "files", contentComponent: "files", title: "Files" },
+    editors: { id: "editors", contentComponent: "editors", title: "Editor" },
+    scratchpad: { id: "scratchpad", contentComponent: "scratchpad", title: "Scratchpad" },
+  },
+  activeGroup: "g1",
+  popoutGroups: [
+    {
+      data: { id: "gp1", views: ["scratchpad"], activeView: "scratchpad" },
+      gridReferenceGroup,
+      position: { top: 100, left: 200, width: 640, height: 480 },
+      url: "/popout.html",
+    },
+  ],
+});
+
+const KNOWN_PLUS_SCRATCHPAD = vocab(["files", "editors", "scratchpad"]);
+
+describe("pruning a layout with a popped-out pane", () => {
+  it("round-trips a popout whose reference group survives", () => {
+    const layout = poppedOutLayout("g2");
+    const pruned = pruneLayout(layout, KNOWN_PLUS_SCRATCHPAD);
+    expect(pruned?.dropped).toEqual([]);
+    expect(pruned?.droppedPanes).toEqual([]);
+    // Kept whole: the popped-out pane, its window position and the group it
+    // returns to all survive the trip so the next launch reopens it there.
+    expect(asJson(pruned?.layout).popoutGroups).toEqual(layout.popoutGroups);
+  });
+
+  it("drops a popout whose gridReferenceGroup no longer exists", () => {
+    // The reference names a grid group this layout never had — nowhere to
+    // re-grid, so restoring it would fail. The panes in the grid are untouched.
+    const pruned = pruneLayout(poppedOutLayout("gGONE"), KNOWN_PLUS_SCRATCHPAD);
+    expect(pruned?.dropped).toEqual([]);
+    expect(asJson(pruned?.layout)).not.toHaveProperty("popoutGroups");
+    expect(Object.keys(asJson(asJson(pruned?.layout).panels)).sort()).toEqual([
+      "editors",
+      "files",
+      "scratchpad",
+    ]);
+  });
+
+  it("drops a popout whose reference group collapsed when its panels went away", () => {
+    // g2 held only `editors`; with editors unregistered g2 collapses out of the
+    // grid, so the popout that pointed at it has lost its home the same way.
+    const pruned = pruneLayout(poppedOutLayout("g2"), vocab(["files", "scratchpad"]));
+    expect(pruned?.dropped).toEqual(["editors"]);
+    expect(asJson(pruned?.layout)).not.toHaveProperty("popoutGroups");
+  });
+
+  it("still drops a popout when its own pane is unaddressable, reference or not", () => {
+    // The popped-out pane itself is gone (scratchpad unregistered): the entry
+    // goes regardless of the reference, by the same `pruneGroup` pass floating
+    // groups use.
+    const pruned = pruneLayout(poppedOutLayout("g2"), vocab(["files", "editors"]));
+    expect(pruned?.dropped).toEqual(["scratchpad"]);
+    expect(asJson(pruned?.layout)).not.toHaveProperty("popoutGroups");
+  });
+});
+
 // ---- presets ----------------------------------------------------------------
 
 const Stub = () => null;

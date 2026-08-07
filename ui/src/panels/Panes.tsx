@@ -58,11 +58,13 @@ import {
 import {
   paneInstanceOptions,
   paneTitle,
+  popoutRefusal,
   type PaneChoice,
   type ToolCommand,
   type WorkbenchTool,
 } from "../registry";
 import { useStore, type QuickPickRow } from "../store";
+import { documentTheme } from "../theme";
 import { TOOLS } from "../tools";
 
 import "../styles/panes.css";
@@ -371,6 +373,127 @@ export function splitFocusedPane(direction: SplitDirection): void {
   splitGroup(group, direction);
 }
 
+// ---- popping a pane out to its own window -----------------------------------
+
+/**
+ * Where dockview opens a popped-out pane. It is a real same-origin page
+ * (`ui/public/popout.html`, copied verbatim to the build — no module script, so
+ * it is not a Rollup entry) because dockview navigates a browser window to it and
+ * then re-parents the pane's DOM in — Monaco and xterm are *moved*,
+ * not recreated, so they survive the trip (asserted in `e2e/popout.spec.ts`).
+ */
+const POPOUT_URL = "/popout.html";
+
+/**
+ * Carry the app's theme into the popped-out document.
+ *
+ * dockview copies the main window's stylesheets into the popout on its `load`
+ * event, so the design tokens arrive — but the `data-theme` attribute that
+ * selects the light palette is on the main document's `<html>`, and that is not
+ * copied. `popout.html` sets it from `localStorage` before first paint; this
+ * mirrors the *live* theme (which may be a flip the user has not persisted yet),
+ * once now and again on load in case the document is still the blank pre-nav one.
+ */
+function themePopoutWindow(win: Window): void {
+  const apply = (): void => {
+    try {
+      const el = win.document.documentElement;
+      if (documentTheme() === "light") el.setAttribute("data-theme", "light");
+      else el.removeAttribute("data-theme");
+    } catch {
+      // The window was closed, or is briefly cross-origin mid-navigation.
+    }
+  };
+  apply();
+  win.addEventListener("load", apply);
+}
+
+/**
+ * Pop the focused pane out into a separate window, unless a pane in it refuses.
+ *
+ * The refusal is the gating safety decision (M5 item 13): a native Office window
+ * docked in a pane has no HWND in a popped-out window's parent chain, so it
+ * cannot follow and must not be orphaned. Every panel in the target group is put
+ * to the registry's `popoutGuard`s — not the office store directly, because the
+ * office host is a document view inside an `editors#…` pane, not a pane of its
+ * own — and one blocking reason refuses the whole group.
+ *
+ * `addPopoutGroup` resolves `false` when the browser blocked the popup; dockview
+ * has already put the group back by then, so the only thing left is to say so.
+ */
+export async function popOutFocusedPane(): Promise<void> {
+  const dock = dockApiHandle();
+  const group = dock === null ? undefined : focusedGroup(dock);
+  if (dock === null || group === undefined) {
+    toast("warn", "No pane is focused — click one first.");
+    return;
+  }
+  const reason = popoutRefusal(
+    TOOLS,
+    group.panels.map((panel) => panel.id),
+  );
+  if (reason !== null) {
+    toast("warn", reason);
+    return;
+  }
+  // dockview fires `onDidOpenPopoutWindowFail` *synchronously* inside
+  // `addPopoutGroup` when the browser blocks the popup. That event is the layout
+  // system's only signal for the restore case, so `Layouts.tsx` toasts on it —
+  // but it fires on this interactive path too, and this path already reports the
+  // block below with wording aimed at the click the user just made. The guard
+  // tells the restore handler to stay quiet so only one, correctly-worded toast
+  // shows (`popoutInProgress`, read in `Layouts.tsx`'s `onDidOpenPopoutWindowFail`).
+  popoutInProgress = true;
+  let opened: boolean;
+  try {
+    opened = await dock.addPopoutGroup(group, {
+      popoutUrl: POPOUT_URL,
+      onDidOpen: ({ window }) => themePopoutWindow(window),
+    });
+  } finally {
+    popoutInProgress = false;
+  }
+  if (!opened) {
+    toast("warn", "The browser blocked the pop-out window — allow pop-ups for Workbench and try again.");
+  }
+}
+
+/**
+ * True only while an interactive `popOutFocusedPane` is awaiting `addPopoutGroup`.
+ *
+ * `Layouts.tsx`'s `onDidOpenPopoutWindowFail` handler reads it to tell an
+ * interactive pop-out block (which reports itself) from a restore-time one (which
+ * has no other signal) and so avoid stacking two toasts on the same failure.
+ */
+let popoutInProgress = false;
+export const isPoppingOut = (): boolean => popoutInProgress;
+
+/**
+ * Return a popped-out pane to the grid — the keyboard path for what closing the
+ * popout window already does (dockview re-grids it at its `gridReferenceGroup`).
+ *
+ * Prefers the focused pane when it is the popped-out one, so with several out at
+ * once the command acts on the one the user is pointed at; otherwise it takes
+ * any. Closing the window is what triggers dockview's own re-grid — there is no
+ * public "move this popout back" call, and closing is the same path a restart or
+ * a blocked popup takes.
+ */
+export function popInFocusedPane(): void {
+  const dock = dockApiHandle();
+  if (dock === null) return;
+  const focused = focusedGroup(dock);
+  const candidate =
+    focused !== undefined && focused.api.location.type === "popout"
+      ? focused
+      : dock.groups.find((group) => group.api.location.type === "popout");
+  const location = candidate?.api.location;
+  if (location === undefined || location.type !== "popout") {
+    toast("warn", "No pane is popped out.");
+    return;
+  }
+  location.getWindow().close();
+}
+
 // ---- the split affordance ---------------------------------------------------
 
 function SplitRightIcon() {
@@ -490,6 +613,10 @@ const chords: Record<string, string[]> = {
   "pane.split.down": ["Alt+Shift+S"],
   "pane.cycle": ["Alt+O"],
   "pane.close": ["Alt+X"],
+  // `Alt+P` — **p**op out, the one letter left in the tmux set. Pop-in is
+  // chordless like cycle-back: it is the rarer half and reachable from the
+  // QuickBar, so it does not spend an `Alt` a `shortcuts.md` file could bind.
+  "pane.popout": ["Alt+P"],
   ...Object.fromEntries(
     PANE_DIRECTIONS.map((direction) => [`pane.focus.${direction}`, [`Alt+${ARROW[direction]}`]]),
   ),
@@ -538,6 +665,19 @@ export const panesTool: WorkbenchTool = {
       title: "Close this pane",
       category: PANES_CATEGORY,
       run: closeFocusedPane,
+    },
+    {
+      id: "pane.popout",
+      title: "Pop this pane out to its own window",
+      detail: () => "moves it to a separate window; a docked Office window refuses",
+      category: PANES_CATEGORY,
+      run: () => void popOutFocusedPane(),
+    },
+    {
+      id: "pane.popin",
+      title: "Bring a popped-out pane back in",
+      category: PANES_CATEGORY,
+      run: popInFocusedPane,
     },
   ],
   shortcuts: chords,

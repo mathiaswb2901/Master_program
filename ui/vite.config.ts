@@ -115,6 +115,14 @@ function bundleMetafile(): Plugin {
 
 export default defineConfig({
   plugins: [react(), bundleMetafile()],
+  // `index.html` is the app and the *only* Rollup entry — a second one splits the
+  // launch cost across two chunks and fails the bundle budget (`e2e/perf/
+  // bundle.spec.ts`, which asserts exactly one entry chunk). `popout.html` is the
+  // blank same-origin page dockview opens with `window.open('/popout.html')` when
+  // a pane is popped out to its own window (M5 item 13, `ui/src/panels/Panes.tsx`).
+  // It carries no module script — only an inline theme guard — so it needs no
+  // bundling: it lives in `public/` and Vite copies it verbatim to `dist/
+  // popout.html`, served at `/popout.html` in dev, `vite preview`, and the build.
   server: { proxy },
   // `vite preview` serves the built bundle; it needs the same proxy so the E2E
   // suite (and anyone eyeballing a production build) talks to a live backend.
