@@ -1,9 +1,11 @@
-"""Local-API security hardening (M5 item 8 / OSS-bar item 1), PR1: plumbing.
+"""Local-API security hardening (M5 item 8 / OSS-bar item 1): enforcement.
 
-The middleware is wired but shipped inert (``enforce_auth=False``), so the
-enforcement paths are exercised here by building an app — and the middleware
-directly — with ``enforce=True``. The last group asserts the shipped default is
-a pure pass-through, which is what lets the rest of the suite stay untouched.
+Enforcement is the shipped default now (PR4, ``enforce_auth=True``). The suite
+runs it off (conftest sets ``WORKBENCH_ENFORCE_AUTH=0`` so the broad suite need
+not thread a token), so the enforcement paths are exercised here by building an
+app — and the middleware directly — with ``enforce=True``: token-gated REST, the
+WS Origin/token handshake, the per-endpoint subprotocol echo, and the CORS
+ordering that keeps a 403 readable to a browser.
 """
 
 import asyncio
@@ -12,11 +14,15 @@ import socket
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping
+from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from starlette.types import Receive, Scope, Send
+from starlette.websockets import WebSocketDisconnect
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
@@ -24,9 +30,16 @@ from workbench_server.services.local_auth import (
     WS_CLOSE_POLICY,
     LocalAuthMiddleware,
     is_local_origin,
+    ws_subprotocol_to_echo,
 )
 
 TOKEN = "sekret-launch-token"
+LOCAL_ORIGIN = "http://localhost:5173"
+
+
+def _label(token: str) -> str:
+    return f"workbench.auth.{token}"
+
 
 # --- is_local_origin ---------------------------------------------------------
 
@@ -276,12 +289,59 @@ async def test_token_handout_refuses_foreign_origin(settings: Settings) -> None:
     assert resp.status_code == 403
 
 
-async def test_default_app_does_not_enforce(settings: Settings) -> None:
-    # The shipped default: a tokenless gated call sails through, so the rest of
-    # the suite (which sends no token) is untouched.
+def test_config_default_enforces(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The shipped default is enforcement ON (M5 item 8, PR4). The test suite runs
+    # it off (conftest sets WORKBENCH_ENFORCE_AUTH=0 so the broad suite need not
+    # thread a token); read the real default by dropping that override first.
+    monkeypatch.delenv("WORKBENCH_ENFORCE_AUTH", raising=False)
+    assert Settings(workspace_root=tmp_path).enforce_auth is True
+
+
+def test_enforcement_can_be_forced_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The debugging escape hatch: WORKBENCH_ENFORCE_AUTH=0 turns the middleware
+    # back into a pass-through without editing code.
+    monkeypatch.setenv("WORKBENCH_ENFORCE_AUTH", "0")
+    assert Settings(workspace_root=tmp_path).enforce_auth is False
+
+
+async def test_enforced_app_forbids_tokenless_rest(settings: Settings) -> None:
+    settings = settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN})
     async with await _app_client(settings) as client:
         resp = await client.get("/api/layouts")
-    assert resp.status_code != 403
+    assert resp.status_code == 403
+
+
+async def test_enforced_app_allows_tokened_rest(settings: Settings) -> None:
+    settings = settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN})
+    async with await _app_client(settings) as client:
+        resp = await client.get("/api/layouts", headers={"X-Workbench-Token": TOKEN})
+    assert resp.status_code == 200
+
+
+async def test_enforced_app_lets_options_preflight_through(settings: Settings) -> None:
+    # CORS preflight carries no credentials; it must reach the CORS layer without
+    # a token or a browser can never make the real call that follows it.
+    settings = settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN})
+    async with await _app_client(settings) as client:
+        resp = await client.options(
+            "/api/layouts",
+            headers={
+                "origin": "http://localhost:5173",
+                "access-control-request-method": "GET",
+            },
+        )
+    assert resp.status_code < 400
+    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+async def test_enforced_app_serves_token_handout_without_a_token(settings: Settings) -> None:
+    # The bootstrap endpoint stays reachable with no token (chicken-and-egg): it
+    # is how a fresh client obtains one. Guarded on local Origin/Host instead.
+    settings = settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN})
+    async with await _app_client(settings) as client:
+        resp = await client.get("/api/auth/token", headers={"host": "localhost:8787"})
+    assert resp.status_code == 200
+    assert resp.json() == {"token": TOKEN}
 
 
 async def test_default_app_mints_a_token(settings: Settings) -> None:
@@ -357,3 +417,115 @@ async def test_ws_reject_delivers_policy_close_code_over_real_server(settings: S
             with pytest.raises(websockets.exceptions.ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=10)
             assert ws.close_code == WS_CLOSE_POLICY
+
+
+async def test_ws_echoes_offered_subprotocol_over_real_server(settings: Settings) -> None:
+    # The browser-critical half: a browser fails any handshake whose offered
+    # subprotocol the server does not echo. `websockets` does not enforce that,
+    # so we assert the echo explicitly — the server must repeat the exact label.
+    import websockets
+    from websockets.typing import Subprotocol
+
+    settings = settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN})
+    with _live_server(settings) as port:
+        uri = f"ws://127.0.0.1:{port}/ws/events"
+        async with websockets.connect(uri, subprotocols=[Subprotocol(_label(TOKEN))]) as ws:
+            assert ws.subprotocol == _label(TOKEN)
+
+
+# --- the subprotocol echo, on every WS endpoint (TestClient) -----------------
+#
+# The middleware validates the token from the offered subprotocol; the endpoint
+# must then *echo* that exact label on accept, or a browser fails the handshake.
+# The echo is one shared helper (`ws_subprotocol_to_echo`) called from all four
+# endpoints, exercised here end to end through the full ASGI stack.
+
+
+def test_ws_subprotocol_to_echo_returns_the_offered_label() -> None:
+    assert ws_subprotocol_to_echo({"subprotocols": [_label(TOKEN)]}) == _label(TOKEN)
+
+
+def test_ws_subprotocol_to_echo_is_none_without_a_token_label() -> None:
+    # A native/test client that authenticates by header, or offers unrelated
+    # subprotocols, gets a plain accept (subprotocol=None) — unchanged behavior.
+    assert ws_subprotocol_to_echo({"subprotocols": []}) is None
+    assert ws_subprotocol_to_echo({"subprotocols": ["graphql-ws", "chat"]}) is None
+
+
+def _enforced_app(settings: Settings) -> FastAPI:
+    return create_app(settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN}))
+
+
+#: The endpoints whose handshake needs no prior REST setup. `/ws/agent/{id}` is
+#: covered separately because it 404s an unknown session before it can accept.
+_SIMPLE_WS_PATHS = ["/ws/events", "/ws/terminal", "/ws/office-host"]
+
+
+@pytest.mark.parametrize("path", _SIMPLE_WS_PATHS)
+def test_ws_echoes_offered_subprotocol(settings: Settings, path: str) -> None:
+    with (
+        TestClient(_enforced_app(settings)) as client,
+        client.websocket_connect(
+            path, subprotocols=[_label(TOKEN)], headers={"origin": LOCAL_ORIGIN}
+        ) as ws,
+    ):
+        assert ws.accepted_subprotocol == _label(TOKEN)
+
+
+@pytest.mark.parametrize("path", _SIMPLE_WS_PATHS)
+def test_ws_without_token_is_rejected(settings: Settings, path: str) -> None:
+    with (
+        TestClient(_enforced_app(settings)) as client,
+        client.websocket_connect(path, headers={"origin": LOCAL_ORIGIN}) as ws,
+        pytest.raises(WebSocketDisconnect) as exc,
+    ):
+        ws.receive_text()
+    assert exc.value.code == WS_CLOSE_POLICY
+
+
+def test_ws_wrong_subprotocol_token_is_rejected(settings: Settings) -> None:
+    with (
+        TestClient(_enforced_app(settings)) as client,
+        client.websocket_connect(
+            "/ws/events", subprotocols=[_label("nope")], headers={"origin": LOCAL_ORIGIN}
+        ) as ws,
+        pytest.raises(WebSocketDisconnect) as exc,
+    ):
+        ws.receive_text()
+    assert exc.value.code == WS_CLOSE_POLICY
+
+
+def test_ws_foreign_origin_is_rejected_through_app(settings: Settings) -> None:
+    with (
+        TestClient(_enforced_app(settings)) as client,
+        client.websocket_connect(
+            "/ws/events", subprotocols=[_label(TOKEN)], headers={"origin": "http://evil.com"}
+        ) as ws,
+        pytest.raises(WebSocketDisconnect) as exc,
+    ):
+        ws.receive_text()
+    assert exc.value.code == WS_CLOSE_POLICY
+
+
+def test_ws_agent_echoes_offered_subprotocol(tmp_path: Path) -> None:
+    # The fourth endpoint, which needs a live session id first. Fake-agent mode
+    # gives one with no Claude login; the REST create carries the token too.
+    settings = Settings(
+        workspace_root=tmp_path,
+        claude_projects_dir=tmp_path / "projects",
+        fake_agent=True,
+        enforce_auth=True,
+        auth_token=TOKEN,
+    )
+    with TestClient(create_app(settings)) as client:
+        resp = client.post(
+            "/api/agents/sessions", json={"folder": ""}, headers={"X-Workbench-Token": TOKEN}
+        )
+        assert resp.status_code == 200
+        local_id = resp.json()["session_id"]
+        with client.websocket_connect(
+            f"/ws/agent/{local_id}",
+            subprotocols=[_label(TOKEN)],
+            headers={"origin": LOCAL_ORIGIN},
+        ) as ws:
+            assert ws.accepted_subprotocol == _label(TOKEN)

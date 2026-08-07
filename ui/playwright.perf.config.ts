@@ -45,6 +45,12 @@ const SERVER_PORT = 8790;
 const UI_PORT = 4175;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
+// Enforced per-launch auth token (M5 item 8, PR4). Pinned so the perf specs'
+// out-of-band `page.request.*` / `request.put` calls (`window.ts`,
+// `mission.spec.ts`, `launch.spec.ts`) authenticate; the app carries its own on
+// its own traffic. Same rationale as `playwright.config.ts`.
+const AUTH_TOKEN = "perf-fixed-auth-token-do-not-ship";
+
 /** Session storage lives *outside* the fixture on purpose: inside, it would be
  * a directory the file tree walks and the folder list reports, so the server
  * would be measuring a workspace it had just changed. Derived rather than
@@ -85,6 +91,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${UI_PORT}`,
     trace: "retain-on-failure",
     video: "off",
+    extraHTTPHeaders: { "X-Workbench-Token": AUTH_TOKEN },
   },
   projects: [{ name: "perf", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
@@ -92,6 +99,7 @@ export default defineConfig({
       command: `uv run --project "${REPO_ROOT}" workbench-server`,
       cwd: PERF_WORKSPACE,
       env: {
+        WORKBENCH_AUTH_TOKEN: AUTH_TOKEN,
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: PERF_WORKSPACE,
         WORKBENCH_CLAUDE_PROJECTS_DIR: path.join(PROJECTS_DIR, "projects"),

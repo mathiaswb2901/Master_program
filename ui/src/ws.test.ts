@@ -168,16 +168,16 @@ describe("ReconnectingSocket", () => {
   });
 
   it("opens every socket with the subprotocol list wsProtocols() decides", () => {
-    // Gated off today (the server does not echo the label yet), so the list is
-    // empty and a reconnect re-reads the same empty list — the socket is still
-    // wired through wsProtocols(), which is what flips when the server echoes.
+    // The server echoes the label now (PR4), so a token resolves to the
+    // `workbench.auth.<token>` offer — and a reconnect re-reads it, so the
+    // resumed socket authenticates the same way the first one did.
     getTokenMock.mockReturnValue("T-sock");
     new ReconnectingSocket("/ws/events", { onMessage: () => undefined });
-    expect(latest().protocols).toEqual([]);
+    expect(latest().protocols).toEqual(["workbench.auth.T-sock"]);
 
     latest().ended(1006);
     vi.advanceTimersByTime(500);
-    expect(latest().protocols).toEqual([]);
+    expect(latest().protocols).toEqual(["workbench.auth.T-sock"]);
   });
 });
 
@@ -188,14 +188,12 @@ describe("wsTokenProtocol", () => {
 });
 
 describe("wsProtocols", () => {
-  // Held off until the server echoes the subprotocol: a browser fails a
-  // handshake whose offered subprotocol is not echoed back, and the WS
-  // endpoints accept() with none today. So the offer is empty even with a
-  // token — the REST path carries it instead (api.ts). Flipping OFFER_WS_TOKEN
-  // on is the WS half of enabling enforcement (PR4), paired with a server echo.
-  it("does not offer the token while the server does not echo it", () => {
+  // The server echoes the offered subprotocol now (PR4), so a resolved token is
+  // offered as `workbench.auth.<token>` — the transport a browser WebSocket
+  // uses to present the token, since it cannot set a header the way api.ts does.
+  it("offers the token as a subprotocol once one has resolved", () => {
     getTokenMock.mockReturnValue("abc123");
-    expect(wsProtocols()).toEqual([]);
+    expect(wsProtocols()).toEqual(["workbench.auth.abc123"]);
   });
 
   it("is empty when no token has resolved", () => {
