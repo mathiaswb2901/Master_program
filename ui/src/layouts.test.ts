@@ -325,6 +325,7 @@ describe("a layout with several panes of the same tool", () => {
       "conversations",
       "editors",
       "terminal",
+      "visual",
     ]);
     expect(real.components.has("files")).toBe(true);
     expect(real.plural.has("files")).toBe(false);
