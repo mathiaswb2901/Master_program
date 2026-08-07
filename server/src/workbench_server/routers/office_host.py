@@ -22,6 +22,7 @@ from workbench_server.models.office_host import (
     OfficeCapabilities,
     OfficeHostInfo,
     OfficeHostList,
+    OfficeIdentity,
     OpenHostRequest,
     SetBoundsRequest,
     SetVisibleRequest,
@@ -66,6 +67,14 @@ def capabilities(request: Request) -> OfficeCapabilities:
     OnlyOffice, or read-only preview. The UI degrades from this, never from a
     guess."""
     return _hosts(request).capabilities(_office(request).enabled)
+
+
+@router.get("/identity")
+async def identity(request: Request) -> OfficeIdentity:
+    """Which Microsoft account this machine's Office is signed in as, and whether
+    it is licensed to edit. Read-only and best-effort: ``unknown`` / ``None``
+    where the machine will not say, so the UI degrades from a fact."""
+    return await _hosts(request).identity()
 
 
 @router.post("/host")

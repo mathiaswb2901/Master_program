@@ -50,6 +50,7 @@ from workbench_server.models.office_host import (
     OfficeHostEvent,
     OfficeHostInfo,
     OfficeHostList,
+    OfficeIdentity,
     OfficeNativeMode,
     PanelRect,
     host_app_kind,
@@ -67,6 +68,7 @@ from workbench_server.services.office_host.document_bridge import (
 )
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
 from workbench_server.services.office_host.fake_document_bridge import FakeDocumentBridge
+from workbench_server.services.office_host.identity import fake_identity, probe_identity
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.office_host.shell_channel import ShellChannel
 from workbench_server.services.office_host.state import ForeignProcessError, HostLifecycle
@@ -297,6 +299,19 @@ class OfficeHostService:
             fallback="native" if native else ("onlyoffice" if onlyoffice_enabled else "preview"),
             detail=self._detail(onlyoffice_enabled),
         )
+
+    async def identity(self) -> OfficeIdentity:
+        """Which Microsoft account this machine's Office is signed in as.
+
+        The same fake/real split as the host backend: a deterministic synthetic
+        account under ``WORKBENCH_OFFICE_FAKE`` (so CI is green with no Office),
+        and a best-effort registry read otherwise — pushed off the event loop
+        because a hosting request must never wait on it, and degrading to
+        ``unknown`` rather than raising if the read cannot be made.
+        """
+        if self._fake:
+            return fake_identity()
+        return await asyncio.to_thread(probe_identity)
 
     @property
     def _shell_attached(self) -> bool:
