@@ -152,6 +152,24 @@ echo two
 /** Where the backend is told to read transcripts from, for a given workspace. */
 export const projectsDirFor = (root: string): string => `${root}-projects`;
 
+/**
+ * The sibling folder the half-B "switch and open" conversation lives in.
+ *
+ * A *sibling* of the run's workspace, on the same reasoning as `SECOND_WORKSPACE`
+ * and the `-projects` store: outside the workspace (so it is genuinely refused
+ * until a switch), small (so switching into it costs a tree of one file), and
+ * with a name that shares no substring with the workspace's — the status chip
+ * and picker rows are matched by text, so a name that could prefix another's is
+ * the bug `SECOND_WORKSPACE` documents. Derived from `root` rather than from the
+ * `E2E_WORKSPACE` export because it is needed *while* that export is still being
+ * computed (inside `seed`).
+ */
+const outsideWorkspaceFor = (root: string): string =>
+  path.join(
+    path.dirname(root),
+    `wb-outside-${path.basename(root).slice(WORKSPACE_PREFIX.length)}`,
+  );
+
 /** Claude Code's project-dir encoding, mirrored from
  * `services/session_index.py`. Lossy on purpose: it is what makes the browser's
  * "resolved or honestly encoded" distinction necessary in the first place. */
@@ -169,11 +187,19 @@ export const CONV_SRC_TITLE = "Rewrite the bid curve for the intraday market";
 export const CONV_SRC_REPLY = "Here is the bid curve rewrite.";
 /** A transcript that will not parse: it keeps its row and says why. */
 export const CONV_BROKEN_ID = "44444444-4444-4444-8444-444444444444";
-/** A conversation from a folder that resolves but sits outside the workspace —
- * the half-B refusal, shown rather than hidden. The home directory is used
- * because it certainly exists; nothing is ever written to it. */
+/**
+ * A conversation from a folder that resolves but sits *outside* the workspace.
+ *
+ * Half A showed it and refused it; half B (M5 item 12) opens it by switching the
+ * workspace to its folder first, so that folder has to be a real directory the
+ * suite can switch into — a dedicated sibling (`OUTSIDE_WORKSPACE`), never the
+ * home directory a switch would try to load whole. It carries one marker file so
+ * the switch can be proven to have re-rooted the tree.
+ */
 export const CONV_OUTSIDE_ID = "55555555-5555-4555-8555-555555555555";
 export const CONV_OUTSIDE_TITLE = "Something I did in another project";
+/** Only in `OUTSIDE_WORKSPACE` — the tree assertion after the switch lands. */
+export const OUTSIDE_FILE = "only-in-outside.md";
 /** …and one whose folder matches no directory at all: shown under the raw key. */
 export const CONV_GONE_KEY = "C--e2e-a-project-that-no-longer-exists";
 export const CONV_GONE_ID = "66666666-6666-4666-8666-666666666666";
@@ -228,8 +254,20 @@ function seedConversations(root: string): void {
     said(CONV_SRC_TITLE),
     replied(CONV_SRC_REPLY),
   ]);
-  writeTranscript(root, encodeProject(fs.realpathSync.native(os.homedir())), CONV_OUTSIDE_ID, [
+  // A real sibling directory, seeded fresh: the conversation is outside the
+  // workspace (so half B has something to switch to), and the marker file proves
+  // the tree followed once it does.
+  const outside = outsideWorkspaceFor(root);
+  fs.rmSync(outside, { recursive: true, force: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(
+    path.join(outside, OUTSIDE_FILE),
+    "# Another project\n\nOnly reachable after switching the workspace here.\n",
+    "utf-8",
+  );
+  writeTranscript(root, encodeProject(fs.realpathSync.native(outside)), CONV_OUTSIDE_ID, [
     said(CONV_OUTSIDE_TITLE),
+    replied("Picking up where we left off."),
   ]);
   writeTranscript(root, CONV_GONE_KEY, CONV_GONE_ID, [said(CONV_GONE_TITLE)]);
 
@@ -353,6 +391,29 @@ export const SECOND_WORKSPACE = path.join(
   `wb-other-${path.basename(E2E_WORKSPACE).slice(WORKSPACE_PREFIX.length)}`,
 );
 export const E2E_APP_DATA = `${E2E_WORKSPACE}-appdata`;
+
+/**
+ * The sibling that journey 11's "switch and open" conversation lives in, seeded
+ * by `seedConversations` above. Exported so the spec can name the folder it
+ * expects the window to re-root into and, afterwards, put the workspace back.
+ */
+export const OUTSIDE_WORKSPACE = outsideWorkspaceFor(E2E_WORKSPACE);
+
+/**
+ * Remove the outside workspace once journey 11 is done with it.
+ *
+ * Switching into it records it on the machine-local recents list, which lives in
+ * the backend for the rest of the run — and a *non-current* recent becomes a
+ * dynamic "Open workspace …" command that later journeys (the QuickBar's exact
+ * category list) do not expect. The recents' `exists` flag is re-stated on every
+ * read and the command builder drops a folder that is gone, so deleting the
+ * throwaway sibling is what keeps this journey from leaking a command into the
+ * ones that run after it. Idempotent, with retries for a watch handle the switch
+ * back may not have released yet on Windows.
+ */
+export function removeOutsideWorkspace(): void {
+  fs.rmSync(OUTSIDE_WORKSPACE, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
 
 /** Only in the second workspace — the file tree assertion, both ways. */
 export const SECOND_FILE = "only-in-second.md";

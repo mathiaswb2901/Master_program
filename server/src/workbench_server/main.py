@@ -172,6 +172,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             layouts_service,
             provenance_service,
             session_manager,
+            # Half B of the session browser (M5 item 12): after a switch the
+            # browser must judge each folder against the workspace the user just
+            # opened, or it goes on refusing the conversation they switched to.
+            conversation_browser,
         ],
         async_rootables=[watcher, worktree_service],
         # Whether anybody *chose* this root, which the UI has to say rather than

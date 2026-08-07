@@ -26,10 +26,12 @@
  * this workspace and expect the window they have always had.
  */
 
+import path from "node:path";
+
 import { expect, request, test, type Locator, type Page } from "@playwright/test";
 
 import type { LayoutsResponse } from "../src/types";
-import { openApp } from "./app";
+import { openApp, treeItem, typeInEditor } from "./app";
 import {
   CONV_GONE_KEY,
   CONV_GONE_TITLE,
@@ -39,6 +41,11 @@ import {
   CONV_SRC_PROJECT_KEY,
   CONV_SRC_REPLY,
   CONV_SRC_TITLE,
+  E2E_WORKSPACE,
+  NOTES_FILE,
+  OUTSIDE_FILE,
+  OUTSIDE_WORKSPACE,
+  removeOutsideWorkspace,
 } from "./workspace";
 
 const browser = (page: Page): Locator => page.locator(".wb-conv");
@@ -94,6 +101,13 @@ test.beforeEach(async ({ page }) => {
 
 test.afterAll(async () => {
   const context = await request.newContext({ baseURL: test.info().project.use.baseURL });
+  // The switch-and-open test re-roots the backend into the outside folder; every
+  // journey after this one expects the seeded workspace, so put it back first —
+  // then remove the outside folder so its now-stale recents entry cannot leak a
+  // dynamic "Open workspace …" command into a later journey — and reset the
+  // layout in the workspace it belongs to.
+  await context.post("/api/workspace/switch", { data: { path: E2E_WORKSPACE } });
+  removeOutsideWorkspace();
   await context.put("/api/layouts", { data: NO_LAYOUT });
   await context.dispose();
 });
@@ -131,10 +145,14 @@ test.describe.serial("the conversation browser", () => {
       await expect(row(page, "(unreadable transcript)")).toBeVisible();
     });
 
-    await test.step("a folder outside this workspace is shown, and refused with a reason", async () => {
+    await test.step("a folder outside this workspace is shown, and offers to switch to it", async () => {
       const outside = row(page, CONV_OUTSIDE_TITLE);
       await expect(outside).toBeVisible();
-      await expect(outside).toHaveClass(/is-blocked/);
+      // Half B: not a dead end. The row is actionable (it switches the workspace
+      // on the way in) rather than blocked, and it says so in words (§7).
+      await expect(outside).toHaveClass(/is-switch/);
+      await expect(outside).not.toHaveClass(/is-blocked/);
+      await expect(outside.locator(".wb-conv-switch")).toBeVisible();
       // The reason is on the folder, in words, next to the conversation.
       const reasons = await page.locator(".wb-conv-reason").allTextContents();
       expect(reasons.join(" ")).toContain("Outside this workspace");
@@ -165,11 +183,13 @@ test.describe.serial("the conversation browser", () => {
       await page.setViewportSize({ width: 1280, height: 720 });
     });
 
-    await test.step("clicking one it may not open says why, and opens nothing", async () => {
+    await test.step("clicking one whose folder is gone says why, and opens nothing", async () => {
+      // The gone folder is the case half B leaves refused: there is no directory
+      // to switch to, so the click surfaces the reason and opens nothing.
       const panes = await page.locator(".dv-groupview").count();
-      await row(page, CONV_OUTSIDE_TITLE).click();
+      await row(page, CONV_GONE_TITLE).click();
       await expect(
-        page.locator(".wb-toast.is-warn").filter({ hasText: "Outside this workspace" }),
+        page.locator(".wb-toast.is-warn").filter({ hasText: "moved or deleted" }),
       ).toBeVisible();
       await expect(page.locator(".dv-groupview")).toHaveCount(panes);
     });
@@ -273,6 +293,77 @@ test.describe.serial("the conversation browser", () => {
       const restored = browser(page).filter({ hasText: CONV_SRC_TITLE }).last();
       await expect(restored.locator(".wb-conv-group")).toHaveCount(1);
       await expect(page.locator(".wb-conv-row", { hasText: CONV_ROOT_TITLE })).toHaveCount(1);
+    });
+  });
+
+  /**
+   * Half B (M5 item 12) — opening a conversation whose folder is outside the
+   * workspace, by switching the workspace to it first.
+   *
+   * Runs last, because it re-roots the backend; the `afterAll` puts it back. It
+   * asserts the three things the half is: the switch is offered (never bypassed
+   * — a dirty buffer stops it exactly as a plain switch would), the switch that
+   * lands carries the conversation's history into a live pane, and opening the
+   * same row twice focuses the one pane rather than cloning it.
+   */
+  test("opens a conversation outside the workspace by switching to its folder", async ({
+    page,
+  }) => {
+    await openApp(page);
+    await openBrowser(page);
+
+    const chipLabel = page.locator(".wb-workspace-chip-label");
+    const firstName = path.basename(E2E_WORKSPACE);
+    const outsideName = path.basename(OUTSIDE_WORKSPACE);
+    const agentTab = page.locator(".wb-panel-tab", { hasText: CONV_OUTSIDE_TITLE });
+    await expect(chipLabel).toHaveText(firstName);
+
+    await test.step("a dirty buffer blocks the switch, and nothing resumes", async () => {
+      await treeItem(page, NOTES_FILE).click();
+      await typeInEditor(page, "unsaved edit\n");
+      await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(1);
+
+      await row(page, CONV_OUTSIDE_TITLE).click();
+      const confirm = page.getByRole("dialog", { name: "Switch workspace?" });
+      await expect(confirm).toBeVisible();
+      // The same guard a plain switch runs — the buffer is named, and Cancel
+      // really cancels: still here, and no pane was opened behind the prompt.
+      await expect(confirm).toContainText(NOTES_FILE);
+      await confirm.getByRole("button", { name: "Cancel" }).click();
+      await expect(chipLabel).toHaveText(firstName);
+      await expect(agentTab).toHaveCount(0);
+    });
+
+    await test.step("discarding it, the switch lands and the conversation resumes with its history", async () => {
+      await row(page, CONV_OUTSIDE_TITLE).click();
+      const confirm = page.getByRole("dialog", { name: "Switch workspace?" });
+      await expect(confirm).toBeVisible();
+      await confirm.getByRole("button", { name: "Discard changes" }).click();
+
+      // The window re-rooted through the switcher's own flow: the chip and the
+      // tree are the other project's now.
+      await expect(chipLabel).toHaveText(outsideName);
+      await expect(treeItem(page, OUTSIDE_FILE)).toBeVisible();
+      await expect(treeItem(page, NOTES_FILE)).toHaveCount(0);
+
+      // And the conversation is live in its own pane, carrying what was said
+      // before — a resume, not an empty chat over a transcript that exists.
+      await expect(agentTab.first()).toBeVisible();
+      await expect(
+        page.locator(".wb-msg-user", { hasText: CONV_OUTSIDE_TITLE }).first(),
+      ).toBeVisible();
+      await expect(page.getByText("Picking up where we left off.").first()).toBeVisible();
+      await expect(page.locator(".wb-pane-note")).toHaveCount(0);
+    });
+
+    await test.step("opening the same row again focuses its pane rather than cloning it", async () => {
+      // Now inside its workspace, so this is the plain focus rule: the row is a
+      // live in-workspace conversation and clicking it reveals the one pane.
+      await openBrowser(page);
+      const panes = await page.locator(".dv-groupview").count();
+      await row(page, CONV_OUTSIDE_TITLE).click();
+      await expect(page.locator(".dv-groupview")).toHaveCount(panes);
+      await expect(agentTab).toHaveCount(1);
     });
   });
 });

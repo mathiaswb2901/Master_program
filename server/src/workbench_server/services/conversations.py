@@ -118,6 +118,26 @@ class ConversationBrowser:
         self._facts: dict[Path, _CachedFacts] = {}
         self._resolved: dict[str, Path] = {}
 
+    # ---- following a workspace switch -------------------------------------
+
+    def set_workspace_root(self, root: Path) -> None:
+        """Re-root, so a folder that was outside the old workspace is judged
+        against the new one.
+
+        This copies ``workspace.root`` into a field of its own, so the switcher
+        rule (``main.py``, ``services/workspaces.py``) requires it to be here and
+        to be listed in ``create_app`` — a browser that kept the old root would
+        go on refusing the very conversation the user just switched *to*, which
+        is the whole of half B (M5 item 12). Only ``openable`` /
+        ``workspace_relative`` / ``reason`` depend on the workspace, and they are
+        recomputed on every browse; the ``key -> real folder`` resolution cache
+        is a match against absolute paths and stays valid, so nothing else is
+        thrown away. Held under the scan lock: a browse in flight must see the
+        old root whole or the new one whole, never one field of each.
+        """
+        with self._lock:
+            self._workspace = root
+
     # ---- the one public entry point ---------------------------------------
 
     def browse(
@@ -325,12 +345,13 @@ class ConversationBrowser:
 
     @staticmethod
     def _reason(folder: Path | None, relative: str | None) -> str | None:
-        """Why a group cannot be opened — shown on the group, never used to hide it.
+        """Why a group sits apart — shown on the group, never used to hide it.
 
-        Both refusals are half A's boundary drawn honestly. Opening a folder
-        outside the workspace needs the multi-root jail (M5 item 5 / item 6),
-        and until it lands the conversation is still worth *seeing*: knowing it
-        exists is most of what the browser is for.
+        Two cases, and half B (M5 item 12) splits them. A folder that resolves
+        but sits outside the workspace *can* now be opened — by switching the
+        workspace to it first — so its sentence names that, and the row carries
+        the action. A folder that matches no directory at all cannot be switched
+        to, so it stays a plain refusal.
         """
         if folder is None:
             return (
@@ -340,8 +361,8 @@ class ConversationBrowser:
             )
         if relative is None:
             return (
-                "Outside this workspace. Workbench opens conversations only from "
-                "folders inside the workspace it was launched in."
+                "Outside this workspace. Opening a conversation here switches "
+                "Workbench to this folder first."
             )
         return None
 

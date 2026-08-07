@@ -409,6 +409,34 @@ def test_a_folder_outside_the_workspace_is_shown_and_refused_with_a_reason(
     assert [c.title for c in group.conversations] == ["another project"]
 
 
+def test_switching_the_workspace_makes_an_outside_folder_openable(
+    browser: ConversationBrowser, projects: Path, workspace: Path, tmp_path: Path
+) -> None:
+    """Half B (M5 item 12): the browser follows a workspace switch.
+
+    A conversation whose folder is outside the workspace is refused until the
+    user switches the workspace *to* that folder — after which it is exactly the
+    workspace root, and must be openable rather than still outside a jail that
+    has moved. ``set_workspace_root`` is what carries the switch to the browser;
+    without it, opening the very conversation the user switched to would fail.
+    """
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    write_transcript(projects, outside, "sess-1", [user("another project")], 1_000.0)
+
+    before = browser.browse().projects[0]
+    assert before.workspace_relative is None
+    assert before.openable is False
+
+    browser.set_workspace_root(outside)
+
+    after = browser.browse().projects[0]
+    assert after.folder == str(outside)
+    assert after.workspace_relative == ""
+    assert after.openable is True
+    assert after.reason is None
+
+
 def test_an_unmatchable_key_shows_the_key_itself_and_never_a_guess(
     browser: ConversationBrowser, projects: Path
 ) -> None:

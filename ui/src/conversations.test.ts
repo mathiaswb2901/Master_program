@@ -300,31 +300,45 @@ describe("opening a conversation", () => {
     expect(outcome).toEqual({ kind: "resumed", sessionId: "local-new" });
   });
 
-  // Half A's boundary, and the shape it takes: a refusal that carries the
-  // reason, not a row that quietly does nothing.
-  it("refuses a folder outside the workspace and hands back why", async () => {
+  // Half B's boundary: a folder that resolved but sits outside the workspace is
+  // not a dead end — it asks for a switch, carrying the path to switch to and
+  // the name to show. The panel drives the re-root; the resume waits for it.
+  it("asks to switch when the folder resolves but is outside the workspace", async () => {
     resumeConversation.mockClear();
     const outcome = await openConversation(
       group({
         openable: false,
         workspace_relative: null,
-        reason: "Outside this workspace. Workbench opens conversations only from…",
+        folder: "C:\\other\\project",
+        label: "C:\\other\\project",
+        reason: "Outside this workspace. Opening a conversation here switches…",
       }),
       conversation(),
     );
     expect(outcome).toEqual({
-      kind: "refused",
-      reason: "Outside this workspace. Workbench opens conversations only from…",
+      kind: "switch",
+      folder: "C:\\other\\project",
+      label: "C:\\other\\project",
     });
+    // No resume yet: that is the panel's job, once the switch has landed.
     expect(resumeConversation).not.toHaveBeenCalled();
   });
 
-  it("refuses an unresolved folder even without a server-supplied reason", async () => {
+  // A folder that matches no directory at all cannot be switched to, so it is
+  // still a refusal — with its reason, not silence.
+  it("refuses an unresolved folder there is nothing to switch to", async () => {
     const outcome = await openConversation(
-      group({ openable: false, workspace_relative: null, reason: null }),
+      group({
+        openable: false,
+        resolved: false,
+        folder: null,
+        workspace_relative: null,
+        reason: null,
+      }),
       conversation(),
     );
     expect(outcome.kind).toBe("refused");
+    expect(resumeConversation).not.toHaveBeenCalled();
   });
 
   it("reports a failed resume rather than pretending a pane was opened", async () => {

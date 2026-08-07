@@ -14,9 +14,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ConversationInfo, ConversationStore, ProjectGroup } from "../types";
 
-// The two imports that would otherwise pull in dockview's runtime, Monaco and
-// the app store. Nothing here clicks anything.
+// The imports that would otherwise pull in dockview's runtime, Monaco, the app
+// store and — through the switcher — the whole tools graph. Nothing here clicks
+// anything, so the row's switch action is stubbed to a no-op.
 vi.mock("./Panes", () => ({ revealPane: () => undefined }));
+vi.mock("./Workspaces", () => ({ requestWorkspaceSwitch: () => undefined }));
 vi.mock("../store", () => ({
   useStore: Object.assign(() => undefined, {
     getState: () => ({ pushToast: () => undefined, resumeConversation: () => Promise.resolve(null) }),
@@ -106,23 +108,27 @@ describe("the folder groups", () => {
 });
 
 describe("what it will not open", () => {
-  // The half-A boundary, on screen: the conversation is visible, and the reason
-  // it cannot be opened is a sentence next to it rather than an absence.
-  it("shows a folder outside the workspace with its reason, and keeps the rows", () => {
+  // The half-B boundary, on screen: a folder that resolved but sits outside the
+  // workspace is not blocked — it is *actionable*, and says in words that it
+  // opens by switching there first. The reason and the rows stay.
+  it("shows a folder outside the workspace as switchable, with its reason and rows", () => {
     const html = show(
       store({
         projects: [
           group({
             openable: false,
             workspace_relative: null,
-            reason: "Outside this workspace. Workbench opens conversations only from…",
+            reason: "Outside this workspace. Opening a conversation here switches…",
           }),
         ],
       }),
     );
     expect(html).toContain("Outside this workspace");
     expect(html).toContain("Fix the DST bug");
-    expect(html).toContain("is-blocked");
+    // Actionable, not blocked, and the affordance is a word not only a colour.
+    expect(html).toContain("is-switch");
+    expect(html).not.toContain("is-blocked");
+    expect(html).toContain("switch &amp; open");
     // …and the reason is the *control's* description, not just a paragraph
     // above it: colour and position are never the only signal (§7).
     expect(html).toContain('aria-describedby="wb-conv-reason-C--work-repo"');

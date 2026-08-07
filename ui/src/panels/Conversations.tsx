@@ -48,6 +48,7 @@ import {
   groupLabel,
   MAX_PAGE,
   openConversation,
+  type OpenOutcome,
   turnLabel,
   useConversations,
   visibleGroups,
@@ -58,6 +59,7 @@ import { relativeTime, relativeTimePhrase } from "../relativeTime";
 import { useStore } from "../store";
 import type { ConversationInfo, ConversationStore, ProjectGroup } from "../types";
 import { revealPane } from "./Panes";
+import { requestWorkspaceSwitch } from "./Workspaces";
 
 import "../styles/conversations.css";
 
@@ -106,10 +108,28 @@ function HistoryIcon() {
  * description rather than only as a paragraph somewhere above (DESIGN.md §7). */
 const reasonId = (group: ProjectGroup): string => `wb-conv-reason-${group.key}`;
 
+/**
+ * Resume the conversation, then focus-or-open its pane.
+ *
+ * `revealPane` decides which: the decision is pane identity — `agent#<id>` is
+ * already on screen or it is not — so opening the same conversation twice
+ * focuses the one pane rather than cloning it.
+ */
+function reveal(outcome: OpenOutcome): void {
+  if (outcome.kind === "focus" || outcome.kind === "resumed") {
+    revealPane(AGENT_TOOL_ID, outcome.sessionId);
+  }
+}
+
 function Row({ group, conversation }: { group: ProjectGroup; conversation: ConversationInfo }) {
   const [busy, setBusy] = useState(false);
   const live = conversation.live_session_id !== null;
-  const blocked = !group.openable && !live;
+  // Two kinds of "cannot open right here". A folder that resolved but sits
+  // outside the workspace is *switchable* — clicking re-roots the window there
+  // and then resumes (half B). A folder that matches no directory is blocked:
+  // there is nothing to switch to, so the click only surfaces the reason.
+  const switchable = !group.openable && !live && group.folder !== null;
+  const blocked = !group.openable && !live && group.folder === null;
 
   const open = (): void => {
     if (busy) return;
@@ -120,10 +140,21 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
           useStore.getState().pushToast("warn", outcome.reason);
           return;
         }
+        if (outcome.kind === "switch") {
+          // Switch the workspace to the conversation's folder, through the
+          // switcher's full guard flow (dirty buffers, the Office guard), and
+          // only if it lands resume the conversation — which now resolves inside
+          // the jail, so its folder-relative path is the new root, "".
+          requestWorkspaceSwitch(outcome.folder, () => {
+            void openConversation(
+              { ...group, openable: true, workspace_relative: "" },
+              conversation,
+            ).then(reveal);
+          });
+          return;
+        }
         if (outcome.kind === "failed") return; // the store raised the toast
-        // Focus or open — `revealPane` decides, and the decision is pane
-        // identity: `agent#<id>` is already on screen or it is not.
-        revealPane(AGENT_TOOL_ID, outcome.sessionId);
+        reveal(outcome);
       })
       .finally(() => setBusy(false));
   };
@@ -134,6 +165,7 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
       className={
         "wb-conv-row" +
         (blocked ? " is-blocked" : "") +
+        (switchable ? " is-switch" : "") +
         (busy ? " is-busy" : "") +
         // Listed but not read: it exists and it opens, it just has no title yet.
         (conversation.read ? "" : " is-unread")
@@ -141,15 +173,20 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
       onClick={open}
       // The reason travels with the control: a pointer user gets it on hover,
       // and a screen reader gets it as this button's description rather than as
-      // a paragraph it might never reach.
-      {...(blocked && group.reason !== null ? { "aria-describedby": reasonId(group) } : {})}
+      // a paragraph it might never reach. A switchable row carries it too —
+      // "outside the workspace" is why clicking switches first.
+      {...((blocked || switchable) && group.reason !== null
+        ? { "aria-describedby": reasonId(group) }
+        : {})}
       title={
-        blocked
-          ? (group.reason ?? "")
-          : !conversation.read
-            ? "This conversation has not been read yet — “Read them all” fetches " +
-              `its title and turn count. Last active ${relativeTimePhrase(conversation.updated_at)}.`
-            : `${conversation.title} — ${relativeTimePhrase(conversation.updated_at)}`
+        switchable
+          ? `Open ${conversation.title} — switches the workspace to ${group.folder ?? groupLabel(group)} first.`
+          : blocked
+            ? (group.reason ?? "")
+            : !conversation.read
+              ? "This conversation has not been read yet — “Read them all” fetches " +
+                `its title and turn count. Last active ${relativeTimePhrase(conversation.updated_at)}.`
+              : `${conversation.title} — ${relativeTimePhrase(conversation.updated_at)}`
       }
     >
       <span
@@ -159,6 +196,9 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
         aria-label={live ? "Already open" : "On disk"}
       />
       <span className="wb-conv-title u-truncate">{conversation.title}</span>
+      {/* The affordance in words, not colour alone (DESIGN.md §7): this row
+          opens, but it re-roots the window on the way in. */}
+      {switchable && <span className="wb-conv-switch">switch &amp; open</span>}
       <span className="wb-conv-turns u-tabular">{turnLabel(conversation)}</span>
       <span className="wb-conv-time u-tabular">{relativeTime(conversation.updated_at)}</span>
       {conversation.problem !== null && (
