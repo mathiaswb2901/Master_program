@@ -7,6 +7,12 @@ Office**. It shares the fake backend so a read is answered for exactly the pids
 that backend launched — the fake stand-in for a real COM read reaching into the
 live instance a pid names.
 
+Content starts minted from the *name* of the document, but a write **mutates the
+in-memory copy in place**, keyed by the pid, so a subsequent read reflects the
+edit exactly as a COM write into the live instance would — the whole point of the
+write seam. The mint is the seed the first access materialises; every read and
+write after that goes through the mutable overlay, and it dies with the pid.
+
 Content is minted from the *name* of the document, so every read branch is
 reachable in CI and, later, drivable from a test that just opens the right file
 name (the ``FAILURE_TRIGGERS`` precedent):
@@ -27,9 +33,16 @@ from pathlib import Path
 
 import structlog
 
-from workbench_server.models.office_bridge import CellWindow, DocStructure, SheetDim, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    SheetDim,
+    WordEdit,
+    WordText,
+)
 from workbench_server.models.office_host import HostAppKind
-from workbench_server.services.office_host.a1 import cell_ref, parse_range
+from workbench_server.services.office_host.a1 import cell_ref, parse_cell, parse_range
 from workbench_server.services.office_host.backend import HostHandle
 from workbench_server.services.office_host.document_bridge import (
     DocGoneError,
@@ -126,6 +139,11 @@ class FakeDocumentBridge:
         #: Shared with the host backend: the read is answered for the pids it
         #: launched, and dies with them.
         self._backend = backend
+        #: The mutable in-memory copy a write edits, materialised lazily from the
+        #: name-derived mint on first access and keyed by pid, so a read after a
+        #: write sees the edit — the fake stand-in for the live COM instance.
+        self._word_docs: dict[int, list[str]] = {}
+        self._excel_docs: dict[int, dict[str, Grid]] = {}
 
     def ready(self) -> bool:
         return True
@@ -139,21 +157,34 @@ class FakeDocumentBridge:
             raise DocGoneError(f"no document is open for pid {handle.pid}")
         return name
 
-    async def structure(self, handle: HostHandle, kind: HostAppKind) -> DocStructure:
+    def _word_body(self, handle: HostHandle) -> list[str]:
+        """The live paragraph list for this pid — minted once, mutated thereafter."""
         name = self._name(handle)
+        if handle.pid not in self._word_docs:
+            self._word_docs[handle.pid] = word_paragraphs(name)
+        return self._word_docs[handle.pid]
+
+    def _excel_book(self, handle: HostHandle) -> dict[str, Grid]:
+        """The live worksheets for this pid — minted once, mutated thereafter."""
+        name = self._name(handle)
+        if handle.pid not in self._excel_docs:
+            self._excel_docs[handle.pid] = excel_sheets(name)
+        return self._excel_docs[handle.pid]
+
+    async def structure(self, handle: HostHandle, kind: HostAppKind) -> DocStructure:
         if kind == "word":
-            return DocStructure(kind="word", paragraph_count=len(word_paragraphs(name)))
+            return DocStructure(kind="word", paragraph_count=len(self._word_body(handle)))
         if kind == "excel":
             sheets = [
                 SheetDim(name=sheet, rows=rows, cols=cols)
-                for sheet, grid in excel_sheets(name).items()
+                for sheet, grid in self._excel_book(handle).items()
                 for rows, cols in (_used_dims(grid),)
             ]
             return DocStructure(kind="excel", sheets=sheets)
         raise DocNotReadableError(f"{kind} documents cannot be read")
 
     async def read_word(self, handle: HostHandle, start_paragraph: int, max_chars: int) -> WordText:
-        paragraphs = word_paragraphs(self._name(handle))
+        paragraphs = self._word_body(handle)
         total = len(paragraphs)
         if total == 0:
             return WordText(start_paragraph=0, returned_chars=0, total_paragraphs=0, text="")
@@ -186,7 +217,7 @@ class FakeDocumentBridge:
     async def read_excel(
         self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int, max_chars: int
     ) -> CellWindow:
-        sheets = excel_sheets(self._name(handle))
+        sheets = self._excel_book(handle)
         if sheet not in sheets:
             raise RangeInvalidError(
                 f"no sheet named {sheet!r}; sheets are {', '.join(sheets) or '(none)'}"
@@ -247,3 +278,39 @@ class FakeDocumentBridge:
             total_cols=total_cols,
             cells=cells,
         )
+
+    async def write_word(self, handle: HostHandle, paragraph: int, text: str) -> WordEdit:
+        paragraphs = self._word_body(handle)
+        total = len(paragraphs)
+        if total == 0:
+            # An empty document has no paragraph to replace — the invalid-target
+            # branch the tool renders as an explicit "empty", not a silent no-op.
+            raise RangeInvalidError("the document is empty; there is no paragraph to replace")
+        if paragraph < 0 or paragraph >= total:
+            raise RangeInvalidError(
+                f"paragraph {paragraph} is past the last paragraph ({total - 1})"
+            )
+        # Replace exactly the one addressed paragraph; every other paragraph, and
+        # the document's shape, is left untouched — the fidelity the seam owes.
+        paragraphs[paragraph] = text
+        return WordEdit(paragraph=paragraph, written_chars=len(text), total_paragraphs=total)
+
+    async def write_excel(self, handle: HostHandle, sheet: str, cell: str, value: str) -> CellEdit:
+        sheets = self._excel_book(handle)
+        if sheet not in sheets:
+            raise RangeInvalidError(
+                f"no sheet named {sheet!r}; sheets are {', '.join(sheets) or '(none)'}"
+            )
+        try:
+            row, col = parse_cell(cell)
+        except ValueError as error:
+            raise RangeInvalidError(f"bad cell {cell!r}: {error}") from error
+        grid = sheets[sheet]
+        # Set exactly the one addressed cell; empty value clears it (mirroring a
+        # COM ``Range.Value = ""``), so the used range can shrink but no other
+        # cell is disturbed.
+        if value == "":
+            grid.pop((row, col), None)
+        else:
+            grid[(row, col)] = value
+        return CellEdit(sheet=sheet, a1_cell=cell_ref(row, col), written_chars=len(value))

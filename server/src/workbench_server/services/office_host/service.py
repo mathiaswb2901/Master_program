@@ -41,7 +41,13 @@ from typing import TypeVar
 
 import structlog
 
-from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    WordEdit,
+    WordText,
+)
 from workbench_server.models.office_host import (
     HOSTABLE_KINDS,
     HostReason,
@@ -65,6 +71,7 @@ from workbench_server.services.office_host.document_bridge import (
     DocNotHostedError,
     DocNotReadableError,
     DocumentBridge,
+    RangeInvalidError,
 )
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
 from workbench_server.services.office_host.fake_document_bridge import FakeDocumentBridge
@@ -718,8 +725,8 @@ class OfficeHostService:
         :class:`~...document_bridge.DocumentBridgeError` refusals the read seam
         reports.
         """
-        host, bridge, handle = self._readable(path)
-        return await self._guarded_read(bridge.structure(handle, host.lifecycle.kind))
+        host, bridge, handle = self._live_document(path, "reading")
+        return await self._guarded_op(bridge.structure(handle, host.lifecycle.kind))
 
     async def read_document(
         self,
@@ -740,25 +747,57 @@ class OfficeHostService:
         an Excel document without a ``sheet`` is a caller error here — the tool
         returns the structure instead — so it is refused rather than guessed.
         """
-        host, bridge, handle = self._readable(path)
+        host, bridge, handle = self._live_document(path, "reading")
         if host.lifecycle.kind == "word":
-            return await self._guarded_read(bridge.read_word(handle, start_paragraph, max_chars))
+            return await self._guarded_op(bridge.read_word(handle, start_paragraph, max_chars))
         if sheet is None:
             raise DocNotReadableError("name a sheet to read from an Excel document")
-        return await self._guarded_read(
+        return await self._guarded_op(
             bridge.read_excel(handle, sheet, a1_range, max_cells, max_chars)
         )
 
-    def _readable(self, path: str) -> tuple[_Host, DocumentBridge, HostHandle]:
-        """The host, its reader and its owned handle — or the refusal that says
-        why the live document cannot be read."""
+    async def write_document(
+        self,
+        path: str,
+        *,
+        content: str,
+        paragraph: int | None = None,
+        sheet: str | None = None,
+        cell: str | None = None,
+    ) -> WordEdit | CellEdit:
+        """Apply one targeted edit to the live document at ``path``.
+
+        Word documents take ``paragraph`` (zero-based) and ``content`` — the new
+        text of that one paragraph; Excel worksheets take ``sheet`` and ``cell``
+        (A1) and ``content`` — the new text of that one cell. The edit is scoped
+        to the addressed target and applied to the live in-memory instance (the
+        user can undo it), never a whole-file rewrite. Missing the target that
+        the document's kind requires is a caller error, refused rather than
+        guessed. Raises the same
+        :class:`~...document_bridge.DocumentBridgeError` refusals the read seam
+        reports (not docked, still opening, foreign window, gone, unavailable).
+        """
+        host, bridge, handle = self._live_document(path, "writing")
+        if host.lifecycle.kind == "word":
+            if paragraph is None:
+                raise RangeInvalidError("name a paragraph to write in a Word document")
+            return await self._guarded_op(bridge.write_word(handle, paragraph, content))
+        if sheet is None or cell is None:
+            raise RangeInvalidError("name a sheet and a cell to write in an Excel document")
+        return await self._guarded_op(bridge.write_excel(handle, sheet, cell, content))
+
+    def _live_document(self, path: str, gerund: str) -> tuple[_Host, DocumentBridge, HostHandle]:
+        """The host, its bridge and its owned handle — or the refusal that says
+        why the live document cannot be reached, phrased with ``gerund``
+        ("reading"/"writing"). One guard, so read and write refuse identically."""
         host = self._live_host_for(path)
         if host is None:
+            verb = {"reading": "read", "writing": "write"}[gerund]
             raise DocNotHostedError(
-                f"{path} is not docked in Workbench; open it first, then read it"
+                f"{path} is not docked in Workbench; open it first, then {verb} it"
             )
         if self._bridge is None:
-            raise DocNotReadableError(self._read_unavailable_detail())
+            raise DocNotReadableError(self._bridge_unavailable_detail(gerund))
         if host.lifecycle.state not in ("embedded", "detached"):
             raise DocNotReadableError(
                 f"{path} is still opening (it is {host.lifecycle.state}); "
@@ -772,20 +811,21 @@ class OfficeHostService:
             ) from error
         return host, self._bridge, handle
 
-    def _read_unavailable_detail(self) -> str:
+    def _bridge_unavailable_detail(self, gerund: str) -> str:
         if self._fake:  # pragma: no cover - the fake always has a bridge
-            return "the fake host backend has no document reader"
-        return "reading the live document is not available here (it needs the desktop shell)"
+            role = "writer" if gerund == "writing" else "reader"
+            return f"the fake host backend has no document {role}"
+        return f"{gerund} the live document is not available here (it needs the desktop shell)"
 
-    async def _guarded_read(self, call: Awaitable[T]) -> T:
-        """One bridge read, under the service's per-call ceiling. A read that
+    async def _guarded_op(self, call: Awaitable[T]) -> T:
+        """One bridge call, under the service's per-call ceiling. A call that
         never returns — a Word thinking about a modal — must not hang the request
         that started it, so it is cancelled and reported rather than awaited
         forever."""
         try:
             return await asyncio.wait_for(call, self._operation_timeout_s)
         except TimeoutError as error:
-            raise DocNotReadableError("the read did not return in time") from error
+            raise DocNotReadableError("the operation did not return in time") from error
 
     # ---- lifecycle ----------------------------------------------------------
 

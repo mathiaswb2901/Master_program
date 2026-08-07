@@ -18,7 +18,13 @@ from typing import Any
 import pytest
 
 from workbench_server.config import Settings
-from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    WordEdit,
+    WordText,
+)
 from workbench_server.models.plans import PlanArtifact, PlanResponse
 from workbench_server.services import skills_bundle
 from workbench_server.services.office_host.document_bridge import DocNotHostedError
@@ -49,7 +55,7 @@ class StubBridge:
 
 
 class StubReader:
-    """OfficeDocumentReader stub — the factory only stores it on the options."""
+    """OfficeDocumentAccess stub — the factory only stores it on the options."""
 
     async def document_structure(self, path: str) -> DocStructure:  # pragma: no cover
         raise DocNotHostedError(path)
@@ -64,6 +70,17 @@ class StubReader:
         a1_range: str | None = None,
         start_paragraph: int = 0,
     ) -> WordText | CellWindow:
+        raise DocNotHostedError(path)
+
+    async def write_document(  # pragma: no cover
+        self,
+        path: str,
+        *,
+        content: str,
+        paragraph: int | None = None,
+        sheet: str | None = None,
+        cell: str | None = None,
+    ) -> WordEdit | CellEdit:
         raise DocNotHostedError(path)
 
 

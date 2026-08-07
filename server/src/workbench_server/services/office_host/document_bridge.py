@@ -1,18 +1,22 @@
-"""The document-read contract — the COM bridge seam, read half only.
+"""The document read/write contract — the COM bridge seam.
 
-This is to reading the *live* hosted document what ``backend.py`` is to hosting
-its window: the small, honest seam the risky native work plugs into. Above it —
-the service methods, the ``office_read`` agent tool, the models — is plain Python
-that runs and is tested on a machine with no Microsoft Office and no Rust,
-against the in-process ``FakeDocumentBridge`` (``fake_document_bridge.py``).
-Below it, in a later PR, will be the Win32/COM implementation that reads the same
-Word/Excel instance ``shell_backend.py`` launched, off the single COM apartment
-thread that backend already owns.
+This is to reading and editing the *live* hosted document what ``backend.py`` is
+to hosting its window: the small, honest seam the risky native work plugs into.
+Above it — the service methods, the ``office_read`` and ``office_write`` agent
+tools, the models — is plain Python that runs and is tested on a machine with no
+Microsoft Office and no Rust, against the in-process ``FakeDocumentBridge``
+(``fake_document_bridge.py``). Below it, in a later PR, will be the Win32/COM
+implementation that reaches into the same Word/Excel instance
+``shell_backend.py`` launched, off the single COM apartment thread that backend
+already owns.
 
-**The contract is read-only, deliberately.** There is no write, no edit, no
-save: mutating the live document is a separate seam that arrives with PR 3, and
-inventing it here would let the domain layer pass tests the native side cannot
-satisfy — the same discipline ``backend.py`` keeps.
+**The read half (PR 1) came before the write half (PR 2).** The two writes below
+— :meth:`DocumentBridge.write_word` and :meth:`DocumentBridge.write_excel` — are
+the mirror of the reads: each is a *targeted* edit of one addressed paragraph or
+one cell that leaves the rest of the document untouched, applied to the live
+in-memory instance (the user can undo it) rather than rewriting the file. They
+are still bounded by the seam the same way — inventing anything the native side
+cannot satisfy is the mistake ``backend.py`` exists to prevent.
 
 **Every method is bounded by the caller above it.** Like a
 :class:`~workbench_server.services.office_host.backend.HostBackend`, an
@@ -28,7 +32,13 @@ naming itself.
 
 from typing import Literal, Protocol
 
-from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.office_bridge import (
+    CellEdit,
+    CellWindow,
+    DocStructure,
+    WordEdit,
+    WordText,
+)
 from workbench_server.models.office_host import HostAppKind
 from workbench_server.services.office_host.backend import HostHandle
 
@@ -123,5 +133,28 @@ class DocumentBridge(Protocol):
         by itself. Reports the whole used range so the caller can ask for the
         rest. Raises :class:`RangeInvalidError` for an unknown sheet or a
         malformed range, :class:`DocGoneError` if the instance has closed.
+        """
+        ...
+
+    async def write_word(self, handle: HostHandle, paragraph: int, text: str) -> WordEdit:
+        """Replace the text of one addressed Word paragraph, nothing else.
+
+        A *targeted* edit — the real COM side sets ``Range.Text`` on the one
+        paragraph and leaves every other paragraph, and the file, untouched;
+        empty ``text`` empties the paragraph without removing it. Raises
+        :class:`RangeInvalidError` when ``paragraph`` is out of range (including
+        an empty document, which has no paragraph to replace), and
+        :class:`DocGoneError` if the instance has closed.
+        """
+        ...
+
+    async def write_excel(self, handle: HostHandle, sheet: str, cell: str, value: str) -> CellEdit:
+        """Set the text of one addressed Excel cell, nothing else.
+
+        A *targeted* edit — the real COM side assigns ``Range(cell).Value`` and
+        leaves every other cell, and the file, untouched; empty ``value`` clears
+        the cell. Raises :class:`RangeInvalidError` for an unknown sheet or a
+        malformed cell address, and :class:`DocGoneError` if the instance has
+        closed.
         """
         ...
