@@ -35,6 +35,7 @@ import type {
   HostCommandAck,
   OfficeCapabilities,
   OfficeHostInfo,
+  OfficeIdentity,
   PanelRect,
   WorkspaceEvent,
 } from "./types";
@@ -197,11 +198,52 @@ export async function runCommand(
   }
 }
 
+// ---- identity ----------------------------------------------------------------
+
+/** The one quiet line the panel shows about the machine's Office sign-in. */
+export interface IdentityLine {
+  text: string;
+  /** True when the line is a *degrade* — nobody signed in, or signed in but not
+   * licensed to edit — rather than a healthy "Signed in as X". Lets the panel
+   * tint it a shade softer without re-deriving the meaning. */
+  degraded: boolean;
+}
+
+/**
+ * The identity, reduced to the one line the panel renders — pure, so the three
+ * states are unit-tested without a store, a socket or a DOM.
+ *
+ * Honest by construction, matching the endpoint (`models/office_host.py`):
+ *
+ * * not signed in → the honest degrade, "Sign into Word to edit";
+ * * signed in, licensed (or license `unknown`) → "Signed in as X", where X is
+ *   the friendly name or, failing that, the email — we show *who*, and never
+ *   claim an edit right we cannot confirm;
+ * * signed in but `unlicensed` → the same name with a gentle nudge to sign in;
+ * * signed in but no nameable active account (several accounts, registry cannot
+ *   say which) → `null`: show nothing rather than fabricate a name.
+ *
+ * `null` (identity not fetched yet, or nothing worth saying) renders nothing.
+ */
+export function identityLine(identity: OfficeIdentity | null): IdentityLine | null {
+  if (identity === null) return null;
+  if (!identity.signed_in) return { text: "Sign into Word to edit", degraded: true };
+  const friendly = identity.active?.display_name ?? identity.active?.email ?? null;
+  if (friendly === null) return null;
+  if (identity.license === "unlicensed") {
+    return { text: `Signed in as ${friendly} — sign in to Word to edit`, degraded: true };
+  }
+  return { text: `Signed in as ${friendly}`, degraded: false };
+}
+
 // ---- the store ---------------------------------------------------------------
 
 interface OfficeHostStore {
   /** Null until the first fetch answers. */
   capabilities: OfficeCapabilities | null;
+  /** Machine-level Office sign-in (one per machine, not per document). Null until
+   * the first fetch answers. */
+  identity: OfficeIdentity | null;
   /**
    * Live and settled hosts, **by workspace-relative path**.
    *
@@ -214,6 +256,9 @@ interface OfficeHostStore {
   hosts: Record<string, OfficeHostInfo>;
   init: () => void;
   refreshCapabilities: () => Promise<void>;
+  /** Re-read the machine's Office sign-in. Cheap and best-effort; a failure
+   * leaves the last answer standing rather than blanking the line. */
+  refreshIdentity: () => Promise<void>;
   /** Open (or re-use) a host for this document. Returns the refusal to show,
    * or null when the host is on its way. */
   open: (path: string, rect: PanelRect) => Promise<OfficeHostInfo | null>;
@@ -271,12 +316,14 @@ let boundsFrame = 0;
 
 export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
   capabilities: null,
+  identity: null,
   hosts: {},
 
   init: () => {
     if (started) return;
     started = true;
     void get().refreshCapabilities();
+    void get().refreshIdentity();
     // Host lifecycle rides the shared bus; this socket reads only its own
     // frames. A second subscriber is what the bus is for, and it keeps the
     // app's store free of a capability it does not own.
@@ -285,9 +332,15 @@ export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
         const event = data as WorkspaceEvent;
         if (event.type !== "office_host") return;
         set((state) => ({ hosts: { ...state.hosts, [event.host.path]: event.host } }));
+        // Re-read the sign-in when a window actually docks: a user who signed
+        // into Word between launch and embed should see the line catch up,
+        // without polling the registry on every frame. `embedded` is the one
+        // transition worth a read — the rest never change who is signed in.
+        if (event.host.state === "embedded") void get().refreshIdentity();
       },
       onOpen: () => {
         void get().refreshCapabilities();
+        void get().refreshIdentity();
       },
     });
     if (isTauri()) startChannel(() => void get().refreshCapabilities());
@@ -300,6 +353,15 @@ export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
       // A server that cannot answer is a server that cannot host: leaving the
       // answer null keeps the panel on its "checking" card, and the next
       // reconnect asks again.
+    }
+  },
+
+  refreshIdentity: async () => {
+    try {
+      set({ identity: await api.getOfficeIdentity() });
+    } catch {
+      // Best-effort: a failed read leaves the previous answer standing rather
+      // than blanking the line, and the next dock or reconnect asks again.
     }
   },
 

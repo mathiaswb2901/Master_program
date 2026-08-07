@@ -220,6 +220,32 @@
   flex: none;
 }
 
+/* ---- Machine Office identity: one quiet line at the foot of the chrome ----
+   Sits in the mat below the body, not on the page — a real Word window would
+   cover an overlay on the surface. A calm status affordance (§6.4), the app's
+   own text pair on the mat (never the paper one); the degrade shade is one step
+   softer, no amber — "signed in as" is a standing fact, and §2.4 keeps amber for
+   what is changing right now. */
+.wb-office-identity {
+  display: flex;
+  align-items: center;
+  flex: none;
+  padding: var(--space-3) var(--space-5);
+  background: var(--surface-paper-surround);
+  border-top: 1px solid var(--border-paper-rim);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-office-identity[data-degraded="true"] {
+  color: var(--text-tertiary);
+}
+
+.wb-office-identity-msg {
+  min-width: 0;
+}
+
 /* ---- Non-modal reopen bar (same pattern as the editor conflict bar) ------- */
 
 .wb-office-bar {
