@@ -158,6 +158,12 @@ export const getTranscript = (folder: string, sessionId: string): Promise<Transc
     `/api/agents/transcript?folder=${encodeURIComponent(folder)}&session_id=${encodeURIComponent(sessionId)}`,
   );
 
+/** A LIVE session's transcript, keyed by its local id — the union of every SDK
+ * transcript it has lived under. Used to rehydrate a chat a reload emptied, so a
+ * reattached pane shows the conversation the socket only carries forward. */
+export const getLiveTranscript = (localId: string): Promise<TranscriptResponse> =>
+  request(`/api/agents/${encodeURIComponent(localId)}/transcript`);
+
 export const putUiState = (body: UiState): Promise<unknown> =>
   request("/api/agents/ui-state", jsonInit("PUT", body));
 

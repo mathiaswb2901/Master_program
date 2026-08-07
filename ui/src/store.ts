@@ -11,6 +11,7 @@ import {
 } from "./filetree";
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { withoutTransitions } from "./motion";
+import { chatNeedsHydration, transcriptToChatItems } from "./liveTranscript";
 import { isOfficePath, preloadDocsApi } from "./office";
 import { anchorKey, MAX_ANNOTATIONS } from "./plan/anchors";
 import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
@@ -1491,9 +1492,39 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
     attachSession: (sessionId) => {
       ensureAgentSocket(sessionId);
+      // Whether this chat needs the live transcript is decided BEFORE the empty
+      // shell is written, or every attach would look empty and re-fetch.
+      const hydrate = chatNeedsHydration(get().chats[sessionId]) && !hydratedChats.has(sessionId);
       set((s) =>
         sessionId in s.chats ? {} : { chats: { ...s.chats, [sessionId]: { items: [] } } },
       );
+      // A reload emptied this window's chats (they live in memory), so a pane
+      // reattaching to a still-live session opens a socket over a blank chat —
+      // the socket only carries the conversation FORWARD. Fill the history from
+      // disk. A warm window that never left keeps its rows and skips this
+      // (chatNeedsHydration is false), so nothing is counted twice; the guard
+      // also makes two panes on one session, or a remount, fetch exactly once.
+      if (!hydrate) return;
+      hydratedChats.add(sessionId);
+      void (async () => {
+        try {
+          const transcript = await api.getLiveTranscript(sessionId);
+          const items = transcriptToChatItems(transcript.messages);
+          if (items.length === 0) return; // a session that has streamed nothing yet
+          set((s) => {
+            const chat = s.chats[sessionId] ?? { items: [] };
+            // Prepend the history in front of anything the live socket appended
+            // while the fetch was out (a delta for a turn in progress). The two
+            // never overlap: `/ws/agent` replays only pending permission/plan
+            // frames, never the text and tool rows already on disk.
+            return { chats: { ...s.chats, [sessionId]: { items: [...items, ...chat.items] } } };
+          });
+        } catch (err) {
+          // Transient (offline, a blip): let a later attach try again.
+          hydratedChats.delete(sessionId);
+          console.error("live transcript hydrate failed", sessionId, err);
+        }
+      })();
     },
 
     focusSession: (sessionId) => {
@@ -1559,11 +1590,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           // chat we draw above it would be empty.
           known ?? api.getTranscript(folder, sessionId).then((r) => r.messages).catch(() => null),
         ]);
-        const items: ChatItem[] = (transcript ?? []).map((m) =>
-          m.role === "user"
-            ? { kind: "user", text: m.text }
-            : { kind: "assistant", text: m.text, done: true, costUsd: null, isError: false },
-        );
+        const items = transcriptToChatItems(transcript ?? []);
         set((s) => ({
           chats: { ...s.chats, [info.session_id]: { items } },
           sessionStates: { ...s.sessionStates, [info.session_id]: info.state },
@@ -1969,6 +1996,13 @@ function scheduleOfficeCheck(path: string, hash: string | null): void {
 // ---- agent sockets (module-level; one per live session, kept for app lifetime)
 
 const agentSockets = new Map<string, ReconnectingSocket>();
+
+/** Sessions whose chat this window has already hydrated (or is hydrating) from
+ * the live transcript. Module-level and never cleared for the app's lifetime:
+ * local session ids do not repeat, and one successful fill is enough — a warm
+ * chat is guarded by `chatNeedsHydration` besides. A failed fetch removes its
+ * entry so a later attach can retry. */
+const hydratedChats = new Set<string>();
 
 function ensureAgentSocket(sessionId: string): ReconnectingSocket {
   const existing = agentSockets.get(sessionId);

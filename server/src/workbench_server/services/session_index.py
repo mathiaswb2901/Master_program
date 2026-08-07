@@ -22,7 +22,7 @@ at different places and the difference is the whole cost:
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -263,6 +263,19 @@ def scan_transcript(
     return TranscriptFacts(first, turns, truncated, None)
 
 
+def _messages_of(transcript: Path) -> list[TranscriptMessage]:
+    """Every chat message in one transcript file, in order. Reads the whole
+    file (this is the browse/replay pass, not the title pass) and drops any line
+    that is not a message — a truncated last line, a summary record, a tool
+    result — exactly as :func:`parse_line` decides."""
+    messages: list[TranscriptMessage] = []
+    for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
+        entry = parse_line(line)
+        if entry is not None:
+            messages.append(entry)
+    return messages
+
+
 class SessionIndex:
     def __init__(self, projects_root: Path) -> None:
         self._root = projects_root
@@ -299,11 +312,36 @@ class SessionIndex:
         transcript = self.project_dir(folder) / f"{session_id}.jsonl"
         if not transcript.is_file():
             raise FileNotFoundError(session_id)
+        return _messages_of(transcript)
+
+    def read_transcripts(self, folder: Path, session_ids: Iterable[str]) -> list[TranscriptMessage]:
+        """The union of one conversation's transcripts, oldest file first.
+
+        A resume mints a fresh SDK id, so a resumed conversation has more than
+        one transcript on disk — one per id it has lived under. They are read in
+        mtime order and concatenated, so a client replaying the conversation
+        after a reload sees the whole of it rather than only its latest leg.
+
+        Unlike :meth:`read_transcript`, an id that is invalid or whose file is
+        missing is skipped rather than raised: a live session that has run no
+        turn yet has no transcript, and "nothing to replay" is a normal answer,
+        not an error.
+        """
+        project = self.project_dir(folder)
+        dated: list[tuple[float, Path]] = []
+        for session_id in session_ids:
+            if not valid_session_id(session_id):
+                continue
+            transcript = project / f"{session_id}.jsonl"
+            try:
+                mtime = transcript.stat().st_mtime
+            except OSError:
+                continue  # missing or unreadable — nothing to add from this leg
+            dated.append((mtime, transcript))
+        dated.sort(key=lambda item: item[0])
         messages: list[TranscriptMessage] = []
-        for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
-            entry = parse_line(line)
-            if entry is not None:
-                messages.append(entry)
+        for _, transcript in dated:
+            messages.extend(_messages_of(transcript))
         return messages
 
     def first_user_text(self, folder: Path, session_id: str) -> str | None:
