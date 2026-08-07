@@ -151,6 +151,9 @@ describe("command registry", () => {
       // decides which *project* every panel below is looking at.
       "workspace.switch",
       "workspace.open",
+      // The Files tool's, next in `tools.ts` — creating a real document rather
+      // than an empty file (M5 item 16).
+      "files.newDocument",
       // …the Editor tool's, then the Agent's, then the Terminal's, then the
       // Scratchpad's — registry order (`tools.ts`), never declared here.
       "file.save",

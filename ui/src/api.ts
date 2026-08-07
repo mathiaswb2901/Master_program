@@ -6,6 +6,8 @@ import type {
   ActivitySnapshot,
   CallbackResponse,
   ConversationStore,
+  CreateDocumentRequest,
+  CreateDocumentResponse,
   CreateRequest,
   CreateSessionRequest,
   DirListing,
@@ -84,6 +86,10 @@ export const putFileContent = (body: WriteRequest): Promise<WriteResponse> =>
 
 export const createEntry = (body: CreateRequest): Promise<OkResponse> =>
   request("/api/files/create", jsonInit("POST", body));
+
+/** Create a valid blank document of a named kind — not a zero-byte file. */
+export const createDocument = (body: CreateDocumentRequest): Promise<CreateDocumentResponse> =>
+  request("/api/files/document", jsonInit("POST", body));
 
 export const renameEntry = (body: RenameRequest): Promise<OkResponse> =>
   request("/api/files/rename", jsonInit("POST", body));

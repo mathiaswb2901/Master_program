@@ -893,6 +893,14 @@ because other sections and five running lanes reference these numbers.
     not have to know that a spreadsheet is spelled `.xlsx`. Exit: every listed kind is
     created from inside the app, opens in its own editor or native host without a repair
     prompt, and a `.ipynb` opens in the notebook view rather than as raw JSON.
+    **Partially landed (PR #62): template creation, the `POST /api/files/document` API,
+    and the "New document…" UI landed** — the owner-preferred answer won, blank OOXML +
+    `.ipynb` templates shipped as package data (a few KB each, valid with no Office
+    installed, zero new runtime dependencies), offered by name from the tree context
+    menu, the tree toolbar and the QuickBar. **The notebook-view half is deferred**:
+    there is no notebook rendering panel in the app yet, so a `.ipynb` opens in Monaco
+    as raw JSON, not the notebook view the exit line asks for — that last clause is the
+    one open sub-piece.
 
 **Sequencing (2026-08-05), weighted toward what the owner can see.** Hours of invisible
 infrastructure read as nothing produced, so the order below front-loads visible shape
