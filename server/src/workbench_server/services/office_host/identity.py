@@ -148,9 +148,22 @@ def _read_accounts() -> list[OfficeAccount]:
         subkey_count = winreg.QueryInfoKey(identities)[0]
         for index in range(subkey_count):
             name = winreg.EnumKey(identities, index)
-            with winreg.OpenKey(identities, name) as account:
-                email = _value(account, "EmailAddress")
-                friendly = _value(account, "FriendlyName")
+            try:
+                with winreg.OpenKey(identities, name) as account:
+                    email = _value(account, "EmailAddress")
+                    friendly = _value(account, "FriendlyName")
+            except OSError as error:
+                # One restricted or corrupted identity subkey must not discard
+                # the accounts already read. Skip the bad one and keep going —
+                # a machine with two signed-in accounts where only the second
+                # trips a PermissionError still reports the first, instead of
+                # the whole read degrading to "could not read".
+                log.warning(
+                    "office_identity.subkey_read_failed",
+                    subkey=name,
+                    detail=f"{type(error).__name__}: {error}",
+                )
+                continue
             if email or friendly:
                 accounts.append(OfficeAccount(display_name=friendly, email=email))
     return accounts

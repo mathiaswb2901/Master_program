@@ -129,6 +129,132 @@ async def test_the_service_pushes_the_real_probe_off_the_loop(
     assert ident.active == account
 
 
+# ---- the real registry parse, against a scratch HKCU key (Windows only) ------
+#
+# The tests above script ``_read_accounts`` itself, which proves ``probe_identity``'s
+# branching but never touches the winreg calls that do the actual work. These do:
+# they build a key with the same shape Office uses under
+# ``…\Common\Identity\Identities`` and run ``_read_accounts`` end-to-end, so the
+# ``OpenKey``/``EnumKey``/``QueryValueEx`` reads and the ``REG_SZ`` type check are
+# exercised against real registry semantics on the Windows CI runner (which has no
+# Office, hence no real Identities key).
+
+_SCRATCH_KEY = r"Software\Workbench\_identity_test_scratch"
+
+windows_only = pytest.mark.skipif(
+    sys.platform != "win32", reason="winreg and HKCU exist only on Windows"
+)
+
+
+def _delete_tree(path: str) -> None:
+    import winreg
+
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_ALL_ACCESS)
+    except FileNotFoundError:
+        return
+    with key:
+        while True:
+            try:
+                child = winreg.EnumKey(key, 0)
+            except OSError:
+                break
+            _delete_tree(path + "\\" + child)
+    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+
+
+def _write_account(
+    subkey: str,
+    *,
+    email: str | None = None,
+    friendly: str | None = None,
+    email_kind: int | None = None,
+) -> None:
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _SCRATCH_KEY + "\\" + subkey) as key:
+        if email is not None:
+            winreg.SetValueEx(key, "EmailAddress", 0, email_kind or winreg.REG_SZ, email)
+        if friendly is not None:
+            winreg.SetValueEx(key, "FriendlyName", 0, winreg.REG_SZ, friendly)
+
+
+@pytest.fixture
+def scratch_identities(monkeypatch: pytest.MonkeyPatch) -> Any:
+    import winreg
+
+    _delete_tree(_SCRATCH_KEY)
+    winreg.CreateKey(winreg.HKEY_CURRENT_USER, _SCRATCH_KEY).Close()
+    monkeypatch.setattr(identity_module, "_IDENTITIES_KEY", _SCRATCH_KEY)
+    try:
+        yield
+    finally:
+        _delete_tree(_SCRATCH_KEY)
+
+
+@windows_only
+def test_read_accounts_parses_a_real_registry_key(scratch_identities: None) -> None:
+    _write_account("id-ada", email="ada@example.com", friendly="Ada Lovelace")
+    _write_account("id-grace", email="grace@example.com", friendly="Grace Hopper")
+    accounts = identity_module._read_accounts()
+    by_email = {a.email: a for a in accounts}
+    assert set(by_email) == {"ada@example.com", "grace@example.com"}
+    assert by_email["ada@example.com"].display_name == "Ada Lovelace"
+    assert by_email["grace@example.com"].display_name == "Grace Hopper"
+
+
+@windows_only
+def test_read_accounts_keeps_a_name_only_identity_and_drops_an_empty_one(
+    scratch_identities: None,
+) -> None:
+    _write_account("id-friendly-only", friendly="Katherine Johnson")
+    _write_account("id-empty")  # neither value: names nobody, not reported
+    accounts = identity_module._read_accounts()
+    assert [(a.display_name, a.email) for a in accounts] == [("Katherine Johnson", None)]
+
+
+@windows_only
+def test_value_narrows_a_non_reg_sz_type_to_none(scratch_identities: None) -> None:
+    """The ``kind != REG_SZ`` check in ``_value`` fires against a real value: an
+    ``EmailAddress`` stored as ``REG_EXPAND_SZ`` reads back as None, while a
+    sibling ``REG_SZ`` FriendlyName is kept — the account is still reported by
+    name rather than the whole read tripping on the unexpected type."""
+    import winreg
+
+    _write_account(
+        "id-oddtype",
+        email="expand@example.com",
+        friendly="Odd Type",
+        email_kind=winreg.REG_EXPAND_SZ,
+    )
+    accounts = identity_module._read_accounts()
+    assert [(a.display_name, a.email) for a in accounts] == [("Odd Type", None)]
+
+
+@windows_only
+def test_one_unreadable_subkey_does_not_discard_the_others(
+    scratch_identities: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permissions refusal on a single identity subkey degrades that one entry,
+    not the whole read: the good account still comes through. Regression for the
+    conflation of 'partially readable' with 'nothing readable'."""
+    import winreg
+
+    _write_account("id-good", email="good@example.com", friendly="Good Account")
+    _write_account("id-bad", email="bad@example.com", friendly="Bad Account")
+
+    real_open = winreg.OpenKey
+
+    def open_but_refuse_the_bad_one(key: Any, sub_key: str, *args: Any, **kwargs: Any) -> Any:
+        if sub_key == "id-bad":
+            raise PermissionError("access is denied")
+        return real_open(key, sub_key, *args, **kwargs)
+
+    monkeypatch.setattr(winreg, "OpenKey", open_but_refuse_the_bad_one)
+    accounts = identity_module._read_accounts()
+    assert [(a.display_name, a.email) for a in accounts] == [("Good Account", "good@example.com")]
+
+
 # ---- the model round-trips ---------------------------------------------------
 
 
