@@ -26,6 +26,7 @@ import { panesTool } from "./panels/Panes";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
 import { usageTool } from "./panels/UsagePanel";
+import { visualTool } from "./panels/VisualPanel";
 import { workspacesTool } from "./panels/Workspaces";
 
 export const TOOLS: readonly WorkbenchTool[] = [
@@ -53,6 +54,9 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // their rows rather than deriving its own, so it reads as the wide view of
   // the two capabilities above it.
   missionTool,
+  // Opened on demand from a plan card's Expand: one pane per drawn artifact,
+  // rendering the same scene graph the card does (M5 item 3, PR 4).
+  visualTool,
   // The last two contribute no panel — they arrange the ones above, so they
   // come after everything they can arrange. Panes splits the window and moves
   // between the pieces; Layouts remembers the result. Layouts is last so its

@@ -605,7 +605,14 @@ describe("the registered tools", () => {
     const closable = panelTools(TOOLS)
       .filter((registered) => panelTabInfo(TOOLS, registered.id).closable)
       .map((registered) => registered.id);
-    expect(closable).toEqual(["conversations", "scratchpad", "usage", "activity", "mission"]);
+    expect(closable).toEqual([
+      "conversations",
+      "scratchpad",
+      "usage",
+      "activity",
+      "mission",
+      "visual",
+    ]);
   });
 
   it("host both shortcut kinds", () => {

@@ -17,6 +17,7 @@ from workbench_server.services.office_host.service import (
     HostStateError,
     OfficeHostService,
     build_backend,
+    build_bridge,
 )
 from workbench_server.services.office_host.shell_channel import ShellChannel
 
@@ -27,4 +28,5 @@ __all__ = [
     "OfficeHostService",
     "ShellChannel",
     "build_backend",
+    "build_bridge",
 ]

@@ -14,14 +14,17 @@ from workbench_server.services.agent_tools import (
     GET_WORKSPACE_STATE,
     LIST_WORKERS,
     MCP_SERVER_NAME,
+    OFFICE_READ,
     PRESENT_PLAN,
     READ_WORKER,
     SEND_TO_WORKER,
     SPAWN_WORKER,
     STOP_WORKER,
+    OfficeDocumentReader,
     OrchestratorHandle,
     allowed_tool_names,
     handle_list_workers,
+    handle_office_read,
     handle_present_plan,
     handle_read_worker,
     handle_send_to_worker,
@@ -57,6 +60,7 @@ class UiStateStore:
 def build_context_bridge(
     store: UiStateStore,
     bridge: SessionBridge,
+    reader: OfficeDocumentReader,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -86,7 +90,11 @@ def build_context_bridge(
     async def present_plan(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_present_plan(bridge, args)
 
-    tools: list[Any] = [get_workspace_state, present_plan]
+    @tool(OFFICE_READ.name, OFFICE_READ.description, OFFICE_READ.input_schema)
+    async def office_read(args: dict[str, Any]) -> dict[str, Any]:
+        return await handle_office_read(reader, args)
+
+    tools: list[Any] = [get_workspace_state, present_plan, office_read]
     if kind == "orchestrator" and orchestrator is not None:
         cost = session_cost or (lambda _worker_id: 0.0)
 
@@ -121,6 +129,7 @@ def build_agent_options(
     folder: Path,
     resume_session_id: str | None,
     bridge: SessionBridge,
+    reader: OfficeDocumentReader,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -188,7 +197,9 @@ def build_agent_options(
         include_partial_messages=True,
         can_use_tool=can_use_tool,
         mcp_servers={
-            MCP_SERVER_NAME: build_context_bridge(store, bridge, kind, orchestrator, session_cost)
+            MCP_SERVER_NAME: build_context_bridge(
+                store, bridge, reader, kind, orchestrator, session_cost
+            )
         },
         plugins=plugins,
         setting_sources=setting_sources,
@@ -209,11 +220,17 @@ def build_agent_options(
 
 def sdk_client_factory(
     store: UiStateStore,
+    reader: OfficeDocumentReader,
     settings: Settings | None = None,
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
 ) -> Any:
-    """Returns a ClientFactory closure for SessionManager."""
+    """Returns a ClientFactory closure for SessionManager.
+
+    ``reader`` is the office-host service, narrowed to :class:`OfficeDocumentReader`
+    so a session can read the live docked document without this module importing
+    the service — the same one-way dependency the rest of the tools keep.
+    """
     resolved = settings or Settings()
 
     def factory(
@@ -225,7 +242,15 @@ def sdk_client_factory(
         from claude_agent_sdk import ClaudeSDKClient
 
         options = build_agent_options(
-            store, resolved, folder, resume_session_id, bridge, kind, orchestrator, session_cost
+            store,
+            resolved,
+            folder,
+            resume_session_id,
+            bridge,
+            reader,
+            kind,
+            orchestrator,
+            session_cost,
         )
         client: SdkClient = ClaudeSDKClient(options=options)
         return client
