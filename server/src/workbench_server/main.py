@@ -36,7 +36,12 @@ from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
 from workbench_server.services.office import OfficeService
-from workbench_server.services.office_host import OfficeHostService, ShellChannel, build_backend
+from workbench_server.services.office_host import (
+    OfficeHostService,
+    ShellChannel,
+    build_backend,
+    build_bridge,
+)
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
@@ -89,6 +94,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # conversation open. In-memory and bounded, like usage.
     activity_service = ActivityService(workspace.root, event_bus)
     ui_state_store = UiStateStore()
+    # Native Office hosting, constructed before the session manager because a
+    # session reads the live docked document through it (narrowed to
+    # OfficeDocumentReader in the SDK factory). The backend is None on any
+    # machine that cannot host (and whenever the policy says not to), which is
+    # not an error: the capabilities endpoint reports it and the UI degrades to
+    # OnlyOffice. The channel is built whatever the policy, so the endpoint
+    # exists and a shell that connects to a server with hosting off is *told* so
+    # by `capabilities` rather than meeting a socket that refuses. The read
+    # bridge is the fake in fake mode and None otherwise for now — the real COM
+    # reader lands in a later PR; hosting the window is shipped, reading its live
+    # document is not.
+    host_channel = ShellChannel()
+    host_backend = build_backend(settings.office_native, settings.office_fake, host_channel)
+    host_bridge = build_bridge(settings.office_native, settings.office_fake, host_backend)
+    if settings.office_fake and host_backend is not None:
+        log.warning(
+            "office_host.fake_mode_enabled",
+            detail="WORKBENCH_OFFICE_FAKE is set: hosts are simulated, no document is really open",
+        )
+    office_host_service = OfficeHostService(
+        workspace,
+        # Host state changes ride the same bus as watcher and session events,
+        # so a window that never issued the open request still tracks them.
+        event_bus,
+        host_backend,
+        bridge=host_bridge,
+        mode=settings.office_native,
+        fake=settings.office_fake,
+        channel=host_channel,
+    )
     session_index = SessionIndex(settings.resolved_projects_dir())
     # The same storage, browsed whole instead of one folder at a time. Read-only
     # and lazy: nothing scans until a client asks, so this costs a bare object
@@ -104,7 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         client_factory = fake_client_factory()
     else:
-        client_factory = sdk_client_factory(ui_state_store, settings)
+        client_factory = sdk_client_factory(ui_state_store, office_host_service, settings)
     session_manager = SessionManager(
         workspace.root,
         client_factory,
@@ -133,29 +168,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # A Document Server save is the user typing, flushed — the correlator
         # has to hear about it or an open agent claim would take the credit.
         provenance=provenance_service,
-    )
-    # Native Office hosting. The backend is None on any machine that cannot host
-    # (and whenever the policy says not to), which is not an error: the
-    # capabilities endpoint reports it and the UI degrades to OnlyOffice. The
-    # channel is built whatever the policy, so the endpoint exists and a shell
-    # that connects to a server with hosting off is *told* so by `capabilities`
-    # rather than meeting a socket that refuses.
-    host_channel = ShellChannel()
-    host_backend = build_backend(settings.office_native, settings.office_fake, host_channel)
-    if settings.office_fake and host_backend is not None:
-        log.warning(
-            "office_host.fake_mode_enabled",
-            detail="WORKBENCH_OFFICE_FAKE is set: hosts are simulated, no document is really open",
-        )
-    office_host_service = OfficeHostService(
-        workspace,
-        # Host state changes ride the same bus as watcher and session events,
-        # so a window that never issued the open request still tracks them.
-        event_bus,
-        host_backend,
-        mode=settings.office_native,
-        fake=settings.office_fake,
-        channel=host_channel,
     )
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
