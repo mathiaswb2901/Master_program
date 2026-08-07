@@ -199,15 +199,24 @@ export function pruneLayout(value: unknown, known: PaneVocabulary): PrunedLayout
   if (dropped.length + droppedPanes.length > 0) delete prunedGrid.maximizedNode;
 
   const layout: Json = { ...value, grid: prunedGrid, panels: kept };
-  if (typeof value.activeGroup === "string" && !groupIds(root).has(value.activeGroup)) {
+  const survivingGroups = groupIds(root);
+  if (typeof value.activeGroup === "string" && !survivingGroups.has(value.activeGroup)) {
     delete layout.activeGroup;
   }
   for (const key of ["floatingGroups", "popoutGroups"] as const) {
     const groups = value[key];
     if (!Array.isArray(groups)) continue;
-    const surviving = groups.filter(
-      (group) => isRecord(group) && pruneGroup(group.data, kept) !== null,
-    );
+    const surviving = groups.filter((group) => {
+      if (!isRecord(group) || pruneGroup(group.data, kept) === null) return false;
+      // A popped-out pane re-grids into the group it names on close/restore, so
+      // one whose `gridReferenceGroup` did not survive pruning has nowhere to go
+      // back to — dockview would fail to restore it. Drop it with the panels it
+      // held; a floating group carries no such reference and keeps this pass.
+      if (key === "popoutGroups" && typeof group.gridReferenceGroup === "string") {
+        return survivingGroups.has(group.gridReferenceGroup);
+      }
+      return true;
+    });
     if (surviving.length === 0) delete layout[key];
     else layout[key] = surviving.map((group) => reviseFloating(group as Json, kept));
   }

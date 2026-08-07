@@ -202,6 +202,8 @@ describe("command registry", () => {
       "pane.cycle",
       "pane.cycleBack",
       "pane.close",
+      "pane.popout",
+      "pane.popin",
       // The Layouts tool's *static* commands. Its per-layout rows are dynamic
       // (the saved set changes while the app runs) and so are not in here —
       // they join in `allCommands`, after everything static.

@@ -33,6 +33,7 @@ import {
   panelFocusCommands,
   panelTabInfo,
   panelTools,
+  popoutRefusal,
   settleBeforeWorkspaceSwitch,
   shortcutAction,
   shortcutHost,
@@ -424,6 +425,51 @@ describe("the workspace-switch guard", () => {
   });
 });
 
+describe("the pop-out guard", () => {
+  const guard = (id: string, block: string | null): WorkbenchTool =>
+    tool({ id, popoutGuard: { blocks: () => block } });
+
+  it("allows a group no tool objects to", () => {
+    expect(popoutRefusal([guard("a", null)], ["editors#a.docx", "terminal#1"])).toBeNull();
+  });
+
+  it("refuses the whole group on the first tool that blocks a pane in it", () => {
+    const tools = [guard("clear", null), guard("office", "a real window is docked here")];
+    expect(popoutRefusal(tools, ["terminal#1", "editors#a.docx"])).toBe(
+      "a real window is docked here",
+    );
+  });
+
+  it("asks the guard about every pane id in the group", () => {
+    const seen: string[] = [];
+    const spy = tool({
+      id: "office",
+      popoutGuard: {
+        blocks: (id) => {
+          seen.push(id);
+          return null;
+        },
+      },
+    });
+    popoutRefusal([spy], ["a", "b", "c"]);
+    expect(seen).toEqual(["a", "b", "c"]);
+  });
+
+  it("skips a tool disabled by its `when`", () => {
+    const off = tool({ id: "off", when: () => false, popoutGuard: { blocks: () => "no" } });
+    expect(popoutRefusal([off], ["x"])).toBeNull();
+  });
+
+  it("is what the office host contributes, and allows the Editor pane with nothing docked", () => {
+    // The shipped guard reads the office store; with no live host it allows the
+    // default Editor pane, which is the branch a test without a running host can
+    // pin. A split file pane is never blocked (it holds no docked window).
+    expect(officeHostTool.popoutGuard?.blocks("editors") ?? null).toBeNull();
+    expect(officeHostTool.popoutGuard?.blocks("editors#report.docx") ?? null).toBeNull();
+    expect(officeHostTool.popoutGuard?.blocks("terminal#1") ?? null).toBeNull();
+  });
+});
+
 describe("document views and status items", () => {
   it("answers which view renders a file kind", () => {
     const view = { kind: "office" as const, component: Stub, hostClassName: "wb-office-host" };
@@ -579,6 +625,7 @@ describe("the registered tools", () => {
       "Alt+Shift+S": "pane.split.down",
       "Alt+O": "pane.cycle",
       "Alt+X": "pane.close",
+      "Alt+P": "pane.popout",
       "Alt+ArrowLeft": "pane.focus.left",
       "Alt+ArrowRight": "pane.focus.right",
       "Alt+ArrowUp": "pane.focus.up",
