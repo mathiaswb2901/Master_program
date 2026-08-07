@@ -29,8 +29,11 @@ from urllib.parse import urlsplit
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 #: WebSocket close code for a rejected handshake. In the 4000-4999 private range
-#: so it never collides with a protocol-defined code; the client reads it as
-#: "the server refused you", not "the connection dropped".
+#: so it never collides with a protocol-defined code; a client that reads the
+#: close frame sees "the server refused you", not "the connection dropped". For
+#: this to reach the client at all the connection must be *accepted* first —
+#: closing before the 101 upgrade makes uvicorn fail the handshake with a flat
+#: HTTP 403 and the browser reports a bare 1006 with no code (see ``_reject_ws``).
 WS_CLOSE_POLICY = 4403
 
 #: A client offering the token as a WebSocket subprotocol prefixes it with this,
@@ -138,13 +141,13 @@ class LocalAuthMiddleware:
         # none, and only a browser attaches one we could distrust. Present and
         # foreign → reject before the endpoint runs.
         if origin is not None and not self._is_local_origin(origin):
-            await self._reject_ws(send)
+            await self._reject_ws(receive, send)
             return
         token = _ws_subprotocol_token(scope) or _header(scope, TOKEN_HEADER)
         if self._token_ok(token):
             await self._app(scope, receive, send)
             return
-        await self._reject_ws(send)
+        await self._reject_ws(receive, send)
 
     def _token_ok(self, offered: str | None) -> bool:
         if offered is None:
@@ -163,7 +166,13 @@ class LocalAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Forbidden"})
 
     @staticmethod
-    async def _reject_ws(send: Send) -> None:
-        # Closing before accepting fails the handshake; the client never sees an
-        # open socket. No receive of the connect event is required first.
+    async def _reject_ws(receive: Receive, send: Send) -> None:
+        # Accept the handshake, then immediately close with the policy code.
+        # Accepting first is what makes the close code *reach the client*: a
+        # close sent before the 101 upgrade is dropped to a flat HTTP 403 by
+        # uvicorn, which a browser reports as an opaque 1006 with no code. We
+        # drain the ``websocket.connect`` event before accepting so the accept
+        # is spec-valid, and never dispatch downstream — the endpoint never runs.
+        await receive()
+        await send({"type": "websocket.accept"})
         await send({"type": "websocket.close", "code": WS_CLOSE_POLICY})

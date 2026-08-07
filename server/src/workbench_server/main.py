@@ -315,13 +315,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.orchestrator = orchestrator_service
     app.state.workspaces = workspace_service
     app.state.documents = document_service
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_DEV_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Order matters, and Starlette inverts it: add_middleware inserts at the head
+    # of the list, so the LAST middleware added is the OUTERMOST layer. We add
+    # LocalAuth *first* and CORS *second* so CORS ends up outer — a request the
+    # auth layer rejects still passes back out through CORS, which attaches the
+    # Access-Control-Allow-Origin header to the 403. Reversed, LocalAuth's 403
+    # would never reach CORS and a browser XHR with a missing/wrong token would
+    # surface as an opaque CORS failure instead of a readable 403 body once
+    # enforce_auth is flipped on.
+    #
     # Local-API security hardening (M5 item 8): require the per-launch token on
     # REST + WS and gate the WS handshake on Origin. Inert while
     # settings.enforce_auth is False (this PR's shipped default) — see
@@ -331,6 +333,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         token=token,
         enforce=settings.enforce_auth,
         is_local_origin=is_local_origin,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_DEV_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     app.include_router(health.router)
     app.include_router(auth.router)
@@ -360,6 +369,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+def runtime_token_path(settings: Settings) -> Path:
+    """Where this instance drops its per-launch token for an attaching shell.
+
+    Keyed by port so two servers on the same machine (different ports) do not
+    clobber or delete each other's file: each writes ``auth-token-<port>`` and
+    an attaching shell reads the one matching the port it is dialling. Without
+    the discriminator, whichever process exited first would unlink the shared
+    file out from under a still-running sibling.
+    """
+    root = settings.app_data_root or app_data_dir()
+    return root / "runtime" / f"auth-token-{settings.port}"
+
+
 def run() -> None:
     """Console entrypoint: `uv run workbench-server`."""
     import uvicorn
@@ -372,7 +394,7 @@ def run() -> None:
     # in-process test app is built through create_app, which touches no disk, so
     # a test run never writes (or races on) this file. Removed on the way out so
     # a token never outlives the process that owns it.
-    token_path = (settings.app_data_root or app_data_dir()) / "runtime" / "auth-token"
+    token_path = runtime_token_path(settings)
     _write_runtime_token(token_path, app.state.auth_token)
     try:
         uvicorn.run(app, host=settings.host, port=settings.port, log_config=None)
