@@ -31,6 +31,7 @@ from workbench_server.routers import (
     shortcuts,
     terminal,
     usage,
+    validation,
     workspaces,
     worktrees,
 )
@@ -59,6 +60,7 @@ from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.sessions import SessionsStore
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
+from workbench_server.services.validation import ValidationService
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
 from workbench_server.services.workspaces import RecentsStore, WorkspaceService
@@ -82,6 +84,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
     # Correlates agent tool calls with the watcher's file events; in-memory only.
     provenance_service = ProvenanceService(workspace.root, event_bus)
+    # The next question after provenance's "who wrote this file": "and is it
+    # correct". A registry of checks that assembles a ValidationResult and
+    # derives its risk from the evidence. In-memory and bounded (LRU keyed by
+    # validation_id, like provenance), and it publishes each result on the shared
+    # bus for a reconnecting client — the usage/activity precedent. Ships the
+    # frame only; the reconciliation gate that plugs into it is a later PR.
+    validation_service = ValidationService(workspace.root, event_bus)
     # One JSON document per workspace, so different projects keep different
     # arrangements. Stateless: read and written on demand, nothing to start.
     layouts_service = LayoutsService(workspace.root)
@@ -243,6 +252,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             shortcuts_service,
             layouts_service,
             provenance_service,
+            # Holds results keyed by a workspace-relative path; a switch must
+            # forget them, or a verdict about a file in the project just left
+            # would attach to a same-named file in the one opened.
+            validation_service,
             session_manager,
             # Half B of the session browser (M5 item 12): after a switch the
             # browser must judge each folder against the workspace the user just
@@ -322,6 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.office_host_channel = host_channel
     app.state.shortcuts = shortcuts_service
     app.state.provenance = provenance_service
+    app.state.validation = validation_service
     app.state.layouts = layouts_service
     app.state.worktrees = worktree_service
     app.state.usage = usage_service
@@ -369,6 +383,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(office_host.ws_router)
     app.include_router(shortcuts.router)
     app.include_router(provenance.router)
+    app.include_router(validation.router)
     app.include_router(layouts.router)
     app.include_router(worktrees.router)
     app.include_router(usage.router)
