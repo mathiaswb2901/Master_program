@@ -28,6 +28,7 @@
 //! *real* child window — Word, eventually — inside a dockview panel rectangle.
 //! It is proven here against a synthetic guest process; see that module.
 
+mod auth_token;
 mod backend;
 mod caption;
 mod close_guard;
@@ -90,6 +91,19 @@ fn close_ack() {
 #[tauri::command]
 fn backend_ready() -> bool {
     BACKEND_READY.load(Ordering::SeqCst)
+}
+
+/// The backend's per-launch auth token, or `null` when none is on disk yet.
+///
+/// Read-only: the server is the sole authority on the token (it mints, writes
+/// and unlinks it — `services/local_auth.py`, `main.py`), and the shell only
+/// reads the file it drops so the webview can authenticate exactly like the
+/// browser client will once enforcement is flipped on (item 8, PR4). `null` is
+/// a normal answer — the backend may not have written the file yet, or the
+/// shell may be attached to an externally-started server.
+#[tauri::command]
+fn auth_token() -> Option<String> {
+    auth_token::current_token()
 }
 
 /// Needs-attention badge, in the one place a native app can show it.
@@ -256,6 +270,7 @@ pub fn run() {
         shell_ready,
         close_ack,
         backend_ready,
+        auth_token,
         set_attention,
         set_caption_tint,
         confirm_close,
@@ -277,6 +292,7 @@ pub fn run() {
         shell_ready,
         close_ack,
         backend_ready,
+        auth_token,
         set_attention,
         set_caption_tint,
         confirm_close,
@@ -296,6 +312,7 @@ pub fn run() {
         shell_ready,
         close_ack,
         backend_ready,
+        auth_token,
         set_attention,
         set_caption_tint,
         confirm_close,
