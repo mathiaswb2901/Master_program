@@ -305,8 +305,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Per-launch auth token (M5 item 8 / OSS-bar item 1). Minted fresh unless
     # one was configured out of band (an attaching desktop shell). Stashed on
     # app.state so the token-handout router can read it; the middleware is
-    # handed its own copy at construction. This PR ships enforce_auth=False, so
-    # the middleware is a pass-through and nothing here changes behavior yet.
+    # handed its own copy at construction. Enforcement is ON by default now
+    # (PR4); `WORKBENCH_ENFORCE_AUTH=0` forces the middleware back to a
+    # pass-through for debugging.
     token = settings.auth_token or secrets.token_urlsafe(32)
     app.state.auth_token = token
     app.state.settings = settings
@@ -340,9 +341,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # enforce_auth is flipped on.
     #
     # Local-API security hardening (M5 item 8): require the per-launch token on
-    # REST + WS and gate the WS handshake on Origin. Inert while
-    # settings.enforce_auth is False (this PR's shipped default) — see
-    # services/local_auth.py.
+    # REST + WS and gate the WS handshake on Origin. Active by default now
+    # (settings.enforce_auth is True); a pass-through only when forced off with
+    # WORKBENCH_ENFORCE_AUTH=0 — see services/local_auth.py.
     app.add_middleware(
         LocalAuthMiddleware,
         token=token,

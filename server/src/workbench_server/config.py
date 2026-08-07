@@ -133,11 +133,12 @@ class Settings(BaseSettings):
     # `secrets.token_urlsafe(32)` per launch (the common case; an explicit value
     # lets an attaching desktop shell be told the token out of band).
     auth_token: str | None = None
-    # The rollout flag. False (the shipped default for this PR) makes the
-    # middleware a pass-through: everything is wired but nothing is enforced, so
-    # this lands with zero behavior change. A later PR flips it on once the
-    # client injects the token and sends a local Origin.
-    enforce_auth: bool = False
+    # The rollout flag, now ON (M5 item 8, PR4). The token is required on REST +
+    # WS and the WS handshake is gated on Origin. Kept as a setting so it can be
+    # forced back OFF for debugging — `WORKBENCH_ENFORCE_AUTH=0` — without editing
+    # code; the whole client (`ui/src/token.ts`, `api.ts`, `ws.ts`) and both test
+    # harnesses present the token, so the shipped default is enforcement on.
+    enforce_auth: bool = True
 
     def resolved_workspace(self) -> Path:
         """The workspace root the server operates on. Defaults to the CWD it was launched from."""

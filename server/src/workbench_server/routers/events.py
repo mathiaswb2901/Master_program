@@ -10,6 +10,7 @@ import contextlib
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from workbench_server.services.event_bus import EventBus
+from workbench_server.services.local_auth import ws_subprotocol_to_echo
 
 router = APIRouter()
 
@@ -17,7 +18,9 @@ router = APIRouter()
 @router.websocket("/ws/events")
 async def events_ws(ws: WebSocket) -> None:
     bus: EventBus = ws.app.state.event_bus
-    await ws.accept()
+    # Echo the token subprotocol the client offered, or a browser fails the
+    # handshake; the middleware already validated it (services/local_auth.py).
+    await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))
     queue = bus.subscribe()
     try:
         while True:

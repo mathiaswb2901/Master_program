@@ -83,6 +83,25 @@ def _ws_subprotocol_token(scope: Scope) -> str | None:
     return None
 
 
+def ws_subprotocol_to_echo(scope: Scope) -> str | None:
+    """The full ``workbench.auth.<token>`` label a WS endpoint must echo on accept.
+
+    A browser **fails** any handshake whose offered subprotocol the server does
+    not echo back in the 101 response, so every WS endpoint accepts with this:
+    ``await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))``. It returns
+    the label verbatim (not just the token) because that whole string is what the
+    ``Sec-WebSocket-Protocol`` response header must repeat. ``None`` when the
+    client offered no token label — native and test clients that authenticate by
+    header, or don't authenticate at all — which accepts with no subprotocol,
+    exactly as before this PR. The token *validation* already happened in the
+    middleware before the endpoint ran; this only mirrors the label back.
+    """
+    for proto in scope.get("subprotocols", []):
+        if proto.startswith(WS_TOKEN_SUBPROTOCOL_PREFIX):
+            return str(proto)
+    return None
+
+
 class LocalAuthMiddleware:
     """Gate REST + WS on a per-launch token, and WS additionally on Origin.
 
