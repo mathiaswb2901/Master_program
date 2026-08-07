@@ -188,6 +188,27 @@ export async function pickDirectory(): Promise<string | null> {
 }
 
 /**
+ * The per-launch auth token, straight from the shell — `null` in a browser tab.
+ *
+ * The shell owns the token the backend was started with, so the desktop window
+ * takes it directly instead of making the `/api/auth/token` handshake a browser
+ * tab has to (`token.ts`). Returns `null` outside the shell so the caller falls
+ * back to the handshake, and never throws: a shell that does not answer the
+ * command yet (the `auth_token` command lands in PR3) is treated the same as a
+ * browser — null, fetch it over HTTP. The E2E suite runs in a browser, where
+ * this is null by construction.
+ */
+export async function authToken(): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    return await callShell<string | null>("auth_token");
+  } catch (err) {
+    console.error("shell auth token unavailable", err);
+    return null;
+  }
+}
+
+/**
  * One shell command whose *answer* matters, and whose failure is the caller's
  * to explain.
  *

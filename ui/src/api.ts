@@ -1,6 +1,7 @@
 /** Typed REST client for the workbench server (proxied through Vite at /api). */
 
 import type { Theme } from "./theme";
+import { getToken } from "./token";
 import type {
   AcknowledgeRequest,
   ActivitySnapshot,
@@ -54,7 +55,13 @@ export class ApiError extends Error {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  // The per-launch token rides a header on every REST call — one merge here
+  // covers all of them. Enforcement is off server-side today, so a null token
+  // (handshake not yet resolved) changes nothing; PR4 flips enforcement on.
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token !== null) headers.set("X-Workbench-Token", token);
+  const res = await fetch(url, { ...init, headers });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {

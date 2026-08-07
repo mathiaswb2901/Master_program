@@ -5,9 +5,55 @@
  * panel manages its own raw WebSocket.
  */
 
+import { getToken } from "./token";
+
 export function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}${path}`;
+}
+
+/** The subprotocol label that carries the token: `workbench.auth.<token>`.
+ * Mirrors `WS_TOKEN_SUBPROTOCOL_PREFIX` in `services/local_auth.py`. */
+const WS_TOKEN_PREFIX = "workbench.auth.";
+
+/**
+ * Build the token-bearing WebSocket subprotocol. A browser cannot set headers
+ * on a `new WebSocket`, so the token travels as a subprotocol — the one
+ * client-controlled value a WS handshake carries, and never a URL/query string.
+ * Pure; whether it is actually offered is decided by `wsProtocols`.
+ */
+export function wsTokenProtocol(token: string): string {
+  return `${WS_TOKEN_PREFIX}${token}`;
+}
+
+/**
+ * Whether a browser socket may yet OFFER the token subprotocol.
+ *
+ * Held OFF, and this is load-bearing, not a stub: a browser *fails* any
+ * WebSocket whose offered subprotocol the server does not echo back in the 101
+ * response — verified live in Chrome, `new WebSocket(url,
+ * ["workbench.auth.…"])` fires `onerror` while the server logs the handshake
+ * `[accepted]`. Every WS endpoint today (`events`, `agents`, `office_host`,
+ * `terminal`) calls `ws.accept()` with no subprotocol, so offering the label
+ * now would break *every* socket in the app, enforcement on or off. Turning
+ * this on is the WebSocket half of enabling enforcement (PR4) and pairs with a
+ * server-side `accept(subprotocol=…)` that echoes the label. The REST token
+ * already rides every call today (`api.ts`); only the WS transport waits on
+ * that server echo.
+ */
+const OFFER_WS_TOKEN = false;
+
+/**
+ * The subprotocol list every socket opens with: the token once it may be
+ * offered, otherwise empty — which a browser treats exactly like offering no
+ * subprotocol (verified: `new WebSocket(url, [])` opens). Used by
+ * `ReconnectingSocket` below (/ws/events, /ws/agent, /ws/office-host) and the
+ * terminal's one raw socket (`Terminal.tsx`).
+ */
+export function wsProtocols(): string[] {
+  const token = getToken();
+  if (!OFFER_WS_TOKEN || token === null) return [];
+  return [wsTokenProtocol(token)];
 }
 
 /**
@@ -50,7 +96,7 @@ export class ReconnectingSocket {
   }
 
   private connect(): void {
-    const ws = new WebSocket(wsUrl(this.path));
+    const ws = new WebSocket(wsUrl(this.path), wsProtocols());
     this.ws = ws;
     ws.onopen = () => {
       this.attempts = 0;
