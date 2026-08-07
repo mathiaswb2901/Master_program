@@ -161,6 +161,7 @@ describe("command registry", () => {
       "editor.prevTab",
       "editor.close",
       "session.new",
+      "session.detach",
       "session.jump.1",
       "session.jump.2",
       "session.jump.3",
