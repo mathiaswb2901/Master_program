@@ -17,15 +17,13 @@
    inside a panel, and the panel is one tab among others. That is the whole
    reason it interrupts nothing.
 
-   It is the product's most important empty state (§6.13), so it earns the two
-   things a plain panel does not: the app's entrance — a short rise that reduced
+   It is the product's most important empty state (§6.13), so it earns the one
+   thing a plain panel does not: the app's entrance — a short rise that reduced
    motion turns into a pure fade, distances and durations both tokens (tokens.css
-   §5) — and a single amber marker down its left edge. That amber is the one the
-   whole identity spends on *where I am* (§2.4): on first paint, the front door is
-   exactly that. It is the only chromatic pixel on the card, and it retires with
-   the welcome. */
+   §5). Its distinction is carried by surface and border, not by colour: amber is
+   spent only on *where I am* and *changing right now* (§2.4), and a marker that
+   stands for the whole life of the card is neither. */
 .wb-welcome {
-  position: relative;
   flex: none;
   margin: var(--space-6) var(--space-6) var(--space-2);
   padding: var(--space-6);
@@ -33,19 +31,6 @@
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   animation: wb-rise-in var(--motion-enter);
-}
-
-/* The amber marker: a short spine, not a full-height rule, so it reads as a mark
-   on the card rather than a second border. */
-.wb-welcome::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: var(--space-6);
-  bottom: var(--space-6);
-  width: 2px;
-  border-radius: var(--radius-full);
-  background: var(--accent);
 }
 
 .wb-welcome-title {

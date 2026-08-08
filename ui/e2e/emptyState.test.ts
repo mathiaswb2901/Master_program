@@ -5,8 +5,8 @@
  * A vitest test rather than a Playwright one, next to `perf/motion.test.ts` and
  * for the same reason: the questions here are about what a stylesheet *declares*
  * — which class carries the app's entrance, whether the one empty-state action is
- * an outline and not a fill, whether the welcome card spends its single amber on
- * the marker §2.4 allows it — and those are answered off disk in milliseconds. It
+ * an outline and not a fill, whether the welcome card leans on surface and border
+ * rather than standing amber — and those are answered off disk in milliseconds. It
  * reuses the perf lane's tiny CSS reader so "a rule" means the same thing here as
  * it does to the motion budget. The look itself is asserted in the browser by
  * `discover.spec.ts`; this is the structure that look is built on.
@@ -80,10 +80,14 @@ describe("the welcome card — the product's most important empty state (§6.13)
     expect(body(KEYBOARD, ".wb-welcome")).toContain("animation: wb-rise-in var(--motion-enter)");
   });
 
-  it("spends its single amber on the marker §2.4 allows *where I am*", () => {
-    const marker = body(KEYBOARD, ".wb-welcome::before");
-    expect(marker).toContain('content: ""');
-    expect(marker).toContain("background: var(--accent)");
+  it("carries its distinction on surface and border, spending no standing amber", () => {
+    // §2.4 sanctions amber for *where I am* and *changing right now* only; a mark
+    // that stands for the whole life of the card is neither, so the card is
+    // distinguished by its elevated surface instead.
+    const card = body(KEYBOARD, ".wb-welcome");
+    expect(card).toContain("background: var(--surface-elevated)");
+    expect(card).toContain("border: 1px solid var(--border-default)");
+    expect(rules(KEYBOARD).map((rule) => rule.selector)).not.toContain(".wb-welcome::before");
   });
 
   it("still runs its affordances as colour-only, instant-in hovers (§5)", () => {

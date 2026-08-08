@@ -132,10 +132,10 @@ test("a new window says what it is, and the reference teaches the chords", async
 
   await test.step("the welcome card wears its ANVIL chrome (§V2)", async () => {
     // The flagship empty state, asserted as computed values rather than a
-    // screenshot: it sits on `--surface-elevated`, and it spends the one amber
-    // the identity allows *where I am* (§2.4) on a marker down its left edge.
-    // Each token is resolved through a throwaway probe so the check holds in
-    // both themes without hard-coding an rgb.
+    // screenshot: it sits on `--surface-elevated`, which is what distinguishes it
+    // — no standing amber, since §2.4 spends amber only on *where I am* and
+    // *changing right now*. The token is resolved through a throwaway probe so
+    // the check holds in both themes without hard-coding an rgb.
     const probe = (token: string): Promise<string> =>
       page.evaluate((name) => {
         const el = document.createElement("div");
@@ -151,12 +151,6 @@ test("a new window says what it is, and the reference teaches the chords", async
     expect(cardBg, "the welcome card sits on --surface-elevated").toBe(
       await probe("--surface-elevated"),
     );
-    const marker = await card.evaluate((node) => {
-      const style = getComputedStyle(node, "::before");
-      return { content: style.content, background: style.backgroundColor };
-    });
-    expect(marker.content, "the card carries an empty ::before marker").toMatch(/["']{2}/);
-    expect(marker.background, "the marker is the amber accent").toBe(await probe("--accent"));
   });
 
   await test.step("and every one of them is reachable by keyboard alone", async () => {
