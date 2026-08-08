@@ -39,6 +39,17 @@ use std::os::windows::process::CommandExt;
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
 
+/// The PyInstaller onedir build is bundled under this folder (a Tauri
+/// *resource*, not a `sidecar`/`externalBin` — see the module header), so the
+/// packaged backend is `<resources>/backend/workbench-server[.exe]`. The
+/// packaging step (`packaging/workbench-server.spec`) and `tauri.conf.json`'s
+/// `bundle.resources` both name this same folder.
+const BUNDLED_BACKEND_DIR: &str = "backend";
+#[cfg(windows)]
+const BUNDLED_BACKEND_EXE: &str = "workbench-server.exe";
+#[cfg(not(windows))]
+const BUNDLED_BACKEND_EXE: &str = "workbench-server";
+
 /// Long enough to cross a loopback connect, short enough that a cold start is
 /// not perceived as a hang.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -140,8 +151,68 @@ pub fn log(message: &str) {
 
 // ---- Supervision -------------------------------------------------------------
 
+/// How a spawned backend is launched — the one decision that differs between a
+/// packaged app and a developer's checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchPlan {
+    /// A packaged build: run the standalone PyInstaller exe bundled beside the
+    /// app. Needs no Python, no `uv`, nothing on the user's machine.
+    Bundled { exe: PathBuf },
+    /// A dev build: `uv run workbench-server` from the repo root, the path the
+    /// shell has always taken and the one `cargo run` / `tauri dev` still take.
+    Dev { root: PathBuf },
+}
+
+/// Decide how to launch, packaged first: a bundled backend beside the app wins
+/// over a repo checkout, so a developer running the *installed* app gets the
+/// shipped server rather than their working tree. `None` when neither is
+/// present — the caller turns that into `Unavailable` with a log line.
+///
+/// Pure over its two inputs so the choice is unit-tested without a filesystem or
+/// a real build: `bundled` is `Some` only when the exe actually exists (the
+/// filesystem probe is `bundled_backend_exe`), `root` is the repo root if found.
+fn plan_launch(bundled: Option<PathBuf>, root: Option<PathBuf>) -> Option<LaunchPlan> {
+    if let Some(exe) = bundled {
+        return Some(LaunchPlan::Bundled { exe });
+    }
+    root.map(|root| LaunchPlan::Dev { root })
+}
+
+/// The bundled backend exe under `base` — a Tauri resource dir or the directory
+/// holding the shell exe — if it is actually there:
+/// `<base>/backend/workbench-server[.exe]`.
+fn bundled_backend_exe(base: &Path) -> Option<PathBuf> {
+    let exe = base.join(BUNDLED_BACKEND_DIR).join(BUNDLED_BACKEND_EXE);
+    exe.is_file().then_some(exe)
+}
+
+/// The directory the shell executable lives in — one of the places a bundled
+/// backend can sit (the other is the resource dir Tauri passes in).
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+/// A sensible default workspace for a *packaged* backend: the user's home
+/// directory. A dev backend inherits the repo root as its CWD (that is the
+/// contract), but an installed app launched from the Start menu has a useless
+/// CWD (often `system32`), and the server treats its CWD as the initial
+/// workspace. Home is writable and expected; the in-app switcher re-roots from
+/// there. `None` leaves the child's CWD inherited rather than guessing.
+fn default_workspace_dir() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Probe first, spawn only if nobody answers.
-pub fn start() -> Backend {
+///
+/// `resource_dir` is Tauri's bundled-resource directory (`None` off Tauri or
+/// when it cannot be resolved); the bundled backend is looked for there first,
+/// then beside the shell exe.
+pub fn start(resource_dir: Option<PathBuf>) -> Backend {
     let addr = backend_addr();
 
     match probe(addr) {
@@ -168,16 +239,23 @@ pub fn start() -> Backend {
         Probe::Nothing => {}
     }
 
-    let Some(root) = repo_root() else {
+    // Packaged backend beside the app first, then the dev `uv run` path.
+    let bundled = resource_dir
+        .as_deref()
+        .and_then(bundled_backend_exe)
+        .or_else(|| exe_dir().as_deref().and_then(bundled_backend_exe));
+    let Some(plan) = plan_launch(bundled, repo_root()) else {
         log(
-            "no repo root found (looked for pyproject.toml + server/ above the \
-             executable and the working directory) — start the backend yourself \
-             with `uv run workbench-server`",
+            "no backend to start: neither a bundled backend beside the app \
+             (packaged build) nor a repo root with pyproject.toml + server/ \
+             (dev build) — start one yourself with `uv run workbench-server`",
         );
         return unavailable();
     };
 
-    // Before the spawn, never after: see `confine_self_to_job`.
+    // Before the spawn, never after: see `confine_self_to_job`. Wraps both
+    // plans, so the bundled backend is reaped by the job object exactly as the
+    // dev one is.
     #[cfg(windows)]
     let job = match confine_self_to_job() {
         Ok(job) => Some(job),
@@ -193,14 +271,29 @@ pub fn start() -> Backend {
         }
     };
 
-    log(&format!(
-        "no backend on {addr}; starting one in {}",
-        root.display()
-    ));
-    let mut command = Command::new("uv");
+    let mut command = match &plan {
+        LaunchPlan::Bundled { exe } => {
+            log(&format!(
+                "no backend on {addr}; starting the bundled backend at {}",
+                exe.display()
+            ));
+            let mut command = Command::new(exe);
+            if let Some(workspace) = default_workspace_dir() {
+                command.current_dir(workspace);
+            }
+            command
+        }
+        LaunchPlan::Dev { root } => {
+            log(&format!(
+                "no backend on {addr}; starting `uv run workbench-server` in {}",
+                root.display()
+            ));
+            let mut command = Command::new("uv");
+            command.args(["run", "workbench-server"]).current_dir(root);
+            command
+        }
+    };
     command
-        .args(["run", "workbench-server"])
-        .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -210,7 +303,7 @@ pub fn start() -> Backend {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            log(&format!("could not start `uv run workbench-server`: {err}"));
+            log(&format!("could not start the backend ({plan:?}): {err}"));
             return unavailable();
         }
     };
@@ -520,6 +613,44 @@ mod tests {
         // Both markers are required: without pyproject.toml there is no root.
         std::fs::remove_file(base.join("pyproject.toml")).unwrap();
         assert_eq!(find_repo_root(&nested), None);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_bundled_backend_beside_the_app_is_chosen_over_the_repo() {
+        // A packaged install: the exe exists on disk, so the plan runs it and
+        // never touches `uv` — even when a repo root is also present.
+        let base = std::env::temp_dir().join(format!("wb-bundled-{}", std::process::id()));
+        let backend_dir = base.join(BUNDLED_BACKEND_DIR);
+        std::fs::create_dir_all(&backend_dir).unwrap();
+        let exe = backend_dir.join(BUNDLED_BACKEND_EXE);
+        std::fs::write(&exe, b"").unwrap();
+
+        assert_eq!(bundled_backend_exe(&base).as_deref(), Some(exe.as_path()));
+        assert_eq!(
+            plan_launch(bundled_backend_exe(&base), Some(PathBuf::from("C:\\repo"))),
+            Some(LaunchPlan::Bundled { exe })
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn no_bundled_backend_falls_back_to_the_dev_uv_run_path() {
+        // A dev checkout: nothing bundled beside the app, so the plan is
+        // `uv run` from the repo root — the path `tauri dev` has always taken.
+        let base = std::env::temp_dir().join(format!("wb-nobundle-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        assert_eq!(bundled_backend_exe(&base), None);
+
+        let root = PathBuf::from("C:\\repo");
+        assert_eq!(
+            plan_launch(None, Some(root.clone())),
+            Some(LaunchPlan::Dev { root })
+        );
+        // Neither bundled nor a repo root: nothing to start.
+        assert_eq!(plan_launch(None, None), None);
 
         std::fs::remove_dir_all(&base).unwrap();
     }

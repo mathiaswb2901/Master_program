@@ -209,6 +209,29 @@ export async function authToken(): Promise<string | null> {
 }
 
 /**
+ * Where the shell put the backend — `http://127.0.0.1:<port>` — or `null` in a
+ * browser tab.
+ *
+ * The sibling of `authToken()`: the shell owns both the port it spawned (or
+ * attached to) the backend on and the token that backend minted, and hands each
+ * over so the desktop window never has to guess. It matters because a built
+ * bundle serves the UI from the asset protocol, which is not same-origin with
+ * the Python backend — so a relative `/api/x` never reaches it (`backend.ts`).
+ * Returns `null` outside the shell so the caller keeps the same-origin path a
+ * browser needs, and never throws: a shell that does not answer the command is
+ * treated exactly like a browser (null, stay same-origin).
+ */
+export async function backendOrigin(): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    return await callShell<string>("backend_origin");
+  } catch (err) {
+    console.error("shell backend origin unavailable", err);
+    return null;
+  }
+}
+
+/**
  * One shell command whose *answer* matters, and whose failure is the caller's
  * to explain.
  *
