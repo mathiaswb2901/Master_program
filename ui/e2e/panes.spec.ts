@@ -126,6 +126,38 @@ test("split a pane, put a second agent in it, and find it there after a reload",
   await openApp(page);
   expect(await panels(page)).toEqual(DEFAULT_PANELS);
 
+  await test.step("exactly one pane wears the live rule, and it is the focused one", async () => {
+    // The signature, asserted in the running window rather than eyeballed
+    // (DESIGN.md §6.1): a 2px amber `::before` across the top of the focused
+    // pane's tab strip, and nowhere else. "Where am I" must never be ambiguous,
+    // so this is the one measurement that says the focus indicator is real —
+    // exactly one strip paints it, and it is the active group's.
+    const amber = await page.evaluate(() => {
+      // Resolve `--accent` to the rgb form getComputedStyle returns, so the
+      // assertion is theme-independent: dark spends the hot amber, light a deep
+      // one, and this reads whichever the running window is in rather than a
+      // hard-coded hex.
+      const probe = document.createElement("span");
+      probe.style.color = "var(--accent)";
+      document.body.appendChild(probe);
+      const wanted = getComputedStyle(probe).color;
+      probe.remove();
+      let total = 0;
+      let onActive = 0;
+      for (const strip of document.querySelectorAll(".dv-tabs-and-actions-container")) {
+        const bg = getComputedStyle(strip, "::before").backgroundColor;
+        if (bg !== wanted) continue;
+        total++;
+        if (strip.closest(".dv-active-group") !== null) onActive++;
+      }
+      return { total, onActive, wanted };
+    });
+    // The accent resolved to a real colour, not a transparent fallback.
+    expect(amber.wanted, "an accent colour resolved").toMatch(/^rgba?\(/);
+    expect(amber.total, "exactly one pane carries the amber live rule").toBe(1);
+    expect(amber.onActive, "and it is the focused pane's strip").toBe(1);
+  });
+
   await test.step("the focused pane, and only it, offers to split", async () => {
     // Chrome (the mouse path): two glyphs at the right end of one tab strip.
     await expect(page.getByRole("button", { name: "Split this pane to the right" })).toHaveCount(1);
