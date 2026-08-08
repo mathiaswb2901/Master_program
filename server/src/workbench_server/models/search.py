@@ -21,7 +21,9 @@ MAX_HITS = 2_000
 
 #: One matching line is clipped to this many characters before it reaches the wire:
 #: a minified bundle or a data row can be tens of kilobytes on one line, and the
-#: match is legible in far less. The clip is stated where the UI can show it.
+#: match is legible in far less. The window is placed *around* the match rather
+#: than taken from the start, so a hit at column 20,000 still shows the text that
+#: matched. The clip is stated where the UI can show it.
 MAX_LINE_CHARS = 400
 
 
@@ -42,12 +44,15 @@ class SearchHit(BaseModel):
 
     #: 1-based line number, the number the editor jumps to.
     line: int
-    #: 0-based character offset of the first match on the line, for highlighting.
+    #: 0-based character offset of the first match **within** ``text``, for
+    #: highlighting — remapped when ``text`` is a window into a longer line, so it
+    #: always points at the match in what was actually returned.
     col: int
     #: The matching line with its trailing newline stripped, clipped to
-    #: ``MAX_LINE_CHARS``; ``line_truncated`` says whether it was cut.
+    #: ``MAX_LINE_CHARS`` around the match; ``line_truncated`` says whether it was
+    #: cut, and a leading ``…`` says the head of the line was elided.
     text: str
-    #: True when the line was longer than ``MAX_LINE_CHARS`` and ``text`` is a prefix.
+    #: True when the line was longer than ``MAX_LINE_CHARS`` and ``text`` is a window.
     line_truncated: bool = False
 
 
@@ -70,6 +75,7 @@ class SearchResponse(BaseModel):
     total_hits: int
     #: Number of files that carried a hit — ``len(files)``, stated for the reader.
     files_with_matches: int
-    #: True when the scan stopped at ``max_results`` and more matches exist. The
-    #: way to widen the window is a larger ``max_results`` or a narrower query.
+    #: True when the cap was hit *and a further match was actually seen* — the scan
+    #: looks one hit past ``max_results`` so this is never a guess. The way to widen
+    #: the window is a larger ``max_results`` or a narrower query.
     truncated: bool

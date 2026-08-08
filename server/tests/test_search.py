@@ -7,6 +7,7 @@ named-ignored directory (``node_modules``) is never returned, because search and
 the file tree must agree about what exists, and that a capped result says so.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from workbench_server.models.search import MAX_LINE_CHARS, SearchRequest
@@ -127,13 +128,82 @@ def test_truncation_spans_files(tmp_path: Path) -> None:
     assert sum(len(f.hits) for f in result.files) == 4
 
 
+def test_a_capped_file_followed_by_a_file_with_no_matches_is_not_truncated(
+    tmp_path: Path,
+) -> None:
+    """The false positive the flag used to carry: another *file*, but no other hit.
+
+    ``a.txt`` holds exactly ``max_results`` matches and ``b.txt`` holds none. The
+    window really is the whole answer, so claiming otherwise sends both surfaces
+    ("narrow the query") chasing matches that do not exist.
+    """
+    (tmp_path / "a.txt").write_text("needle\nneedle\nneedle\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("nothing of interest here\n", encoding="utf-8")
+    result = _service(tmp_path).search(SearchRequest(query="needle", max_results=3))
+    assert result.total_hits == 3
+    assert result.truncated is False
+
+
+def test_truncation_is_asserted_only_when_a_further_hit_exists(tmp_path: Path) -> None:
+    """Same shape, but ``b.txt`` really does carry one more — now it is truncated."""
+    (tmp_path / "a.txt").write_text("needle\nneedle\nneedle\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("nothing\nneedle\n", encoding="utf-8")
+    result = _service(tmp_path).search(SearchRequest(query="needle", max_results=3))
+    assert result.total_hits == 3
+    assert result.truncated is True
+    # The probe hit is not handed back — the cap is exact.
+    assert [f.path for f in result.files] == ["a.txt"]
+
+
 def test_a_very_long_line_is_clipped_with_a_flag(tmp_path: Path) -> None:
     long_line = "x" * 50 + "needle" + "y" * (MAX_LINE_CHARS * 2)
     (tmp_path / "wide.txt").write_text(long_line + "\n", encoding="utf-8")
     hit = _service(tmp_path).search(SearchRequest(query="needle")).files[0].hits[0]
     assert len(hit.text) == MAX_LINE_CHARS
     assert hit.line_truncated is True
-    assert hit.col == 50
+    assert hit.text[hit.col : hit.col + len("needle")] == "needle"
+
+
+def test_a_match_past_the_clip_is_still_inside_the_returned_text(tmp_path: Path) -> None:
+    """The minified-bundle case: clipping from the start would lose the match.
+
+    A hit whose preview does not contain what matched is worse than no preview,
+    so the window is placed around the match and ``col`` is remapped into it.
+    """
+    long_line = "x" * (MAX_LINE_CHARS * 3) + "needle" + "y" * 100
+    (tmp_path / "bundle.min.js").write_text(long_line + "\n", encoding="utf-8")
+    hit = _service(tmp_path).search(SearchRequest(query="needle")).files[0].hits[0]
+
+    assert "needle" in hit.text
+    assert hit.text[hit.col : hit.col + len("needle")] == "needle"
+    assert len(hit.text) <= MAX_LINE_CHARS
+    assert hit.line_truncated is True
+    assert hit.text.startswith("…")  # the elided head is stated, not silent
+
+
+def test_the_walk_is_lazy_so_a_small_cap_does_not_enumerate_the_tree(
+    tmp_path: Path,
+) -> None:
+    """A one-hit query stops walking; it does not first list every file."""
+    (tmp_path / "a.txt").write_text("needle\nneedle\n", encoding="utf-8")
+    service = _service(tmp_path)
+    walked: list[Path] = []
+    real_walk = service._walk
+
+    def spy(root: Path) -> "Iterator[Path]":
+        for path in real_walk(root):
+            walked.append(path)
+            yield path
+
+    service._walk = spy  # type: ignore[method-assign]
+    for i in range(50):
+        (tmp_path / f"z{i:02d}.txt").write_text("needle\n", encoding="utf-8")
+
+    result = service.search(SearchRequest(query="needle", max_results=1))
+    assert result.total_hits == 1
+    assert result.truncated is True
+    # a.txt alone carries the cap *and* the probe hit — nothing after it is visited.
+    assert walked == [tmp_path / "a.txt"]
 
 
 def test_results_are_grouped_and_path_sorted(tmp_path: Path) -> None:

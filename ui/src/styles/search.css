@@ -167,7 +167,7 @@
 }
 
 .wb-search-mark {
-  background: var(--accent-tint);
+  background: var(--accent-muted);
   color: var(--text-primary);
   border-radius: var(--radius-sm);
 }
