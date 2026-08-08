@@ -37,6 +37,7 @@ dev = [
 
 [project.scripts]
 workbench-server = "workbench_server.main:run"
+workbench-cmd = "workbench_server.cli.commands_cli:main"
 
 [build-system]
 requires = ["hatchling"]
