@@ -664,6 +664,7 @@ describe("the registered tools", () => {
       "activity",
       "mission",
       "review",
+      "objective",
       "visual",
       "keys",
     ]);

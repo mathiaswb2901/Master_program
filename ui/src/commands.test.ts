@@ -187,6 +187,8 @@ describe("command registry", () => {
       "mission.open",
       "mission.newOrchestrator",
       "review.open",
+      // Objectives after Review, because it consumes the evidence Review approves.
+      "objective.open",
       "keys.open",
       "keys.welcome",
       // The two tools that arrange panels rather than being one, in the order
