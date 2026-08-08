@@ -4,14 +4,17 @@
  * The order is the feature. First the **quiet** bar: with nothing validated, the
  * status reading is absent (§6.7 — a quiet bar means nothing needs you). Then a
  * `ValidationResult` is driven into existence the way the server really mints
- * one — `POST /api/validation/run`. With **no check registered** (#82's honest
- * default on this base), that run is `blocked`: a validation that could not judge
- * anything, which is a real end-to-end result needing no reconciliation check.
+ * one — `POST /api/validation/run`. The reconciliation gate (#85) is now the one
+ * registered check, so a run that names no check runs it; handed no spec, it
+ * judges what it can and returns a `fail` line — a **high**-risk result, which is
+ * a real end-to-end result the panel must surface. (The empty-evidence *blocked*
+ * rendering is covered where it is deterministic — the unit suite's
+ * `EvidenceGallery` case — since every registered check now emits evidence.)
  *
- * The Review panel then shows that result: the **blocked** risk badge, and an
- * evidence gallery that *says why it is empty* rather than showing blankness. A
- * `blocked` result is medium-or-worse, so it is **awaiting approval** — the one
- * mandatory human decision — and Approve records it and reflects the recorded
+ * The Review panel then shows that result: the risk badge, and an evidence
+ * gallery with the check's finding rather than blankness. A `high` result is
+ * medium-or-worse, so it is **awaiting approval** — the one mandatory human
+ * decision — and Approve records it and reflects the recorded
  * `ValidationApproval`.
  *
  * The POST runs inside the page so it rides the same-origin `/api` proxy and
@@ -78,7 +81,7 @@ async function openReviewPanel(page: Page): Promise<void> {
   await expect(page.locator(".wb-review")).toBeVisible();
 }
 
-test("validation surfaces: the quiet bar, the blocked badge, the approval gate", async ({
+test("validation surfaces: the quiet bar, the risk badge, the approval gate", async ({
   page,
 }) => {
   await openApp(page);
@@ -93,7 +96,7 @@ test("validation surfaces: the quiet bar, the blocked badge, the approval gate",
     label: "Åsen 2 dispatch output",
   };
 
-  await test.step("a run with no registered check mints a blocked result", async () => {
+  await test.step("a run mints a result the registered check judged", async () => {
     const id = await seedValidation(page, subject);
     expect(id).toMatch(/^val_/);
   });
@@ -112,20 +115,23 @@ test("validation surfaces: the quiet bar, the blocked badge, the approval gate",
     await row.click();
   });
 
-  await test.step("the blocked badge and an evidence gallery that says why", async () => {
+  await test.step("the risk badge, and an evidence gallery carrying the check's finding", async () => {
     const body = page.locator(".wb-review-body");
     await expect(body).toBeVisible();
-    // The badge is the blocked pill; the gallery is empty and says so; the
-    // summary carries the *why* (§ the honest default — never a silent green).
-    await expect(body.locator(".wb-pill")).toContainText("Blocked");
-    await expect(body.locator(".wb-review-none")).toContainText("No evidence");
-    await expect(body).toContainText("nothing was validated");
+    // The header badge is the result's risk — high, from the check's fail. It is
+    // scoped to the header so it is not confused with an evidence-row pill.
+    await expect(body.locator(".wb-review-head .wb-pill")).toContainText("High risk");
+    // The gallery is not blank: the check produced at least one evidence row, and
+    // its outcome renders as a Fail pill (the finding, surfaced — not a silent
+    // green). We assert the UI shape, not the check's own wording.
+    await expect(body.locator(".wb-evidence")).not.toHaveCount(0);
+    await expect(body.locator(".wb-evidence .wb-pill").first()).toContainText("Fail");
   });
 
-  await test.step("a blocked result awaits a human, and Approve records the decision", async () => {
+  await test.step("a high-risk result awaits a human, and Approve records the decision", async () => {
     const body = page.locator(".wb-review-body");
     await expect(body.locator(".wb-review-awaiting")).toContainText("Awaiting approval");
-    await body.locator(".wb-review-note").fill("acknowledged: nothing to judge");
+    await body.locator(".wb-review-note").fill("acknowledged: reviewed the finding");
     await body.locator(".wb-review-approve").click();
     // The recorded ValidationApproval, reflected: who and the note.
     await expect(body.locator(".wb-review-approved")).toContainText("Approved by you");
