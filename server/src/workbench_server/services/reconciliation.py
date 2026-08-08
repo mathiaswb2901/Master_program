@@ -41,6 +41,7 @@ from workbench_server.models.reconciliation import (
     ExpectedValue,
     ReconciliationReport,
     ReconciliationSpec,
+    TimeExpectation,
     Tolerance,
 )
 from workbench_server.models.validation import (
@@ -266,6 +267,11 @@ def _compare_one(
     )
 
 
+def _time_address(exp: TimeExpectation) -> str:
+    """The wall-clock label a time-row comparison is keyed by in the evidence."""
+    return exp.timestamp + (f" (fold {exp.fold})" if exp.fold else "")
+
+
 def _parse_local(ts: str) -> datetime:
     """A naive local ISO timestamp string. Raises ``ValueError`` on anything else."""
     parsed = datetime.fromisoformat(ts)
@@ -360,7 +366,12 @@ class ReconciliationCheck:
             sheet, addr = _split_cell(exp.cell)
             try:
                 raw = reader.cell_value(sheet, addr)
-            except (KeyError, ValueError) as exc:
+            except Exception as exc:
+                # The reader seam: a malformed address (e.g. a bare row "14", which
+                # openpyxl resolves to a *tuple* of cells whose `.value` raises
+                # AttributeError) or an unknown sheet is one isolated fail row that
+                # names the reason — never an exception that sinks the whole run.
+                log.warning("reconciliation.cell_unreadable", cell=exp.cell, error=str(exc))
                 out.append(self._unreadable_cell(exp, f"cannot read {exp.cell}: {exc}"))
                 empties += 1
                 continue
@@ -400,12 +411,39 @@ class ReconciliationCheck:
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise _CheckBlocked(f"unknown timezone {spec.timezone!r}: {exc}") from exc
 
-        pairs = reader.column_pairs(ti.sheet, ti.timestamp_column, ti.value_column, ti.start_row)
+        try:
+            pairs = reader.column_pairs(
+                ti.sheet, ti.timestamp_column, ti.value_column, ti.start_row
+            )
+        except Exception as exc:
+            # A bad sheet (KeyError) or a malformed column letter is isolated to the
+            # time-index rows — each becomes a fail that names why — so the direct-cell
+            # comparisons in the same run still land in the stored report.
+            log.warning(
+                "reconciliation.time_index_unreadable",
+                workbook=spec.workbook,
+                error=str(exc),
+            )
+            reason = (
+                f"cannot read time-index columns ({ti.timestamp_column}/{ti.value_column}): {exc}"
+            )
+            return [
+                CellComparison(
+                    cell=_time_address(exp),
+                    label=exp.label,
+                    expected=exp.expected,
+                    actual=None,
+                    unit=exp.unit,
+                    outcome="fail",
+                    reason=reason,
+                )
+                for exp in ti.expectations
+            ]
         aligned = _align_time_rows(pairs)
 
         out: list[CellComparison] = []
         for exp in ti.expectations:
-            address = f"{exp.timestamp}" + (f" (fold {exp.fold})" if exp.fold else "")
+            address = _time_address(exp)
             try:
                 local = _parse_local(exp.timestamp)
             except ValueError:

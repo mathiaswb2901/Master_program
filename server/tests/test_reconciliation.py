@@ -239,6 +239,44 @@ async def test_a_declared_kwh_cell_converts_and_names_the_conversion(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_declared_kwh_price_converts_and_names_the_conversion(tmp_path: Path) -> None:
+    """The price sibling of the energy conversion: a cell declared in EUR/kWh checked
+    against an EUR/MWh expectation is a x1000, and the legitimate declared case must
+    convert (0.05 EUR/kWh → 50 EUR/MWh), match, and *name* the conversion — so a price
+    unit slip can no more hide inside a pass than an energy one can."""
+    make_workbook(tmp_path / "book.xlsx", {"D14": 0.05})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        default_tolerance=Tolerance(rel=0.001),
+        expectations=[
+            ExpectedValue(cell="D14", expected=50.0, unit="EUR/MWh", cell_unit="EUR/kWh")
+        ],
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "pass"
+    row = report_of(service, result).comparisons[0]
+    assert row.outcome == "pass"
+    assert row.actual == pytest.approx(50.0)  # 0.05 * 1000
+    assert "EUR/kWh" in (row.reason or "") and "EUR/MWh" in (row.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_eur_kwh_price_is_caught_not_silent(tmp_path: Path) -> None:
+    """And the failure sibling: a cell holding 0.05 (EUR/kWh magnitude) checked against
+    a 50.0 EUR/MWh expectation with *no* cell_unit declared is a 1000x error, and must
+    be a fail rather than a silent mismatch swallowed by tolerance."""
+    make_workbook(tmp_path / "book.xlsx", {"D14": 0.05})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        default_tolerance=Tolerance(rel=0.01),
+        expectations=[ExpectedValue(cell="D14", expected=50.0, unit="EUR/MWh")],
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    assert report_of(service, result).comparisons[0].outcome == "fail"
+
+
+@pytest.mark.asyncio
 async def test_incompatible_dimensions_are_a_fail(tmp_path: Path) -> None:
     make_workbook(tmp_path / "book.xlsx", {"D14": 42.5})
     spec = ReconciliationSpec(
@@ -337,6 +375,63 @@ async def test_an_empty_cell_is_a_fail_with_a_reason(tmp_path: Path) -> None:
     assert rows["D15"].outcome == "fail"
     assert "empty cell" in (rows["D15"].reason or "")
     assert rows["D14"].outcome == "pass"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_cell_address_is_isolated_to_one_fail_row(tmp_path: Path) -> None:
+    """A plausible typo — a bare row reference '14' with the column letter dropped —
+    must fail *only that row*, not crash the whole check. openpyxl resolves ws['14']
+    to a tuple of the row's cells whose `.value` raises AttributeError; the gate turns
+    that into one CellComparison fail while D14 and D15 still reconcile and land in the
+    stored report (proof the run was not downgraded to a single kind='gate' line)."""
+    make_workbook(tmp_path / "book.xlsx", {"D14": 42.5, "D15": 10.0})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        default_tolerance=Tolerance(abs=0.001),
+        expectations=[
+            ExpectedValue(cell="D14", expected=42.5, unit="MWh"),
+            ExpectedValue(cell="14", expected=1.0, unit="MWh"),  # column letter dropped
+            ExpectedValue(cell="D15", expected=10.0, unit="MWh"),
+        ],
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    assert result.evidence[0].kind == "numeric"  # not "gate": the report was still built
+    rows = {c.cell: c for c in report_of(service, result).comparisons}
+    assert rows["14"].outcome == "fail"
+    assert "cannot read 14" in (rows["14"].reason or "")
+    assert rows["D14"].outcome == "pass" and rows["D15"].outcome == "pass"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_time_index_sheet_fails_only_its_rows(tmp_path: Path) -> None:
+    """A mistyped TimeIndexSpec.sheet must isolate to the time rows: reading the
+    columns off a non-existent sheet raises KeyError from the reader, and the gate
+    turns each time expectation into a fail while the direct-cell comparison in the
+    same run still lands in the stored report."""
+    make_workbook(tmp_path / "book.xlsx", {"D14": 42.5})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        expectations=[ExpectedValue(cell="D14", expected=42.5, unit="MWh")],
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            sheet="NoSuchSheet",
+            expectations=[
+                TimeExpectation(timestamp="2024-10-27T05:00:00", expected=5.0, unit="EUR/MWh"),
+            ],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    assert result.evidence[0].kind == "numeric"  # not downgraded to a gate line
+    rows = {c.cell: c for c in report_of(service, result).comparisons}
+    assert rows["D14"].outcome == "pass"  # the valid direct comparison survived
+    bad = rows["2024-10-27T05:00:00"]
+    assert bad.outcome == "fail"
+    assert "time-index columns" in (bad.reason or "")
 
 
 @pytest.mark.asyncio
