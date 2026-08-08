@@ -242,6 +242,7 @@ describe("the picker's rows, against the registry the app ships", () => {
       "agent",
       "conversations",
       "editors",
+      "objective",
       "review",
       "terminal",
       "visual",

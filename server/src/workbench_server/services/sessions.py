@@ -44,9 +44,13 @@ from workbench_server.models.sessions import (
     SESSIONS_VERSION,
     CreateNamedSessionRequest,
     NamedSession,
+    Objective,
+    ObjectiveStatus,
+    ObjectiveView,
     SessionsFile,
     UpdateNamedSessionRequest,
 )
+from workbench_server.models.validation import ValidationResult
 from workbench_server.services.app_data import app_data_dir
 
 log = structlog.get_logger()
@@ -155,6 +159,10 @@ class SessionsStore:
             leases=request.leases,
             created_at=existing.created_at,
             last_attached_at=time.time(),
+            # The whole-manifest PUT does not carry the objective, so it is kept
+            # from the stored session — set/clear own it through their own
+            # endpoints, and a rename or re-arrange must never wipe the goal.
+            objective=existing.objective,
         )
         self._sessions = [*self._sessions[:index], updated, *self._sessions[index + 1 :]]
         self._save()
@@ -167,6 +175,32 @@ class SessionsStore:
         index = self._index_of(session_id)
         self._sessions = [*self._sessions[:index], *self._sessions[index + 1 :]]
         self._save()
+
+    def get(self, session_id: str) -> NamedSession:
+        """One session by id. Raises :class:`SessionNotFoundError` if unknown —
+        the objective endpoints turn that into a 404."""
+        self._ensure_loaded()
+        return self._sessions[self._index_of(session_id)]
+
+    def set_objective(self, session_id: str, objective: Objective) -> NamedSession:
+        """Bind (or re-state) the session's goal, and persist it. Additive: only
+        the ``objective`` field changes, every other field is untouched."""
+        self._ensure_loaded()
+        index = self._index_of(session_id)
+        updated = self._sessions[index].model_copy(update={"objective": objective})
+        self._sessions = [*self._sessions[:index], updated, *self._sessions[index + 1 :]]
+        self._save()
+        return updated
+
+    def clear_objective(self, session_id: str) -> NamedSession:
+        """Drop the session's goal, back to no objective. Idempotent — clearing a
+        session that has none rewrites the same manifest."""
+        self._ensure_loaded()
+        index = self._index_of(session_id)
+        updated = self._sessions[index].model_copy(update={"objective": None})
+        self._sessions = [*self._sessions[:index], updated, *self._sessions[index + 1 :]]
+        self._save()
+        return updated
 
     # ---- internals ----------------------------------------------------------
 
@@ -241,3 +275,69 @@ class SessionsStore:
                     raise
                 log.debug("sessions.replace_retry", path=str(self._path), attempt=attempt + 1)
                 time.sleep(REPLACE_BACKOFF_S)
+
+
+# ---- objective status: the evidence join -----------------------------------
+#
+# Deliberately a **pure function over data**, not a method that reaches into the
+# ValidationService: it "computes the join and nothing else", the same discipline
+# `mission.ts`' `buildCards` follows. The router hands it the validation results
+# from the service's own replay snapshot (`GET /api/validation`'s seam); this
+# function neither holds nor duplicates that state. That is what keeps a single
+# authority for "how risky" — the objective badge and the Review badge are two
+# readings of the *same* result, never two computations of it.
+
+
+def _latest_objective_result(
+    session_id: str, results: list[ValidationResult]
+) -> ValidationResult | None:
+    """The most recent ``ValidationResult`` whose subject is this objective, or
+    None. ``subject.kind == "objective"`` disambiguates it from a
+    ``session_output`` result that shares the session id as its ref.
+
+    "Most recent" is by ``created_at`` then ``validation_id`` — the same ordering
+    the client uses (`validation.ts` ``orderResults``) — because the service's map
+    is LRU-ordered (an approval moves a result to the end), so insertion order is
+    not chronological order.
+    """
+    mine = [r for r in results if r.subject.kind == "objective" and r.subject.ref == session_id]
+    if not mine:
+        return None
+    return max(mine, key=lambda r: (r.created_at, r.validation_id))
+
+
+def derive_objective_status(
+    objective: Objective | None, latest: ValidationResult | None
+) -> ObjectiveStatus:
+    """Status from the goal and its latest evidence — the honest, derived answer.
+
+    ``open`` when there is no objective or no evidence for it, **or** when the
+    evidence passes but no human has signed it off yet (approval is the gate).
+    ``met`` when the latest result carries a human approval — the plan's "closed
+    by evidence a human cleared". Otherwise the *unapproved* latest result speaks:
+    ``at-risk`` at ``medium``, ``failing`` at ``high``/``blocked``. A ``pass``/``low``
+    result with no approval is still ``open`` — evidence exists, but "done" waits
+    on the human, never on opinion.
+    """
+    if objective is None or latest is None:
+        return "open"
+    if latest.approval is not None:
+        return "met"
+    if latest.risk in ("high", "blocked"):
+        return "failing"
+    if latest.risk == "medium":
+        return "at-risk"
+    return "open"
+
+
+def objective_view(session: NamedSession, results: list[ValidationResult]) -> ObjectiveView:
+    """Assemble the wire view for a session's objective: the goal, its derived
+    status, and the evidence the status came from. The one place the join is
+    computed, so every endpoint returns the same answer."""
+    latest = _latest_objective_result(session.id, results)
+    return ObjectiveView(
+        session_id=session.id,
+        objective=session.objective,
+        status=derive_objective_status(session.objective, latest),
+        evidence=latest,
+    )

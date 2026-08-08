@@ -24,7 +24,18 @@ by :data:`MAX_FILE_BYTES`, so a runaway arrangement cannot become a runaway
 payload.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, JsonValue
+
+from workbench_server.models.validation import ValidationResult
+
+#: Longest an objective statement may be — a goal is a sentence, not an essay.
+MAX_OBJECTIVE_CHARS = 280
+
+#: Longest the optional acceptance note may be — room for the "done means…" a
+#: reviewer reads, still bounded so it cannot balloon the manifest.
+MAX_ACCEPTANCE_CHARS = 1000
 
 #: How many named sessions the store keeps. Sized like the neighbours
 #: (`MAX_SAVED_LAYOUTS`): long enough to cover the working sessions a person
@@ -79,6 +90,37 @@ class LeaseRef(BaseModel):
     lease_id: str
 
 
+#: An objective's status is **derived**, never asserted — the whole point of the
+#: feature is that "done" is closed by evidence, not opinion (plan §3):
+#:
+#: * ``open`` — the default; no evidence yet closes it, or evidence exists but no
+#:   human has signed it off.
+#: * ``met`` — a ``ValidationResult`` for this objective that a human *approved*
+#:   (:class:`~workbench_server.models.validation.ValidationApproval`). Approval is
+#:   the human gate the plan requires, so even a clean ``pass`` closes the
+#:   objective only once someone signs it — that is what "closed by evidence, not a
+#:   turn count" means here.
+#: * ``at-risk`` — the latest result is ``medium`` and not yet approved.
+#: * ``failing`` — the latest result is ``high``/``blocked`` and not yet approved.
+ObjectiveStatus = Literal["open", "met", "at-risk", "failing"]
+
+
+class Objective(BaseModel):
+    """A named goal bound to a session — what the work is meant to achieve.
+
+    A *thin record*, not a second session: it carries only what the named-session
+    store does not already have — a goal statement and an optional acceptance note.
+    Its **status is not stored here**; it is derived from the validation results
+    that reference this objective (see :class:`ObjectiveView` and
+    ``services/sessions.py``), so a stale "done" can never outlive the evidence.
+    """
+
+    #: The human-stated goal, e.g. "Reconcile Åsen 2 dispatch revenue with code".
+    statement: str = Field(min_length=1, max_length=MAX_OBJECTIVE_CHARS)
+    #: Optional "done means…" note a reviewer reads alongside the goal.
+    acceptance: str | None = Field(default=None, max_length=MAX_ACCEPTANCE_CHARS)
+
+
 class NamedSession(BaseModel):
     """One session a user can name, detach from, and return to.
 
@@ -109,6 +151,11 @@ class NamedSession(BaseModel):
     #: When it was last attached to, unix seconds. Ordering comes off this — most
     #: recently used first, like the recents list.
     last_attached_at: float
+    #: The goal this session works toward, if one is set (plan §3). Additive to
+    #: the #70 manifest — a session without an objective reads exactly as before.
+    #: Set/cleared through the dedicated objective endpoints, never rewritten by
+    #: the whole-manifest ``PUT`` (which carries it over untouched).
+    objective: Objective | None = None
 
 
 class SessionsFile(BaseModel):
@@ -148,6 +195,35 @@ class UpdateNamedSessionRequest(BaseModel):
     arrangement: JsonValue = None
     agents: list[AgentRef] = Field(default_factory=list)
     leases: list[LeaseRef] = Field(default_factory=list)
+
+
+class SetObjectiveRequest(BaseModel):
+    """``PUT /api/sessions/{id}/objective`` — bind (or re-state) the goal.
+
+    Just the two fields the objective owns; the derived status is never accepted
+    from a client (it is computed from the evidence on read)."""
+
+    statement: str = Field(min_length=1, max_length=MAX_OBJECTIVE_CHARS)
+    acceptance: str | None = Field(default=None, max_length=MAX_ACCEPTANCE_CHARS)
+
+
+class ObjectiveView(BaseModel):
+    """What the objective endpoints return: the goal, its **derived** status, and
+    the evidence that status was computed from.
+
+    ``objective`` is null when the session carries none (then ``status`` is
+    ``open`` and ``evidence`` null). ``evidence`` is the latest
+    ``ValidationResult`` whose subject is this objective — the same result object
+    the Review panel renders, so the objective badge and the Review badge can
+    never disagree (plan §3: "an objective does not derive its own notion of
+    done")."""
+
+    session_id: str
+    objective: Objective | None
+    status: ObjectiveStatus
+    #: The result the status derives from, or null when nothing has validated this
+    #: objective yet. Carried so the UI can link straight to the evidence.
+    evidence: ValidationResult | None = None
 
 
 class SessionsResponse(BaseModel):
