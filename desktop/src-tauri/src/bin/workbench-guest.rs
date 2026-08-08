@@ -78,15 +78,22 @@ mod guest {
     static TYPED: Mutex<String> = Mutex::new(String::new());
 
     pub fn run() -> ! {
+        // The window class to register under. Defaults to the synthetic class,
+        // but a test can pass one as the first argument to stand in for a
+        // specific real frame — `OpusApp` (Word) or `XLMAIN` (Excel) — and prove
+        // the finder and the embed key on nothing but the class string they are
+        // told. The class name is only ever *found* by class+pid; the docking
+        // that follows touches an HWND and never a class.
+        let class = std::env::args()
+            .nth(1)
+            .filter(|arg| !arg.is_empty())
+            .unwrap_or_else(|| SYNTHETIC_GUEST_CLASS.to_string());
         // SAFETY: a conventional Win32 window program. Every call is on a
         // handle produced by the call above it, and the message loop owns the
         // window for the process's whole life.
         unsafe {
             let instance = GetModuleHandleW(None).expect("no module handle");
-            let class_name: Vec<u16> = SYNTHETIC_GUEST_CLASS
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let class_name: Vec<u16> = class.encode_utf16().chain(std::iter::once(0)).collect();
             let class = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
