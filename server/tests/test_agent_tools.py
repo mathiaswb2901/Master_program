@@ -164,6 +164,17 @@ class _Commands:
         )
 
 
+class _Runner:
+    """ReconciliationRunner stub: enough to build a session's options. The tool's
+    behavior against a real ValidationService lives in test_office_reconcile.py."""
+
+    async def run(self, spec: Any) -> Any:  # pragma: no cover - never called here
+        raise AssertionError("not exercised in option-building tests")
+
+    def payload(self, kind: Any, ref: str) -> Any:  # pragma: no cover
+        return None
+
+
 def representative_plan_payload() -> dict[str, Any]:
     """A plan of the size the card was designed for: a choice and some steps."""
     return {
@@ -214,6 +225,7 @@ class TestRegistry:
             "present_plan",
             "office_read",
             "office_write",
+            "office_reconcile",
             "run_command",
         ]
         for spec in AGENT_TOOLS:
@@ -250,6 +262,7 @@ class TestRegistry:
             "mcp__workbench__present_plan",
             "mcp__workbench__office_read",
             "mcp__workbench__office_write",
+            "mcp__workbench__office_reconcile",
             "mcp__workbench__run_command",
         ]
 
@@ -275,6 +288,7 @@ class TestRegistry:
             _Bridge(),
             _Reader(DocStructure(kind="word", paragraph_count=0)),
             _Commands(),
+            _Runner(),
         )
         assert set(allowed_tool_names()) <= set(options.allowed_tools)
         assert set(options.mcp_servers) == {"workbench"}
@@ -288,6 +302,7 @@ class TestRegistry:
             _Bridge(),
             _Reader(DocStructure(kind="word", paragraph_count=0)),
             _Commands(),
+            _Runner(),
             "orchestrator",
         )
         assert set(allowed_tool_names("orchestrator")) <= set(options.allowed_tools)

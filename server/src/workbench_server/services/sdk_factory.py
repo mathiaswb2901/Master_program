@@ -15,6 +15,7 @@ from workbench_server.services.agent_tools import (
     LIST_WORKERS,
     MCP_SERVER_NAME,
     OFFICE_READ,
+    OFFICE_RECONCILE,
     OFFICE_WRITE,
     PRESENT_PLAN,
     READ_WORKER,
@@ -25,9 +26,11 @@ from workbench_server.services.agent_tools import (
     CommandInvoker,
     OfficeDocumentAccess,
     OrchestratorHandle,
+    ReconciliationRunner,
     allowed_tool_names,
     handle_list_workers,
     handle_office_read,
+    handle_office_reconcile,
     handle_office_write,
     handle_present_plan,
     handle_read_worker,
@@ -67,6 +70,7 @@ def build_context_bridge(
     bridge: SessionBridge,
     reader: OfficeDocumentAccess,
     commands: CommandInvoker,
+    reconciler: ReconciliationRunner,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -104,6 +108,10 @@ def build_context_bridge(
     async def office_write(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_office_write(reader, args)
 
+    @tool(OFFICE_RECONCILE.name, OFFICE_RECONCILE.description, OFFICE_RECONCILE.input_schema)
+    async def office_reconcile(args: dict[str, Any]) -> dict[str, Any]:
+        return await handle_office_reconcile(reconciler, args)
+
     @tool(RUN_COMMAND.name, RUN_COMMAND.description, RUN_COMMAND.input_schema)
     async def run_command(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_run_command(commands, args)
@@ -113,6 +121,7 @@ def build_context_bridge(
         present_plan,
         office_read,
         office_write,
+        office_reconcile,
         run_command,
     ]
     if kind == "orchestrator" and orchestrator is not None:
@@ -151,6 +160,7 @@ def build_agent_options(
     bridge: SessionBridge,
     reader: OfficeDocumentAccess,
     commands: CommandInvoker,
+    reconciler: ReconciliationRunner,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -219,7 +229,7 @@ def build_agent_options(
         can_use_tool=can_use_tool,
         mcp_servers={
             MCP_SERVER_NAME: build_context_bridge(
-                store, bridge, reader, commands, kind, orchestrator, session_cost
+                store, bridge, reader, commands, reconciler, kind, orchestrator, session_cost
             )
         },
         plugins=plugins,
@@ -243,6 +253,7 @@ def sdk_client_factory(
     store: UiStateStore,
     reader: OfficeDocumentAccess,
     commands: CommandInvoker,
+    reconciler: ReconciliationRunner,
     settings: Settings | None = None,
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -253,7 +264,9 @@ def sdk_client_factory(
     so a session can read *and* edit the live docked document without this module
     importing the service — the same one-way dependency the rest of the tools keep.
     ``commands`` is the command relay, narrowed to :class:`CommandInvoker`, so a
-    session can invoke a registered window command the same way.
+    session can invoke a registered window command the same way. ``reconciler`` is
+    the validation service, narrowed to :class:`ReconciliationRunner`, so a session
+    can run the reconciliation gate over a workbook it just wrote.
     """
     resolved = settings or Settings()
 
@@ -273,6 +286,7 @@ def sdk_client_factory(
             bridge,
             reader,
             commands,
+            reconciler,
             kind,
             orchestrator,
             session_cost,
