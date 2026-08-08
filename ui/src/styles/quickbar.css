@@ -145,10 +145,12 @@
 /* Hover is a *pointer* state and selection is a *keyboard* one, and in this
    surface they are wired together — moving the mouse over a runnable row selects
    it (`QuickBar.tsx`), so the amber below is what a hover normally looks like.
-   This wash is what is left: the frame before the pointer has moved, and a
-   disabled row, which never takes the selection and must still answer the mouse
-   with something. No transition on either state — §5.4 forbids animating this
-   selection, because it tracks a key. */
+   This wash is the frame before that selection lands — the pointer entering a
+   row it has not yet claimed. A **disabled** row is excluded on purpose: it can
+   never be run, and a wash that follows the mouse across it is the app offering
+   something it will then refuse (§6.5, "never a dead button"). It answers the
+   pointer with `cursor: default` instead. No transition on either state — §5.4
+   forbids animating this selection, because it tracks a key. */
 .wb-qb-row:hover:not(:disabled):not(.is-selected) {
   background: var(--surface-hover);
 }
@@ -249,8 +251,8 @@
   padding: var(--space-4) var(--space-6) var(--space-2);
   font-size: var(--type-xs-size);
   line-height: var(--type-xs-line);
-  font-weight: 500;
-  letter-spacing: 0.04em;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
