@@ -33,9 +33,11 @@ One Python process, one webview window, one optional local Office engine.
    discriminated unions on `type`. The UI mirrors these in `ui/src/types.ts`.
 3. **Routers thin, services own logic.** A router validates, delegates, maps domain
    errors to HTTP codes. Everything interesting is testable without HTTP.
-4. **Platform code is quarantined.** Windows-only bits live in
-   `services/pty_manager.py` behind a `Protocol`; a POSIX implementation slots in
-   without touching the router.
+4. **Platform code is quarantined.** The PTY sits behind the `PtyLike` `Protocol` in
+   `services/pty_manager.py`, whose `_spawn_backend` picks by `sys.platform`: pywinpty
+   (ConPTY) on Windows, `services/pty_posix.py` (stdlib `pty`) elsewhere. Neither
+   backend's imports run on the other's platform, and the router never learns which
+   one it got.
 5. **The Agent SDK is injected.** `services/agent_sessions.py` takes a client factory;
    the real one (`services/sdk_factory.py`) is the only module importing
    `claude_agent_sdk`. Tests script a fake client through the same seam.
@@ -395,7 +397,8 @@ in-process calls where the model and the user dominate.
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
-| `services/pty_manager.py` | ConPTY sessions (Windows) |
+| `services/pty_manager.py` | PTY sessions: the `PtyLike` seam, the per-platform factory, ConPTY (Windows) |
+| `services/pty_posix.py` | the POSIX PTY backend — stdlib `pty.fork`, behind an injectable syscall surface |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
