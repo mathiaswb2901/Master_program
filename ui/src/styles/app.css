@@ -244,15 +244,45 @@ input {
 
 /* ---- Empty states (§6.10) -------------------------------------------------- */
 
+/* An empty state is an invitation, not an apology: it names the space and offers
+   the verb that fills it (DESIGN.md §6.10). Centred, capped at 260px, on the panel
+   it belongs to — never a filled call to action, just a quiet glyph, a title, one
+   line of hint, and at most one outline/link affordance carrying its own chord.
+
+   It arrives on the app's one entrance — a short rise that `prefers-reduced-motion`
+   turns into a pure fade, because the travel distance and the transform time are
+   both tokens the reduced-motion block zeroes (tokens.css §5). No new keyframe: the
+   same `wb-rise-in` every panel-level surface enters on. */
 .wb-empty {
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-4);
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-6);
   text-align: center;
-  padding: var(--space-6);
+  animation: wb-rise-in var(--motion-enter);
+}
+
+/* The content column is capped, not the flex box: a panel may wrap `.wb-empty` in
+   a flex parent, so the 260px of §6.10 lives on the children that carry text. */
+.wb-empty-title,
+.wb-empty-hint {
+  max-width: 260px;
+}
+
+/* 32px glyph, 1.5px stroke, tertiary (§6.10). The panel supplies the icon; this is
+   the quiet frame it sits in, one step above the title. */
+.wb-empty-icon {
+  display: flex;
+  margin-bottom: var(--space-1);
+  color: var(--text-tertiary);
+}
+
+.wb-empty-icon svg {
+  width: 32px;
+  height: 32px;
 }
 
 .wb-empty-title {
@@ -263,8 +293,54 @@ input {
 
 .wb-empty-hint {
   font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
   color: var(--text-tertiary);
-  max-width: 260px;
+}
+
+/* The one action an empty state may carry — an outline button, never a filled one
+   (§6.10) — and it holds the chord as keycaps, so the invitation and the keyboard
+   path are the same control. Colour-only hover, instant in and eased out (§5). */
+.wb-empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  height: var(--control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+  transition:
+    background-color var(--motion-tint),
+    border-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+.wb-empty-action:hover,
+.wb-empty-action:active {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  transition-duration: 0s;
+}
+
+/* The link form of the same affordance: the amber that §6.10 allows an empty state,
+   spent on a text action rather than an outline. Underlined so colour is never the
+   only signal (§7). */
+.wb-empty-action-link {
+  height: auto;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.wb-empty-action-link:hover,
+.wb-empty-action-link:active {
+  background: transparent;
+  color: var(--accent-hover);
 }
 
 /* ---- Scrollbars (overlay-style, §6.6) ------------------------------------- */
