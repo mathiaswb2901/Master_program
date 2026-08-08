@@ -44,6 +44,10 @@ import type {
   TreeNode,
   UiState,
   UsageSnapshot,
+  ApproveRequest,
+  ValidationResult,
+  ValidationResults,
+  ValidationSpec,
   WorkspaceState,
   WorktreePool,
   WriteRequest,
@@ -137,6 +141,23 @@ export const deleteEntry = (path: string): Promise<OkResponse> =>
 export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcuts");
 
 export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
+
+/** Every validation result currently held — initial load and reconnect (the
+ * live updates ride `/ws/events` as `validation`). Empty is the common answer. */
+export const getValidations = (): Promise<ValidationResults> => request("/api/validation");
+
+/** Run the checks a spec names and get back the assembled result. Also
+ * published on `/ws/events`, so a window that never issued it still tracks it. */
+export const runValidation = (body: ValidationSpec): Promise<ValidationResult> =>
+  request("/api/validation/run", jsonInit("POST", body));
+
+/** Record the human decision on a result. A stale/superseded id is 404 (the
+ * `ApiError.status` the panel reads to say "no longer current"), never a 200. */
+export const approveValidation = (
+  validationId: string,
+  body: ApproveRequest,
+): Promise<ValidationResult> =>
+  request(`/api/validation/${encodeURIComponent(validationId)}/approve`, jsonInit("POST", body));
 
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 
