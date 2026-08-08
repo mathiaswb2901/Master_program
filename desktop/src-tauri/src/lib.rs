@@ -93,6 +93,21 @@ fn backend_ready() -> bool {
     BACKEND_READY.load(Ordering::SeqCst)
 }
 
+/// Where the shell put the backend: `http://127.0.0.1:<port>`.
+///
+/// The sibling of [`auth_token`]. A built bundle serves the UI from the asset
+/// protocol (`tauri://localhost`), which is *not* same-origin with the Python
+/// backend, so the webview cannot reach it with a relative `/api/x`; it asks
+/// here for the explicit origin instead (`ui/src/backend.ts`). Always loopback:
+/// the server binds `127.0.0.1` (or the wildcard, still reached over loopback
+/// from here), and the token file the webview authenticates with is keyed by
+/// exactly this port. In `tauri dev` the answer is the same origin Vite proxies
+/// to, so the dev window and a built window take the identical path.
+#[tauri::command]
+fn backend_origin() -> String {
+    format!("http://127.0.0.1:{}", backend::backend_port())
+}
+
 /// The backend's per-launch auth token, or `null` when none is on disk yet.
 ///
 /// Read-only: the server is the sole authority on the token (it mints, writes
@@ -200,13 +215,17 @@ pub fn run() {
                 // see `host::class` — so something has to ask.
                 host::spawn_watchdog(app.handle().clone());
             }
+            // Where a packaged build's bundled backend sits (`tauri.conf.json`
+            // `bundle.resources`); `None` in a dev build, where `backend::start`
+            // falls back to `uv run` from the repo root.
+            let resource_dir = app.path().resource_dir().ok();
             let handle = app.handle().clone();
             // Off the main thread on purpose. Probing, spawning and waiting for
             // health is up to `READY_TIMEOUT` of work, and Tauri creates the
             // configured window only after `setup` returns — doing it here
             // means no window, no splash and no taskbar entry while it runs.
             thread::spawn(move || {
-                let backend = backend::start();
+                let backend = backend::start(resource_dir);
                 backend::log(&format!("backend {:?}", backend.mode));
                 // Held in managed state: dropping it would end the child.
                 handle.manage(backend);
@@ -271,6 +290,7 @@ pub fn run() {
         close_ack,
         backend_ready,
         auth_token,
+        backend_origin,
         set_attention,
         set_caption_tint,
         confirm_close,
@@ -293,6 +313,7 @@ pub fn run() {
         close_ack,
         backend_ready,
         auth_token,
+        backend_origin,
         set_attention,
         set_caption_tint,
         confirm_close,
@@ -313,6 +334,7 @@ pub fn run() {
         close_ack,
         backend_ready,
         auth_token,
+        backend_origin,
         set_attention,
         set_caption_tint,
         confirm_close,

@@ -5,12 +5,14 @@
  * panel manages its own raw WebSocket.
  */
 
+import { wsUrl } from "./backend";
 import { getToken } from "./token";
 
-export function wsUrl(path: string): string {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}${path}`;
-}
+// `wsUrl` lives in the backend-origin seam (`backend.ts`): same-origin in a
+// browser (derived from `location`, as before), explicit `ws://127.0.0.1:<port>`
+// in the shell. Re-exported here so `Terminal.tsx` and the rest of the app keep
+// importing it from `./ws`.
+export { wsUrl };
 
 /** The subprotocol label that carries the token: `workbench.auth.<token>`.
  * Mirrors `WS_TOKEN_SUBPROTOCOL_PREFIX` in `services/local_auth.py`. */
