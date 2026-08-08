@@ -5,7 +5,7 @@ Isolated here so nothing else imports the SDK — sessions stay testable with fa
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from workbench_server.config import Settings
 from workbench_server.models.agents import SessionKind, UiState
@@ -43,11 +43,18 @@ from workbench_server.services.agent_tools import (
     handle_workspace_search,
     workspace_state_result,
 )
+from workbench_server.services.permission_broker import build_pre_tool_use_hook
 from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
 
-# Tools the agent may use inside its folder without asking. Deliberately file-only:
-# anything else (Bash, web access, ...) falls through to can_use_tool and becomes
-# a permission prompt in the UI. Auto-allowing them would shadow the callback.
+# Tools the agent may use inside its folder without asking. Deliberately
+# file-only, and deliberately the *whole* reason editing does not prompt: a
+# whole-tool entry here auto-approves the tool before can_use_tool is consulted,
+# which is exactly what we want for the four file tools provenance correlates.
+#
+# Everything else — shell, web — is absent, so it reaches a human. For the shell
+# launchers that guarantee is enforced twice: absence from this list, *and* the
+# PreToolUse broker in ``services/permission_broker.py``, which binds even when a
+# permission mode or a workspace settings file would otherwise auto-approve.
 _AUTO_ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep"]
 
 # The two bundled skills something already tells the agent to reach for on its
@@ -192,6 +199,7 @@ def build_agent_options(
     """
     from claude_agent_sdk import (
         ClaudeAgentOptions,
+        HookMatcher,
         PermissionResultAllow,
         PermissionResultDeny,
         SdkPluginConfig,
@@ -226,17 +234,55 @@ def build_agent_options(
         resume=resume_session_id,
         allowed_tools=[
             # Never widened for a worker, and that is the whole permission story
-            # of Mission Control: `Bash` is absent here, so a worker's shell
-            # request falls through to `can_use_tool`, blocks, and escalates to
-            # the board for a human to answer. An orchestrator adds its own five
-            # tools below and nothing else — it gains no way to run anything.
+            # of Mission Control: no shell launcher is here, so a worker's shell
+            # request blocks and escalates to the board for a human to answer.
+            # An orchestrator adds its own five tools below and nothing else —
+            # it gains no way to run anything.
             *_AUTO_ALLOWED,
             *(_AUTO_ALLOWED_SKILLS if plugins else []),
             *allowed_tool_names(kind),
         ],
-        permission_mode="acceptEdits",
+        # NOT ``acceptEdits``. That mode auto-approves a Bash call whose base
+        # command is one of ``mkdir touch rm rmdir mv cp sed`` inside cwd, and an
+        # auto-approved call never reaches ``can_use_tool`` — so ``rm -rf`` and
+        # ``sed -i`` in the workspace used to run with no permission card, no
+        # provenance claim and no activity row. Measured, not inferred; the
+        # regression test is ``test_permission_broker.py``.
+        #
+        # Dropping it costs nothing: the four file tools are auto-approved by
+        # ``allowed_tools`` above, which shadows ``can_use_tool`` on its own, so
+        # ordinary Write/Edit still does not prompt (also measured). ``default``
+        # is therefore the *same* editing ergonomics minus the shell fast path.
+        permission_mode="default",
         include_partial_messages=True,
         can_use_tool=can_use_tool,
+        # The broker that binds regardless of mode. It is not redundant with
+        # ``can_use_tool``: a hook is dispatched for every tool call, while the
+        # callback is only reached for calls the CLI resolves to "ask" — so a
+        # ``permissions.allow`` rule in a folder the user did not write, or a
+        # mode a subagent inherited, cannot walk around this one. Nor does the
+        # pair cost two prompts: both resolve through the same
+        # ``bridge.ask_permission`` future, and the hook's explicit allow
+        # suppresses the callback — asserted against the real CLI by
+        # ``TestTheEndToEndRepro`` in ``server/tests/test_permission_broker.py``,
+        # which counts the awaits for a single approved shell call.
+        # ``cast`` because the broker is deliberately SDK-free (this module is
+        # the only one that imports ``claude_agent_sdk`` at all), so it types its
+        # hook input as a plain dict rather than the SDK's TypedDict union. The
+        # keys it reads — ``tool_name``, ``tool_input``, ``agent_id`` — are the
+        # ones ``PreToolUseHookInput`` declares.
+        hooks={
+            "PreToolUse": [
+                HookMatcher(
+                    hooks=[
+                        cast(
+                            "Any",
+                            build_pre_tool_use_hook(bridge.ask_permission, bridge.session_id),
+                        )
+                    ]
+                )
+            ]
+        },
         mcp_servers={
             MCP_SERVER_NAME: build_context_bridge(
                 store,
