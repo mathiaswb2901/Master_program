@@ -6,6 +6,8 @@ import type {
   AcknowledgeRequest,
   ActivitySnapshot,
   CallbackResponse,
+  CommandManifest,
+  CommandResultRequest,
   ConversationStore,
   CreateDocumentRequest,
   CreateDocumentResponse,
@@ -218,6 +220,20 @@ export const getConversations = (limit?: number): Promise<ConversationStore> =>
   request(
     limit === undefined ? "/api/conversations" : `/api/conversations?limit=${String(limit)}`,
   );
+
+// ---- command relay (M5 item 14) ---------------------------------------------
+// The window publishes what it will run, and reports how each invocation went.
+// The invoke half lives outside the window (the CLI and the `run_command` agent
+// tool); the window is only the executor here.
+
+/** Publish the manifest of commands this window will run on request. Called on
+ * every (re)connect so the backend always validates against the live window. */
+export const publishCommandManifest = (body: CommandManifest): Promise<OkResponse> =>
+  request("/api/commands/manifest", jsonInit("PUT", body));
+
+/** Report how one relayed command turned out, completing the awaiting invoke. */
+export const reportCommandResult = (body: CommandResultRequest): Promise<OkResponse> =>
+  request("/api/commands/result", jsonInit("POST", body));
 
 export const getOfficeStatus = (): Promise<OfficeStatus> => request("/api/office/status");
 

@@ -13,6 +13,7 @@
 
 import type { WorkbenchTool } from "./registry";
 
+import { commandRelayTool } from "./commandRelay";
 import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
 import { conversationsTool } from "./panels/Conversations";
@@ -69,4 +70,9 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // read as the window's own rather than as one capability's.
   panesTool,
   layoutsTool,
+  // Contributes no panel, command or status item — only a lifecycle. It
+  // publishes the invocable-command manifest on connect and runs a relayed
+  // command on a `command_invoke` event (M5 item 14). Last because order here is
+  // panel/focus/status order, and it is none of those; its position is inert.
+  commandRelayTool,
 ];
