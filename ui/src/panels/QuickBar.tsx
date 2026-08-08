@@ -13,11 +13,19 @@ import { usePresence } from "../motion";
 import { useStore } from "../store";
 import type { TreeNode } from "../types";
 
-/** Subsequence match with bonuses for adjacency and segment starts; null = no match. */
-function fuzzyScore(query: string, target: string): number | null {
-  if (query === "") return 0;
+/**
+ * Subsequence match with bonuses for adjacency and segment starts.
+ *
+ * Returns the score *and* the character positions it consumed, because the row
+ * has to be able to say why it is here (DESIGN.md §6.5's match highlight) and a
+ * second walk that disagreed with this one would highlight the wrong letters.
+ * `null` = no match.
+ */
+function fuzzyMatch(query: string, target: string): { score: number; hits: number[] } | null {
+  if (query === "") return { score: 0, hits: [] };
   const q = query.toLowerCase();
   const t = target.toLowerCase();
+  const hits: number[] = [];
   let qi = 0;
   let score = 0;
   let last = -2;
@@ -29,11 +37,17 @@ function fuzzyScore(query: string, target: string): number | null {
     if (i === 0 || prev === "/" || prev === "." || prev === "_" || prev === "-" || prev === " ") {
       score += 3;
     }
+    hits.push(i);
     last = i;
     qi += 1;
   }
   if (qi < q.length) return null;
-  return score - t.length * 0.01; // light tiebreak toward shorter targets
+  return { score: score - t.length * 0.01, hits }; // light tiebreak toward shorter targets
+}
+
+/** The score alone, for the ranking that does not care where the match landed. */
+function fuzzyScore(query: string, target: string): number | null {
+  return fuzzyMatch(query, target)?.score ?? null;
 }
 
 interface Row {
@@ -47,6 +61,12 @@ interface Row {
   /** Visible but not choosable — the row is here so the reason in `detail` is
    * (DESIGN.md §6.5). Only a `quickPick` supplies these. */
   disabled?: boolean;
+  /** Character positions to emphasise, where the row already knows them —
+   * a file is *ranked* on its whole path and *shown* as a name beside a folder,
+   * so the match that found it is split across the two labels rather than
+   * guessed at again from either half (see `Labelled`). */
+  titleHits?: number[];
+  detailHits?: number[];
   run: () => void;
 }
 
@@ -59,6 +79,54 @@ function rowScore(query: string, title: string, detail: string): number | null {
   if (a === null) return b;
   if (b === null) return a;
   return Math.max(a, b);
+}
+
+/**
+ * A label with the matched characters held at full strength (DESIGN.md §6.5).
+ *
+ * The emphasis has to land under the letters the user can actually see, and a
+ * row's two labels are not always what the ranking matched. Where the row knows
+ * (a file, ranked on its whole path and shown as a name beside its folder) it
+ * hands the positions down already split between the two; where it does not (a
+ * command, a pick row — both matched on the text they show) the query is matched
+ * against this label. Nothing is highlighted that did not match, in either case.
+ */
+function Labelled({
+  text,
+  query,
+  className,
+  positions,
+}: {
+  text: string;
+  query: string;
+  className: string;
+  positions?: number[] | undefined;
+}) {
+  const hits = positions ?? (query === "" ? [] : (fuzzyMatch(query, text)?.hits ?? []));
+  if (hits.length === 0) return <span className={`${className} u-truncate`}>{text}</span>;
+  const marked = new Set(hits);
+  // Adjacent characters are coalesced into one span: a word matched end to end
+  // should be one bold run, not six elements the browser lays out separately.
+  const parts: { text: string; hit: boolean }[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const hit = marked.has(i);
+    const last = parts[parts.length - 1];
+    if (last !== undefined && last.hit === hit) last.text += text[i];
+    else parts.push({ text: text[i] ?? "", hit });
+  }
+  return (
+    <span className={`${className} u-truncate is-matched`}>
+      {parts.map((part, i) =>
+        part.hit ? (
+          <span key={i} className="wb-qb-hit">
+            {part.text}
+          </span>
+        ) : (
+          <Fragment key={i}>{part.text}</Fragment>
+        ),
+      )}
+    </span>
+  );
 }
 
 export function QuickBar() {
@@ -134,8 +202,12 @@ export function QuickBar() {
   // prefix is a file/command toggle and has no meaning inside one.
   const actionsMode = pick === null && query.startsWith(">");
   let rows: Row[];
+  // What the rows were matched against, kept for the highlight below — the `>`
+  // is a mode switch and never a character anyone searched for.
+  let matched: string;
   if (pick !== null) {
     const q = query.trim();
+    matched = q;
     const supplied = pick.rows(q);
     // Ranked inside each section, never across them: the sections are the
     // vocabulary ("Panels", "Agent sessions", "Files"), and a list that
@@ -159,6 +231,7 @@ export function QuickBar() {
       }));
   } else if (actionsMode) {
     const q = query.slice(1).trim();
+    matched = q;
     // Every command in the registry, so the QuickBar is the complete keyboard
     // path to the app — nothing is reachable only by mouse or only by chord.
     rows = commands
@@ -181,17 +254,29 @@ export function QuickBar() {
       }));
   } else {
     const q = query.trim();
+    matched = q;
     rows = files
-      .map((path) => ({ path, score: fuzzyScore(q, path) }))
-      .filter((x) => x.score !== null)
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .map((path) => ({ path, match: fuzzyMatch(q, path) }))
+      .filter((x) => x.match !== null)
+      .sort((a, b) => (b.match?.score ?? 0) - (a.match?.score ?? 0))
       .slice(0, 50)
-      .map(({ path }) => ({
-        key: path,
-        title: path.split("/").pop() ?? path,
-        detail: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "",
-        run: () => void useStore.getState().openFile(path),
-      }));
+      .map(({ path, match }) => {
+        // The row is ranked on the whole path and shown as a name beside its
+        // folder, so the match is *split* rather than re-guessed from either
+        // half: `ui/src/quick` is a real match for `ui/src/panels/QuickBar.tsx`
+        // and matches neither label on its own, which is exactly the query a
+        // file search is made of. `cut` is the index the basename starts at.
+        const slash = path.lastIndexOf("/");
+        const cut = slash + 1;
+        return {
+          key: path,
+          title: path.slice(cut),
+          detail: slash < 0 ? "" : path.slice(0, slash),
+          titleHits: (match?.hits ?? []).filter((i) => i >= cut).map((i) => i - cut),
+          detailHits: (match?.hits ?? []).filter((i) => i < slash),
+          run: () => void useStore.getState().openFile(path),
+        };
+      });
   }
   // The selection only ever lands on a row that can be run: a disabled row is
   // there to be *read* (why "New agent session" is unavailable), and arrowing
@@ -279,8 +364,18 @@ export function QuickBar() {
                   if (row.disabled !== true) setSel(i);
                 }}
               >
-                <span className="wb-qb-row-title u-truncate">{row.title}</span>
-                <span className="wb-qb-row-detail u-truncate">{row.detail}</span>
+                <Labelled
+                  className="wb-qb-row-title"
+                  text={row.title}
+                  query={matched}
+                  positions={row.titleHits}
+                />
+                <Labelled
+                  className="wb-qb-row-detail"
+                  text={row.detail}
+                  query={matched}
+                  positions={row.detailHits}
+                />
                 {row.chord !== undefined && (
                   <span className="wb-qb-row-keys">
                     {chordKeycaps(row.chord).map((cap) => (

@@ -1,10 +1,43 @@
-/* QuickBar overlay (DESIGN.md §6.5). */
+/* QuickBar overlay (DESIGN.md §6.5) — ANVIL V3.
+ *
+ * This is the surface the app is *used* through: every command runs from here,
+ * so it is the one place where "fast, precise, quiet" has to be literally true
+ * rather than a description. Three rules govern everything below.
+ *
+ *  1. **Nothing here animates a selection.** §5.4 puts QuickBar row selection in
+ *     the "does not move" column, because it tracks the arrow key — a wash that
+ *     eases in behind ↓ *is* the feeling of lag. So the rows carry no transition
+ *     at all: hover and selection are both answered on the frame they arrive.
+ *  2. **One amber, and it is the selected row.** §2.4 sanctions the amber for
+ *     *where I am*, which inside this overlay is the row Enter would run — the
+ *     `--surface-selected` wash and the 2px `--accent` left edge, and nowhere
+ *     else. The caret is the one other spend, for the same reason: §2.4 names
+ *     "the field you are typing in" and the caret is that field, blinking, only
+ *     while the palette is open. Neither is standing decoration.
+ *  3. **Elevation is the overlay's, not its own.** Surface, shadow, border and
+ *     radius come from §6.5's numbers via tokens; a floating thing in this app
+ *     looks like every other floating thing.
+ */
 
+/* The scrim arrives with the bar rather than a frame before it: an instant
+   60%-black flash under a surface that is still scaling in is the one part of
+   this gesture that used to read as a jump. Opacity only, so it is the tint
+   channel and reduced motion leaves it alone. */
 .wb-qb-backdrop {
   position: fixed;
   inset: 0;
   background: var(--backdrop);
   z-index: 100;
+  animation: wb-qb-scrim-in var(--motion-enter);
+}
+
+@keyframes wb-qb-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .wb-qb {
@@ -55,10 +88,16 @@
   padding: 0 var(--space-6);
   font-size: var(--type-xl-size);
   line-height: var(--type-xl-line);
+  font-weight: var(--weight-body);
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
+  /* The one other amber in this overlay, and §2.4 names it outright: *the field
+     you are typing in*. It exists only while the palette is open and it blinks
+     where the next character lands, so it is "where I am" in its purest form —
+     not a mark that is still true when you look away. */
+  caret-color: var(--accent);
 }
 
 /* Replacement focus treatment — the bar itself is the focus context, and the
@@ -74,6 +113,9 @@
 .wb-qb-results {
   overflow-y: auto;
   padding: var(--space-3) 0;
+  /* The dock is still behind the scrim, and a list that hands its overscroll to
+     the window scrolls the file tree while the user is picking a command. */
+  overscroll-behavior: contain;
 }
 
 .wb-qb-row {
@@ -87,11 +129,39 @@
   font-size: var(--type-md-size);
   color: var(--text-primary);
   text-align: left;
+  /* `scrollIntoView({ block: "nearest" })` follows the arrow key, and "nearest"
+     stops the moment the row's own box is inside the viewport — which, under a
+     sticky section header, is the moment it disappears behind one. Measured in
+     the browser rather than assumed: a header pins one `--space-3` down (the
+     list's own top padding) and is `--space-4 + --type-xs-line + --space-2`
+     tall, so that plus a hair of daylight is what an arrowed-to row must clear.
+     Written from the tokens that draw the header, so retuning one moves this. */
+  scroll-margin-top: calc(
+    var(--space-3) + var(--space-4) + var(--type-xs-line) + var(--space-2) + var(--space-1)
+  );
+  scroll-margin-bottom: var(--space-3);
+}
+
+/* Hover is a *pointer* state and selection is a *keyboard* one, and in this
+   surface they are wired together — moving the mouse over a runnable row selects
+   it (`QuickBar.tsx`), so the amber below is what a hover normally looks like.
+   This wash is what is left: the frame before the pointer has moved, and a
+   disabled row, which never takes the selection and must still answer the mouse
+   with something. No transition on either state — §5.4 forbids animating this
+   selection, because it tracks a key. */
+.wb-qb-row:hover:not(:disabled):not(.is-selected) {
+  background: var(--surface-hover);
 }
 
 .wb-qb-row.is-selected {
   background: var(--surface-selected);
   border-left-color: var(--accent);
+}
+
+/* Inset, like every other list row (§7): a 2px ring at the default +2px offset
+   inside a 640px overlay is drawn over the row above it. */
+.wb-qb-row:focus-visible {
+  outline-offset: -2px;
 }
 
 /* A row that is shown so its reason can be read, not chosen (§6.5). It keeps
@@ -104,6 +174,12 @@
 
 .wb-qb-row:disabled .wb-qb-row-detail {
   color: var(--text-disabled);
+}
+
+/* A keycap on a row that cannot run must not read as a key you may press. */
+.wb-qb-row:disabled .wb-keycap {
+  color: var(--text-disabled);
+  border-color: var(--border-subtle);
 }
 
 .wb-qb-row-title {
@@ -119,6 +195,37 @@
   color: var(--text-tertiary);
 }
 
+/* ---- The match highlight (§6.5) --------------------------------------------
+ *
+ * Why the row *is* here, said in the row itself: the characters the query
+ * matched are held at full strength and the rest of the label steps back one
+ * notch. It is a hierarchy, not a colour — the amber in this overlay means the
+ * row Enter would run, and spending it on "these letters matched" would put it
+ * on every row at once, which is how a mark stops meaning anything (§2.4).
+ *
+ * The step-back applies only while there is something matched to step back
+ * *from*: with an empty query the component emits no spans, `is-matched` is
+ * absent, and the list sits at full contrast rather than dimming itself for a
+ * search nobody has typed yet.
+ */
+.wb-qb-row-title.is-matched {
+  color: var(--text-secondary);
+}
+
+.wb-qb-row-title .wb-qb-hit {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.wb-qb-row-detail .wb-qb-hit {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.wb-qb-row:disabled .wb-qb-hit {
+  color: var(--text-disabled);
+}
+
 /* Keycap hints, right-aligned after the detail (§6.5). */
 .wb-qb-row-keys {
   display: flex;
@@ -127,8 +234,18 @@
   flex: none;
 }
 
-/* Section header above a group of rows (§6.5). */
+/* Section header above a group of rows (§6.5).
+ *
+ * Sticky, because in a pick the section names *are* the vocabulary (§6.11): a
+ * list scrolled past its header answers "which of these is a panel and which is
+ * a session?" with nothing. It rides on the overlay's own surface so a row
+ * passing under it is covered rather than blended — the same value as the bar,
+ * so the header does not read as a second layer. */
 .wb-qb-cat {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-overlay);
   padding: var(--space-4) var(--space-6) var(--space-2);
   font-size: var(--type-xs-size);
   line-height: var(--type-xs-line);
