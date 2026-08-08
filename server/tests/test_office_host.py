@@ -311,6 +311,35 @@ async def test_opening_walks_launching_embedding_embedded(tmp_path: Path) -> Non
     assert service.snapshot().hosts == [info]
 
 
+async def test_opening_an_xlsx_docks_as_excel(tmp_path: Path) -> None:
+    """The Word lifecycle, walked for a workbook. A ``.xlsx`` resolves to the
+    excel host and the fake backend embeds it with no Excel and no window — the
+    proof that hosting is not Word-only at the domain layer, driven the way the
+    E2E drives the UI half."""
+    backend = FakeHostBackend()
+    service, bus = make_service(tmp_path, backend)
+    info = await service.open(document(tmp_path, "book.xlsx"), RECT)
+
+    assert bus.states() == ["launching", "embedding", "embedded"]
+    assert info.state == "embedded"
+    assert info.reason is None
+    assert info.kind == "excel"
+    assert host_app_kind("book.xlsx") == "excel"
+    assert "excel" in HOSTABLE_KINDS
+    assert backend.calls == [("launch", "book.xlsx"), ("embed", "640x480")]
+
+
+async def test_an_xlsx_embed_that_is_refused_settles_failed(tmp_path: Path) -> None:
+    """The refused-embed path is not Word's alone: a workbook whose window will
+    not dock ends ``failed``/``embed_refused``, which is what turns the panel
+    over to the preview editor (the E2E asserts the UI half)."""
+    backend = FakeHostBackend()
+    service, _ = make_service(tmp_path, backend)
+    info = await service.open(document(tmp_path, "book-refuse-embed.xlsx"), RECT)
+
+    assert (info.state, info.reason, info.kind) == ("failed", "embed_refused", "excel")
+
+
 async def test_a_host_opened_without_bounds_gets_the_default_rect(tmp_path: Path) -> None:
     backend = FakeHostBackend()
     service, _ = make_service(tmp_path, backend)

@@ -382,6 +382,9 @@ class FakeApp:
         self.Visible = False
         self.quits = 0
         self._hwnd = hwnd
+        #: What ``IgnoreRemoteRequests`` was last set to, or None if never — the
+        #: `/x` isolation Excel gets and Word does not.
+        self.ignore_remote_requests: object | None = None
         self.Documents = FakeDocuments(document or FakeDocument())
         self.Workbooks = self.Documents
 
@@ -398,6 +401,14 @@ class FakeApp:
     @DisplayAlerts.setter
     def DisplayAlerts(self, value: object) -> None:
         self.alerts.append(value)
+
+    @property
+    def IgnoreRemoteRequests(self) -> object:
+        return self.ignore_remote_requests
+
+    @IgnoreRemoteRequests.setter
+    def IgnoreRemoteRequests(self, value: object) -> None:
+        self.ignore_remote_requests = value
 
     def Quit(self, *args: object) -> None:
         self.quits += 1
@@ -602,6 +613,37 @@ def test_excel_is_asked_which_frame_it_owns_instead_of_being_guessed(
     instance = office_com._identify(FakeApp(hwnd=0x55), "excel", set(), {})
 
     assert (instance.window_id, instance.pid) == (0x55, 4242)
+
+
+def test_excel_is_walled_off_from_the_users_other_workbooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `/x` isolation, in-process: our private Excel is a DDE server, so
+    without ``IgnoreRemoteRequests`` the next workbook the user opens from
+    Explorer could land in the window Workbench is hosting."""
+    win32 = FakeWin32(classes={0x55: "XLMAIN"}, pids={0x55: 4242})
+    monkeypatch.setattr(office_com, "win32gui", win32, raising=False)
+    monkeypatch.setattr(office_com, "win32process", win32, raising=False)
+    monkeypatch.setattr(office_com, "frame_windows", lambda kind: {0x55: 4242})
+    app = FakeApp(hwnd=0x55)
+
+    office_com._identify(app, "excel", set(), {})
+
+    assert app.ignore_remote_requests is True
+
+
+def test_word_is_not_asked_to_ignore_remote_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Word runs no DDE server and has no such property; touching it would raise
+    where the isolation must stay Excel-only."""
+    monkeypatch.setattr(office_com, "_IDENTIFY_SETTLE_S", 0.0)
+    monkeypatch.setattr(office_com, "frame_windows", lambda kind: {0x22: 900})
+    app = FakeApp()
+
+    office_com._identify(app, "word", {1}, {})
+
+    assert app.ignore_remote_requests is None
 
 
 # ---- opening: a stranger's process is released, never terminated --------------
