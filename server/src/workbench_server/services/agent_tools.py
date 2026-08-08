@@ -31,11 +31,13 @@ before a design one.
 """
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from workbench_server.models.agent_reconcile import ReconcileMismatch, ReconcileSummary
 from workbench_server.models.agents import SessionKind, UiState
 from workbench_server.models.commands import CommandInvokeResult, CommandManifest
 from workbench_server.models.office_bridge import (
@@ -52,6 +54,13 @@ from workbench_server.models.orchestrator import (
     WorkerInfo,
 )
 from workbench_server.models.plans import PlanArtifact, plan_input_schema
+from workbench_server.models.reconciliation import ReconciliationReport, ReconciliationSpec
+from workbench_server.models.validation import (
+    EvidenceKind,
+    ValidationResult,
+    ValidationSpec,
+    ValidationSubject,
+)
 from workbench_server.services.agent_sessions import PlanAlreadyPendingError, SessionBridge
 from workbench_server.services.office_host.a1 import cell_ref, column_letter, parse_cell
 from workbench_server.services.office_host.document_bridge import DocumentBridgeError
@@ -939,6 +948,308 @@ async def handle_run_command(invoker: CommandInvoker, args: dict[str, Any]) -> d
     )
 
 
+# ---- office_reconcile -------------------------------------------------------
+#
+# The moat, made agent-usable. An agent that just wrote numbers into a workbook
+# asks: do the cells actually hold what I computed? This runs M6's unit- and
+# DST-aware reconciliation gate (services/reconciliation.py, registered on the
+# ValidationService) and hands back an honest pass/warn/fail with the worst few
+# mismatches — never the whole table, which lives behind the result's payload_ref.
+
+
+class ReconciliationRunner(Protocol):
+    """The narrow slice of ``ValidationService`` this tool needs — threaded into
+    the context bridge so this module never imports the service (the CommandInvoker
+    pattern). ``run`` dispatches to the registered ``reconciliation`` check; ``payload``
+    fetches the stored :class:`ReconciliationReport` the worst-mismatch list is read
+    from."""
+
+    async def run(self, spec: ValidationSpec) -> ValidationResult: ...
+    def payload(self, kind: EvidenceKind, ref: str) -> BaseModel | None: ...
+
+
+#: Worst flagged cells carried in one confirmation. Worst-first; beyond this the
+#: count is stated as ``withheld`` and the full table named (AXI shape 1). A handful
+#: is what an agent acts on in one turn; the rest is a read of the named result.
+RECONCILE_WORST_N = 5
+
+#: Field clips that keep the compact-JSON result provably inside its byte budget:
+#: the agent controls a cell address and the check writes a reason, so both are
+#: bounded before serialization rather than clamped after (clamping JSON corrupts it).
+_RECONCILE_CELL_CLIP = 64
+_RECONCILE_REASON_CLIP = 140
+_RECONCILE_LINE_CLIP = 200
+
+OFFICE_RECONCILE = AgentToolSpec(
+    name="office_reconcile",
+    description=(
+        "Check numbers you wrote into an .xlsx against your own computed "
+        "expectations — the unit- and DST-aware reconciliation gate. Give the "
+        "workbook path, a default_tolerance (abs and/or rel), and expectations: "
+        "direct cells (cell like Sheet1!D14, expected, unit such as MWh/MW/EUR/MWh, "
+        "optional cell_unit so a kWh-vs-MWh 1000x cannot pass silently), and/or a "
+        "time_index that aligns rows to local wall-clock (needs timezone). Returns "
+        "the derived risk (pass/low/medium/high/blocked), a one-line summary, "
+        "pass/warn/fail counts, and the worst few mismatches (cell, expected, actual, "
+        "delta, reason). An unreadable workbook or empty cells is an honest fail, "
+        "never a silent pass; the full per-cell table is the named validation result."
+    ),
+    output_format="compact-json",
+    # The success body is bounded by construction, not clamped (clamping valid JSON
+    # hands back invalid JSON): RECONCILE_WORST_N mismatches, each with a clipped
+    # cell and reason, plus a summary and next-step line. Five worst mismatches with
+    # 64-char cells and 140-char reasons measure well under 2 kB even with the widest
+    # float reprs; 2,560 is that with a margin the budget test pins.
+    max_result_bytes=2_560,
+    # The request reuses ReconciliationSpec, so the schema is the widest of these
+    # tools: workbook, two expectation shapes, a tolerance and a time-index block.
+    # Measured near 2.3 kB; 2,800 leaves room to reword a field description without a
+    # new property slipping in unmeasured — the schema is paid on every request.
+    max_schema_bytes=2_800,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "workbook": {
+                "type": "string",
+                "description": "Workspace-relative path to the .xlsx to check.",
+            },
+            "default_tolerance": {
+                "type": "object",
+                "description": "Match band for any cell without an override; need at least one.",
+                "properties": {
+                    "abs": {"type": "number", "description": "Absolute band, in the value's unit."},
+                    "rel": {
+                        "type": "number",
+                        "description": "Relative band, a fraction (0.001=0.1%).",
+                    },
+                },
+            },
+            "expectations": {
+                "type": "array",
+                "description": "Direct-cell checks: your number vs a workbook cell.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "cell": {
+                            "type": "string",
+                            "description": "A1 address, e.g. Sheet1!D14 or D14 (active sheet).",
+                        },
+                        "expected": {"type": "number", "description": "Your value, in unit."},
+                        "unit": {
+                            "type": "string",
+                            "description": "Unit of expected: MWh/MW/EUR/MWh/EUR/% or '' default.",
+                        },
+                        "cell_unit": {
+                            "type": "string",
+                            "description": "Cell's unit if it differs; incompatible dims fail.",
+                        },
+                        "label": {"type": "string", "description": "Human label for the evidence."},
+                    },
+                    "required": ["cell", "expected"],
+                },
+            },
+            "per_cell_tolerance": {
+                "type": "object",
+                "description": "Optional cell -> {abs,rel} overrides, keyed by the cell string.",
+            },
+            "timezone": {
+                "type": "string",
+                "description": "IANA zone (e.g. Europe/Oslo). Required when time_index is set.",
+            },
+            "time_index": {
+                "type": "object",
+                "description": "Time-indexed check: rows aligned by local wall-clock time.",
+                "properties": {
+                    "timestamp_column": {
+                        "type": "string",
+                        "description": "Column letter of the local timestamps, e.g. A.",
+                    },
+                    "value_column": {
+                        "type": "string",
+                        "description": "Column letter of the values, e.g. B.",
+                    },
+                    "value_unit": {
+                        "type": "string",
+                        "description": "Unit of the value column (default: expectation's unit).",
+                    },
+                    "start_row": {
+                        "type": "integer",
+                        "description": "1-based first data row (default 2).",
+                    },
+                    "sheet": {"type": "string", "description": "Sheet the columns live on."},
+                    "expectations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "timestamp": {
+                                    "type": "string",
+                                    "description": "Naive local ISO, e.g. 2024-10-27T02:00:00.",
+                                },
+                                "expected": {"type": "number"},
+                                "unit": {"type": "string"},
+                                "fold": {
+                                    "type": "integer",
+                                    "description": "Repeated fall-back hour: 0 first, 1 second.",
+                                },
+                                "label": {"type": "string"},
+                            },
+                            "required": ["timestamp", "expected"],
+                        },
+                    },
+                },
+                "required": ["timestamp_column", "value_column"],
+            },
+        },
+        "required": ["workbook", "default_tolerance"],
+    },
+)
+
+
+def _clip(text: str, limit: int) -> str:
+    """A hard character clip with a stated tail, so a field cannot blow the budget."""
+    return text if len(text) <= limit else text[: max(limit - 1, 0)] + "…"
+
+
+def _finite(value: float | None) -> float | None:
+    """Drop a non-finite float to ``None`` so the summary stays valid JSON.
+
+    ``ExpectedValue.expected`` is data the agent supplies: a JSON literal like
+    ``1e400`` overflows to ``inf`` in Python's parser with no guard, and a ``delta``
+    of two finite-but-huge floats can overflow the same way. ``model_dump_json``
+    would serialize ``inf``/``nan`` as the bare tokens ``Infinity``/``NaN`` — not
+    valid JSON per RFC 8259 — so a strict parser on the agent's side would choke on
+    the very result that promises to be machine-readable. Mapping to ``None`` mirrors
+    how ``actual``/``delta`` already go ``None`` for an unreadable cell."""
+    return value if value is None or math.isfinite(value) else None
+
+
+def _reconcile_summary(result: ValidationResult, runner: ReconciliationRunner) -> ReconcileSummary:
+    """Fold one run into the compact confirmation, worst-first and budget-bounded.
+
+    The reconciliation check returns exactly one grouped ``numeric`` evidence line;
+    its ``payload_ref`` names the stored :class:`ReconciliationReport`. When there is
+    no report — a spec error, an unreadable workbook, every cell empty — the risk is
+    still an honest ``high`` fail and the evidence detail carries the reason, so the
+    summary says *why* rather than a blank the model reads as either "clean" or "broke".
+    """
+    evidence = next((item for item in result.evidence if item.kind == "numeric"), None)
+    report: ReconciliationReport | None = None
+    if evidence is not None and evidence.payload_ref is not None:
+        payload = runner.payload("numeric", evidence.payload_ref)
+        if isinstance(payload, ReconciliationReport):
+            report = payload
+
+    if report is None:
+        # No table to draw from: surface the honest reason, not a green blank.
+        reason = evidence.detail if evidence is not None else result.summary
+        return ReconcileSummary(
+            risk=result.risk,
+            summary=_clip(reason, _RECONCILE_LINE_CLIP),
+            passed=0,
+            warned=0,
+            failed=0,
+            total=0,
+            worst=[],
+            withheld=0,
+            validation_id=result.validation_id,
+            next_step=_clip(
+                f"Nothing reconciled — {reason} Fix and re-run; full result "
+                f"{result.validation_id}.",
+                _RECONCILE_LINE_CLIP,
+            ),
+        )
+
+    passed = report.matched
+    failed = report.mismatched
+    total = report.total
+    warned = max(total - passed - failed, 0)
+    flagged = [c for c in report.comparisons if c.outcome in ("fail", "warn")]
+    worst = [
+        ReconcileMismatch(
+            cell=_clip(c.cell, _RECONCILE_CELL_CLIP),
+            expected=_finite(c.expected),
+            actual=_finite(c.actual),
+            delta=_finite(c.delta),
+            reason=_clip(c.reason, _RECONCILE_REASON_CLIP) if c.reason else None,
+        )
+        for c in flagged[:RECONCILE_WORST_N]
+    ]
+    # Withheld is measured against the *true* count of bad cells, not the stored
+    # window (which the report already capped at 200): the failed/warned totals are
+    # exact, so an agent is never told it saw everything when it did not.
+    withheld = max((failed + warned) - len(worst), 0)
+
+    if failed == 0 and warned == 0:
+        summary = f"All {total} cells reconciled within tolerance."
+        next_step = _clip(
+            f"Clean: risk {result.risk}. Full table is validation result {result.validation_id}.",
+            _RECONCILE_LINE_CLIP,
+        )
+    else:
+        first = worst[0].cell if worst else "?"
+        summary = _clip(
+            f"{failed} fail / {warned} warn of {total} cells; worst {first}.",
+            _RECONCILE_LINE_CLIP,
+        )
+        more = f" ({withheld} more not shown)" if withheld else ""
+        next_step = _clip(
+            f"Fix the {failed} flagged cell(s){more} and re-run; the full per-cell "
+            f"table is validation result {result.validation_id} (kind 'numeric').",
+            _RECONCILE_LINE_CLIP,
+        )
+
+    return ReconcileSummary(
+        risk=result.risk,
+        summary=summary,
+        passed=passed,
+        warned=warned,
+        failed=failed,
+        total=total,
+        worst=worst,
+        withheld=withheld,
+        validation_id=result.validation_id,
+        next_step=next_step,
+    )
+
+
+async def handle_office_reconcile(
+    runner: ReconciliationRunner, args: dict[str, Any]
+) -> dict[str, Any]:
+    """The office_reconcile tool body, free of SDK imports so it is directly testable.
+
+    The request *is* a ReconciliationSpec — validated here so a malformed call is a
+    tool error the agent fixes, not an exception — mapped into a ValidationSpec that
+    names the ``reconciliation`` check and carries the spec as its per-check params.
+    The compact confirmation the agent reads is built from the run; the whole table
+    stays behind the result's ``payload_ref`` and is only *named* here.
+    """
+    try:
+        spec = ReconciliationSpec.model_validate(args)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:6]
+        )
+        return error_result(
+            clamp_result(
+                f"Invalid reconciliation request — fix and retry: {problems}",
+                OFFICE_RECONCILE.max_result_bytes,
+            )
+        )
+    validation_spec = ValidationSpec(
+        subject=ValidationSubject(kind="file", ref=spec.workbook, label=spec.workbook),
+        checks=["reconciliation"],
+        params=spec.model_dump(),
+    )
+    result = await runner.run(validation_spec)
+    summary = _reconcile_summary(result, runner)
+    # Compact JSON, never clamped: the body is bounded by construction (a fixed
+    # worst-N, clipped fields), so it is valid JSON the agent parses — not a wall
+    # of prose truncated mid-token.
+    return text_result(summary.model_dump_json())
+
+
 # ---- the registry -----------------------------------------------------------
 
 #: Every session's toolset — office_read and office_write included, so every
@@ -949,6 +1260,7 @@ AGENT_TOOLS: tuple[AgentToolSpec, ...] = (
     PRESENT_PLAN,
     OFFICE_READ,
     OFFICE_WRITE,
+    OFFICE_RECONCILE,
     RUN_COMMAND,
 )
 

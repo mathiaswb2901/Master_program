@@ -201,6 +201,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ui_state_store,
             office_host_service,
             command_relay,
+            # The reconciliation gate a session runs over a workbook it wrote. The
+            # ValidationService, narrowed to ReconciliationRunner in the SDK factory;
+            # the reconciliation check is registered on it a few lines above.
+            validation_service,
             settings,
             orchestrator_service,
             # What a worker has spent, read from the *one* accumulator: the same

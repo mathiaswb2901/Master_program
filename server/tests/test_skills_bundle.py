@@ -32,6 +32,7 @@ from workbench_server.services.event_bus import EventBus
 from workbench_server.services.office_host.document_bridge import DocNotHostedError
 from workbench_server.services.sdk_factory import UiStateStore, build_agent_options
 from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
+from workbench_server.services.validation import ValidationService
 
 EXPECTED_SKILLS = {"plan-visual", "remember", "workbench-dev"}
 #: Skills are progressive disclosure: the body is loaded into context on use, so
@@ -95,6 +96,7 @@ def options_for(settings: Settings, resume: str | None = None) -> Any:
         StubBridge(),
         StubReader(),
         CommandRelay(EventBus()),
+        ValidationService(Path.cwd(), EventBus()),
     )
 
 
