@@ -19,13 +19,21 @@
   height: 20px;
   border-radius: var(--radius-sm);
   color: var(--text-tertiary);
-  transition: color var(--duration-1) var(--ease-standard),
-    background-color var(--duration-1) var(--ease-standard);
+  /* Colour only, on the tint channel (DESIGN.md §5.3) — migrated off the
+   * deprecated `--duration-1` / `--ease-standard` pair the palette landing
+   * shipped it on, so the whole frame now speaks the one motion vocabulary. The
+   * glyph tints on hover; it never travels. */
+  transition:
+    color var(--motion-tint),
+    background-color var(--motion-tint);
 }
 
 .wb-pane-action:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+  /* Instant in, eased out (DESIGN.md §5.5): the affordance lights the frame the
+   * pointer lands on, and only its decay is animated. */
+  transition-duration: 0s;
 }
 
 /* A pane arriving — the one panel-level movement in the app (DESIGN.md §5:
