@@ -239,6 +239,12 @@
   align-items: flex-start;
 }
 
+/* The pre-hydration wait for a restored pane — neutral, never the tombstone. */
+.wb-review-loading {
+  color: var(--text-secondary);
+  padding: var(--space-5);
+}
+
 /* ---- the status-bar reading (§6.7, hides at zero) -------------------------- */
 
 .wb-review-status {

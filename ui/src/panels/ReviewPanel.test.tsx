@@ -12,11 +12,11 @@
  * the panel opening, the approve click — is `ui/e2e/review.spec.ts`.
  */
 
+import type { IDockviewPanelProps } from "dockview";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CheckOutcome, EvidenceItem, RiskLevel, ValidationResult } from "../types";
-import { resetValidationStoreForTests, useValidationStore } from "../validation";
 
 // `./Panes` pulls in dockview's runtime; `../dock` the whole registry. Neither
 // is exercised by static rendering — the picker's `key()` returns a string and
@@ -24,15 +24,70 @@ import { resetValidationStoreForTests, useValidationStore } from "../validation"
 vi.mock("./Panes", () => ({ revealPane: vi.fn() }));
 vi.mock("../dock", () => ({ openPanel: vi.fn() }));
 
+// The store, mocked to read a mutable state object — the `AgentPanel.test.tsx`
+// pattern. This is what lets a *mounted* `ReviewPanel` resolve its pane id
+// against seeded results: node-only `renderToStaticMarkup` reads zustand's
+// *initial* snapshot through the real hook, so a real store could never carry
+// mutated state into an SSR render. The pure rules (`riskVisual`,
+// `awaitingApproval`, …) stay real via `importActual`; only the hook is swapped.
+let vstate: { results: Record<string, ValidationResult>; hydrated: boolean } = {
+  results: {},
+  hydrated: false,
+};
+const approveMock = vi.fn();
+const initMock = vi.fn();
+
+vi.mock("../validation", async (importActual) => {
+  const actual = await importActual<typeof import("../validation")>();
+  const snapshot = (): Record<string, unknown> => ({ ...vstate, approve: approveMock, init: initMock });
+  const useValidationStore = Object.assign((select: (s: Record<string, unknown>) => unknown) => select(snapshot()), {
+    getState: snapshot,
+    setState: (patch: Partial<typeof vstate>) => {
+      vstate = { ...vstate, ...patch };
+    },
+  });
+  return {
+    ...actual,
+    useValidationStore,
+    resetValidationStoreForTests: () => {
+      vstate = { results: {}, hydrated: false };
+    },
+  };
+});
+
+const { resetValidationStoreForTests, useValidationStore } = await import("../validation");
+
 const {
   ApprovalGate,
   EvidenceGallery,
   OutcomePill,
+  ReviewPanel,
   ReviewView,
   RiskBadge,
   reviewTool,
   worstAwaiting,
 } = await import("./ReviewPanel");
+
+/** Seed the mocked store with a set of results and mark it hydrated (the
+ * post-load steady state). Tests that need the pre-load race set `hydrated`
+ * themselves. */
+function seed(results: ValidationResult[], hydrated = true): void {
+  useValidationStore.setState({
+    results: Object.fromEntries(results.map((r) => [r.validation_id, r])),
+    hydrated,
+  });
+}
+
+/** A minimal dockview panel props with just the `api` the panel reads — the
+ * pane's own id (its `review#<validation_id>` string) and a `close`. */
+function panelProps(paneId: string): IDockviewPanelProps {
+  return { api: { id: paneId, close: vi.fn() } } as unknown as IDockviewPanelProps;
+}
+
+/** Render one real `ReviewPanel` instance bound to a pane id, against whatever
+ * the shared `useValidationStore` currently holds — the true wiring the trivial
+ * two-`ReviewView` test never exercised. */
+const panel = (paneId: string): string => html(<ReviewPanel {...panelProps(paneId)} />);
 
 const ALL_RISKS: RiskLevel[] = ["pass", "low", "medium", "high", "blocked"];
 
@@ -226,20 +281,67 @@ describe("worstAwaiting", () => {
 });
 
 describe("two Review panes are independent (the plural contract)", () => {
-  it("two results render as two independent reviews, each its own subject and risk", () => {
-    // The pane binding *is* the validation_id, so two panes carry two ids and
-    // resolve two different results — asserted here as two independent renders.
-    const a = view(result("val_aaaa", { risk: "high", subject: { kind: "session_output", ref: "s1", label: "output A" } }));
-    const b = view(result("val_bbbb", { risk: "low", subject: { kind: "session_output", ref: "s2", label: "output B" } }));
+  it("two ReviewPanel instances resolve two different ids against the shared store", () => {
+    // Two whole panes, not two calls to a pure view: each carries its own
+    // `review#<validation_id>` pane id, and each must resolve *its* id through
+    // `paneInstance` against the one `useValidationStore` map. A pane-id-parsing
+    // or stale-closure regression that made both resolve to the same result
+    // would fail this and pass the old two-`ReviewView` test.
+    seed([
+      result("val_aaaa", { risk: "high", subject: { kind: "session_output", ref: "s1", label: "output A" } }),
+      result("val_bbbb", { risk: "low", subject: { kind: "session_output", ref: "s2", label: "output B" } }),
+    ]);
+
+    const a = panel("review#val_aaaa");
+    const b = panel("review#val_bbbb");
+
     expect(a).toContain('data-validation="val_aaaa"');
     expect(a).toContain("output A");
     expect(a).toContain("High risk");
     expect(b).toContain('data-validation="val_bbbb"');
     expect(b).toContain("output B");
     expect(b).toContain("Low risk");
-    // Nothing bleeds from one into the other.
+    // Nothing bleeds from one pane into the other — the whole point of binding a
+    // pane to an id rather than to "the review panel".
     expect(a).not.toContain("output B");
+    expect(a).not.toContain("Low risk");
     expect(b).not.toContain("output A");
+    expect(b).not.toContain("High risk");
+  });
+
+  it("the bare pane (no id) is the index of every held result", () => {
+    seed([
+      result("val_aaaa", { subject: { kind: "session_output", ref: "s1", label: "output A" } }),
+      result("val_bbbb", { subject: { kind: "session_output", ref: "s2", label: "output B" } }),
+    ]);
+    const index = panel("review");
+    expect(index).toContain("wb-review-index");
+    expect(index).toContain("output A");
+    expect(index).toContain("output B");
+  });
+});
+
+// ---- a restored pane is vetted before it is believed (hydration gate) -------
+
+describe("a restored pane bound to an absent id", () => {
+  it("waits (never a tombstone) until the store has answered", () => {
+    // Fresh store: hydrated is false, the map empty — the exact cold-launch race
+    // where the layout restores a pane before `GET /api/validation` resolves. A
+    // tombstone here would flash 're-run it' over a result that is in fact live.
+    const before = panel("review#val_still_held");
+    expect(before).toContain("wb-review-loading");
+    expect(before).not.toContain("wb-review-tombstone");
+    expect(before).not.toContain("no longer loaded");
+  });
+
+  it("falls through to the tombstone only once the store has answered and the id is gone", () => {
+    // The store answered (a refresh settled) and the id is genuinely absent —
+    // now, and only now, the tombstone is the honest view.
+    useValidationStore.setState({ hydrated: true, results: {} });
+    const after = panel("review#val_evicted");
+    expect(after).toContain("wb-review-tombstone");
+    expect(after).toContain("no longer loaded");
+    expect(after).not.toContain("wb-review-loading");
   });
 });
 

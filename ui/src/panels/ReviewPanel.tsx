@@ -38,6 +38,7 @@ import {
   orderResults,
   outcomeVisual,
   reviewCount,
+  riskSeverity,
   riskVisual,
   useValidationStore,
 } from "../validation";
@@ -367,6 +368,7 @@ function ReviewInstance({ validationId }: { validationId: string }) {
 export function ReviewPanel(props: IDockviewPanelProps) {
   const validationId = useMemo(() => paneInstance(props.api.id), [props.api.id]);
   const results = useValidationStore((s) => s.results);
+  const hydrated = useValidationStore((s) => s.hydrated);
 
   useEffect(() => {
     // The panel is a reader of the validation service; opening it is what starts
@@ -382,6 +384,18 @@ export function ReviewPanel(props: IDockviewPanelProps) {
     );
   }
   if (results[validationId] === undefined) {
+    // The tombstone is only honest once the store has *answered*. On a cold
+    // launch that restores a pane bound to a still-held id, the first render
+    // happens before the load resolves; a tombstone here would flash "re-run it"
+    // over a live result. Wait for hydration, then fall through — presumed alive
+    // until proven gone, never the inverse (product principle 4c).
+    if (!hydrated) {
+      return (
+        <div className="wb-review">
+          <p className="wb-review-loading">Loading validation…</p>
+        </div>
+      );
+    }
     return (
       <div className="wb-review">
         <ReviewTombstone id={validationId} api={props.api} />
@@ -438,8 +452,9 @@ export function worstAwaiting(results: readonly ValidationResult[]): RiskLevel |
 }
 
 function orderBySeverity(results: readonly ValidationResult[]): ValidationResult[] {
-  const severity: Record<RiskLevel, number> = { pass: 0, low: 1, medium: 2, high: 3, blocked: 4 };
-  return [...results].sort((a, b) => severity[b.risk] - severity[a.risk]);
+  // The one severity table lives in `validation.ts` (`riskSeverity`); a second
+  // copy here would silently drift from `isMediumOrWorse`/`reviewCount`.
+  return [...results].sort((a, b) => riskSeverity(b.risk) - riskSeverity(a.risk));
 }
 
 // ---- registration ------------------------------------------------------------

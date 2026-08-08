@@ -152,6 +152,15 @@ interface ValidationStore {
   /** Held results, keyed by `validation_id`. Empty is a real answer (nothing
    * validated yet) and the common one — never a singleton. */
   results: Record<string, ValidationResult>;
+  /**
+   * `false` until the first `refresh()` settles (success *or* failure), `true`
+   * forever after. Before it flips, an absent id is *unknown*, not gone — a
+   * restored Review pane must wait for this rather than presume its still-held
+   * result dead and flash a tombstone (product principle 4c: a restored pane is
+   * vetted before it is believed). The usage/activity stores answer "is what I
+   * hold real yet" the same way.
+   */
+  hydrated: boolean;
   init: () => void;
   refresh: () => Promise<void>;
   /** Run a validation (also drives it onto `/ws/events`); returns the result. */
@@ -170,11 +179,12 @@ let started = false;
 /** Reset the module-level "already subscribed" latch and the map. Tests only. */
 export function resetValidationStoreForTests(): void {
   started = false;
-  useValidationStore.setState({ results: {} });
+  useValidationStore.setState({ results: {}, hydrated: false });
 }
 
 export const useValidationStore = create<ValidationStore>((set, get) => ({
   results: {},
+  hydrated: false,
 
   init: () => {
     if (started) return;
@@ -199,10 +209,13 @@ export const useValidationStore = create<ValidationStore>((set, get) => ({
   refresh: async () => {
     try {
       const { results } = await getValidations();
-      set({ results: Object.fromEntries(results.map((r) => [r.validation_id, r])) });
+      set({ results: Object.fromEntries(results.map((r) => [r.validation_id, r])), hydrated: true });
     } catch {
       // A server that cannot answer leaves the last map standing — the honest
-      // reading of the situation, same posture as usage/activity.
+      // reading of the situation, same posture as usage/activity. Still counts as
+      // hydrated: the store *answered*, so an absent id is now genuinely absent
+      // and a restored pane may fall through to its tombstone.
+      set({ hydrated: true });
     }
   },
 

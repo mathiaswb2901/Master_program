@@ -21,6 +21,7 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
+import type { LayoutsResponse } from "../src/types";
 import { openApp } from "./app";
 
 interface ValidationSubject {
@@ -28,6 +29,27 @@ interface ValidationSubject {
   ref: string;
   label: string;
 }
+
+const NO_LAYOUT = { current: null, current_name: null, saved: [] };
+
+/** Pane ids as they are on disk — the strings the next launch will trust. */
+async function persistedPaneIds(page: Page): Promise<string[]> {
+  const response = (await (await page.request.get("/api/layouts")).json()) as LayoutsResponse;
+  const current = response.state.current as { panels?: Record<string, unknown> } | null;
+  return Object.keys(current?.panels ?? {}).sort();
+}
+
+/** Wait until the debounced autosave has written a pane we just opened. */
+async function persisted(page: Page, paneId: string): Promise<void> {
+  await expect.poll(() => persistedPaneIds(page), { timeout: 10_000 }).toContain(paneId);
+}
+
+// Each test starts from the default arrangement: the two-pane test opens instance
+// panes that would otherwise be scenery in the single-result test, and the shared
+// server holds both runs' validations in memory across tests.
+test.beforeEach(async ({ page }) => {
+  await page.request.put("/api/layouts", { data: NO_LAYOUT });
+});
 
 /** Mint a real result through the server, from inside the page so the token
  * rides along. Returns its `validation_id`. */
@@ -115,4 +137,60 @@ test("validation surfaces: the quiet bar, the blocked badge, the approval gate",
   await test.step("with the one result approved, the bar goes quiet again", async () => {
     await expect(page.locator(".wb-review-status")).toHaveCount(0);
   });
+});
+
+/**
+ * The plural-tool contract (CLAUDE.md product principle 4): two Review panes are
+ * two independent reviews — bound to two different `validation_id`s — and they
+ * stay that way **through a reload**, which is what proves the binding lives in
+ * the pane id on disk rather than in memory. A reload is the real cold launch:
+ * the layout restores two `review#<id>` panes before `GET /api/validation`
+ * resolves, so it also exercises the hydration gate (a still-held result must
+ * come back live, never as a flashed tombstone).
+ */
+test("two Review panes are independent, through a reload", async ({ page }) => {
+  await openApp(page);
+
+  const first: ValidationSubject = { kind: "session_output", ref: "sess-two-a", label: "First subject A" };
+  const second: ValidationSubject = { kind: "file", ref: "wb-two-b.xlsx", label: "Second subject B" };
+
+  const idA = await seedValidation(page, first);
+  const idB = await seedValidation(page, second);
+  expect(idA).not.toBe(idB);
+
+  await test.step("the index lists both; opening each row opens its own instance pane", async () => {
+    await openReviewPanel(page);
+    await page.locator(".wb-review-row", { hasText: "First subject A" }).click();
+    // Back to the index pane to open the second — the first row opened a pane to
+    // the side, leaving the index visible.
+    await page.locator(".wb-review-row", { hasText: "Second subject B" }).click();
+  });
+
+  await test.step("two bodies, each its own subject — nothing bleeds across", async () => {
+    const bodyA = page.locator(".wb-review-body", { hasText: "First subject A" });
+    const bodyB = page.locator(".wb-review-body", { hasText: "Second subject B" });
+    await expect(bodyA).toBeVisible();
+    await expect(bodyB).toBeVisible();
+    // Each pane resolved *its* id: A's body does not carry B's subject.
+    await expect(bodyA).not.toContainText("Second subject B");
+    await expect(bodyB).not.toContainText("First subject A");
+    // Each pane is bound to its own validation_id on the DOM.
+    await expect(page.locator(`.wb-review-body[data-validation="${idA}"]`)).toHaveCount(1);
+    await expect(page.locator(`.wb-review-body[data-validation="${idB}"]`)).toHaveCount(1);
+  });
+
+  await test.step("a reload brings both back live — the id on disk, no tombstone flash", async () => {
+    // Only really persisted if these exact strings are on disk (`ui/src/panes.ts`).
+    await persisted(page, `review#${idA}`);
+    await persisted(page, `review#${idB}`);
+    await page.reload();
+    // Both restored panes resolve their still-held results — live bodies, and the
+    // tombstone's "no longer loaded" never appears for a result the server holds.
+    await expect(page.locator(`.wb-review-body[data-validation="${idA}"]`)).toBeVisible();
+    await expect(page.locator(`.wb-review-body[data-validation="${idB}"]`)).toBeVisible();
+    await expect(page.locator(".wb-review-tombstone")).toHaveCount(0);
+  });
+
+  // Put the arrangement back for whatever journey shares this workspace next.
+  await page.request.put("/api/layouts", { data: NO_LAYOUT });
 });
