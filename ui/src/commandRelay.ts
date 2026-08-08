@@ -135,7 +135,18 @@ export function startCommandRelay(): void {
   });
 }
 
+/** Stop the relay and, if it was running, unpublish the manifest first. The
+ * backend keeps the last-published manifest until it is replaced, so a graceful
+ * teardown (workspace switch, window close) that just dropped the socket would
+ * leave a stale manifest: `GET /api/commands` would keep listing this window's
+ * commands as available and every invoke would block the full invoke timeout
+ * before returning "did not confirm" instead of the immediate honest "no window
+ * is connected". Publishing an empty manifest on the way out restores that
+ * honest state. Fire-and-forget — teardown does not wait on the network, and a
+ * hard crash that never runs this is still bounded by the server's invoke
+ * timeout. */
 export function stopCommandRelay(): void {
+  if (socket !== null) void publishCommandManifest({ commands: [] });
   socket?.close();
   socket = null;
 }

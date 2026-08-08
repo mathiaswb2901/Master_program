@@ -110,7 +110,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # Re-key the settings to the port actually being addressed (--port wins over
+    # WORKBENCH_PORT/default) before reading the token, so runtime_token_path and
+    # _base_url agree on which server this is: without it the token always comes
+    # from the default port's file while the request goes to --port, so a second
+    # server on another port is dialled with the wrong (or missing) token.
     settings = load_settings()
+    resolved_port = args.port if args.port is not None else settings.port
+    settings = settings.model_copy(update={"port": resolved_port})
     token = _read_token(settings)
     if token is None:
         print(

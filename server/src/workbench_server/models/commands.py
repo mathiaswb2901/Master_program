@@ -11,7 +11,7 @@ window published is invocable, and the invoke request is rejected before it ever
 reaches the bus otherwise.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -57,7 +57,7 @@ class CommandInvokeEvent(BaseModel):
     whether the command actually ran rather than only that it was dispatched.
     """
 
-    type: str = "command_invoke"
+    type: Literal["command_invoke"] = "command_invoke"
     invocation_id: str
     command_id: str
     params: dict[str, Any] = Field(default_factory=dict)

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // The relay resolves commands against the *real* registry (that is the point —
 // one dispatch, not a second), so this drags in the real panel modules exactly
@@ -36,6 +36,28 @@ vi.mock("./store", () => ({
   unchosenOptionGroups: () => [],
 }));
 
+const apiMocks = vi.hoisted(() => ({
+  publishCommandManifest: vi.fn(() => Promise.resolve({ ok: true })),
+  reportCommandResult: vi.fn(() => Promise.resolve({ ok: true })),
+}));
+
+vi.mock("./api", () => apiMocks);
+
+// A ReconnectingSocket stub: records the handlers and whether it was closed, so
+// the lifecycle tests can drive open/close without a real WebSocket.
+const socketMocks = vi.hoisted(() => ({
+  instances: [] as { close: ReturnType<typeof vi.fn> }[],
+}));
+
+vi.mock("./ws", () => ({
+  ReconnectingSocket: class {
+    close = vi.fn();
+    constructor(_url: string, _opts: unknown) {
+      socketMocks.instances.push(this);
+    }
+  },
+}));
+
 vi.mock("./monaco", () => ({
   MONO_FONT: "mono",
   editorPathProp: (path: string) => path,
@@ -49,7 +71,8 @@ vi.mock("./monaco", () => ({
   prefetchMonaco: () => undefined,
 }));
 
-const { buildManifest, executeCommandById, invocableCommands } = await import("./commandRelay");
+const { buildManifest, executeCommandById, invocableCommands, startCommandRelay, stopCommandRelay } =
+  await import("./commandRelay");
 const { builtinCommands } = await import("./commands");
 
 describe("the command relay's window half", () => {
@@ -85,5 +108,31 @@ describe("the command relay's window half", () => {
     const outcome = executeCommandById("workspace.open", builtinCommands());
     expect(outcome.ok).toBe(false);
     expect(outcome.detail).toContain("cannot be invoked");
+  });
+});
+
+describe("the relay's teardown", () => {
+  afterEach(() => {
+    stopCommandRelay();
+    apiMocks.publishCommandManifest.mockClear();
+    socketMocks.instances.length = 0;
+  });
+
+  it("unpublishes the manifest and closes the socket when stopped", () => {
+    startCommandRelay();
+    const socket = socketMocks.instances.at(-1);
+    apiMocks.publishCommandManifest.mockClear(); // ignore the on-connect publish
+
+    stopCommandRelay();
+
+    // The empty manifest is what makes the backend say "no window connected"
+    // again, instead of leaving this window's stale commands listed.
+    expect(apiMocks.publishCommandManifest).toHaveBeenCalledWith({ commands: [] });
+    expect(socket?.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not unpublish when it was never running", () => {
+    stopCommandRelay();
+    expect(apiMocks.publishCommandManifest).not.toHaveBeenCalled();
   });
 });
