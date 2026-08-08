@@ -29,6 +29,7 @@ vi.mock("./api", async () => {
 
 import type { NamedSession, ObjectiveStatus, RiskLevel, ValidationResult } from "./types";
 import {
+  goalFor,
   latestForObjective,
   objectiveStatus,
   objectiveStatusVisual,
@@ -102,6 +103,28 @@ describe("latestForObjective", () => {
 
   it("is null when nothing has validated the objective", () => {
     expect(latestForObjective([], "sess")).toBeNull();
+  });
+});
+
+describe("goalFor", () => {
+  const session = { id: "a", objective: { statement: "goal A", acceptance: null } };
+
+  it("uses the manifest snapshot only while the map has no entry (undefined = not loaded)", () => {
+    expect(goalFor({}, session)?.statement).toBe("goal A");
+    expect(goalFor({}, { id: "b" })).toBeNull();
+  });
+
+  it("prefers the loaded map value over the manifest snapshot", () => {
+    expect(goalFor({ a: { statement: "fresh goal", acceptance: null } }, session)?.statement).toBe(
+      "fresh goal",
+    );
+  });
+
+  it("honours an explicit cleared entry (null) instead of falling back to a stale manifest", () => {
+    // The bug: clearing an objective sets objectives[id] = null but leaves the
+    // session list snapshot untouched. A `??` chain would fall through null back
+    // to session.objective; `goalFor` must read the clear.
+    expect(goalFor({ a: null }, session)).toBeNull();
   });
 });
 

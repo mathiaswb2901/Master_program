@@ -118,6 +118,30 @@ describe("offTrackCount", () => {
     // Nothing off track → zero (the reading hides).
     expect(offTrackCount([{ id: "b", objective: sessions[1].objective }], {}, [])).toBe(0);
   });
+
+  it("honours a cleared objective (map null) over a stale session snapshot", () => {
+    const results: ValidationResult[] = [
+      {
+        validation_id: "v1",
+        subject: { kind: "objective", ref: "a", label: "a" },
+        risk: "high",
+        evidence: [],
+        summary: "s",
+        created_at: "2026-08-08T12:00:00Z",
+        completed_at: null,
+        truncated: null,
+        approval: null,
+      },
+    ];
+    // Session a still carries its old goal in the last list snapshot, but the
+    // objective store has it cleared (objectives.a === null, not undefined). The
+    // clear must win — a `??` chain would fall back to the stale goal and keep
+    // counting a failing objective that no longer exists.
+    const sessions = [{ id: "a", objective: { statement: "goal A", acceptance: null } }];
+    expect(offTrackCount(sessions, { a: null }, results)).toBe(0);
+    // Sanity: without the clear (map empty), the stale goal is still counted.
+    expect(offTrackCount(sessions, {}, results)).toBe(1);
+  });
 });
 
 describe("the tool descriptor", () => {

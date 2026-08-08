@@ -25,7 +25,7 @@ import type { IDockviewPanelProps } from "dockview";
 import { memo, useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { openPanel } from "../dock";
-import { latestForObjective, objectiveStatus, objectiveStatusVisual, useObjectiveStore } from "../objectives";
+import { goalFor, latestForObjective, objectiveStatus, objectiveStatusVisual, useObjectiveStore } from "../objectives";
 import { paneInstance } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import type { Objective, ObjectiveStatus, ValidationResult } from "../types";
@@ -221,7 +221,7 @@ function ObjectiveIndex() {
     void useObjectiveStore.getState().refresh();
   }, []);
 
-  const withGoals = sessions.filter((s) => (objectives[s.id] ?? s.objective ?? null) !== null);
+  const withGoals = sessions.filter((s) => goalFor(objectives, s) !== null);
   if (withGoals.length === 0) {
     return (
       <div className="wb-objective-empty">
@@ -235,7 +235,7 @@ function ObjectiveIndex() {
   return (
     <ul className="wb-objective-index">
       {withGoals.map((session) => {
-        const goal = objectives[session.id] ?? session.objective ?? null;
+        const goal = goalFor(objectives, session);
         const status = objectiveStatus(
           goal,
           latestForObjective(Object.values(results), session.id),
@@ -287,7 +287,7 @@ export function offTrackCount(
 ): number {
   let count = 0;
   for (const session of sessions) {
-    const goal = objectives[session.id] ?? session.objective ?? null;
+    const goal = goalFor(objectives, session);
     if (goal === null) continue;
     const status = objectiveStatus(goal, latestForObjective(results, session.id));
     if (status === "at-risk" || status === "failing") count += 1;
@@ -357,7 +357,7 @@ export const objectiveTool: WorkbenchTool = {
         return sessions.map((session) => ({
           id: `objective.${session.id}`,
           title: session.name,
-          detail: (objectives[session.id] ?? session.objective ?? null)?.statement ?? "no goal yet",
+          detail: goalFor(objectives, session)?.statement ?? "no goal yet",
           category: "Objectives",
           key: () => session.id,
         }));

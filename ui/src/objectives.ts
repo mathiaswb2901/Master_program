@@ -64,6 +64,26 @@ export function objectiveStatus(
   return "open";
 }
 
+/**
+ * The goal a view should show for a session, reconciling the two sources every
+ * call site joins: the live `objectives` map (authoritative once loaded) and the
+ * `NamedSession.objective` snapshot from the last list read.
+ *
+ * The map's value is three-valued on purpose (see `ObjectiveStore.objectives`):
+ * `undefined` = never loaded, `null` = loaded and cleared, an `Objective` = set.
+ * Only `undefined` may fall back to the manifest snapshot — a `??` chain that
+ * treats `null` as nullish would let a goal cleared in one pane fall through to
+ * the stale `session.objective` from the last `refresh()`, leaving another
+ * already-mounted view showing the old goal and its old status. `in` distinguishes
+ * "not loaded" from "loaded, empty" so a clear is honoured everywhere at once.
+ */
+export function goalFor(
+  objectives: Readonly<Record<string, Objective | null>>,
+  session: { id: string; objective?: Objective | null },
+): Objective | null {
+  return session.id in objectives ? objectives[session.id] : (session.objective ?? null);
+}
+
 // ---- the status visual (reuses the semantic ramp — no new colour) -----------
 
 /** An objective status onto the existing semantic tokens — invents nothing, the
