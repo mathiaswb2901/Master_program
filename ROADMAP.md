@@ -1070,6 +1070,26 @@ named as deferred rather than blocking. Summary of the sequence:
 
 ### M7 — Premium & Public (identity + OSS release)
 
+**Plan of record: [`docs/plan/m7-premium.md`](docs/plan/m7-premium.md)** — the bullets
+below are scoped there into disjoint, fake-first, file-owned PRs (the M6-plan shape). The
+sequence, in five waves: **A** — V1 (dock/tab/pane chrome, the frame everything inherits)
+and C1 (cross-platform PTY, `services/pty_manager.py`, which unblocks the CI matrix); **B**
+— the surface-scoped visual PRs V2–V6 (each owning disjoint `ui/src/styles/*.css`: welcome
++ empty states, the QuickBar, status bar + toasts, agent/chat, the document mat), the
+first-run **Setup** capability (`models/setup.py` + `services/setup.py` + `Setup.tsx`,
+composing with the existing welcome card, reading `office/capabilities`), C2 (the 3-OS CI
+matrix), and C3 (CONTRIBUTING/templates/zero-telemetry README); **C** — the editor-dressing
+capabilities V7–V8 (Monaco ANVIL theme, content search `Ctrl+Shift+F`, Settings UI), each
+behind a dynamic import and proven out of the entry chunk; **D** — the voice seam
+(`VoiceBackend` + `FakeVoiceBackend`, `WORKBENCH_VOICE_FAKE=1`), CI-green as wiring with the
+real `faster-whisper` model owner-gated; **E** — the owner-gated finish: V9 (the fully
+custom title bar, waiting on the ratified visual direction) and C4 (signed, versioned Tauri
+releases). **Everything invents no colour** — ANVIL's tokens and `palette.test.ts` are the
+guardrail, not a starting point — and **no product name is proposed**: the name, signing
+certs, versioning policy, the real voice model + mic, and the public-launch decision are
+all **OWNER-GATED** and marked as such. The visual overhaul uses the `ui-ux-pro-max` skill
+as a design source (principles applied, nothing installed, no dependency).
+
 - The logged "frontend is too plain" change request executed in full. **Its colour half
   landed early, on 2026-08-06**: six directions were drafted against a measured
   crispness bar and the owner chose **ANVIL** — true black, achromatic neutrals, one
