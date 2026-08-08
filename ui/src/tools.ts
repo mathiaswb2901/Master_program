@@ -14,6 +14,7 @@
 import type { WorkbenchTool } from "./registry";
 
 import { commandRelayTool } from "./commandRelay";
+import { setupTool } from "./setup";
 import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
 import { conversationsTool } from "./panels/Conversations";
@@ -71,6 +72,12 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // Opened on demand from a plan card's Expand: one pane per drawn artifact,
   // rendering the same scene graph the card does (M5 item 3, PR 4).
   visualTool,
+  // The connect half of first run (M7 §2): the walkthrough that says what is
+  // wired up (Claude sign-in, Office) and then gets out of the way. Beside the
+  // Keyboard tool because the two are one first-run idea seen from two sides —
+  // the welcome card teaches the window, Setup teaches the connections — and its
+  // status chip is the Keys chip's neighbour, hidden the moment all is well.
+  setupTool,
   // After every capability it describes, and before the two that arrange them:
   // its reference is a rendering of everything above, and its status chip sits
   // just inside the layout chip at the bar's outer edge.
