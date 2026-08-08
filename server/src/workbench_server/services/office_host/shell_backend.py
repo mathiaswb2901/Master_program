@@ -184,6 +184,29 @@ class ShellHostBackend:
         alive = await self._run(partial(office_com.is_running, bound.instance))
         return "alive" if alive else "gone"
 
+    # ---- the document bridge's reach into the held instance ------------------
+
+    def instance_for(self, pid: int) -> OfficeInstance | None:
+        """The live COM instance this backend launched for ``pid``, or ``None``.
+
+        ``None`` means the process was never ours or has since been closed and
+        reaped — the document bridge reads it as "gone" rather than reaching for
+        a proxy that is not there. The bridge shares this map rather than keeping
+        a second one, exactly as the fake bridge shares the fake backend's.
+        """
+        bound = self._bound.get(pid)
+        return bound.instance if bound is not None else None
+
+    async def run_com(self, call: Callable[[], T]) -> T:
+        """Run one blocking COM call on *this* backend's apartment thread.
+
+        The document bridge cannot make its own thread: a COM proxy belongs to
+        the apartment that created it, so a read of the live document has to run
+        where the launch ran. Sharing the one executor is what keeps every COM
+        call — launch, poll, read, write — on the single thread the module
+        docstring requires."""
+        return await self._run(call)
+
     # ---- shutdown ------------------------------------------------------------
 
     async def aclose(self) -> None:
