@@ -1,4 +1,34 @@
-/* Status bar: 24px, chrome surface, top hairline (DESIGN.md §2.1, §6.4). */
+/* The status bar — ANVIL V4 (DESIGN.md §6.7, §6.4, §2.4, §5.4).
+ *
+ * The one always-visible strip of chrome, so it is written as an instrument's
+ * readout rather than as a toolbar: 24px of `--surface-app`, 11px text, every
+ * figure in tabular numerals, and *nothing on it that is not a reading*. Three
+ * rules carry the whole surface.
+ *
+ *  1. **Quiet at rest.** A reading that is zero is not shown (the Agent tool
+ *     drops its own counts), and a region with nothing in it takes no space —
+ *     `:empty` below, so the bar does not carry the gaps of readings that are
+ *     not there. A quiet bar means nothing needs you, and that is only true if
+ *     silence is actually reachable.
+ *  2. **Colour is spent on the dot, never on the label.** §6.4's badge anatomy
+ *     puts status colour on a badge's text, but that is a badge on a panel. At
+ *     the bar's 11px, `--agent-attention` on its own 16% wash measures 3.66:1
+ *     (dark) / 3.05:1 (light) — under §7's 4.5:1 floor. So the dot carries the
+ *     hue and the label is `--text-primary` (7.53–11.28:1 on these washes).
+ *     Measured, not assumed; `e2e/statusChrome.test.ts` pins the pairing.
+ *  3. **The one amber is transient.** The layout chip owns accent in this bar
+ *     (§6.9) and nothing else takes it. What a *working* chip wears instead is
+ *     the agent-status amber as a **hairline**, for exactly as long as the turn
+ *     runs — §2.4's "changing right now", and gone when you look away. An
+ *     outline rather than a fill, so it composes with the active chip's
+ *     `--surface-selected` instead of competing with it.
+ *
+ * State-driven rules read the `aria-label` the dot is *required* to carry
+ * (§6.4, §7). That is deliberate: the chips and counts are the Agent tool's
+ * markup and belong to another lane, and the accessible name is the one part of
+ * them that is a contract rather than an implementation detail — `status.spec.ts`
+ * already locates them by exactly these names.
+ */
 
 .wb-statusbar {
   flex: none;
@@ -12,6 +42,11 @@
   font-size: var(--type-xs-size);
   line-height: var(--type-xs-line);
   color: var(--text-tertiary);
+  /* Every reading in this bar is a number, and a number that shifts width as it
+     counts is a number you cannot read at a glance (DESIGN.md §1.7). */
+  font-variant-numeric: tabular-nums;
+  /* Chrome, not content: dragging across a readout should never select it. */
+  user-select: none;
   overflow: hidden;
 }
 
@@ -22,6 +57,13 @@
   align-items: center;
   gap: var(--space-3);
   min-width: 0;
+}
+
+/* The quiet bar, at region scale: a region holding nothing contributes neither
+   width nor a gap. Without this the centre's 12px of gap survives every session
+   ending, and the bar's own items drift as a result. */
+.wb-statusbar > :empty {
+  display: none;
 }
 
 .wb-status-left {
@@ -63,7 +105,10 @@
   background: var(--text-secondary);
 }
 
-/* ---- Session chips -------------------------------------------------------- */
+/* ---- Chips ----------------------------------------------------------------
+   One anatomy, four consumers: the session chips (centre), and the workspace,
+   layout and keys chips at the outer edges. They differ only in what they hold,
+   so the geometry, the hairline and the focus ring live here once. */
 
 .wb-status-chip {
   display: flex;
@@ -72,6 +117,9 @@
   height: 18px;
   max-width: 160px;
   padding: 0 var(--space-3);
+  /* Transparent rather than absent, so a chip that gains an edge on hover or
+     while it is live does not move the ones beside it by 2px when it does. */
+  border: 1px solid transparent;
   border-radius: var(--radius-full);
   font-size: var(--type-xs-size);
   color: var(--text-secondary);
@@ -87,8 +135,17 @@
 
 .wb-status-chip:hover {
   background: var(--surface-hover);
+  border-color: var(--border-subtle);
   color: var(--text-primary);
   transition-duration: 0s;
+}
+
+/* The bar clips its overflow at 24px, so the global 2px-offset ring would be
+   sliced off the top and bottom of an 18px chip. Offset 1px is the largest that
+   survives, and a focus ring you cannot see is the one §7 forbids most. */
+.wb-status-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 /* The status dot inside a chip changes colour when the session's state does —
@@ -103,6 +160,15 @@
   color: var(--text-primary);
 }
 
+/* Working: a hairline in the live amber for as long as the turn runs, and the
+   title at full strength. This is the bar's one "changing right now" (§2.4) and
+   it retracts on its own — the standing amber §2.4 demoted everywhere else is
+   what this deliberately is not. */
+.wb-status-chip:has([aria-label="Working"]) {
+  border-color: var(--agent-working);
+  color: var(--text-primary);
+}
+
 .wb-status-chip-title {
   min-width: 0;
 }
@@ -112,15 +178,38 @@
   color: var(--text-tertiary);
 }
 
-/* ---- Counters + cost ------------------------------------------------------ */
+/* ---- Counters + cost ------------------------------------------------------
+   The right end is the fleet at a glance. Both counts hide at zero in the
+   Agent tool's own markup, so what is styled here is only ever a non-zero
+   reading — which is what lets one of them be a badge without the bar ever
+   wearing a badge for nothing. */
 
 .wb-status-count {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  height: 18px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
   flex: none;
   color: var(--text-secondary);
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
 }
+
+/* The attention badge — the one reading in the bar that is a *request*. It is
+   the orchid of §2.6, not the amber: a session waiting on you is a standing
+   state, and standing amber is what §2.4 spends nowhere. A 16% wash and the
+   dot; the count itself stays `--text-primary` (see the header, rule 2). */
+.wb-status-count:has([aria-label="Needs attention"]) {
+  background: var(--agent-attention-bg);
+  color: var(--text-primary);
+}
+
+/* The working count keeps the pulsing dot and no wash. Two washed pills side by
+   side is a bar competing with the work; exactly one lights up, and it lights
+   up only when something needs you. */
 
 .wb-status-cost {
   font-family: var(--font-mono);
