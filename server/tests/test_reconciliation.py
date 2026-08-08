@@ -40,6 +40,7 @@ from workbench_server.models.reconciliation import (
 from workbench_server.models.validation import ValidationResult, ValidationSpec, ValidationSubject
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.reconciliation import (
+    CrossCurrency,
     ReconciliationCheck,
     UnitMismatch,
     convert,
@@ -81,6 +82,34 @@ def make_dst_workbook(path: Path) -> None:
     rows.append((datetime(2024, 10, 27, 2), 21.0))  # fold 1 (CET)
     for hour in range(3, 24):
         rows.append((datetime(2024, 10, 27, hour), float(hour)))
+    for offset, (ts, value) in enumerate(rows):
+        r = 2 + offset
+        ws[f"A{r}"] = ts
+        ws[f"B{r}"] = value
+    wb.save(path)
+
+
+def make_duplicated_row_workbook(path: Path) -> None:
+    """An *ordinary data-entry error*: a plain June day whose 02:00 row was pasted
+    twice. June has no DST transition in Europe/Oslo, so the second 02:00 is not a
+    repeated hour — it is a duplicated row, and a validation gate must say so.
+
+    The two copies carry different values (20.0 then 21.0) so that a gate which
+    silently treated them as fold 0 / fold 1 would happily *match* a fold-1
+    expectation of 21.0 — i.e. bless corrupt input.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Prices"
+    ws["A1"] = "timestamp"
+    ws["B1"] = "price_eur_mwh"
+    rows: list[tuple[datetime, float]] = [
+        (datetime(2024, 6, 15, 0), 0.0),
+        (datetime(2024, 6, 15, 1), 1.0),
+        (datetime(2024, 6, 15, 2), 20.0),
+        (datetime(2024, 6, 15, 2), 21.0),  # the pasted duplicate
+        (datetime(2024, 6, 15, 3), 3.0),
+    ]
     for offset, (ts, value) in enumerate(rows):
         r = 2 + offset
         ws[f"A{r}"] = ts
@@ -353,6 +382,168 @@ async def test_a_time_row_with_no_matching_wall_clock_is_a_fail(tmp_path: Path) 
     service, result = await run_recon(tmp_path, spec)
     assert result.risk == "high"
     assert "alignment gap" in (report_of(service, result).comparisons[0].reason or "")
+
+
+# ------------------------------------------- duplicated rows are not a silent fold
+
+
+@pytest.mark.asyncio
+async def test_a_duplicated_non_ambiguous_timestamp_is_a_fail_not_a_silent_fold(
+    tmp_path: Path,
+) -> None:
+    """The defect this regression test was written for: a workbook whose 02:00 row on a
+    *June* day was pasted twice used to be read as fold 0 / fold 1 — so a fold-1
+    expectation MATCHED and the gate reported 'reconciled' on corrupt input, inverting
+    the whole promise of a validation gate.
+
+    June is not a DST-transition date in Europe/Oslo, so the second 02:00 is not a
+    repeated hour. It must be an explicit fail that names the duplicated timestamp, and
+    the fold-1 expectation must NOT match.
+    """
+    make_duplicated_row_workbook(tmp_path / "prices.xlsx")
+    spec = ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[
+                TimeExpectation(
+                    timestamp="2024-06-15T02:00:00", expected=21.0, unit="EUR/MWh", fold=1
+                ),
+            ],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high", result.summary
+    # The duplicate is named in its own evidence line, and says what to do next.
+    dup = [e for e in result.evidence if "duplicate" in e.detail.lower()]
+    assert dup, [e.detail for e in result.evidence]
+    assert dup[0].outcome == "fail"
+    assert "2024-06-15T02:00:00" in dup[0].detail
+    assert "Europe/Oslo" in dup[0].detail
+    # And the fold-1 expectation did not quietly match the pasted second copy.
+    row = report_of(service, result).comparisons[0]
+    assert row.outcome == "fail"
+    assert row.actual != pytest.approx(21.0)
+
+
+@pytest.mark.asyncio
+async def test_a_fold_1_expectation_on_a_non_ambiguous_date_is_refused(tmp_path: Path) -> None:
+    """A fold only exists where the zone actually repeats an hour. Asking for fold 1 on
+    an ordinary June date is a spec error, and is refused by name rather than reported
+    as a generic 'alignment gap' (which would read as a missing workbook row)."""
+    make_workbook(tmp_path / "book.xlsx", {"A1": "timestamp", "B1": "v"})
+    wb = openpyxl.load_workbook(tmp_path / "book.xlsx")
+    ws = wb["Sheet1"]
+    ws["A2"] = datetime(2024, 6, 15, 2)
+    ws["B2"] = 20.0
+    wb.save(tmp_path / "book.xlsx")
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Sheet1",
+            expectations=[
+                TimeExpectation(
+                    timestamp="2024-06-15T02:00:00", expected=20.0, unit="EUR/MWh", fold=1
+                ),
+            ],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    row = report_of(service, result).comparisons[0]
+    assert row.outcome == "fail"
+    reason = row.reason or ""
+    assert "not an ambiguous" in reason and "Europe/Oslo" in reason
+    assert "alignment gap" not in reason
+
+
+# ------------------------------------------------------------- Nordic currencies
+
+
+def test_nordic_currency_units_are_first_class() -> None:
+    """The beachhead persona trades NO/SE/DK zones, where models are denominated in
+    NOK/SEK/DKK per MWh. Within-currency scaling converts and is named, exactly like
+    the EUR path."""
+    for currency in ("NOK", "SEK", "DKK"):
+        converted, note = convert(0.5, f"{currency}/kWh", f"{currency}/MWh")
+        assert converted == pytest.approx(500.0)
+        assert note is not None and f"{currency}/kWh" in note and f"{currency}/MWh" in note
+
+
+def test_cross_currency_is_refused_and_no_fx_rate_is_invented() -> None:
+    with pytest.raises(CrossCurrency) as caught:
+        convert(100.0, "NOK/MWh", "EUR/MWh")
+    message = str(caught.value)
+    assert "NOK" in message and "EUR" in message
+    assert "FX" in message
+    # It is still a UnitMismatch, so every existing caller stays safe.
+    assert isinstance(caught.value, UnitMismatch)
+
+
+@pytest.mark.asyncio
+async def test_a_declared_nok_kwh_price_converts_and_names_the_conversion(tmp_path: Path) -> None:
+    make_workbook(tmp_path / "book.xlsx", {"D14": 0.5})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        default_tolerance=Tolerance(rel=0.001),
+        expectations=[
+            ExpectedValue(cell="D14", expected=500.0, unit="NOK/MWh", cell_unit="NOK/kWh")
+        ],
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "pass", result.evidence[0].detail
+    row = report_of(service, result).comparisons[0]
+    assert row.actual == pytest.approx(500.0)
+    assert "NOK/kWh" in (row.reason or "") and "NOK/MWh" in (row.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_a_cross_currency_comparison_is_a_principled_refusal(tmp_path: Path) -> None:
+    """NOK/MWh against an EUR/MWh expectation is not an 'unknown unit' — the units are
+    both known and both prices. It is a refusal to invent an FX rate, and the evidence
+    has to say that, because the fix (state the FX rate you meant, in your own code) is
+    different from the fix for a typo'd unit."""
+    make_workbook(tmp_path / "book.xlsx", {"D14": 1200.0})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        default_tolerance=Tolerance(rel=0.01),
+        expectations=[
+            ExpectedValue(cell="D14", expected=100.0, unit="EUR/MWh", cell_unit="NOK/MWh")
+        ],
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    row = report_of(service, result).comparisons[0]
+    assert row.outcome == "fail"
+    reason = row.reason or ""
+    assert "cross-currency" in reason
+    assert "NOK" in reason and "EUR" in reason
+    assert "unknown unit" not in reason
+
+
+@pytest.mark.asyncio
+async def test_an_actually_unknown_unit_still_says_unknown(tmp_path: Path) -> None:
+    make_workbook(tmp_path / "book.xlsx", {"D14": 1.0})
+    spec = ReconciliationSpec(
+        workbook="book.xlsx",
+        default_tolerance=Tolerance(rel=0.01),
+        expectations=[ExpectedValue(cell="D14", expected=1.0, unit="MWh", cell_unit="bananas")],
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    reason = report_of(service, result).comparisons[0].reason or ""
+    assert "unknown unit" in reason
+    assert "cross-currency" not in reason
 
 
 # --------------------------------------------------------------- unreadable / missing
