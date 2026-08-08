@@ -1,0 +1,107 @@
+# Unsigned release pipeline (M7 plan §C4, the CI-automatable half).
+#
+# On a version tag (or a manual dispatch to prove the pipeline without cutting a
+# tag), this runs the SAME two steps that build the installer locally —
+#   1. freeze the backend with PyInstaller  (packaging/build_backend.ps1)
+#   2. `tauri build`                          (desktop `npm run tauri build`)
+# — and attaches the produced Windows installer(s) to a GitHub Release, marked
+# PRE-RELEASE and UNSIGNED.
+#
+# Deliberately OUT of scope (owner-gated, per §C4 — invented by nothing here):
+#   * code-signing certificates / secrets (SmartScreen will warn until the owner
+#     wires a cert into `tauri.conf.json` `bundle.windows.certificateThumbprint`)
+#   * the product NAME / identifier (placeholders `Workbench` / `dev.workbench.app`)
+#   * versioning policy and the public-launch decision
+#
+# The toolchain setup mirrors `.github/workflows/ci.yml` exactly (same action
+# versions for uv, Node and Rust) so the release job cannot drift from what CI
+# already proves green.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+# Only the release upload needs write; everything else is a read of the repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # --- toolchain, mirroring ci.yml ---
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      # --- dependencies ---
+      - name: Sync backend dependencies
+        run: uv sync --dev
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      # --- build: freeze the backend, then bundle the app ---
+      # One source of truth for the freeze: the same script a developer runs
+      # locally (`uv run --group packaging pyinstaller …` staged into
+      # desktop/src-tauri/backend/). `tauri build`'s beforeBuildCommand builds
+      # the UI, so no separate `npm run build` step is needed here.
+      - name: Freeze the backend (PyInstaller onedir)
+        run: pwsh -File packaging/build_backend.ps1
+
+      - name: Build the desktop app (tauri build)
+        working-directory: desktop
+        run: npm run tauri build
+
+      # --- publish ---
+      # Attach whatever Windows bundle targets tauri produced (NSIS .exe +
+      # MSI .msi under target/release/bundle/**). Pre-release + unsigned, stated
+      # in the body. GITHUB_TOKEN carries the `contents: write` above.
+      #
+      # On workflow_dispatch there is no tag, so fall back to a dispatch tag name
+      # and let the action create it — this is the "prove the pipeline" path and
+      # is still marked pre-release.
+      - name: Publish GitHub Release with the installer
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dispatch-{0}', github.run_number) }}
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: |
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+          body: |
+            **Unsigned pre-release** built from `${{ github.ref_name }}` (${{ github.sha }}).
+
+            This installer is **not code-signed** — Windows SmartScreen will warn
+            on first run until the owner adds a signing certificate
+            (`tauri.conf.json` → `bundle.windows.certificateThumbprint`). The
+            product name is still the placeholder `Workbench` (`dev.workbench.app`).
+
+            Built by `.github/workflows/release.yml`: the backend frozen with
+            PyInstaller (`packaging/build_backend.ps1`) and bundled with
+            `tauri build`.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
