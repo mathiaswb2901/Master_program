@@ -57,6 +57,7 @@ from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.orchestrator import OrchestratorService
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
+from workbench_server.services.reconciliation import ReconciliationCheck
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.sessions import SessionsStore
@@ -98,6 +99,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # bus for a reconnecting client — the usage/activity precedent. Ships the
     # frame only; the reconciliation gate that plugs into it is a later PR.
     validation_service = ValidationService(workspace.root, event_bus)
+    # M6 PR2: the first *domain* check. It reads the addressed .xlsx cells directly
+    # with openpyxl (deterministic, no Office), comparing code-computed numbers
+    # against the workbook unit- and DST-aware. Additive registration — the frame
+    # dispatches to it when a spec names its id ("reconciliation").
+    validation_service.register(ReconciliationCheck())
     # One JSON document per workspace, so different projects keep different
     # arrangements. Stateless: read and written on demand, nothing to start.
     layouts_service = LayoutsService(workspace.root)

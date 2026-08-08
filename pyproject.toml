@@ -23,6 +23,12 @@ dependencies = [
     "httpx>=0.28.1",
     "claude-agent-sdk>=0.2.128",
     "tzdata>=2026.3",
+    # The M6 reconciliation gate reads .xlsx cell values deterministically with no
+    # Office installed — the whole reason the gate is CI-verifiable. openpyxl is the
+    # standard pure-Python xlsx reader (no native build, no transitive weight of
+    # note); hand-parsing the OOXML zip with the stdlib would reinvent it for no gain.
+    # Read-only, data_only=True (the *cached computed* values, not formula strings).
+    "openpyxl>=3.1.5",
 ]
 
 [dependency-groups]
@@ -92,6 +98,10 @@ module = [
     "win32gui",
     "win32job",
     "win32process",
+    # openpyxl ships no py.typed marker; `types-openpyxl` is a second package to keep
+    # in step for a reader we call in one module.
+    "openpyxl",
+    "openpyxl.*",
 ]
 ignore_missing_imports = true
 
