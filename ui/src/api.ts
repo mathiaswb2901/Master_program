@@ -40,6 +40,7 @@ import type {
   SessionInfo,
   SessionLimits,
   SessionsResponse,
+  SetupStatus,
   SetObjectiveRequest,
   ShortcutsState,
   SwitchWorkspaceRequest,
@@ -293,6 +294,11 @@ export const getOfficeCapabilities = (): Promise<OfficeCapabilities> =>
  * is licensed to edit. Read-only and best-effort; the panel degrades from it. */
 export const getOfficeIdentity = (): Promise<OfficeIdentity> =>
   request("/api/office/identity");
+
+/** The first-run picture: what is wired up (Claude login detected, Office/OnlyOffice
+ * readiness echoed from the capabilities), and whether this is a fresh workspace.
+ * The Setup walkthrough degrades from this, never from a guess. */
+export const getSetupStatus = (): Promise<SetupStatus> => request("/api/setup/status");
 
 export const openOfficeHost = (body: OpenHostRequest): Promise<OfficeHostInfo> =>
   request("/api/office/host", jsonInit("POST", body));
