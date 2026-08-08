@@ -1002,12 +1002,17 @@ def test_auto_hosts_natively_only_where_it_actually_can(tmp_path: Path) -> None:
 def test_auto_builds_the_real_backend_when_a_channel_exists() -> None:
     """The other half: on Windows with a channel, `auto` is the real thing."""
     backend = build_backend("auto", fake=False, channel=ShellChannel())
-    if sys.platform != "win32":  # pragma: no cover - the CI matrix is Windows
+    if sys.platform != "win32":
+        # The matrix's linux/macos legs assert the *other* half of the same
+        # rule: off Windows there is nothing to host with, whatever the mode
+        # says. `if`/`else` rather than an early return so mypy's platform-check
+        # exemption applies (an early return makes the tail unreachable, and
+        # `warn_unreachable` is on).
         assert backend is None
-        return
-    assert isinstance(backend, ShellHostBackend)
-    # …and it still refuses to claim it can host with nobody attached.
-    assert backend.ready() is False
+    else:
+        assert isinstance(backend, ShellHostBackend)
+        # …and it still refuses to claim it can host with nobody attached.
+        assert backend.ready() is False
 
 
 def test_off_beats_a_channel_and_a_working_machine() -> None:

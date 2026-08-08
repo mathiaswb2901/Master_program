@@ -353,21 +353,29 @@ def process_alive(pid: int) -> bool:
 
 
 def _alive_windows(pid: int) -> bool:
-    """``OpenProcess`` + ``GetExitCodeProcess``: ask, never touch."""
-    import ctypes
+    """``OpenProcess`` + ``GetExitCodeProcess``: ask, never touch.
 
-    process_query_limited_information = 0x1000
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
-    if not handle:
-        return False  # gone, or a process this account may not ask about
-    try:
-        code = ctypes.c_ulong()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return False
-        return code.value == _STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
+    Inside a ``sys.platform`` branch because ``ctypes.WinDLL`` exists only on
+    Windows — off it, typeshed does not define the attribute, so the matrix's
+    linux and macos legs would fail to type-check this file otherwise.
+    """
+    if sys.platform != "win32":
+        raise RuntimeError("the Windows liveness probe is Windows-only")
+    else:
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return False  # gone, or a process this account may not ask about
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == _STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 def _alive_posix(pid: int) -> bool:
