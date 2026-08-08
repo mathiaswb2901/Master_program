@@ -666,6 +666,7 @@ describe("the registered tools", () => {
       "review",
       "objective",
       "visual",
+      "setup",
       "keys",
     ]);
   });

@@ -1,5 +1,6 @@
 """Application factory and entrypoint."""
 
+import os
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ from workbench_server.routers import (
     orchestrator,
     provenance,
     sessions,
+    setup,
     shortcuts,
     terminal,
     usage,
@@ -61,6 +63,7 @@ from workbench_server.services.reconciliation import ReconciliationCheck
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.sessions import SessionsStore
+from workbench_server.services.setup import SetupService, detect_claude_login
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
 from workbench_server.services.validation import ValidationService
@@ -252,6 +255,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # current project must not change which sessions exist, only which ones a
     # window asks to see. One project can host more than one named session.
     sessions_store = SessionsStore(settings.app_data_root)
+    # First-run / Setup (M7 §2). Reads the live `Workspace` (so a switch re-roots
+    # first-run detection with everything else — no `set_workspace_root` owed) and
+    # echoes the office authority rather than computing a second one. The Claude
+    # check is *presence only*: under the fake agent there is no real Claude, so
+    # the probe reports signed-out deterministically for CI; otherwise it reads
+    # the machine's existing credentials and never triggers a login.
+    setup_service = SetupService(
+        workspace,
+        office_host_service,
+        office_service,
+        signed_in_probe=(
+            (lambda: False)
+            if settings.fake_agent
+            else (lambda: detect_claude_login(Path.home(), os.environ))
+        ),
+    )
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
     # this list is the *only* place a switch is coordinated — a service added
@@ -360,6 +379,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.workspaces = workspace_service
     app.state.documents = document_service
     app.state.sessions = sessions_store
+    app.state.setup = setup_service
     # Order matters, and Starlette inverts it: add_middleware inserts at the head
     # of the list, so the LAST middleware added is the OUTERMOST layer. We add
     # LocalAuth *first* and CORS *second* so CORS ends up outer — a request the
@@ -408,6 +428,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(orchestrator.router)
     app.include_router(workspaces.router)
     app.include_router(sessions.router)
+    app.include_router(setup.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
@@ -459,8 +480,6 @@ def _write_runtime_token(path: Path, token: str) -> None:
     the OS honours POSIX bits; on NTFS it only clears the read-only flag, which
     is why the per-user directory — not this call — is the real guarantee.
     """
-    import os
-
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token, encoding="utf-8")
     try:

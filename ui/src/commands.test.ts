@@ -189,6 +189,9 @@ describe("command registry", () => {
       "review.open",
       // Objectives after Review, because it consumes the evidence Review approves.
       "objective.open",
+      // First run's connect half sits beside the Keyboard tool (its welcome
+      // half), just before it in `tools.ts`.
+      "setup.open",
       "keys.open",
       "keys.welcome",
       // The two tools that arrange panels rather than being one, in the order
