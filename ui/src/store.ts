@@ -17,6 +17,7 @@ import { anchorKey, MAX_ANNOTATIONS } from "./plan/anchors";
 import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
 import { cancelShellClose, closeShellWindow } from "./shell";
 import { promptInsertText, shellInsertText } from "./shortcuts";
+import { parsePaneId } from "./panes";
 import { terminalHandle } from "./terminalInput";
 import { documentTheme, THEME_STORAGE_KEY, type Theme } from "./theme";
 import type {
@@ -280,6 +281,15 @@ interface WorkbenchStore {
    * the first refresh lands (or if it failed) — treat that as "no prediction". */
   sessionLimits: SessionLimits | null;
   activeSessionId: string | null;
+  /**
+   * Live agent sessions the user has *detached* (M5 item 15): local session id →
+   * the named-session record id that keeps it reattachable. A detached session
+   * keeps running server-side but its pane closed as a view — so a pane
+   * (re)opened onto it shows the Resume tombstone rather than silently streaming,
+   * and it is offered under "Detached" in the browser. Keyed by session id, never
+   * a singleton: any number of sessions may be detached at once.
+   */
+  detachedSessions: Record<string, string>;
   transcriptView: { session: SessionInfo; messages: TranscriptMessage[] } | null;
   chats: Record<string, ChatState>;
   /** Unsent message text per session — in the store because prompt shortcuts
@@ -421,6 +431,19 @@ interface WorkbenchStore {
    * you are talking to, exactly as in tmux. */
   focusSession: (sessionId: string) => void;
   openTranscript: (info: SessionInfo) => Promise<void>;
+  /** Rebuild `detachedSessions` from the named-session store for this workspace,
+   * keeping only records whose session is still live in this server process — a
+   * detached session that died with a server restart is a plain dead pane, not a
+   * Resume tombstone. Called with the session listing so the two agree. */
+  refreshDetached: () => Promise<void>;
+  /** Detach a live session: record it in the named-session store so it survives
+   * having no pane, and mark it detached. The pane is closed by the caller (it
+   * owns the dock); the server session keeps running. */
+  detachSession: (sessionId: string) => Promise<void>;
+  /** Undo a detach: clear the mark (optimistically, then delete the record) so a
+   * pane on this session attaches and hydrates again. The caller opens/focuses
+   * the pane — this only clears the mark. */
+  reattachSession: (sessionId: string) => void;
   /** Resolves with the new session's id, so a caller that is opening a *pane*
    * for it can bind the pane to it (`agent#<session_id>`); null if it failed. */
   createSessionIn: (folder: string) => Promise<string | null>;
@@ -467,6 +490,15 @@ const loadingPaths = new Set<string>();
  * on a timer and never on a watcher event. */
 let fileIndexStale = true;
 let fileIndexPending: Promise<void> | null = null;
+
+/** The detached-session marks are read from disk exactly once per workspace
+ * load, not on every polled `refreshSessions`: after that first read a detach or
+ * reattach in *this* window updates the map directly, so a poll firing
+ * `/api/sessions` on every session-status tick would be pure waste (and land in
+ * the middle of another journey's "no request" window). Reset by `adoptWorkspace`
+ * — a new project has its own detached list — and by a reload, which reloads the
+ * module. */
+let detachedHydrated = false;
 
 const TOAST_AUTO_DISMISS_MS = 6000;
 let toastSeq = 0;
@@ -544,6 +576,14 @@ function errorDetail(err: unknown): string {
   return String(err);
 }
 
+/** The local session id an `AgentRef.pane_key` binds to — `agent#<id>` → `<id>`.
+ * A pane_key that is not an agent instance pane (a malformed record) is not a
+ * session this window can reattach, so it is ignored. */
+function detachedLocalId(paneKey: string): string | null {
+  const { toolId, instance } = parsePaneId(paneKey);
+  return toolId === "agent" ? instance : null;
+}
+
 function emptyFile(
   path: string,
   name: string,
@@ -599,6 +639,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     sessionFlags: {},
     sessionLimits: null,
     activeSessionId: null,
+    detachedSessions: {},
     transcriptView: null,
     chats: {},
     chatDrafts: {},
@@ -817,6 +858,9 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
 
     adoptWorkspace: async () => {
       const before = get();
+      // A new project has its own detached list — read it fresh on the next
+      // sessions refresh rather than carrying this one's marks across.
+      detachedHydrated = false;
       // Clean buffers close; dirty ones stay and stop being savable. Monaco
       // models for the closed ones go with them — a model keyed by a path that
       // now means a different file is worse than no model at all.
@@ -836,6 +880,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         folders: [],
         sessionStates: {},
         sessionFlags: {},
+        detachedSessions: {},
         transcriptView: null,
         orphanedPaths: orphaned,
       }));
@@ -1457,6 +1502,14 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           }
           return { folders, sessionStates: states, sessionFlags: flags };
         });
+        // Which of the (now known) live sessions are detached — read once per
+        // workspace load, after the listing lands so the two agree. Best-effort:
+        // a detached mark that fails to load just means a pane streams instead of
+        // offering Resume. Not on every poll — see `detachedHydrated`.
+        if (!detachedHydrated) {
+          detachedHydrated = true;
+          void get().refreshDetached();
+        }
       } catch (err) {
         console.error("sessions refresh failed", err);
         get().pushToast("error", `Session list refresh failed: ${errorDetail(err)}`);
@@ -1544,6 +1597,89 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         console.error("transcript load failed", err);
         get().pushToast("error", `Transcript load failed: ${errorDetail(err)}`);
       }
+    },
+
+    refreshDetached: async () => {
+      try {
+        // The store is queried by workspace, never re-rooted by a switch, so the
+        // absolute root is the key. `getWorkspace` is the one place the client
+        // reads it — the Workspaces tool keeps its own copy in its own module,
+        // and reaching into that module is the coupling `store.ts` avoids.
+        const workspace = await api.getWorkspace();
+        const { sessions } = await api.listNamedSessions(workspace.root);
+        const live = new Set(
+          get()
+            .folders.flatMap((group) => group.sessions)
+            .filter((session) => session.live)
+            .map((session) => session.session_id),
+        );
+        const detached: Record<string, string> = {};
+        for (const named of sessions) {
+          for (const agent of named.agents) {
+            const localId = detachedLocalId(agent.pane_key);
+            // Only sessions still running here are detached-but-alive; a record
+            // whose session died with a restart is a plain dead pane, and its
+            // pane falls through to the quiet "not running any more" tombstone.
+            if (localId !== null && live.has(localId)) detached[localId] = named.id;
+          }
+        }
+        set({ detachedSessions: detached });
+      } catch (err) {
+        // Never fatal: without the marks a pane just streams instead of offering
+        // Resume, which is the pre-feature behaviour.
+        console.error("detached sessions refresh failed", err);
+      }
+    },
+
+    detachSession: async (sessionId) => {
+      const info = get()
+        .folders.flatMap((group) => group.sessions)
+        .find((session) => session.session_id === sessionId);
+      if (info === undefined || !info.live) {
+        get().pushToast("warn", "Only a running session can be detached.");
+        return;
+      }
+      if (sessionId in get().detachedSessions) return; // already detached
+      try {
+        const workspace = await api.getWorkspace();
+        const named = await api.createNamedSession({
+          name: info.title,
+          workspace: workspace.root,
+          // One agent, by reference. `pane_key` carries the local id reattach
+          // binds a pane to; `sdk_session_id` is left empty because a live
+          // reattach uses the local id, not the SDK transcript id (that field is
+          // for a future resume-across-restart, which this PR does not do).
+          agents: [{ pane_key: `agent#${sessionId}`, sdk_session_id: "", folder: info.folder }],
+        });
+        set((s) => ({
+          detachedSessions: { ...s.detachedSessions, [sessionId]: named.id },
+          // The chat this window held for it is no longer on screen; the socket
+          // is dropped by the pane unmounting. Clear the active pointer if it was
+          // this one so the browser does not keep drawing a chat for a pane that
+          // has gone.
+          ...(s.activeSessionId === sessionId ? { activeSessionId: null } : {}),
+        }));
+      } catch (err) {
+        console.error("session detach failed", sessionId, err);
+        get().pushToast("error", `Detach failed: ${errorDetail(err)}`);
+      }
+    },
+
+    reattachSession: (sessionId) => {
+      const namedId = get().detachedSessions[sessionId];
+      if (namedId === undefined) return;
+      // Clear the mark first so the pane attaches and hydrates now; forget the
+      // record on the server after, best-effort — a delete that fails leaves a
+      // stale row the next `refreshDetached` prunes (its session is live and
+      // no longer marked, so it will not reappear as detached).
+      set((s) => {
+        const next = { ...s.detachedSessions };
+        delete next[sessionId];
+        return { detachedSessions: next };
+      });
+      void api.deleteNamedSession(namedId).catch((err: unknown) => {
+        console.error("named session delete failed", namedId, err);
+      });
     },
 
     createSessionIn: async (folder) => {
