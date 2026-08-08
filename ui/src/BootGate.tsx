@@ -12,20 +12,21 @@
 
 import { useEffect, useState } from "react";
 
-import { BOOT_ENGINE_MS, BOOT_TIMEOUT_MS, type BootPhase, bootStatus } from "./boot";
+import { BOOT_ENGINE_MS, BOOT_TIMEOUT_MS, type BootPhase, bootPhaseAt, bootStatus } from "./boot";
 
 export function BootGate(): JSX.Element {
-  const [phase, setPhase] = useState<BootPhase>("starting");
+  const [phase, setPhase] = useState<BootPhase>(() => bootPhaseAt(0));
 
   useEffect(() => {
-    // Two one-shot timers from mount, at the phase thresholds `boot.ts` defines.
-    // The engine copy only advances a wait still on the first phase; the timeout
-    // always wins, because reaching it means the backend never answered.
-    const toEngine = window.setTimeout(
-      () => setPhase((p) => (p === "starting" ? "engine" : p)),
-      BOOT_ENGINE_MS,
-    );
-    const toFailed = window.setTimeout(() => setPhase("failed"), BOOT_TIMEOUT_MS);
+    const mountedAt = Date.now();
+    // The phase a user sees is whatever `bootPhaseAt` returns for the time since
+    // mount — this component owns no transition logic of its own. The two timers
+    // only wake it at the moments the phase can change (the thresholds `boot.ts`
+    // defines); the pure, tested function alone decides what it becomes, so the
+    // rendered path and `boot.test.ts` can never disagree.
+    const sync = (): void => setPhase(bootPhaseAt(Date.now() - mountedAt));
+    const toEngine = window.setTimeout(sync, BOOT_ENGINE_MS);
+    const toFailed = window.setTimeout(sync, BOOT_TIMEOUT_MS);
     return () => {
       window.clearTimeout(toEngine);
       window.clearTimeout(toFailed);

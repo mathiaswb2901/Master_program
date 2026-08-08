@@ -12,6 +12,7 @@
 
 import { expect, test } from "@playwright/test";
 
+import { BOOT_ENGINE_MS, BOOT_TIMEOUT_MS } from "../src/boot";
 import { openApp } from "./app";
 
 test("a branded, non-blank loading state ships in the first paint", async ({ page }) => {
@@ -40,4 +41,45 @@ test("React takes over and removes the splash once the backend is up", async ({ 
   // overlay simply sitting on top of a working app.
   await expect(page.locator(".wb-dock")).toBeVisible();
   await expect(page.locator("#wb-splash")).toHaveCount(0);
+});
+
+test("the boot gate advances its copy and offers Retry when the engine never answers", async ({
+  page,
+}) => {
+  // Drive the gate's own timers by a controlled clock instead of waiting real
+  // seconds, and stall the one handshake a browser boot blocks on (the auth
+  // token) so the gate stays mounted rather than handing off to the app. This
+  // is the only path that reaches the 'engine' and 'failed' copy the fast
+  // harness backend otherwise skips straight past.
+  await page.clock.install();
+  let tokenRequests = 0;
+  await page.route("**/api/auth/token", () => {
+    // Never fulfilled: `tokenReady` stays false, so `App` keeps `<BootGate/>`
+    // on screen for the whole timeline below.
+    tokenRequests += 1;
+  });
+
+  await page.goto("/");
+
+  const status = page.locator(".wb-boot-status");
+
+  // First frame: the calm opening line, verbatim what the inline splash paints.
+  await expect(status).toHaveText("Starting Workbench…");
+
+  // Past the engine threshold: the copy owns up to the local engine. This is
+  // exactly `bootPhaseAt(BOOT_ENGINE_MS)` rendered — the value `boot.test.ts`
+  // pins — proving the tested function drives the shipped component.
+  await page.clock.fastForward(BOOT_ENGINE_MS);
+  await expect(status).toHaveText("Starting the local engine…");
+
+  // Past the generous timeout: an honest error surfaced as an alert with a
+  // Retry, never an endless spinner.
+  await page.clock.fastForward(BOOT_TIMEOUT_MS);
+  const boot = page.getByRole("alert");
+  await expect(boot).toBeVisible();
+  await expect(status).toHaveText("Workbench could not reach its local engine.");
+
+  // Retry reloads the app: the boot's handshake fires a second time.
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => tokenRequests).toBeGreaterThan(1);
 });
