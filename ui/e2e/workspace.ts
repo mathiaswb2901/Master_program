@@ -105,6 +105,17 @@ export const BROKEN_SHORTCUT_NAME = "Broken entry";
  */
 export const WELCOME_FILE = ".workbench/welcome.json";
 
+/**
+ * The Setup walkthrough's dismissal, seeded **dismissed** — the same reasoning
+ * as `WELCOME_FILE`. Setup auto-opens as a centre tab on a window nobody has
+ * arranged (a fresh temp workspace is exactly that), so without this every
+ * journey after the first would run against a window with an extra Setup tab and
+ * `panes.spec.ts` would count one panel too many. `firstrun.spec.ts` owns the
+ * other side: it clears this through the app's own API to get first run back,
+ * and puts it as it found it.
+ */
+export const SETUP_FILE = ".workbench/setup.json";
+
 /** The `layout` entry: the one shortcut kind that acts rather than inserts.
  * Journey 9 presses its chord and asserts the panels moved. */
 export const LAYOUT_SHORTCUT_NAME = "Fleet view";
@@ -355,6 +366,11 @@ function seed(root: string): void {
   fs.writeFileSync(path.join(root, ".workbench", "shortcuts.md"), SHORTCUTS_FILE, "utf-8");
   fs.writeFileSync(
     path.join(root, ...WELCOME_FILE.split("/")),
+    `${JSON.stringify({ dismissed: true }, null, 2)}\n`,
+    "utf-8",
+  );
+  fs.writeFileSync(
+    path.join(root, ...SETUP_FILE.split("/")),
     `${JSON.stringify({ dismissed: true }, null, 2)}\n`,
     "utf-8",
   );

@@ -1563,3 +1563,53 @@ export interface CommandResultRequest {
   ok: boolean;
   detail: string;
 }
+
+// ---- first-run / Setup (M7 §2) ---------------------------------------------
+// Mirrors server/models/setup.py. The first-run walkthrough greets a fresh
+// workspace and reports what is wired up — Claude login (detected, never
+// performed), Office/OnlyOffice readiness (echoed from the office capabilities)
+// — then gets out of the way. Every field is server-computed and honest.
+
+/** The connections a first run reports on. */
+export type SetupCheckId = "claude_login" | "office" | "onlyoffice" | "workspace" | "shell";
+
+/** What a check found. `action_needed` is the only state that keeps the
+ * walkthrough from getting out of the way; `unavailable` is reported honestly
+ * (no Office on the machine, a browser tab) but never nags. */
+export type SetupCheckState = "ok" | "action_needed" | "unavailable";
+
+/** How a check's one action is carried out: a registered in-app `command`, or an
+ * `instruction` the human runs themselves (Claude login is `claude /login`,
+ * never a button the app could fire). */
+export type SetupActionKind = "command" | "instruction";
+
+/** The one thing that would move a check toward `ok`. Exactly one of
+ * `command_id` / `instruction` is set, per `kind`. */
+export interface SetupAction {
+  kind: SetupActionKind;
+  label: string;
+  /** A registered command id, for `kind === "command"`. */
+  command_id: string | null;
+  /** The exact line the human runs, for `kind === "instruction"` — rendered as
+   * copyable text, never wired to a handler. */
+  instruction: string | null;
+}
+
+/** One connection, as the first-run checklist shows it. */
+export interface SetupCheck {
+  id: SetupCheckId;
+  title: string;
+  state: SetupCheckState;
+  detail: string;
+  action: SetupAction | null;
+}
+
+/** GET /api/setup/status — the whole first-run picture, computed server-side. */
+export interface SetupStatus {
+  checks: SetupCheck[];
+  /** No `.workbench/` state in this workspace yet — drives the auto-open. */
+  first_run: boolean;
+  /** Derived: nothing is `action_needed`. The walkthrough (and its status-bar
+   * reading) gets out of the way when true. */
+  all_ok: boolean;
+}
