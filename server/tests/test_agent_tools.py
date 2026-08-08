@@ -16,6 +16,7 @@ from typing import Any
 
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
+from workbench_server.models.commands import CommandInvokeResult, CommandManifest
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
@@ -147,6 +148,22 @@ class _Reader:
         return self._edit
 
 
+class _Commands:
+    """CommandInvoker stub: an empty manifest, so nothing is registered and an
+    invoke would report no window. Enough to build a session's options."""
+
+    def manifest(self) -> CommandManifest:
+        return CommandManifest()
+
+    def is_registered(self, command_id: str) -> bool:
+        return False
+
+    async def invoke(self, command_id: str, params: dict[str, Any]) -> CommandInvokeResult:
+        return CommandInvokeResult(
+            invocation_id="x", dispatched=False, ok=False, detail="no window"
+        )
+
+
 def representative_plan_payload() -> dict[str, Any]:
     """A plan of the size the card was designed for: a choice and some steps."""
     return {
@@ -197,6 +214,7 @@ class TestRegistry:
             "present_plan",
             "office_read",
             "office_write",
+            "run_command",
         ]
         for spec in AGENT_TOOLS:
             # ``output_format``, ``max_result_bytes`` and ``max_schema_bytes``
@@ -232,6 +250,7 @@ class TestRegistry:
             "mcp__workbench__present_plan",
             "mcp__workbench__office_read",
             "mcp__workbench__office_write",
+            "mcp__workbench__run_command",
         ]
 
     def test_a_chat_session_pays_nothing_for_the_orchestrator_toolset(self) -> None:
@@ -255,6 +274,7 @@ class TestRegistry:
             None,
             _Bridge(),
             _Reader(DocStructure(kind="word", paragraph_count=0)),
+            _Commands(),
         )
         assert set(allowed_tool_names()) <= set(options.allowed_tools)
         assert set(options.mcp_servers) == {"workbench"}
@@ -267,6 +287,7 @@ class TestRegistry:
             None,
             _Bridge(),
             _Reader(DocStructure(kind="word", paragraph_count=0)),
+            _Commands(),
             "orchestrator",
         )
         assert set(allowed_tool_names("orchestrator")) <= set(options.allowed_tools)

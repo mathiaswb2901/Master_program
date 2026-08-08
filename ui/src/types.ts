@@ -122,7 +122,8 @@ export type WorkspaceEvent =
   | SessionActivityEvent
   | SessionPermissionEvent
   | OrchestratorEvent
-  | WorkspaceChangedEvent;
+  | WorkspaceChangedEvent
+  | CommandInvokeEvent;
 
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
@@ -1523,4 +1524,41 @@ export interface ValidationResults {
 export interface ValidationEvent {
   type: "validation";
   result: ValidationResult;
+}
+
+// ---- commands.py ------------------------------------------------------------
+// Commands the window does not own (M5 item 14). The window owns the command
+// registry; these types are the seam that lets a shell or agent reach one. The
+// UI publishes its manifest on connect, the backend validates an id against it,
+// and a CommandInvokeEvent on /ws/events carries the request back to the window,
+// which runs it and POSTs the result. Mirrors `models/commands.py`.
+
+/** One command the window will run on request. `takes_params` is advisory —
+ * today's commands run parameterless. */
+export interface CommandManifestItem {
+  id: string;
+  title: string;
+  takes_params: boolean;
+}
+
+/** PUT /api/commands/manifest (what the window publishes) and GET /api/commands
+ * (what a CLI/agent discovers). Empty until a window has connected. */
+export interface CommandManifest {
+  commands: CommandManifestItem[];
+}
+
+/** Pushed on /ws/events so the connected window runs one command. The window
+ * reports back with `invocation_id` so the awaiting caller hears the outcome. */
+export interface CommandInvokeEvent {
+  type: "command_invoke";
+  invocation_id: string;
+  command_id: string;
+  params: Record<string, unknown>;
+}
+
+/** POST /api/commands/result — the window's verdict on one invocation. */
+export interface CommandResultRequest {
+  invocation_id: string;
+  ok: boolean;
+  detail: string;
 }

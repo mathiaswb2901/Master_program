@@ -974,6 +974,7 @@ def test_session_status_reaches_the_events_websocket(
     def fake_sdk_client_factory(
         _ui_state_store: Any,
         _reader: Any,
+        _commands: Any,
         _settings: Any = None,
         _orchestrator: Any = None,
         _session_cost: Any = None,

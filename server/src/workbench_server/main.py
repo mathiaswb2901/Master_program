@@ -18,6 +18,7 @@ from workbench_server.routers import (
     activity,
     agents,
     auth,
+    commands,
     conversations,
     events,
     files,
@@ -38,6 +39,7 @@ from workbench_server.routers import (
 from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.app_data import app_data_dir
+from workbench_server.services.commands import CommandRelay
 from workbench_server.services.conversations import ConversationBrowser
 from workbench_server.services.documents import DocumentService
 from workbench_server.services.event_bus import EventBus
@@ -80,6 +82,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     pty_manager = PtyManager()
     workspace = Workspace(settings.resolved_workspace())
     event_bus = EventBus()
+    # Relays a registered window command from a shell/agent to a connected window
+    # (M5 item 14): the event bus run backwards. Holds only the manifest the UI
+    # publishes and the futures awaiting each invoke — no workspace state, so it
+    # needs no re-rooting on a workspace switch.
+    command_relay = CommandRelay(event_bus)
     watcher = Watcher(workspace.root, event_bus)
     # Rides the watcher's bus for the workspace file; watches the global one itself.
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
@@ -190,6 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         client_factory = sdk_client_factory(
             ui_state_store,
             office_host_service,
+            command_relay,
             settings,
             orchestrator_service,
             # What a worker has spent, read from the *one* accumulator: the same
@@ -333,6 +341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.pty_manager = pty_manager
     app.state.workspace = workspace
     app.state.event_bus = event_bus
+    app.state.commands = command_relay
     app.state.ui_state_store = ui_state_store
     app.state.session_manager = session_manager
     app.state.session_index = session_index
@@ -382,6 +391,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(terminal.router)
     app.include_router(files.router)
     app.include_router(events.router)
+    app.include_router(commands.router)
     app.include_router(agents.router)
     app.include_router(agents.ws_router)
     app.include_router(conversations.router)

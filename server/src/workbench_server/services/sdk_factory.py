@@ -18,9 +18,11 @@ from workbench_server.services.agent_tools import (
     OFFICE_WRITE,
     PRESENT_PLAN,
     READ_WORKER,
+    RUN_COMMAND,
     SEND_TO_WORKER,
     SPAWN_WORKER,
     STOP_WORKER,
+    CommandInvoker,
     OfficeDocumentAccess,
     OrchestratorHandle,
     allowed_tool_names,
@@ -29,6 +31,7 @@ from workbench_server.services.agent_tools import (
     handle_office_write,
     handle_present_plan,
     handle_read_worker,
+    handle_run_command,
     handle_send_to_worker,
     handle_spawn_worker,
     handle_stop_worker,
@@ -63,6 +66,7 @@ def build_context_bridge(
     store: UiStateStore,
     bridge: SessionBridge,
     reader: OfficeDocumentAccess,
+    commands: CommandInvoker,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -100,7 +104,17 @@ def build_context_bridge(
     async def office_write(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_office_write(reader, args)
 
-    tools: list[Any] = [get_workspace_state, present_plan, office_read, office_write]
+    @tool(RUN_COMMAND.name, RUN_COMMAND.description, RUN_COMMAND.input_schema)
+    async def run_command(args: dict[str, Any]) -> dict[str, Any]:
+        return await handle_run_command(commands, args)
+
+    tools: list[Any] = [
+        get_workspace_state,
+        present_plan,
+        office_read,
+        office_write,
+        run_command,
+    ]
     if kind == "orchestrator" and orchestrator is not None:
         cost = session_cost or (lambda _worker_id: 0.0)
 
@@ -136,6 +150,7 @@ def build_agent_options(
     resume_session_id: str | None,
     bridge: SessionBridge,
     reader: OfficeDocumentAccess,
+    commands: CommandInvoker,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -204,7 +219,7 @@ def build_agent_options(
         can_use_tool=can_use_tool,
         mcp_servers={
             MCP_SERVER_NAME: build_context_bridge(
-                store, bridge, reader, kind, orchestrator, session_cost
+                store, bridge, reader, commands, kind, orchestrator, session_cost
             )
         },
         plugins=plugins,
@@ -227,6 +242,7 @@ def build_agent_options(
 def sdk_client_factory(
     store: UiStateStore,
     reader: OfficeDocumentAccess,
+    commands: CommandInvoker,
     settings: Settings | None = None,
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -236,6 +252,8 @@ def sdk_client_factory(
     ``reader`` is the office-host service, narrowed to :class:`OfficeDocumentAccess`
     so a session can read *and* edit the live docked document without this module
     importing the service — the same one-way dependency the rest of the tools keep.
+    ``commands`` is the command relay, narrowed to :class:`CommandInvoker`, so a
+    session can invoke a registered window command the same way.
     """
     resolved = settings or Settings()
 
@@ -254,6 +272,7 @@ def sdk_client_factory(
             resume_session_id,
             bridge,
             reader,
+            commands,
             kind,
             orchestrator,
             session_cost,
