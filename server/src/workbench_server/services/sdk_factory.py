@@ -260,7 +260,12 @@ def build_agent_options(
         # ``can_use_tool``: a hook is dispatched for every tool call, while the
         # callback is only reached for calls the CLI resolves to "ask" — so a
         # ``permissions.allow`` rule in a folder the user did not write, or a
-        # mode a subagent inherited, cannot walk around this one.
+        # mode a subagent inherited, cannot walk around this one. Nor does the
+        # pair cost two prompts: both resolve through the same
+        # ``bridge.ask_permission`` future, and the hook's explicit allow
+        # suppresses the callback — asserted against the real CLI by
+        # ``TestTheEndToEndRepro`` in ``server/tests/test_permission_broker.py``,
+        # which counts the awaits for a single approved shell call.
         # ``cast`` because the broker is deliberately SDK-free (this module is
         # the only one that imports ``claude_agent_sdk`` at all), so it types its
         # hook input as a plain dict rather than the SDK's TypedDict union. The

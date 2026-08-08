@@ -73,8 +73,12 @@ def broker_decision(tool_name: str, allowed: bool) -> dict[str, Any]:
 
     Returning an explicit *allow* here is what keeps the prompt count at one:
     a ``PreToolUse`` allow decision skips ``can_use_tool``, so the request that
-    this broker just escalated is not escalated a second time (verified against
-    the bundled CLI).
+    this broker just escalated is not escalated a second time. That is not a
+    reading of the docs — it is asserted against the bundled CLI by
+    ``TestTheEndToEndRepro::test_a_shell_command_costs_exactly_one_human_answer``
+    (the ``approved`` case), which registers this hook and ``can_use_tool``
+    together on one options object, routes both through the same answer future,
+    and requires that future to be awaited exactly once.
     """
     return {
         "hookSpecificOutput": {

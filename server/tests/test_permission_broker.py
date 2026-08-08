@@ -147,7 +147,9 @@ class TestTheBrokerBinds:
     @pytest.mark.parametrize("tool", sorted(BROKERED_TOOLS))
     async def test_a_human_yes_allows_it_exactly_once(self, tool: str) -> None:
         """An explicit allow is what stops the request being asked twice: the
-        CLI skips ``can_use_tool`` when a PreToolUse hook decides."""
+        CLI skips ``can_use_tool`` when a PreToolUse hook decides. This checks
+        the payload we emit; the CLI half of that sentence is checked against the
+        real CLI by ``TestTheEndToEndRepro`` (the ``approved`` case)."""
         bridge = StubBridge(answer=True)
         hook = hook_of(options_for(bridge=bridge))
         out = await hook({"tool_name": tool, "tool_input": {"command": "mkdir x"}}, None, None)
@@ -319,6 +321,14 @@ class TestTheEndToEndRepro:
     which shell tool that CLI exposes on the host. It is the reproduction the
     fix was written against, kept runnable rather than described.
 
+    Both directions are driven, because they prove different halves. The
+    ``declined`` case is the security claim: a shell command the human refused
+    does not run. The ``approved`` case is the ergonomics claim the rest of this
+    change rests on: the hook and ``can_use_tool`` are registered together on one
+    options object and share one answer future, so a single approved call that
+    awaits it exactly once is the CLI demonstrating that a hook's explicit allow
+    suppresses the callback rather than escalating a second time.
+
     Platform caveat, stated rather than hidden: the ``acceptEdits`` fast path is
     keyed on the *Bash* tool, so only the POSIX run of this test discriminates
     between the old configuration and the new one. On Windows the CLI hands out
@@ -329,10 +339,27 @@ class TestTheEndToEndRepro:
     ``Bash`` as well; that path is machine-specific and so is not baked in here.
     """
 
-    async def test_a_shell_command_does_not_run_without_a_human(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("answer", "runs"),
+        [(False, False), (True, True)],
+        ids=["declined", "approved"],
+    )
+    async def test_a_shell_command_costs_exactly_one_human_answer(
+        self, tmp_path: Path, answer: bool, runs: bool
+    ) -> None:
+        """Both halves of the claim, through the real CLI, on one options object.
+
+        ``can_use_tool`` and the ``PreToolUse`` hook are registered together and
+        both resolve through the *same* :meth:`StubBridge.ask_permission`, so the
+        length of ``bridge.asked`` is a direct count of how many times a human
+        would have been prompted for this one tool call. That is what makes the
+        ``approved`` case load-bearing rather than decorative: it is the only
+        automated check that a hook's explicit ``allow`` suppresses the callback
+        instead of the request being escalated a second time.
+        """
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
-        bridge = StubBridge(answer=False)
+        bridge = StubBridge(answer=answer)
         shipped = options_for(bridge=bridge)
         _FakeAnthropic.turns = 0
         server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeAnthropic)
@@ -359,4 +386,9 @@ class TestTheEndToEndRepro:
             server.shutdown()
 
         assert bridge.asked, "the shell request never reached the broker"
-        assert not (tmp_path / "probe_dir").is_dir(), "a declined command still ran"
+        assert bridge.asked[0][0] == SHELL_TOOL
+        assert len(bridge.asked) == 1, (
+            "one tool call cost more than one human answer -- the hook's decision "
+            f"did not suppress the callback: {bridge.asked}"
+        )
+        assert (tmp_path / "probe_dir").is_dir() is runs

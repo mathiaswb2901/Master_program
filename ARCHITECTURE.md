@@ -566,7 +566,10 @@ and its deny binds even in permissive modes, so a mode a subagent inherited or a
 allow rule in a folder the user did not write cannot walk around it. The hook
 resolves the *same* `ask_permission` future the chat card and the board answer,
 and its explicit allow suppresses the callback, so a brokered request still costs
-exactly one prompt. The context-bridge
+exactly one prompt — both directions are driven through the real bundled CLI by
+`TestTheEndToEndRepro` in `server/tests/test_permission_broker.py`
+(`WORKBENCH_PERMISSION_REPRO=1`), which counts the answers a single shell call
+costs. The context-bridge
 MCP tool `get_workspace_state` lets agents see the active/open/dirty files so they
 avoid editing buffers with unsaved user changes.
 
