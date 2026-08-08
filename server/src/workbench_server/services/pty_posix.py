@@ -21,6 +21,17 @@ reason: an unset `TERM` makes readline and every curses program degrade.
 * **EOF has two spellings.** Linux raises `OSError(EIO)` when the last slave
   handle closes; macOS returns `b""`. Both mean the same thing here.
 
+* **No wait on a child is ever unbounded.** `PtySession.terminate()` runs on the
+  asyncio event loop thread (`routers/terminal.py` calls it from a `finally:`),
+  and uvicorn's loop is single-threaded, so one blocking `waitpid` freezes every
+  other websocket and request on the server. SIGKILL is uncatchable, but a child
+  wedged in uninterruptible kernel I/O (a hung network mount, an `ssh` waiting on
+  a dead peer) does not die until that I/O returns. So every reap here is
+  `WNOHANG`, and the force path polls with backoff up to `REAP_TIMEOUT_S` and
+  then gives up — the Windows path cannot hang the loop this way either
+  (`winpty.PtyProcess.terminate` is signals plus bounded sleeps), and this keeps
+  the two backends honest about the same worst case.
+
 Every kernel call goes through `PosixSyscalls`, which is what lets the whole
 class be exercised on the Windows box this is developed on (the stdlib `pty`,
 `fcntl` and `termios` modules do not exist there) — the same stand-in shape
@@ -33,6 +44,7 @@ import codecs
 import os
 import struct
 import sys
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -44,6 +56,20 @@ log = structlog.get_logger()
 FALLBACK_SHELL = "/bin/sh"
 #: What the child is told it is talking to. xterm.js is an xterm.
 TERM = "xterm-256color"
+#: Longest a force-terminate will wait for the SIGKILLed child to be reapable.
+#: A healthy child is gone in well under a millisecond; this ceiling only binds
+#: when the child is stuck in uninterruptible kernel I/O, and it is what keeps
+#: that case from freezing the event loop for the whole server.
+REAP_TIMEOUT_S = 1.0
+#: Poll backoff bounds for that wait: start tight so the common case costs one
+#: syscall, widen so a doomed child does not spin a core.
+REAP_POLL_MIN_S = 0.001
+REAP_POLL_MAX_S = 0.05
+
+#: Children that outlived `REAP_TIMEOUT_S`. Nothing else will ever wait on them
+#: — their session is gone — so they would stay zombies for the life of the
+#: server. Swept (non-blocking) whenever a new terminal is spawned.
+_UNREAPED: list[tuple[int, "PosixSyscalls"]] = []
 
 
 class PosixSyscalls(Protocol):
@@ -58,8 +84,15 @@ class PosixSyscalls(Protocol):
     def close(self, fd: int) -> None: ...
     def kill(self, pid: int, *, force: bool) -> None: ...
 
-    def reap(self, pid: int, *, block: bool) -> int | None:
-        """Exit status, or None while the child is still running."""
+    def reap(self, pid: int) -> int | None:
+        """Exit status, or None while the child is still running.
+
+        Never blocks: see the module docstring on why waiting on the event loop
+        thread is not an option here.
+        """
+
+    def sleep(self, seconds: float) -> None:
+        """Pause between reap polls."""
 
 
 class _StdlibSyscalls:
@@ -115,15 +148,18 @@ class _StdlibSyscalls:
 
             os.kill(pid, signal.SIGKILL if force else signal.SIGHUP)
 
-    def reap(self, pid: int, *, block: bool) -> int | None:
+    def reap(self, pid: int) -> int | None:
         if sys.platform == "win32":
             raise RuntimeError("the POSIX PTY backend is not available on Windows")
         else:
             try:
-                done, status = os.waitpid(pid, 0 if block else os.WNOHANG)
+                done, status = os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:  # already reaped
                 return 0
             return None if done == 0 else status
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
 
 
 class PosixPty:
@@ -180,7 +216,7 @@ class PosixPty:
     def isalive(self) -> bool:
         if self._exit_status is not None:
             return False
-        status = self._sys.reap(self.pid, block=False)
+        status = self._sys.reap(self.pid)
         if status is None:
             return True
         self._exit_status = status
@@ -194,15 +230,36 @@ class PosixPty:
         try:
             self._sys.kill(self.pid, force=force)
         except OSError:  # exited between the check and the signal
+            # It is gone and nothing will signal it again, so it has to be
+            # waited on *here* — the manager has already dropped this session,
+            # so a skipped reap is a zombie for the life of the server.
             log.debug("pty.posix_terminate_race", pid=self.pid)
+            status = self._sys.reap(self.pid)
         else:
-            # SIGKILL cannot be caught, so this wait is bounded by the kernel.
-            # A caught SIGHUP could be ignored, so that one is not waited on.
-            status = self._sys.reap(self.pid, block=force)
-            if status is not None:
-                self._exit_status = status
+            # SIGKILL is uncatchable, so the child is doomed and worth waiting
+            # for — but only for `REAP_TIMEOUT_S`, and never with a blocking
+            # waitpid. A caught SIGHUP could be ignored: never wait on that one.
+            status = self._reap_within_timeout() if force else self._sys.reap(self.pid)
+        if status is not None:
+            self._exit_status = status
         self._close_fd()
         return True
+
+    def _reap_within_timeout(self) -> int | None:
+        """Poll `WNOHANG` with backoff; hand the pid to the sweep if it outlasts us."""
+        waited = 0.0
+        delay = REAP_POLL_MIN_S
+        while True:
+            status = self._sys.reap(self.pid)
+            if status is not None:
+                return status
+            if waited >= REAP_TIMEOUT_S:
+                log.warning("pty.posix_reap_timeout", pid=self.pid, waited=waited)
+                _UNREAPED.append((self.pid, self._sys))
+                return None
+            self._sys.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, REAP_POLL_MAX_S)
 
     def _close_fd(self) -> None:
         if not self._fd_open:
@@ -214,10 +271,30 @@ class PosixPty:
             log.debug("pty.posix_close_race", pid=self.pid)
 
 
+def sweep_unreaped() -> int:
+    """Wait (non-blocking) on children a force-terminate could not reap in time.
+
+    Returns how many are still outstanding. Called on every spawn: a terminal
+    the user opens later is the only recurring event with the right cadence,
+    and the list is empty in every normal run.
+    """
+    for entry in list(_UNREAPED):
+        pid, calls = entry
+        try:
+            status = calls.reap(pid)
+        except OSError:  # pragma: no cover - nothing left to wait on
+            status = 0
+        if status is not None:
+            _UNREAPED.remove(entry)
+            log.info("pty.posix_reaped_late", pid=pid, status=status)
+    return len(_UNREAPED)
+
+
 def spawn(
     cwd: Path, rows: int = 24, cols: int = 80, syscalls: PosixSyscalls | None = None
 ) -> PosixPty:
     """Start the user's login shell on a new pty, rooted at `cwd`."""
+    sweep_unreaped()
     calls = syscalls if syscalls is not None else _StdlibSyscalls()
     shell = os.environ.get("SHELL") or FALLBACK_SHELL
     env = dict(os.environ, TERM=TERM)

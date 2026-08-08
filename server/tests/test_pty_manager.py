@@ -15,6 +15,7 @@ is what the ubuntu leg of the 3-OS matrix (M7 §C2) is for, where these same
 
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +37,8 @@ class FakePosix:
         self.sizes: list[tuple[int, int]] = []
         self.signals: list[bool] = []
         self.closed = 0
-        self.blocking_reaps = 0
+        self.reaps = 0
+        self.slept: list[float] = []
         self.exit_status: int | None = None
         self.write_limit: int | None = None
         self.forked: tuple[list[str], Path, dict[str, str]] | None = None
@@ -69,15 +71,23 @@ class FakePosix:
         self.signals.append(force)
         self.exit_status = 9 if force else None
 
-    def reap(self, pid: int, *, block: bool) -> int | None:
-        if block:
-            self.blocking_reaps += 1
-            self.exit_status = 9 if self.exit_status is None else self.exit_status
+    def reap(self, pid: int) -> int | None:
+        self.reaps += 1
         return self.exit_status
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
 
 
 def posix_pty(fake: FakePosix) -> PosixPty:
     return PosixPty(fake.pid, 7, fake)
+
+
+@pytest.fixture(autouse=True)
+def _no_unreaped_leak_between_tests() -> Iterator[None]:
+    pty_posix._UNREAPED.clear()
+    yield
+    pty_posix._UNREAPED.clear()
 
 
 class TestTheSeam:
@@ -202,7 +212,7 @@ class RealFdSyscalls(_StdlibSyscalls):
 
     def kill(self, pid: int, *, force: bool) -> None: ...
 
-    def reap(self, pid: int, *, block: bool) -> int | None:
+    def reap(self, pid: int) -> int | None:
         return None
 
 
@@ -267,16 +277,16 @@ class TestPosixLifecycle:
         proc = posix_pty(fake)
         assert proc.terminate(force=True)
         assert fake.signals == [True]
-        assert fake.blocking_reaps == 1  # SIGKILL cannot be caught: waiting is safe
+        assert fake.slept == []  # a dead child is reapable on the first poll
         assert fake.closed == 1
         assert proc.exit_status == 9
 
-    def test_a_gentle_terminate_does_not_block_on_the_child(self) -> None:
+    def test_a_gentle_terminate_does_not_wait_on_the_child(self) -> None:
         fake = FakePosix()
         proc = posix_pty(fake)
         proc.terminate()
         assert fake.signals == [False]
-        assert fake.blocking_reaps == 0  # SIGHUP can be ignored — never wait on it
+        assert fake.slept == []  # SIGHUP can be ignored — never wait on it
 
     def test_terminating_an_exited_child_signals_nothing(self) -> None:
         fake = FakePosix()
@@ -286,11 +296,85 @@ class TestPosixLifecycle:
         assert fake.signals == []
         assert fake.closed == 1
 
-    def test_a_terminate_race_is_survived(self) -> None:
+    def test_a_terminate_race_still_reaps_the_child(self) -> None:
+        """The child exits between `isalive()` and the signal.
+
+        Nothing will ever signal it again and the manager has already dropped
+        the session, so if `terminate` skips the reap here the child stays a
+        zombie for the life of the server.
+        """
+
         class Racing(FakePosix):
             def kill(self, pid: int, *, force: bool) -> None:
+                self.exit_status = 0  # it is gone; that is why the signal failed
                 raise ProcessLookupError(3, "No such process")
 
         fake = Racing()
-        assert posix_pty(fake).terminate(force=True)
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert fake.reaps >= 2  # the isalive() probe, then the one that waits on it
+        assert proc.exit_status == 0
         assert fake.closed == 1
+
+
+class TestAWedgedChildCannotFreezeTheServer:
+    """`PtySession.terminate()` runs on the single asyncio loop thread.
+
+    Uvicorn serves every other websocket and request from that same thread, so
+    a wait that is not bounded here is a server-wide stall, not a slow tab.
+    """
+
+    def test_the_real_syscall_wrapper_never_issues_a_blocking_waitpid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bug, at the only layer that can actually hang: `os.waitpid`."""
+        flags: list[int] = []
+
+        def spy(pid: int, options: int) -> tuple[int, int]:
+            flags.append(options)
+            return 0, 0
+
+        wnohang = 0x2A  # a sentinel, since Windows has no os.WNOHANG to compare to
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(os, "WNOHANG", wnohang, raising=False)
+        monkeypatch.setattr(os, "waitpid", spy, raising=False)
+        assert _StdlibSyscalls().reap(4242) is None
+        assert flags == [wnohang]  # a 0 here is the server-wide freeze
+
+    def test_a_child_that_never_dies_gives_up_inside_the_timeout(self) -> None:
+        class Wedged(FakePosix):
+            """SIGKILLed, but stuck in uninterruptible I/O — never reapable."""
+
+            def reap(self, pid: int) -> int | None:
+                self.reaps += 1
+                return None
+
+        fake = Wedged()
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert sum(fake.slept) <= pty_posix.REAP_TIMEOUT_S + pty_posix.REAP_POLL_MAX_S
+        assert max(fake.slept) <= pty_posix.REAP_POLL_MAX_S  # no single long stall
+        assert fake.closed == 1  # the fd is released even though the child is not
+        assert proc.exit_status is None
+
+    def test_a_child_that_dies_late_is_reaped_by_the_next_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Giving up on the wait must not mean giving up on the zombie."""
+
+        class Wedged(FakePosix):
+            reapable = False
+
+            def reap(self, pid: int) -> int | None:
+                self.reaps += 1
+                return 9 if self.reapable else None
+
+        fake = Wedged()
+        posix_pty(fake).terminate(force=True)
+        assert [(fake.pid, fake)] == pty_posix._UNREAPED
+
+        assert pty_posix.sweep_unreaped() == 1  # still wedged: still tracked
+        fake.reapable = True
+        monkeypatch.setenv("SHELL", "/bin/sh")
+        pty_posix.spawn(Path.cwd(), syscalls=FakePosix())
+        assert pty_posix._UNREAPED == []
