@@ -37,6 +37,32 @@
   --dv-overlay-z-index: 50;
 }
 
+/* Tab-strip bottom hairline (DESIGN.md §6.1: "bottom hairline --border-subtle").
+ * The strip is `--surface-app` and the panel body below it `--surface-panel`, so
+ * a value step already sits under the strip — but the doc asks for a drawn
+ * hairline and the step alone leaves the boundary soft where a strip runs long.
+ * Drawn on the whole strip, on every group (not just the focused one), so it
+ * never jumps as focus moves — unlike a `border-top`, which is why the live rule
+ * below is an overlay and not a border.
+ *
+ * The one thing it must not do is cut the fusion: the *selected* tab's background
+ * IS `--surface-panel`, the same surface as the body, and that merge is the
+ * active indicator (§6.1, "no bottom border — this fusion is the active
+ * indicator"). A full-width hairline drawn naively would cross under it and
+ * reintroduce exactly the line the fusion removes. It does not here: the parent's
+ * border paints first and in-flow tab backgrounds paint over it, so the selected
+ * tab — pulled 1px down onto the hairline — fills that 1px with `--surface-panel`
+ * and erases the line under itself alone. The inactive tabs are transparent and
+ * the empty actions area is bare, so the hairline shows everywhere the fusion is
+ * not. */
+.dockview-theme-workbench .dv-tabs-and-actions-container {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.dockview-theme-workbench .dv-tab.dv-active-tab {
+  margin-bottom: -1px;
+}
+
 /* THE LIVE RULE (DESIGN.md §6.1) — the app's signature and its real focus
  * indicator: a 2px full-bleed amber rule across the top of the focused pane's
  * tab strip, and nowhere else. One pane wears it at a time, so "where am I"
@@ -84,6 +110,33 @@
 
 .dockview-theme-workbench .dv-tab:hover {
   transition-duration: 0s;
+}
+
+/* Inactive-tab hover (DESIGN.md §6.1) — the one tab state the palette landing
+ * left unwired. An inactive tab answered the pointer with nothing, so a strip of
+ * them read as a static row of labels rather than a set of controls. A hover is
+ * answered by the wash, never by the amber (§2.4): `--surface-hover` under the
+ * pointer and the text a step up, `--text-tertiary` -> `--text-secondary`. Only
+ * the inactive tabs — the active tab's background *is* the surface below it, and
+ * a wash laid over that would dim the fusion that is the whole active indicator.
+ * Instant in, eased out: the decay rides the `.dv-tab` transition above and the
+ * rule right before this one zeroes the arrival (DESIGN.md §5.5). */
+.dockview-theme-workbench .dv-tab.dv-inactive-tab:hover {
+  background-color: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+/* Keyboard focus is a visible 2px ring, on a tab as everywhere (DESIGN.md §1.8).
+ * dockview draws its own focus box as a `::after` outline in
+ * `--dv-tab-divider-color`, which ANVIL sets to transparent — there are no tab
+ * dividers in this frame — so a tab reached by the keyboard wore no ring at all.
+ * Recolour that same box to the focus ring, and only under `:focus-visible` so a
+ * mouse click never paints it. The live rule (the amber pane edge) says which
+ * *pane* the keyboard is in; this says which *tab* within it, and the two do not
+ * compete. */
+.dockview-theme-workbench .dv-tab:focus-visible::after {
+  outline: 2px solid var(--focus-ring) !important;
+  outline-offset: -2px;
 }
 
 .wb-panel-tab-close {
