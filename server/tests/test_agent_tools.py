@@ -175,6 +175,14 @@ class _Runner:
         return None
 
 
+class _Searcher:
+    """WorkspaceSearcher stub: enough to build a session's options. The tool's
+    behavior against a real SearchService lives in test_agent_search.py."""
+
+    def search(self, request: Any) -> Any:  # pragma: no cover - never called here
+        raise AssertionError("not exercised in option-building tests")
+
+
 def representative_plan_payload() -> dict[str, Any]:
     """A plan of the size the card was designed for: a choice and some steps."""
     return {
@@ -227,6 +235,7 @@ class TestRegistry:
             "office_write",
             "office_reconcile",
             "run_command",
+            "workspace_search",
         ]
         for spec in AGENT_TOOLS:
             # ``output_format``, ``max_result_bytes`` and ``max_schema_bytes``
@@ -264,6 +273,7 @@ class TestRegistry:
             "mcp__workbench__office_write",
             "mcp__workbench__office_reconcile",
             "mcp__workbench__run_command",
+            "mcp__workbench__workspace_search",
         ]
 
     def test_a_chat_session_pays_nothing_for_the_orchestrator_toolset(self) -> None:
@@ -289,6 +299,7 @@ class TestRegistry:
             _Reader(DocStructure(kind="word", paragraph_count=0)),
             _Commands(),
             _Runner(),
+            _Searcher(),
         )
         assert set(allowed_tool_names()) <= set(options.allowed_tools)
         assert set(options.mcp_servers) == {"workbench"}
@@ -303,6 +314,7 @@ class TestRegistry:
             _Reader(DocStructure(kind="word", paragraph_count=0)),
             _Commands(),
             _Runner(),
+            _Searcher(),
             "orchestrator",
         )
         assert set(allowed_tool_names("orchestrator")) <= set(options.allowed_tools)

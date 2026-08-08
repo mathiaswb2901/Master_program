@@ -1560,6 +1560,52 @@ export interface ValidationEvent {
   result: ValidationResult;
 }
 
+// ---- search.py --------------------------------------------------------------
+// Workspace content search (M7 V7b). `POST /api/search` finds literal text across
+// the workspace's files, respecting the file tree's ignore rules (IGNORED_DIRS +
+// CACHEDIR.TAG). The result carries the AXI truncation shape: `truncated` says the
+// cap was hit, and `max_results` is the argument that widens it. Mirrors
+// `models/search.py`.
+
+/** POST /api/search — what to find, and how much to bring back. */
+export interface SearchRequest {
+  /** Literal text (substring, not a regex); at least one character. */
+  query: string;
+  /** Cap on hits across all files; the scan stops here and sets `truncated`. */
+  max_results?: number;
+  /** Default false — case-insensitive is what "find SE3" usually means. */
+  case_sensitive?: boolean;
+}
+
+/** One matching line in one file. */
+export interface SearchHit {
+  /** 1-based line number — the line the editor jumps to. */
+  line: number;
+  /** 0-based character offset of the first match on the line. */
+  col: number;
+  /** The matching line (trailing newline stripped), clipped when very long. */
+  text: string;
+  /** True when the line was longer than the clip and `text` is a prefix. */
+  line_truncated: boolean;
+}
+
+/** Every returned hit in one file, in line order. */
+export interface FileMatches {
+  /** Workspace-relative, forward slashes — the path the editor opens. */
+  path: string;
+  hits: SearchHit[];
+}
+
+/** POST /api/search response — hits grouped by file. Empty `files` = no matches. */
+export interface SearchResponse {
+  query: string;
+  files: FileMatches[];
+  total_hits: number;
+  files_with_matches: number;
+  /** True when the scan stopped at `max_results` and more matches exist. */
+  truncated: boolean;
+}
+
 // ---- commands.py ------------------------------------------------------------
 // Commands the window does not own (M5 item 14). The window owns the command
 // registry; these types are the seam that lets a shell or agent reach one. The

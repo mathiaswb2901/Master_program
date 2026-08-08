@@ -15,7 +15,14 @@
 
 /* A card on the elevated surface rather than a full-bleed hero: it is one thing
    inside a panel, and the panel is one tab among others. That is the whole
-   reason it interrupts nothing. */
+   reason it interrupts nothing.
+
+   It is the product's most important empty state (§6.13), so it earns the one
+   thing a plain panel does not: the app's entrance — a short rise that reduced
+   motion turns into a pure fade, distances and durations both tokens (tokens.css
+   §5). Its distinction is carried by surface and border, not by colour: amber is
+   spent only on *where I am* and *changing right now* (§2.4), and a marker that
+   stands for the whole life of the card is neither. */
 .wb-welcome {
   flex: none;
   margin: var(--space-6) var(--space-6) var(--space-2);
@@ -23,6 +30,7 @@
   background: var(--surface-elevated);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
+  animation: wb-rise-in var(--motion-enter);
 }
 
 .wb-welcome-title {
