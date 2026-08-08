@@ -823,6 +823,11 @@ def _close_handle(handle: Any) -> None:
 #: carries. Stripped so a read returns the same clean string the fake mints.
 _PARAGRAPH_MARKS = "\r\n\x07\x0b\x0c"
 
+#: ``0x800401FD CO_E_OBJNOTCONNECTED`` as a signed int32. Computed *from* the hex
+#: so the decimal can never drift away from the constant it names — the earlier
+#: hand-typed literal was ``-2147221021``, which is actually ``0x800401E3``.
+CO_E_OBJNOTCONNECTED = int("0x800401FD", 16) - 2**32  # -2147220995
+
 #: HRESULTs that mean the COM object is gone: the instance closed under a call
 #: that was in flight. Mapped to ``DocGoneError`` rather than the catch-all, so a
 #: read that races a close reports the honest reason.
@@ -830,7 +835,7 @@ _DEAD_HRESULTS = frozenset(
     {
         -2147417848,  # RPC_E_DISCONNECTED
         -2147023174,  # 0x800706BA RPC server unavailable
-        -2147221021,  # 0x800401FD CO_E_OBJNOTCONNECTED
+        CO_E_OBJNOTCONNECTED,  # 0x800401FD CO_E_OBJNOTCONNECTED
         -2146959355,  # 0x80080005 CO_E_SERVER_EXEC_FAILURE
     }
 )
@@ -898,14 +903,25 @@ def word_paragraph_texts(instance: OfficeInstance) -> list[str]:
 def set_word_paragraph_text(instance: OfficeInstance, paragraph: int, text: str) -> None:
     """Replace the text of one paragraph (zero-based), and nothing else.
 
-    The paragraph mark is re-supplied so the replace stays *within* the
-    paragraph: the document's paragraph count never changes and no neighbour is
-    disturbed — the fidelity the write seam owes. Applied to the live in-memory
-    instance, so the user can undo it; the file is never rewritten here.
+    The paragraph's *own* terminal mark is re-supplied so the replace stays
+    *within* the paragraph: the document's paragraph count never changes and no
+    neighbour is disturbed — the fidelity the write seam owes. Applied to the
+    live in-memory instance, so the user can undo it; the file is never rewritten
+    here.
+
+    Which mark matters. ``Document.Paragraphs`` includes the paragraphs inside
+    table cells, and the *last* paragraph in a cell ends not with ``\\r`` but
+    with the end-of-cell marker ``\\x07`` (one of :data:`_PARAGRAPH_MARKS`).
+    Forcing ``\\r`` onto such a paragraph rewrites that structural marker and can
+    merge or split cells or strand a stray paragraph. So the terminator that is
+    already there is read back and re-supplied unchanged; only a paragraph whose
+    range carries no recognised terminal mark falls back to a plain ``\\r``.
     """
     document = instance.document
     target = _com_call(document.Paragraphs.Item, paragraph + 1)
-    _com_call(setattr, target.Range, "Text", text + "\r")
+    current = str(_com_call(getattr, target.Range, "Text"))
+    mark = current[-1] if current and current[-1] in _PARAGRAPH_MARKS else "\r"
+    _com_call(setattr, target.Range, "Text", text + mark)
 
 
 def excel_sheet_names(instance: OfficeInstance) -> list[str]:

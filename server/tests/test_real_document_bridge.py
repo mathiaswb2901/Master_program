@@ -230,6 +230,23 @@ class TestWord:
         assert edit.total_paragraphs == 2  # still two paragraphs
         assert doc.Paragraphs.Item(2).Range.Text == "\r"  # the mark, no content
 
+    async def test_write_preserves_a_table_cell_end_of_cell_marker(self, com: Any) -> None:
+        # Document.Paragraphs includes paragraphs inside table cells, and the last
+        # paragraph in a cell ends with the end-of-cell marker chr(7), not \r.
+        # Forcing \r there rewrites the cell structure; the write must re-supply
+        # the marker the paragraph already carries.
+        doc = FakeWordDoc(["Before cell.", "In cell.", "After cell."])
+        doc.Paragraphs.Item(2).Range.Text = "In cell." + "\x07"  # a table-cell tail
+        bridge = com("word", doc)
+        edit = await bridge.write_word(HANDLE, 1, "Rewritten cell.")
+        assert isinstance(edit, WordEdit)
+        assert (edit.paragraph, edit.written_chars, edit.total_paragraphs) == (1, 15, 3)
+        # chr(7) re-supplied, not \r — the cell structure is untouched.
+        assert doc.Paragraphs.Item(2).Range.Text == "Rewritten cell.\x07"
+        # Neighbours are byte-for-byte, count unchanged.
+        assert doc.Paragraphs.Item(1).Range.Text == "Before cell.\r"
+        assert doc.Paragraphs.Item(3).Range.Text == "After cell.\r"
+
     async def test_write_to_an_empty_document_is_range_invalid(self, com: Any) -> None:
         bridge = com("word", FakeWordDoc([]))
         with pytest.raises(RangeInvalidError):
@@ -331,6 +348,16 @@ class TestRefusals:
     async def test_a_dead_com_object_mid_read_is_document_gone(self, com: Any) -> None:
         # RPC_E_DISCONNECTED: the instance closed under the call in flight.
         bridge = com("word", FakeWordDoc(["Body."], dead_hresult=-2147417848))
+        with pytest.raises(DocGoneError):
+            await bridge.read_word(HANDLE, 0, 6_000)
+
+    async def test_co_e_objnotconnected_mid_read_is_document_gone(self, com: Any) -> None:
+        # 0x800401FD CO_E_OBJNOTCONNECTED = -2147220995: the proxy's server is
+        # gone. is_object_gone must recognise it (the literal used to be wrong),
+        # and the bridge must map it to document_gone, not the catch-all.
+        assert office_com.CO_E_OBJNOTCONNECTED == -2147220995
+        assert office_com.is_object_gone(Exception(-2147220995)) is True
+        bridge = com("word", FakeWordDoc(["Body."], dead_hresult=-2147220995))
         with pytest.raises(DocGoneError):
             await bridge.read_word(HANDLE, 0, 6_000)
 
