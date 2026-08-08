@@ -74,6 +74,15 @@ export const DOCX_FILE = "sample.docx";
 export const DOCX_ALREADY_OPEN = "sample-already-open.docx";
 export const DOCX_REFUSES_EMBED = "sample-refuse-embed.docx";
 /**
+ * A workbook, and one whose window refuses to dock. Excel docks through the same
+ * host lifecycle as Word (`services/office_host/`), so these prove the office
+ * journey's Word assertions hold for Excel too: an ``.xlsx`` docks and the panel
+ * names Microsoft Excel, and a refused embed still ends in a working editor. The
+ * `-refuse-embed` name is what the fake host backend matches to take that branch.
+ */
+export const XLSX_FILE = "sample.xlsx";
+export const XLSX_REFUSES_EMBED = "sample-refuse-embed.xlsx";
+/**
  * The document that docks and then will not quit — the `close_failed` window,
  * sitting on the desktop with an unsaved edit in it.
  *
@@ -358,6 +367,8 @@ function seed(root: string): void {
     DOCX_ALREADY_OPEN,
     DOCX_REFUSES_EMBED,
     DOCX_REFUSES_CLOSE,
+    XLSX_FILE,
+    XLSX_REFUSES_EMBED,
     PPTX_FILE,
   ]) {
     fs.writeFileSync(path.join(root, name), "not a real document\n", "utf-8");
