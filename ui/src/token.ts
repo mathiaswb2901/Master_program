@@ -21,6 +21,7 @@
  * attaching it now is what lets PR4 flip enforcement on without a client change.
  */
 
+import { apiUrl } from "./backend";
 import { authToken } from "./shell";
 import type { AuthTokenResponse } from "./types";
 
@@ -40,7 +41,11 @@ export async function initToken(): Promise<void> {
       token = fromShell;
       return;
     }
-    const res = await fetch("/api/auth/token");
+    // Same-origin in a browser (the shell path returned non-null above and
+    // never reaches here); through the backend-origin seam so a shell that
+    // could not hand over a token still hits 127.0.0.1:<port>, not the asset
+    // protocol (`backend.ts`).
+    const res = await fetch(apiUrl("/api/auth/token"));
     if (!res.ok) return;
     const body = (await res.json()) as AuthTokenResponse;
     token = body.token;

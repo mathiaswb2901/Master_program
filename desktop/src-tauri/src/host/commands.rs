@@ -23,6 +23,7 @@
 //! [`host_open_guest`], which waits for a process to start and would freeze the
 //! window for as long as that took.
 
+#[cfg(debug_assertions)]
 use std::time::Duration;
 
 use serde::Serialize;

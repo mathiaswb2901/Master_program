@@ -1,0 +1,5 @@
+Placeholder so `tauri.conf.json`'s `bundle.resources` path exists at build time.
+The real contents — the PyInstaller onedir build of the backend — are staged
+here by `packaging/build_backend.ps1` before `tauri build` and are gitignored.
+An empty desktop shell build (dev / `cargo build`) ships only this file, and
+`backend.rs` finds no `workbench-server.exe`, so it falls back to `uv run`.
