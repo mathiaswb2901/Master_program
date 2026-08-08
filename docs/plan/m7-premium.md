@@ -70,9 +70,9 @@ Every PR below inherits these without restating them:
 
 ## Using the `ui-ux-pro-max` skill, without a dependency
 
-The `ui-ux-pro-max` skill (installed in this workspace, `~/.claude/skills/ui-ux-pro-max`)
-is a **design-intelligence source**, not a component library and not a runtime. It is
-consulted *during authorship* of the visual PRs — for layout systems, spacing rhythm,
+The `ui-ux-pro-max` skill — available to the authoring agent, not part of the app's own
+session-scoped skill bundle — is a **design-intelligence source**, not a component library
+and not a runtime. It is consulted *during authorship* of the visual PRs — for layout systems, spacing rhythm,
 component composition patterns, motion presets (GSAP-shaped ideas), accessibility
 guidelines and empty-state patterns — and its output is then **translated into ANVIL's
 existing primitives**:
@@ -374,9 +374,11 @@ class VoiceBackend(Protocol):
 
 The public repo wants a cross-OS CI matrix and a real release process building on the M4
 packaging track (#87, the bundled backend + `tauri build`). The current CI
-(`.github/workflows/ci.yml`) is **all `windows-latest`** — six jobs (server, ui, e2e, perf,
-desktop, quality-gate) — because the PTY is Windows (`services/pty_manager.py`, pywinpty)
-and the Office host is Windows. Two of the three OSes cannot even run the server today.
+(`.github/workflows/ci.yml`) is **seven jobs** — `server`, `ui`, `e2e`, `perf` and
+`desktop` on `windows-latest`; `changes` and `quality-gate` already on `ubuntu-latest` —
+so the compute-heavy five are Windows-bound because the PTY is Windows
+(`services/pty_manager.py`, pywinpty) and the Office host is Windows. Two of the three OSes
+cannot even run those five today.
 
 ### C1 — Cross-platform PTY (the prerequisite, server) · CI-verifiable
 
