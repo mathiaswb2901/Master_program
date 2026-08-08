@@ -18,6 +18,7 @@ Three families of test, and the split is the design:
 """
 
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -269,10 +270,15 @@ def test_a_workspace_path_becomes_a_target_the_window_can_open(tmp_path: Path) -
 def test_a_path_outside_the_workspace_is_redacted_not_printed(tmp_path: Path) -> None:
     """The disclosure this jail exists for. On the per-session socket this row
     is only seen by a window that opened that conversation; here every window in
-    the workspace receives it."""
-    summary, target = describe(
-        tmp_path, tmp_path, "Read", {"file_path": "C:/Users/someone/.ssh/config"}
+    the workspace receives it.
+
+    The path must be absolute on the platform running the test — "C:/Users/…"
+    is an ordinary *relative* path on linux and macOS, which would land inside
+    the workspace and prove nothing about the jail."""
+    secret = (
+        "C:/Users/someone/.ssh/config" if sys.platform == "win32" else "/home/someone/.ssh/config"
     )
+    summary, target = describe(tmp_path, tmp_path, "Read", {"file_path": secret})
     assert target is None
     assert summary == f"Read: {OUTSIDE_WORKSPACE}"
     assert "someone" not in summary

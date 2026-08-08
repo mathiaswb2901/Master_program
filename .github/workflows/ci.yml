@@ -43,7 +43,11 @@ jobs:
       - name: Type check
         run: uv run mypy
       - name: Tests
-        run: uv run pytest
+        # `-rs` prints every skip *with its reason*. On a 3-OS matrix that is
+        # the difference between "green" and "green, and here is exactly what
+        # this platform did not run" — the honest scoping §C2 asks for, in the
+        # log rather than in a PR description that will go stale.
+        run: uv run pytest -rs
 
   # The UI gate on all three platforms too. Nothing in `ui/` is platform code,
   # which is exactly why it is worth matrixing: the things that break here are
