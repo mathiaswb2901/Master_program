@@ -638,6 +638,8 @@ describe("the registered tools", () => {
       // The chord that answers "what are the chords" — the one a user needs
       // before they know any others (`panels/Keyboard.tsx`).
       "Alt+K": "keys.open",
+      // The universal find-in-files chord (`panels/Search.tsx`).
+      "Ctrl+Shift+F": "search.open",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",
       "Ctrl+3": "panel.agent",
@@ -658,6 +660,7 @@ describe("the registered tools", () => {
       .filter((registered) => panelTabInfo(TOOLS, registered.id).closable)
       .map((registered) => registered.id);
     expect(closable).toEqual([
+      "search",
       "conversations",
       "scratchpad",
       "usage",

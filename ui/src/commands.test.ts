@@ -154,6 +154,9 @@ describe("command registry", () => {
       // The Files tool's, next in `tools.ts` — creating a real document rather
       // than an empty file (M5 item 16).
       "files.newDocument",
+      // The Search tool's, after Files because it is registered right after it —
+      // the other way into the tree (Ctrl+Shift+F).
+      "search.open",
       // …the Editor tool's, then the Agent's, then the Terminal's, then the
       // Scratchpad's — registry order (`tools.ts`), never declared here.
       "file.save",
