@@ -130,6 +130,29 @@ test("a new window says what it is, and the reference teaches the chords", async
     ).toContainText("Alt");
   });
 
+  await test.step("the welcome card wears its ANVIL chrome (§V2)", async () => {
+    // The flagship empty state, asserted as computed values rather than a
+    // screenshot: it sits on `--surface-elevated`, which is what distinguishes it
+    // — no standing amber, since §2.4 spends amber only on *where I am* and
+    // *changing right now*. The token is resolved through a throwaway probe so
+    // the check holds in both themes without hard-coding an rgb.
+    const probe = (token: string): Promise<string> =>
+      page.evaluate((name) => {
+        const el = document.createElement("div");
+        el.style.backgroundColor = `var(${name})`;
+        document.body.appendChild(el);
+        const colour = getComputedStyle(el).backgroundColor;
+        el.remove();
+        return colour;
+      }, token);
+
+    const card = welcome(page);
+    const cardBg = await card.evaluate((node) => getComputedStyle(node).backgroundColor);
+    expect(cardBg, "the welcome card sits on --surface-elevated").toBe(
+      await probe("--surface-elevated"),
+    );
+  });
+
   await test.step("and every one of them is reachable by keyboard alone", async () => {
     // A discovery surface for a keyboard-first app that can only be *used* with
     // a mouse teaches the wrong thing about the product it is introducing
