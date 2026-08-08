@@ -389,7 +389,13 @@ def test_the_endpoints_run_replay_and_approve(tmp_path: Path) -> None:
         assert client.get("/api/validation").json()["results"] == []  # nothing yet
 
         with client.websocket_connect("/ws/events") as events:
-            body = {"subject": {"kind": "file", "ref": "book.xlsx", "label": "book.xlsx"}}
+            # Name the check explicitly: production wiring now also registers the
+            # real reconciliation gate, so an empty `checks` ("run all") would run
+            # it too — against a spec with no params — and change this risk.
+            body = {
+                "subject": {"kind": "file", "ref": "book.xlsx", "label": "book.xlsx"},
+                "checks": ["recon"],
+            }
             posted = client.post("/api/validation/run", json=body).json()
             vid = posted["validation_id"]
             assert posted["risk"] == "medium"
