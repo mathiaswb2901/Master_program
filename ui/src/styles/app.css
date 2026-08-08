@@ -51,15 +51,63 @@ input {
   flex-direction: column;
 }
 
-/* Shell boot gate. The native window opens before the backend answers, so this
-   is what the first second or two looks like — instead of nothing at all. */
+/* Launch boot gate. The native window opens before the backend answers, so this
+   is what the first second or two looks like (Boot.tsx) — a token-drawn twin of
+   the inline pre-JS splash in index.html, so the hand-off from that overlay is
+   seamless. Colours via tokens only; the splash's literals mirror these. */
 .wb-boot {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-secondary);
-  font-size: var(--type-sm-size);
+  background: var(--surface-app);
+}
+.wb-boot-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.wb-boot-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  /* --accent-fill, not --accent: the mark is a filled amber *area*, and
+     --accent-fill is #FBBF24 in BOTH themes (DESIGN.md §2.4), matching the
+     inline splash's literal amber. --accent goes deep (#856000) in light, which
+     would flash a colour change at the hand-off. */
+  background: var(--accent-fill);
+  /* Calm, one-property pulse — the same opacity loop as the agent "working" dot
+     (DESIGN.md §5) and the inline splash, so nothing new is invented here. */
+  animation: wb-pulse 2s ease-in-out infinite;
+}
+/* The stalled state: the mark stops pulsing and turns to the error colour. */
+.wb-boot-mark.is-error {
+  background: var(--error);
+  animation: none;
+}
+.wb-boot-name {
+  margin-top: var(--space-7);
+  font-size: var(--type-xl-size);
+  line-height: var(--type-xl-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+.wb-boot-status {
+  margin-top: var(--space-3);
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-tertiary);
+}
+.wb-boot-retry {
+  margin-top: var(--space-6);
+}
+
+/* The pulse is a loop, and reduced motion stops the one looping animation in the
+   app (tokens.css does this for .u-agent-pulse); the boot mark follows suit. */
+@media (prefers-reduced-motion: reduce) {
+  .wb-boot-mark {
+    animation: none;
+  }
 }
 
 /* The one element `src/motion.ts` animates: focus mode and a layout switch are
