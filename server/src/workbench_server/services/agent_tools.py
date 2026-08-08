@@ -37,6 +37,7 @@ from typing import Any, Literal, Protocol
 from pydantic import ValidationError
 
 from workbench_server.models.agents import SessionKind, UiState
+from workbench_server.models.commands import CommandInvokeResult, CommandManifest
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
@@ -830,6 +831,114 @@ async def handle_office_write(writer: OfficeDocumentWriter, args: dict[str, Any]
     return text_result(clamp_result(text, OFFICE_WRITE.max_result_bytes))
 
 
+# ---- run_command ------------------------------------------------------------
+#
+# The window owns the command registry; this tool lets an agent reach one, so it
+# can *arrange the window it works in* (open a file beside the terminal, put a
+# plan card in a pane of its own) rather than only describing what to click. It
+# never runs arbitrary code: only ids the window published are invocable, and the
+# relay refuses the rest (M5 item 14).
+
+
+class CommandInvoker(Protocol):
+    """The narrow slice of ``services/commands.CommandRelay`` this tool needs —
+    threaded into the context bridge so this module never imports the service."""
+
+    def manifest(self) -> CommandManifest: ...
+    def is_registered(self, command_id: str) -> bool: ...
+    async def invoke(self, command_id: str, params: dict[str, Any]) -> CommandInvokeResult: ...
+
+
+#: Commands listed in one discovery call before the list is capped and the rest
+#: named as a count (AXI shape 1). The window has a few dozen commands, so this
+#: shows the lot in the ordinary case and bounds a future that grows unbounded.
+RUN_COMMAND_LIST_MAX = 50
+
+RUN_COMMAND = AgentToolSpec(
+    name="run_command",
+    description=(
+        "Arrange the Workbench window by invoking one of its registered commands — "
+        "focus or open a panel, split a pane, switch a layout — instead of only "
+        "telling the user what to click. Call with no command_id to list the "
+        "available commands (id :: title); call with a command_id to run one. "
+        "params is reserved for commands that take arguments and is otherwise "
+        "ignored. Only commands the window published are invocable; an unknown id "
+        "is refused. Returns a one-line confirmation of what ran, or why it did "
+        "not (no window connected, or the window did not confirm)."
+    ),
+    output_format="text",
+    # A confirmation is one sentence; the list is the larger case — up to
+    # RUN_COMMAND_LIST_MAX lines of `id :: title` (~45 bytes each) plus the
+    # capped-count footer. 2,560 covers that with margin; a longer list is cut to
+    # it and says so.
+    max_result_bytes=2_560,
+    # Two small optional properties. Measured near 250 bytes; 420 leaves room to
+    # reword a description-in-schema without a third argument slipping in
+    # unmeasured — the schema is paid on every request whether the tool runs.
+    max_schema_bytes=420,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "command_id": {
+                "type": "string",
+                "description": "Registered command id; omit to list the available commands.",
+            },
+            "params": {
+                "type": "object",
+                "description": "Reserved: arguments for a command that takes them.",
+            },
+        },
+    },
+)
+
+
+def _format_command_list(manifest: CommandManifest) -> dict[str, Any]:
+    """The discovery answer: one `id :: title` per line, capped with a count.
+
+    An empty manifest says so and how to fix it (AXI shapes 2 and 3): no window
+    has connected, so there is nothing to run and nothing to list yet.
+    """
+    items = manifest.commands
+    if not items:
+        return text_result(
+            "No commands available — no Workbench window is connected. "
+            "Open the window, then call run_command again."
+        )
+    shown = items[:RUN_COMMAND_LIST_MAX]
+    lines = [f"{item.id} :: {item.title}" for item in shown]
+    if len(items) > RUN_COMMAND_LIST_MAX:
+        withheld = len(items) - RUN_COMMAND_LIST_MAX
+        lines.append(f"-- {withheld} more; these are the first {RUN_COMMAND_LIST_MAX}.")
+    return text_result(clamp_result("\n".join(lines), RUN_COMMAND.max_result_bytes))
+
+
+async def handle_run_command(invoker: CommandInvoker, args: dict[str, Any]) -> dict[str, Any]:
+    """The run_command tool body, free of SDK imports so it is directly testable.
+
+    No command_id lists the manifest; a command_id runs it. An unknown id is a
+    tool error the agent fixes by discovering the real ones — never a silent
+    pass. A run that does not succeed (no window, no confirmation) also comes
+    back as a tool error, with the relay's own sentence for why.
+    """
+    command_id = _arg_str(args, "command_id")
+    if not command_id:
+        return _format_command_list(invoker.manifest())
+    if not invoker.is_registered(command_id):
+        return error_result(
+            f"{command_id!r} is not a registered command. "
+            "Call run_command with no command_id to list them."
+        )
+    raw = args.get("params")
+    params = raw if isinstance(raw, dict) else {}
+    result = await invoker.invoke(command_id, params)
+    if result.ok:
+        confirm = f"ran {command_id}" + (f": {result.detail}" if result.detail else "")
+        return text_result(clamp_result(confirm, RUN_COMMAND.max_result_bytes))
+    return error_result(
+        clamp_result(f"did not run {command_id}: {result.detail}", RUN_COMMAND.max_result_bytes)
+    )
+
+
 # ---- the registry -----------------------------------------------------------
 
 #: Every session's toolset — office_read and office_write included, so every
@@ -840,6 +949,7 @@ AGENT_TOOLS: tuple[AgentToolSpec, ...] = (
     PRESENT_PLAN,
     OFFICE_READ,
     OFFICE_WRITE,
+    RUN_COMMAND,
 )
 
 #: The extra toolset an ``orchestrator`` session carries. Never in the context
