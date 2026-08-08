@@ -324,6 +324,7 @@ describe("a layout with several panes of the same tool", () => {
       "agent",
       "conversations",
       "editors",
+      "review",
       "terminal",
       "visual",
     ]);
