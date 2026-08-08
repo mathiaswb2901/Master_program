@@ -126,6 +126,41 @@ describe("the working chip — the bar's one 'changing right now' (§2.4)", () =
   });
 });
 
+/**
+ * The half every other assertion in this file assumes and none of them checks.
+ *
+ * `:has([aria-label="…"])` is a *string join across two files*: the stylesheet
+ * names an accessible name, and another lane's component emits it. Get the
+ * string wrong — or let the Agent lane reword "Working" — and the selector
+ * matches nothing, silently, in exactly the way an undefined `var()` paints
+ * nothing (`tokenRefs.test.ts`, and the search highlight that shipped invisible).
+ * Every check above would stay green: they read the sheet that contains the
+ * typo. So the join is asserted from the other end, against the source that
+ * actually renders the label.
+ */
+describe("the state selectors join to markup that exists", () => {
+  const AGENT_SOURCE = ["panels/AgentPanel.tsx", "panels/Chat.tsx"]
+    .map((file) =>
+      fs.readFileSync(path.join(STYLE_ROOT, "..", ...file.split("/")), "utf-8"),
+    )
+    .join("\n");
+
+  /** Every accessible name `statusbar.css` keys a rule on. */
+  const keyedNames = (): string[] => [
+    ...new Set(
+      [...STATUSBAR.matchAll(/:has\(\[aria-label="([^"]+)"\]\)/g)].map((match) => match[1]),
+    ),
+  ];
+
+  it("keys on names the Agent tool really renders", () => {
+    const names = keyedNames();
+    // Not vacuous: the two rules this sheet's whole state story rests on.
+    expect(names.sort()).toEqual(["Needs attention", "Working"]);
+    const missing = names.filter((name) => !AGENT_SOURCE.includes(`"${name}"`));
+    expect(missing).toEqual([]);
+  });
+});
+
 describe("the attention badge — the one reading that is a request (§2.6, §7)", () => {
   const attention = () => body(STATUSBAR, '.wb-status-count:has([aria-label="Needs attention"])');
 
