@@ -806,3 +806,160 @@ def _close_handle(handle: Any) -> None:
     # A handle that is already closed is the outcome we wanted anyway.
     with contextlib.suppress(Exception):
         handle.Close()
+
+
+# ---- reading and writing the live document -----------------------------------
+#
+# The COM half of the document bridge (``real_document_bridge.py``). Every
+# function here is synchronous and runs on the one apartment thread that created
+# the ``Application`` — COM objects belong to the apartment that made them, so a
+# read must run where the launch did. They reach the live in-memory document
+# through the ``OfficeInstance`` the launch is holding; none opens a new one, and
+# a write is scoped to the one addressed paragraph or cell (the fidelity rule),
+# never a ``SaveAs`` or a whole-document rewrite.
+
+#: Trailing markers Word puts on a paragraph's ``Range.Text`` — the paragraph
+#: mark itself (``\r``), and the cell/row markers a paragraph inside a table
+#: carries. Stripped so a read returns the same clean string the fake mints.
+_PARAGRAPH_MARKS = "\r\n\x07\x0b\x0c"
+
+#: HRESULTs that mean the COM object is gone: the instance closed under a call
+#: that was in flight. Mapped to ``DocGoneError`` rather than the catch-all, so a
+#: read that races a close reports the honest reason.
+_DEAD_HRESULTS = frozenset(
+    {
+        -2147417848,  # RPC_E_DISCONNECTED
+        -2147023174,  # 0x800706BA RPC server unavailable
+        -2147221021,  # 0x800401FD CO_E_OBJNOTCONNECTED
+        -2146959355,  # 0x80080005 CO_E_SERVER_EXEC_FAILURE
+    }
+)
+
+
+def is_object_gone(error: Exception) -> bool:
+    """Does this COM failure mean the instance closed underneath the call?"""
+    return _hresult(error) in _DEAD_HRESULTS
+
+
+def _cell_text(value: Any) -> str:
+    """One Excel cell value as the string a reader sees.
+
+    Integral floats lose their ``.0`` (Excel hands back ``1000.0`` for a cell
+    that shows ``1000``); booleans render as Excel does; a blank cell is the
+    empty string, never ``None``, so the grid stays rectangular.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _as_matrix(values: Any) -> list[list[Any]]:
+    """``Range.Value`` normalised to a 2D list.
+
+    Excel returns a scalar for one cell, a tuple of tuples for a rectangle, and
+    ``None`` for a range with nothing in it — one shape to iterate keeps the
+    caller from re-deciding per read.
+    """
+    if values is None:
+        return []
+    if not isinstance(values, tuple):
+        return [[values]]
+    if values and isinstance(values[0], tuple):
+        return [list(row) for row in values]
+    return [list(values)]
+
+
+def word_paragraph_count(instance: OfficeInstance) -> int:
+    """How many paragraphs the live Word body has."""
+    return int(_com_call(getattr, instance.document.Paragraphs, "Count"))
+
+
+def word_paragraph_texts(instance: OfficeInstance) -> list[str]:
+    """Every paragraph's text, cleaned of its trailing paragraph mark.
+
+    Read straight from ``Document.Paragraphs(i).Range.Text`` — the live,
+    on-screen body including edits the user has not saved — which is exactly what
+    hosting a real Word instead of a preview exists to expose.
+    """
+    document = instance.document
+    count = int(_com_call(getattr, document.Paragraphs, "Count"))
+    texts: list[str] = []
+    for index in range(1, count + 1):
+        paragraph = _com_call(document.Paragraphs.Item, index)
+        raw = str(_com_call(getattr, paragraph.Range, "Text"))
+        texts.append(raw.rstrip(_PARAGRAPH_MARKS))
+    return texts
+
+
+def set_word_paragraph_text(instance: OfficeInstance, paragraph: int, text: str) -> None:
+    """Replace the text of one paragraph (zero-based), and nothing else.
+
+    The paragraph mark is re-supplied so the replace stays *within* the
+    paragraph: the document's paragraph count never changes and no neighbour is
+    disturbed — the fidelity the write seam owes. Applied to the live in-memory
+    instance, so the user can undo it; the file is never rewritten here.
+    """
+    document = instance.document
+    target = _com_call(document.Paragraphs.Item, paragraph + 1)
+    _com_call(setattr, target.Range, "Text", text + "\r")
+
+
+def excel_sheet_names(instance: OfficeInstance) -> list[str]:
+    """Every worksheet name, in tab order."""
+    worksheets = instance.document.Worksheets
+    count = int(_com_call(getattr, worksheets, "Count"))
+    return [
+        str(_com_call(getattr, _com_call(worksheets.Item, index), "Name"))
+        for index in range(1, count + 1)
+    ]
+
+
+def excel_worksheet(instance: OfficeInstance, sheet: str) -> Any:
+    """The worksheet named ``sheet``, or ``None`` if the book has no such tab.
+
+    Found by name rather than by ``Worksheets(sheet)`` so a missing sheet is a
+    plain ``None`` the caller turns into the shared ``range_invalid`` refusal,
+    not a raw COM exception.
+    """
+    worksheets = instance.document.Worksheets
+    count = int(_com_call(getattr, worksheets, "Count"))
+    for index in range(1, count + 1):
+        worksheet = _com_call(worksheets.Item, index)
+        if str(_com_call(getattr, worksheet, "Name")) == sheet:
+            return worksheet
+    return None
+
+
+def excel_grid(worksheet: Any) -> dict[tuple[int, int], str]:
+    """The worksheet's used range as a sparse ``(row, col) -> text`` map from A1.
+
+    ``UsedRange`` may start below and right of A1; its ``Row``/``Column`` anchor
+    the grid so the coordinates match the fake's A1-based ones. Read in one
+    ``Value`` call rather than cell by cell, and blank cells are dropped so the
+    used-range dimensions come out ``0, 0`` for an empty sheet.
+    """
+    used = _com_call(getattr, worksheet, "UsedRange")
+    base_row = int(_com_call(getattr, used, "Row")) - 1
+    base_col = int(_com_call(getattr, used, "Column")) - 1
+    grid: dict[tuple[int, int], str] = {}
+    for row_offset, row in enumerate(_as_matrix(_com_call(getattr, used, "Value"))):
+        for col_offset, value in enumerate(row):
+            text = _cell_text(value)
+            if text:
+                grid[(base_row + row_offset, base_col + col_offset)] = text
+    return grid
+
+
+def set_excel_cell(worksheet: Any, row: int, col: int, value: str) -> None:
+    """Set one cell (zero-based ``row``/``col``), and nothing else.
+
+    ``Cells(r, c).Value`` is assigned directly; an empty value clears the cell
+    (``None``), mirroring the fake. No other cell is touched and the file is not
+    rewritten — the live instance changes, the user can undo it.
+    """
+    cell = _com_call(worksheet.Cells.Item, row + 1, col + 1)
+    _com_call(setattr, cell, "Value", value if value != "" else None)

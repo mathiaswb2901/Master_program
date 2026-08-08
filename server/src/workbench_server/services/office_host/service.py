@@ -76,6 +76,7 @@ from workbench_server.services.office_host.document_bridge import (
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
 from workbench_server.services.office_host.fake_document_bridge import FakeDocumentBridge
 from workbench_server.services.office_host.identity import fake_identity, probe_identity
+from workbench_server.services.office_host.real_document_bridge import ShellDocumentBridge
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.office_host.shell_channel import ShellChannel
 from workbench_server.services.office_host.state import ForeignProcessError, HostLifecycle
@@ -198,16 +199,19 @@ def build_bridge(
 
     ``None`` means "cannot read a hosted document here", which is not an error:
     the ``office_read`` tool says so and names how to open one. The fake shares
-    the fake host backend so a read is answered for exactly the pids it launched.
-    The real COM reader arrives in a later PR; until then the ``ShellHostBackend``
-    branch is deliberately ``None`` — hosting a window is shipped, reading its
-    live document is not.
+    the fake host backend so a read is answered for exactly the pids it launched;
+    the real :class:`~...real_document_bridge.ShellDocumentBridge` shares the real
+    one the same way, reading and writing the live COM document through the
+    instance that backend is holding. A machine with no shell backend (a browser
+    tab, or off Windows) has no live document to read, so it stays ``None`` and
+    the tool degrades honestly.
     """
     if mode == "off":
         return None
     if fake and isinstance(backend, FakeHostBackend):
         return FakeDocumentBridge(backend)
-    # ShellHostBackend -> None for now (PR 2 builds the real ShellDocumentBridge).
+    if isinstance(backend, ShellHostBackend):
+        return ShellDocumentBridge(backend)
     return None
 
 
