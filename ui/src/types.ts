@@ -122,6 +122,7 @@ export type WorkspaceEvent =
   | SessionActivityEvent
   | SessionPermissionEvent
   | OrchestratorEvent
+  | ValidationEvent
   | WorkspaceChangedEvent;
 
 // ---- provenance.py ----------------------------------------------------------

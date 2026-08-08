@@ -24,6 +24,7 @@ import { missionTool } from "./panels/MissionControl";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
+import { reviewTool } from "./panels/ReviewPanel";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
 import { usageTool } from "./panels/UsagePanel";
@@ -55,6 +56,11 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // their rows rather than deriving its own, so it reads as the wide view of
   // the two capabilities above it.
   missionTool,
+  // After the board, because it surfaces the *proof* behind a session's output:
+  // one Review pane per validation result, its risk badge and evidence gallery,
+  // and the human approval gate (M6 PR3). Opened on demand; its status reading
+  // and tab badge are always there.
+  reviewTool,
   // Opened on demand from a plan card's Expand: one pane per drawn artifact,
   // rendering the same scene graph the card does (M5 item 3, PR 4).
   visualTool,

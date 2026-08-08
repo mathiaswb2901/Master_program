@@ -38,10 +38,12 @@ import type {
   SessionState,
   SpawnRefusal,
   UsageSessionEntry,
+  ValidationResult,
   WorkerInfo,
   WorkspaceEvent,
   WorktreeInfo,
 } from "./types";
+import { latestForSession } from "./validation";
 import { ReconnectingSocket } from "./ws";
 
 // ---- one card's worth of fleet ----------------------------------------------
@@ -63,6 +65,15 @@ export interface MissionCard {
   slot: WorktreeInfo | null;
   /** Prompts this session is blocked on, answerable from the card. */
   pending: PendingPermission[];
+  /** The latest `ValidationResult` for this session's output — the fifth read
+   * (M6 PR3). The card renders its risk badge *from this object*, deriving no
+   * new number: the card's risk and the Review panel's risk are the same result
+   * by construction. Null until this session has been validated.
+   *
+   * `buildCards` always sets it; it is declared optional only so a card literal
+   * built in a test that predates the read (Mission Control's own fixtures)
+   * stays valid without every fixture restating `validation: null`. */
+  validation?: ValidationResult | null;
 }
 
 /** Order: anything blocked on the human first, then the busy, then the quiet.
@@ -128,11 +139,17 @@ export function buildCards(input: {
   slots: readonly WorktreeInfo[];
   permissions: readonly SessionPermissions[];
   states: Readonly<Record<string, SessionState>>;
+  /** The fifth read (M6 PR3): every held `ValidationResult`. The card takes the
+   * latest one for its session's output and renders its badge — no new number.
+   * Optional and defaulting to empty, so a caller that does not yet wire the
+   * validation store still builds the same cards with `validation: null`. */
+  validations?: readonly ValidationResult[];
 }): MissionCard[] {
   const workers = workersById(input.orchestrators);
   const costById = new Map(input.costs.map((entry) => [entry.session_id, entry]));
   const promptsById = new Map(input.permissions.map((row) => [row.session_id, row]));
   const activityById = new Map(input.sessions.map((row) => [row.session_id, row]));
+  const validations = input.validations ?? [];
 
   const ids = new Set<string>([...activityById.keys(), ...workers.keys()]);
   const cards: MissionCard[] = [];
@@ -163,6 +180,10 @@ export function buildCards(input: {
       worker,
       slot: slotFor(worker, input.slots),
       pending: prompts?.pending ?? [],
+      // The join, not a new authority: the card's risk *is* the latest result's,
+      // so a card and its Review pane can never show two computations of "how
+      // risky" (M6 PR3, plan §1 "the same result object by construction").
+      validation: latestForSession(validations, sessionId),
     });
   }
   return orderCards(cards);

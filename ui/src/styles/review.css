@@ -1,0 +1,249 @@
+/**
+ * The Review panel: the evidence gallery, the risk badge, the approval gate.
+ *
+ * Every colour is a DESIGN.md token, and the status colours arrive as CSS custom
+ * properties set inline from `validation.ts`' semantic mapping (`--pill-color` /
+ * `--pill-bg`) — so this stylesheet spends no raw hex and invents no colour, it
+ * only lays out what the mapping coloured. §6.4 status pills, §6.7 the reading.
+ */
+
+.wb-review {
+  height: 100%;
+  overflow: auto;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  padding: var(--space-4) var(--space-5);
+}
+
+/* ---- the risk badge + the outcome pill (§6.4) ------------------------------ */
+
+.wb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 20px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--pill-color);
+  background: var(--pill-bg);
+  white-space: nowrap;
+}
+
+.wb-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--pill-color);
+  flex: none;
+}
+
+/* Dot-only variant (10px) for a tab strip and a Mission Control card. It carries
+   its own aria-label — colour is never the only signal. */
+.wb-pill-dotonly {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--pill-color);
+  flex: none;
+}
+
+/* ---- the head: subject + risk --------------------------------------------- */
+
+.wb-review-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.wb-review-subject {
+  font-weight: 600;
+  min-width: 0;
+}
+
+.wb-review-summary {
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-4);
+}
+
+/* ---- the evidence gallery -------------------------------------------------- */
+
+.wb-review-gallery {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-evidence {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-elevated);
+}
+
+.wb-evidence-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.wb-evidence-label {
+  font-weight: 500;
+  min-width: 0;
+}
+
+.wb-evidence-kind {
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}
+
+.wb-evidence-detail {
+  margin: var(--space-2) 0 0;
+  color: var(--text-secondary);
+}
+
+.wb-evidence-expand {
+  margin-top: var(--space-2);
+}
+
+.wb-evidence-payload {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}
+
+/* The explicit empty state — a gallery says "none", never blankness (AXI 2). */
+.wb-review-none {
+  color: var(--text-secondary);
+  padding: var(--space-3) 0;
+}
+
+.wb-review-truncation {
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+  margin-top: var(--space-3);
+}
+
+/* ---- the approval gate ----------------------------------------------------- */
+
+.wb-review-approval {
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-review-awaiting {
+  color: var(--warn);
+  font-weight: 500;
+  margin: 0 0 var(--space-3);
+}
+
+.wb-review-note {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 48px;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--type-md-size);
+}
+
+.wb-review-approved {
+  color: var(--success);
+  margin: 0;
+}
+
+/* The one action the app is blocked on carries the amber fill (DESIGN.md §2.4). */
+.wb-review-approve {
+  height: 28px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent-fill);
+  color: var(--text-on-accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wb-review-approve:hover {
+  background: var(--accent-fill-hover);
+}
+
+.wb-review-approve:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.wb-review-stale {
+  color: var(--error);
+  margin: var(--space-3) 0 0;
+}
+
+/* ---- the index (the bare pane) + the tombstone ----------------------------- */
+
+.wb-review-index {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-review-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.wb-review-row:hover {
+  background: var(--surface-hover);
+}
+
+.wb-review-row-subject {
+  min-width: 0;
+  flex: 1;
+}
+
+.wb-review-empty,
+.wb-review-tombstone {
+  color: var(--text-secondary);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+/* ---- the status-bar reading (§6.7, hides at zero) -------------------------- */
+
+.wb-review-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--warn);
+}
