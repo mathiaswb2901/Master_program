@@ -146,14 +146,18 @@ class SetupService:
         # Not native here is not the user's error to fix in a checklist: a
         # browser tab has no window to host into, and a machine may have no
         # Office. Reported honestly as unavailable (never blocks all_ok), with a
-        # pointer when there is a real one — the desktop app docks documents.
+        # pointer only when it names the real cause. "Open the desktop app" is a
+        # no-op — and so misleading — when the shell is already attached (the
+        # user is in the desktop app) or when native hosting is off by explicit
+        # operator override (WORKBENCH_OFFICE_NATIVE=off); neither is fixed by
+        # launching an app that is already running or was deliberately disabled.
         action = (
             SetupAction(
                 kind="instruction",
                 label="Open the desktop app to dock a document",
                 instruction="Run the Workbench desktop app (cd desktop && npm run tauri dev).",
             )
-            if caps.office_detected
+            if caps.office_detected and not caps.shell_attached and caps.office_native != "off"
             else None
         )
         return SetupCheck(

@@ -183,6 +183,36 @@ def test_office_detected_in_browser_offers_desktop_pointer(tmp_path: Path) -> No
     assert office.action is not None and office.action.kind == "instruction"
 
 
+def test_office_detected_with_shell_attached_omits_desktop_pointer(tmp_path: Path) -> None:
+    # Already inside the desktop app: "open the desktop app" would be a no-op, so
+    # the pointer must not be offered even though Office is detected.
+    caps = _caps(
+        native_hosting=False,
+        office_detected=True,
+        shell_attached=True,
+        detail="native hosting disabled",
+    )
+    status = _service(tmp_path, caps=caps).status()
+    office = _check(status, "office")
+    assert office.state == "unavailable"
+    assert office.action is None
+
+
+def test_office_native_off_omits_misleading_pointer(tmp_path: Path) -> None:
+    # An explicit operator override (WORKBENCH_OFFICE_NATIVE=off) is not fixed by
+    # launching the desktop app, so no "open the app" nudge is attached.
+    caps = _caps(
+        native_hosting=False,
+        office_detected=True,
+        office_native="off",
+        detail="native hosting off by policy",
+    )
+    status = _service(tmp_path, caps=caps).status()
+    office = _check(status, "office")
+    assert office.state == "unavailable"
+    assert office.action is None
+
+
 def test_onlyoffice_ok_when_configured(tmp_path: Path) -> None:
     caps = _caps(onlyoffice=True)
     status = _service(tmp_path, caps=caps, onlyoffice_enabled=True).status()
