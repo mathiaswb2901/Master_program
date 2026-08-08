@@ -77,9 +77,18 @@ impl Fixture {
     /// window: the arrangement below it — panel, clip child, reparented guest —
     /// is identical, and it is the arrangement under test.
     fn new(size: (i32, i32), caption_inset: i32) -> Self {
+        Self::with_class(size, caption_inset, guest::SYNTHETIC_GUEST_CLASS)
+    }
+
+    /// Dock a guest that registers itself under `class`.
+    ///
+    /// The default class stands in for both Word (`OpusApp`) and Excel
+    /// (`XLMAIN`); a test names one explicitly to prove the mechanism keys on
+    /// nothing but the class string it is handed.
+    fn with_class(size: (i32, i32), caption_inset: i32, class: &str) -> Self {
         let serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
         let exe = guest::synthetic_guest_exe().expect("the synthetic guest binary should be built");
-        let mut launched = guest::launch(&exe, &[], guest::SYNTHETIC_GUEST_CLASS, LAUNCH_TIMEOUT)
+        let mut launched = guest::launch(&exe, &[class], class, LAUNCH_TIMEOUT)
             .expect("the synthetic guest should start and show a window");
         let handshake = read_handshake(&mut launched.process);
 
@@ -259,6 +268,45 @@ fn a_guest_window_is_found_by_class_and_pid() {
     );
     // And the search is specific: nothing of that class belongs to *our* pid.
     assert!(guest::find_window(std::process::id(), guest::SYNTHETIC_GUEST_CLASS).is_none());
+}
+
+#[test]
+fn an_xlmain_frame_docks_the_way_words_opusapp_frame_does() {
+    // Excel's top-level frame is `XLMAIN` where Word's is `OpusApp`. Native
+    // hosting keys on *neither*: `launch` finds the frame by the class it is
+    // told, and `embed` reparents the HWND that came back and strips its styles
+    // — the same code either way. A guest that registers itself as `XLMAIN` is
+    // therefore found and docked exactly as Word is, which is the whole claim of
+    // extending hosting to Excel: the frame class differs, the docking does not.
+    let mut fixture = Fixture::with_class((820, 560), 0, "XLMAIN");
+    assert_eq!(
+        guest::find_window(fixture.guest_process.pid(), "XLMAIN"),
+        Some(fixture.guest_window),
+        "the XLMAIN frame was not found by its own class and pid",
+    );
+
+    let guest_hwnd = fixture.guest_window.hwnd();
+    assert_eq!(
+        style_of(guest_hwnd) & WS_CHILD.0,
+        0,
+        "the XLMAIN guest should start as a top-level window",
+    );
+
+    fixture.embed();
+
+    let after = style_of(guest_hwnd);
+    assert_eq!(
+        after & WS_CHILD.0,
+        WS_CHILD.0,
+        "the XLMAIN guest is not a child"
+    );
+    assert_eq!(after & WS_CAPTION.0, 0, "the caption survived the restyle");
+    assert_eq!(after & WS_THICKFRAME.0, 0, "the resize frame survived");
+    assert_eq!(
+        parent_of(guest_hwnd),
+        Some(fixture.clip),
+        "the XLMAIN guest is not inside the clip child",
+    );
 }
 
 #[test]
