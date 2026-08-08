@@ -1427,3 +1427,100 @@ export interface SessionsResponse {
   /** Why the sessions file was ignored, if it was. Never fatal. */
   problem: string | null;
 }
+
+// ---- validation.py ----------------------------------------------------------
+// Mirrors server/src/workbench_server/models/validation.py. Provenance answers
+// "who wrote this file"; validation answers "and is it correct" — one
+// ValidationResult, its `risk` derived from the evidence (never asserted), held
+// server-side keyed by `validation_id`. No UI panel yet (that is M6 PR3): these
+// are the wire types PR3 consumes.
+
+/** The badge value, least-to-most severe. `blocked` is "could not judge" —
+ * distinct from a red `high` fail — and a result with no evidence derives it. */
+export type RiskLevel = "pass" | "low" | "medium" | "high" | "blocked";
+
+/** One check's verdict on one thing. `skipped` = did not apply / could not
+ * evaluate, distinct from `fail` (evaluated, disagreed). */
+export type CheckOutcome = "pass" | "warn" | "fail" | "skipped";
+
+/** The kind of evidence, and the key its detail payload is stored under. */
+export type EvidenceKind = "numeric" | "gate" | "diff" | "log" | "artifact";
+
+/** AXI shape 1: a capped list says how much was cut and how to widen it. */
+export interface EvidenceTruncation {
+  shown: number;
+  total: number;
+  detail: string;
+}
+
+/** One line of evidence, with a reference to its detail payload (never the
+ * payload inline). `payload_ref` is null when there is no payload behind it. */
+export interface EvidenceItem {
+  kind: EvidenceKind;
+  label: string;
+  outcome: CheckOutcome;
+  detail: string;
+  payload_ref: string | null;
+}
+
+/** What was validated: a session's output, a file, or an objective. */
+export interface ValidationSubject {
+  kind: "session_output" | "file" | "objective";
+  /** A session_id, a workspace-relative path, or an objective_id. */
+  ref: string;
+  label: string;
+}
+
+/** The one mandatory human decision on a `medium`-or-worse result. Timestamp is
+ * server-minted (ISO 8601 string). */
+export interface ValidationApproval {
+  approver: string;
+  timestamp: string;
+  note: string | null;
+}
+
+/** One validation's whole answer — the atom the milestone composes with. */
+export interface ValidationResult {
+  /** Server-minted stable handle; `approve` and GET /{id} address it. */
+  validation_id: string;
+  subject: ValidationSubject;
+  /** Derived from `evidence`, never asserted by the caller. */
+  risk: RiskLevel;
+  evidence: EvidenceItem[];
+  summary: string;
+  created_at: string;
+  /** null while running. */
+  completed_at: string | null;
+  /** Set when `evidence` was capped (AXI shape 1); null means whole. */
+  truncated: EvidenceTruncation | null;
+  /** The human decision once made; null = awaiting approval (medium-or-worse)
+   * or not required. */
+  approval: ValidationApproval | null;
+}
+
+/** POST /api/validation/run — what to validate and with which checks. `checks`
+ * empty runs every registered check; `params` is per-check input as data. */
+export interface ValidationSpec {
+  subject: ValidationSubject;
+  checks?: string[];
+  params?: Record<string, unknown>;
+}
+
+/** POST /api/validation/{id}/approve — the server stamps the timestamp. */
+export interface ApproveRequest {
+  approver: string;
+  note?: string | null;
+}
+
+/** GET /api/validation — every result currently held, oldest first. In-memory
+ * and bounded; a restart returns an empty list. */
+export interface ValidationResults {
+  results: ValidationResult[];
+}
+
+/** Broadcast on /ws/events when a result is created or approved. Carries the
+ * whole result; the client replaces its entry keyed by `validation_id`. */
+export interface ValidationEvent {
+  type: "validation";
+  result: ValidationResult;
+}
