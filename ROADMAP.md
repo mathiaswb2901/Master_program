@@ -1027,16 +1027,46 @@ without forking — the difference between a fixed app and an instrument.
 
 ### M6 — Proof (validation + objectives)
 
-- Validation pipeline with evidence: post-done staged run in an isolated worktree —
-  intent-from-transcript, rebase, adversarial fresh-context review, ruff/mypy/pytest
-  gates, intent-directed E2E with recorded screenshots/video/logs — evidence gallery +
-  risk badge in a Review panel, one mandatory human approval before push/PR, PR
-  babysitter with bounded retries. Runnable standalone on any branch (principle 1).
-- First **domain gate** ships as proof of the moat: numeric reconciliation between a
-  workbook and the code that produced it.
-- Objective sessions: server-enforced loops (iteration/token/wall-clock caps in code,
-  unattended deny-and-log permission policy), telemetry strip, morning-after per-commit
-  diff review linked to iteration transcripts.
+**Plan of record: [`docs/plan/m6-proof.md`](docs/plan/m6-proof.md)** — the first plan doc
+to live under `docs/plan/` rather than inline here, because M6 breaks into a five-PR
+sequence with explicit disjoint file ownership and that is more than a milestone bullet can
+carry. The frame ships **fake-first / fully CI-verifiable** (the reconciliation gate reads
+`.xlsx` with openpyxl, no Office), and the pieces that need real Office or a second pass are
+named as deferred rather than blocking. Summary of the sequence:
+
+- **PR 1 — the validation frame** (`models/validation.py`, `services/validation.py`,
+  `routers/validation.py`): a `ValidationResult` with typed `EvidenceItem`s and a derived
+  `RiskLevel`, a `ValidationCheck` protocol (a registry of checks, not a hardwired
+  pipeline), a `ValidationEvent` on the shared bus with `GET /api/validation` replay, a
+  bounded result map, and the **one mandatory human approval** endpoint. Foundation for 2–5.
+- **PR 2 — the first domain gate** (`services/reconciliation.py`, `models/reconciliation.py`,
+  an `office_reconcile` `AgentToolSpec`): workbook↔code **numeric reconciliation** as proof
+  of the moat. Inputs are a `cell → expected` mapping with **units** (never executed user
+  code); comparison is **unit-aware** (a silent EUR/MWh↔EUR/kWh or MW↔MWh ×1000 is a named
+  `fail`, not a coerced number) and **DST-aware** (23-/25-hour Nordic days align by local
+  wall-clock, tested on 2024-03-31 / 2024-10-27), with a look-ahead/leakage `warn`. Reads
+  the xlsx with **openpyxl** — the one justified new runtime dep, chosen so the gate is
+  green with **no Office**; the live-COM reader is a deferred later PR. The agent tool
+  honours the byte budget + the AXI three shapes.
+- **PR 3 — the Review panel + risk badge** (`ui/src/panels/ReviewPanel.tsx`,
+  `ui/src/validation.ts`, one line in `tools.ts`): the evidence gallery and the risk badge,
+  a §6.4 status pill mapped onto the **existing** semantic/agent-status tokens (no new
+  colour), plural-safe. **PR 4 — composition**: a fifth read in `ui/src/mission.ts` so a
+  Mission Control card shows the same risk object (a join, not a second authority), plus a
+  sibling risk badge on the provenance bar (#26). Evidence attaches at provenance's own two
+  anchors — a session's output and a file — so validation composes with #26 and #63 rather
+  than duplicating them.
+- **PR 5 — objective sessions** (`models/objectives.py`, `services/objectives.py`,
+  `ui/src/panels/ObjectivePanel.tsx`): a session bound to a validated goal with
+  **server-enforced** iteration/token/wall-clock caps and an unattended **deny-and-log**
+  permission policy; pass/fail evidence (a `ValidationResult` reaching `pass`) closes it. It
+  **reuses the named-session store (#70)** — an `Objective` references a `session_id` and
+  adds only a goal, a spec and caps; no second session store, no `store.activeObjective`.
+- **Deferred past M6's first cut** (named, not forgotten): the staged adversarial
+  fresh-context review + intent-directed E2E checks (they plug into `ValidationCheck`
+  later), the push/PR babysitter with bounded retries, the live-COM reconciliation reader
+  (needs the owner's Office box), and persisting results/objectives to `.workbench/` (M6
+  stays in memory, the provenance/activity/usage posture).
 
 ### M7 — Premium & Public (identity + OSS release)
 
