@@ -24,7 +24,9 @@ from workbench_server.services.commands import CommandRelay
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.office_host.document_bridge import DocNotHostedError
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
+from workbench_server.services.search import SearchService
 from workbench_server.services.validation import ValidationService
+from workbench_server.services.workspace import Workspace
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("WORKBENCH_LIVE_AGENT") != "1",
@@ -71,6 +73,7 @@ async def test_real_sdk_round_trip(tmp_path: Path) -> None:
             _NoReader(),
             CommandRelay(EventBus()),
             ValidationService(tmp_path, EventBus()),
+            SearchService(Workspace(tmp_path)),
         ),
         max_sessions=1,
     )
