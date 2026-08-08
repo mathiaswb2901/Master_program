@@ -55,6 +55,11 @@ from workbench_server.models.orchestrator import (
 )
 from workbench_server.models.plans import PlanArtifact, plan_input_schema
 from workbench_server.models.reconciliation import ReconciliationReport, ReconciliationSpec
+from workbench_server.models.search import (
+    MAX_HITS,
+    SearchRequest,
+    SearchResponse,
+)
 from workbench_server.models.validation import (
     EvidenceKind,
     ValidationResult,
@@ -1250,6 +1255,149 @@ async def handle_office_reconcile(
     return text_result(summary.model_dump_json())
 
 
+# ---- workspace_search -------------------------------------------------------
+#
+# Grep the folder the session is working in, without shelling out. The window
+# owns the same search (services/search.py, the Ctrl+Shift+F panel); this is the
+# agent's door to it, so an agent can find where a symbol lives before it edits
+# rather than re-reading files it already read. It respects the file tree's
+# ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so it never returns a match inside
+# a build cache the user cannot see either.
+
+
+class WorkspaceSearcher(Protocol):
+    """The narrow slice of ``SearchService`` this tool needs — threaded into the
+    context bridge so this module never imports the service (the CommandInvoker
+    pattern)."""
+
+    def search(self, request: SearchRequest) -> SearchResponse: ...
+
+
+#: Hits carried in one tool result before the list is capped and the rest named
+#: as a count (AXI shape 1). Smaller than the panel's default: an agent acts on a
+#: handful and reads the file for the rest, and the cap is what keeps the result
+#: provably inside its byte budget.
+WORKSPACE_SEARCH_MAX_HITS = 40
+
+#: Field clips that keep the compact text result inside its byte budget by
+#: construction: a matching line and a path are both bounded before the result is
+#: assembled, so the body cannot blow the ceiling on a minified file or a deep path.
+_SEARCH_LINE_CLIP = 160
+_SEARCH_PATH_CLIP = 120
+
+WORKSPACE_SEARCH = AgentToolSpec(
+    name="workspace_search",
+    description=(
+        "Find literal text across the files in your workspace folder — the same "
+        "content search the Ctrl+Shift+F panel runs. Give a query; optionally "
+        "max_results (default 40) and case_sensitive (default false). Returns hits "
+        "grouped by file as 'path:line: matching text', respecting the file tree's "
+        "ignored dirs and build caches (.git, node_modules, CACHEDIR.TAG). Says so "
+        "explicitly when nothing matches, and when it stopped at max_results it "
+        "names how to see more. Substring match, not a regex. Open a named file to "
+        "read a hit in context."
+    ),
+    output_format="text",
+    # WORKSPACE_SEARCH_MAX_HITS lines of `  line: text` (each clipped to
+    # _SEARCH_LINE_CLIP) plus a path header per file and a header/footer sentence.
+    # 40 hits * ~180 bytes + headers measures well under 8 kB; 8,192 is that with a
+    # margin the budget test pins, and a longer body is clamped to it (text the
+    # model reads, never JSON it parses, so clamping is safe).
+    max_result_bytes=8_192,
+    # Three small properties, one required. Measured near 480 bytes; 700 leaves
+    # room to reword a field description without a fourth argument slipping in
+    # unmeasured — the schema is paid on every request whether the tool runs.
+    max_schema_bytes=700,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The literal text to find (substring, not a regex).",
+                "minLength": 1,
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_HITS,
+                "description": f"Cap on hits (default {WORKSPACE_SEARCH_MAX_HITS}).",
+            },
+            "case_sensitive": {
+                "type": "boolean",
+                "description": "Match case exactly. Default false.",
+            },
+        },
+        "required": ["query"],
+    },
+)
+
+
+def _format_search(response: SearchResponse) -> str:
+    """Group the hits under their files, and end with what to do next.
+
+    All three AXI shapes: a truncated result names ``max_results`` as the way to
+    widen it (shape 1), an empty result says so and suggests a change (shape 2),
+    and a non-empty one ends by naming a file to open (shape 3).
+    """
+    if not response.files:
+        return (
+            f"No matches for {response.query!r} in the workspace. "
+            "Try a shorter or different query, or case_sensitive=false."
+        )
+    lines = [
+        f"{response.total_hits} match(es) in {response.files_with_matches} file(s) "
+        f"for {response.query!r}:"
+    ]
+    for file in response.files:
+        lines.append(_clip(file.path, _SEARCH_PATH_CLIP))
+        for hit in file.hits:
+            lines.append(f"  {hit.line}: {_clip(hit.text.strip(), _SEARCH_LINE_CLIP)}")
+    first = response.files[0].path
+    if response.truncated:
+        lines.append(
+            f"[stopped at {response.total_hits} hits; more exist — narrow the query "
+            "or raise max_results.]"
+        )
+    else:
+        lines.append(
+            f"Open a file (e.g. {_clip(first, _SEARCH_PATH_CLIP)}) to read a hit in context."
+        )
+    return "\n".join(lines)
+
+
+def handle_workspace_search(searcher: WorkspaceSearcher, args: dict[str, Any]) -> dict[str, Any]:
+    """The workspace_search tool body, free of SDK imports so it is directly testable.
+
+    A missing or malformed query is a tool error the agent fixes, not an
+    exception. The result is clamped to the tool's byte budget as a backstop — it
+    is text the model reads, never JSON it parses, so truncation is safe.
+    """
+    query = _arg_str(args, "query")
+    if not query:
+        return error_result("workspace_search needs a `query` — the text to find.")
+    raw_max = args.get("max_results")
+    max_results = (
+        min(raw_max, MAX_HITS)
+        if isinstance(raw_max, int) and not isinstance(raw_max, bool) and raw_max > 0
+        else WORKSPACE_SEARCH_MAX_HITS
+    )
+    case_sensitive = args.get("case_sensitive") is True
+    try:
+        request = SearchRequest(query=query, max_results=max_results, case_sensitive=case_sensitive)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:6]
+        )
+        return error_result(
+            clamp_result(
+                f"Invalid search — fix and retry: {problems}", WORKSPACE_SEARCH.max_result_bytes
+            )
+        )
+    response = searcher.search(request)
+    return text_result(clamp_result(_format_search(response), WORKSPACE_SEARCH.max_result_bytes))
+
+
 # ---- the registry -----------------------------------------------------------
 
 #: Every session's toolset — office_read and office_write included, so every
@@ -1262,6 +1410,7 @@ AGENT_TOOLS: tuple[AgentToolSpec, ...] = (
     OFFICE_WRITE,
     OFFICE_RECONCILE,
     RUN_COMMAND,
+    WORKSPACE_SEARCH,
 )
 
 #: The extra toolset an ``orchestrator`` session carries. Never in the context

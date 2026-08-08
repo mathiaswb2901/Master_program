@@ -28,6 +28,7 @@ import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
 import { reviewTool } from "./panels/ReviewPanel";
+import { searchTool } from "./panels/Search";
 import { scratchpadTool } from "./panels/Scratchpad";
 import { terminalTool } from "./panels/Terminal";
 import { usageTool } from "./panels/UsagePanel";
@@ -40,6 +41,10 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // where the workspace name has always been.
   workspacesTool,
   filesTool,
+  // After Files, because it is the other way into the tree: workspace-wide
+  // content search (Ctrl+Shift+F), opened on demand beside the file list. Its
+  // panel is singular and points at no resource — see `panels/Search.tsx`.
+  searchTool,
   editorTool,
   agentTool,
   // After the Agent, because it is a way *into* one: a row here opens an agent

@@ -23,10 +23,12 @@ from workbench_server.services.agent_tools import (
     SEND_TO_WORKER,
     SPAWN_WORKER,
     STOP_WORKER,
+    WORKSPACE_SEARCH,
     CommandInvoker,
     OfficeDocumentAccess,
     OrchestratorHandle,
     ReconciliationRunner,
+    WorkspaceSearcher,
     allowed_tool_names,
     handle_list_workers,
     handle_office_read,
@@ -38,6 +40,7 @@ from workbench_server.services.agent_tools import (
     handle_send_to_worker,
     handle_spawn_worker,
     handle_stop_worker,
+    handle_workspace_search,
     workspace_state_result,
 )
 from workbench_server.services.skills_bundle import PLUGIN_NAME, bundled_plugin_path
@@ -71,6 +74,7 @@ def build_context_bridge(
     reader: OfficeDocumentAccess,
     commands: CommandInvoker,
     reconciler: ReconciliationRunner,
+    searcher: WorkspaceSearcher,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -116,6 +120,10 @@ def build_context_bridge(
     async def run_command(args: dict[str, Any]) -> dict[str, Any]:
         return await handle_run_command(commands, args)
 
+    @tool(WORKSPACE_SEARCH.name, WORKSPACE_SEARCH.description, WORKSPACE_SEARCH.input_schema)
+    async def workspace_search(args: dict[str, Any]) -> dict[str, Any]:
+        return handle_workspace_search(searcher, args)
+
     tools: list[Any] = [
         get_workspace_state,
         present_plan,
@@ -123,6 +131,7 @@ def build_context_bridge(
         office_write,
         office_reconcile,
         run_command,
+        workspace_search,
     ]
     if kind == "orchestrator" and orchestrator is not None:
         cost = session_cost or (lambda _worker_id: 0.0)
@@ -161,6 +170,7 @@ def build_agent_options(
     reader: OfficeDocumentAccess,
     commands: CommandInvoker,
     reconciler: ReconciliationRunner,
+    searcher: WorkspaceSearcher,
     kind: SessionKind = "chat",
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -229,7 +239,15 @@ def build_agent_options(
         can_use_tool=can_use_tool,
         mcp_servers={
             MCP_SERVER_NAME: build_context_bridge(
-                store, bridge, reader, commands, reconciler, kind, orchestrator, session_cost
+                store,
+                bridge,
+                reader,
+                commands,
+                reconciler,
+                searcher,
+                kind,
+                orchestrator,
+                session_cost,
             )
         },
         plugins=plugins,
@@ -254,6 +272,7 @@ def sdk_client_factory(
     reader: OfficeDocumentAccess,
     commands: CommandInvoker,
     reconciler: ReconciliationRunner,
+    searcher: WorkspaceSearcher,
     settings: Settings | None = None,
     orchestrator: OrchestratorHandle | None = None,
     session_cost: Callable[[str], float] | None = None,
@@ -287,6 +306,7 @@ def sdk_client_factory(
             reader,
             commands,
             reconciler,
+            searcher,
             kind,
             orchestrator,
             session_cost,

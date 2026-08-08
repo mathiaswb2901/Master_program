@@ -37,6 +37,8 @@ import type {
   ObjectiveView,
   ProvenanceMap,
   RenameRequest,
+  SearchRequest,
+  SearchResponse,
   SessionInfo,
   SessionLimits,
   SessionsResponse,
@@ -145,6 +147,11 @@ export const deleteEntry = (path: string): Promise<OkResponse> =>
 export const getShortcuts = (): Promise<ShortcutsState> => request("/api/shortcuts");
 
 export const getProvenance = (): Promise<ProvenanceMap> => request("/api/provenance");
+
+/** Find literal text across the workspace's files, grouped by file. Empty
+ * `files` is the honest "no matches"; `truncated` says the cap was hit. */
+export const searchWorkspace = (body: SearchRequest): Promise<SearchResponse> =>
+  request("/api/search", jsonInit("POST", body));
 
 /** Every validation result currently held — initial load and reconnect (the
  * live updates ride `/ws/events` as `validation`). Empty is the common answer. */

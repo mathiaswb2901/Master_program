@@ -29,6 +29,7 @@ from workbench_server.routers import (
     office_host,
     orchestrator,
     provenance,
+    search,
     sessions,
     setup,
     shortcuts,
@@ -61,6 +62,7 @@ from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.reconciliation import ReconciliationCheck
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
+from workbench_server.services.search import SearchService
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.sessions import SessionsStore
 from workbench_server.services.setup import SetupService, detect_claude_login
@@ -107,6 +109,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # against the workbook unit- and DST-aware. Additive registration — the frame
     # dispatches to it when a spec names its id ("reconciliation").
     validation_service.register(ReconciliationCheck())
+    # Workspace-wide content search (M7 V7b). Holds the live `Workspace`, so a
+    # switch re-roots it with everything else and it owes no `set_workspace_root`.
+    # Reuses the file tree's ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so search
+    # and the tree agree about what exists. Also handed to a session as the
+    # `workspace_search` agent tool (narrowed to WorkspaceSearcher in the factory).
+    search_service = SearchService(workspace)
     # One JSON document per workspace, so different projects keep different
     # arrangements. Stateless: read and written on demand, nothing to start.
     layouts_service = LayoutsService(workspace.root)
@@ -205,6 +213,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # ValidationService, narrowed to ReconciliationRunner in the SDK factory;
             # the reconciliation check is registered on it a few lines above.
             validation_service,
+            # Workspace content search, narrowed to WorkspaceSearcher, so a session
+            # can grep its own folder through the `workspace_search` tool.
+            search_service,
             settings,
             orchestrator_service,
             # What a worker has spent, read from the *one* accumulator: the same
@@ -375,6 +386,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.shortcuts = shortcuts_service
     app.state.provenance = provenance_service
     app.state.validation = validation_service
+    app.state.search = search_service
     app.state.layouts = layouts_service
     app.state.worktrees = worktree_service
     app.state.usage = usage_service
@@ -425,6 +437,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(shortcuts.router)
     app.include_router(provenance.router)
     app.include_router(validation.router)
+    app.include_router(search.router)
     app.include_router(layouts.router)
     app.include_router(worktrees.router)
     app.include_router(usage.router)
