@@ -1,0 +1,191 @@
+/**
+ * The first-run / Setup walkthrough (M7 §2).
+ *
+ * Loaded on the panel's own dynamic chunk (imported from `panels/Setup.tsx`), so
+ * nothing here is on the launch path. Every value is a DESIGN.md token — the
+ * ANVIL palette, no raw hex (`ui/e2e/palette.test.ts`). It reads as the welcome
+ * card's sibling (`styles/keyboard.css`): a centred surface, quiet neutrals, the
+ * three semantic status colours used only on the pills.
+ */
+
+.wb-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: var(--space-7) var(--space-6);
+  color: var(--text-secondary);
+}
+
+.wb-setup-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-setup-title {
+  margin: 0;
+  font-size: var(--type-2xl-size);
+  line-height: var(--type-2xl-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-setup-lede {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-secondary);
+}
+
+/* ---- the checklist -------------------------------------------------------- */
+
+.wb-setup-checks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-setup-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.wb-setup-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.wb-setup-row-title {
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-setup-detail {
+  margin: 0;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+/* ---- status pill (DESIGN.md §6.4) ----------------------------------------- */
+
+.wb-setup-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 20px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: var(--type-xs-size);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.wb-setup-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  flex: none;
+}
+
+.wb-setup-pill.is-ok {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.wb-setup-pill.is-action {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.wb-setup-pill.is-unavailable {
+  background: var(--surface-hover);
+  color: var(--text-tertiary);
+}
+
+/* ---- a check's one action ------------------------------------------------- */
+
+.wb-setup-action {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.wb-setup-action-label {
+  color: var(--text-tertiary);
+}
+
+.wb-setup-instruction {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm-size);
+  color: var(--text-primary);
+  user-select: all;
+}
+
+/* ---- the teach ------------------------------------------------------------ */
+
+.wb-setup-teach {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-setup-teach-title {
+  color: var(--text-tertiary);
+}
+
+.wb-setup-teach-lede {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+.wb-setup-teach-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+/* ---- footer --------------------------------------------------------------- */
+
+.wb-setup-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wb-setup-note {
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+.wb-setup-loading {
+  color: var(--text-tertiary);
+}
