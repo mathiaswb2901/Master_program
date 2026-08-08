@@ -75,6 +75,17 @@ describe("the frame is painted from the tokens, inverted ramp and all", () => {
     // weight that makes it visible where it actually sits.
     expect(theme).toMatch(/--dv-separator-border:\s*var\(--border-strong\)/);
   });
+
+  it("draws the tab-strip bottom hairline in --border-subtle, and the selected tab erases it (§6.1)", () => {
+    // §6.1 asks for a drawn hairline under the strip; it must be --border-subtle
+    // and it must not survive under the selected tab, whose --surface-panel
+    // background is the fusion that is the active indicator. The strip carries the
+    // border; the active tab is pulled 1px down to fill and erase its own slice.
+    const strip = ruleContaining(dock, ".dv-tabs-and-actions-container").body;
+    expect(strip).toMatch(/border-bottom:\s*1px solid var\(--border-subtle\)/);
+    const activeTab = ruleContaining(dock, ".dv-tab.dv-active-tab").body;
+    expect(activeTab).toMatch(/margin-bottom:\s*-1px/);
+  });
 });
 
 describe("the live rule — the signature — is the amber, 2px, full-bleed", () => {

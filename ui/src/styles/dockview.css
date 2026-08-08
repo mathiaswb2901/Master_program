@@ -37,6 +37,32 @@
   --dv-overlay-z-index: 50;
 }
 
+/* Tab-strip bottom hairline (DESIGN.md §6.1: "bottom hairline --border-subtle").
+ * The strip is `--surface-app` and the panel body below it `--surface-panel`, so
+ * a value step already sits under the strip — but the doc asks for a drawn
+ * hairline and the step alone leaves the boundary soft where a strip runs long.
+ * Drawn on the whole strip, on every group (not just the focused one), so it
+ * never jumps as focus moves — unlike a `border-top`, which is why the live rule
+ * below is an overlay and not a border.
+ *
+ * The one thing it must not do is cut the fusion: the *selected* tab's background
+ * IS `--surface-panel`, the same surface as the body, and that merge is the
+ * active indicator (§6.1, "no bottom border — this fusion is the active
+ * indicator"). A full-width hairline drawn naively would cross under it and
+ * reintroduce exactly the line the fusion removes. It does not here: the parent's
+ * border paints first and in-flow tab backgrounds paint over it, so the selected
+ * tab — pulled 1px down onto the hairline — fills that 1px with `--surface-panel`
+ * and erases the line under itself alone. The inactive tabs are transparent and
+ * the empty actions area is bare, so the hairline shows everywhere the fusion is
+ * not. */
+.dockview-theme-workbench .dv-tabs-and-actions-container {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.dockview-theme-workbench .dv-tab.dv-active-tab {
+  margin-bottom: -1px;
+}
+
 /* THE LIVE RULE (DESIGN.md §6.1) — the app's signature and its real focus
  * indicator: a 2px full-bleed amber rule across the top of the focused pane's
  * tab strip, and nowhere else. One pane wears it at a time, so "where am I"
