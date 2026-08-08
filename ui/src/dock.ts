@@ -43,3 +43,11 @@ export function layoutDefaultPanels(api: DockviewApi): void {
 export function openPanel(toolId: string): void {
   if (dockApi !== null) openToolPanel(dockApi, TOOLS, toolId);
 }
+
+/** Close a panel if it is open — the way a self-dismissing surface (the Setup
+ * walkthrough) retires its own tab. A no-op when the panel is not open, so a
+ * dismiss that races the tab already being closed is harmless. Names no
+ * capability: it takes the panel id the caller already owns. */
+export function closePanel(id: string): void {
+  dockApi?.getPanel(id)?.api.close();
+}

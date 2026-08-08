@@ -6,6 +6,7 @@ import {
 } from "dockview";
 import { useCallback, useEffect, useState } from "react";
 
+import { BootGate } from "./BootGate";
 import { applyCaptionTint } from "./captionTint";
 import { installCommandKeys } from "./commands";
 import { layoutDefaultPanels, setDockApi } from "./dock";
@@ -185,6 +186,15 @@ export default function App() {
   // Every keybinding in the app comes from the command registry (commands.ts).
   useEffect(() => installCommandKeys(), []);
 
+  // Hand off from the inline pre-JS splash (index.html) to React. React has
+  // committed by the time a mount effect runs, so `<Boot/>` — a token-drawn twin
+  // of the overlay — is already on screen underneath it; removing the overlay
+  // reveals identical pixels, so there is no flash or jump. Runs once, and is a
+  // no-op if the element is already gone (a hot reload, say).
+  useEffect(() => {
+    document.getElementById("wb-splash")?.remove();
+  }, []);
+
   useEffect(() => () => setDockApi(null), []);
 
   // Only the panels wait for the backend — the modals stay mounted throughout,
@@ -219,9 +229,7 @@ export default function App() {
           <QuickBar />
         </>
       ) : (
-        <div className="wb-boot" role="status">
-          Starting the Workbench backend…
-        </div>
+        <BootGate />
       )}
       <DirtyCloseModal />
       <ShellCloseModal />

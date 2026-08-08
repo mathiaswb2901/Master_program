@@ -12,9 +12,88 @@
         if (t === "light") document.documentElement.setAttribute("data-theme", "light");
       } catch (e) {}
     </script>
+    <!--
+      Instant pre-JS splash. This is the very first thing the webview paints —
+      before the module bundle is downloaded, parsed or evaluated — so the window
+      is never blank, never white, and never a stuck-looking error screen while
+      the frozen backend boots (the shell opens the window immediately, ahead of
+      the backend answering; see desktop/src-tauri/src/lib.rs).
+
+      It is deliberately inline and asset-free: a module script blocks first paint
+      until it is fetched and evaluated (ARCHITECTURE.md "The launch path"), so a
+      splash that pulled in any JS or a webfont would defeat its own purpose.
+      Colours are hard-coded here because tokens.css has not loaded yet at this
+      moment — they are the literal values of ANVIL's --surface-app / --accent /
+      --text-* tokens (ui/src/design/tokens.css) and MUST stay in lockstep with
+      them. The React boot state (ui/src/BootGate.tsx) renders the same mark, name and
+      status line from the tokens themselves, so removing this overlay once React
+      mounts is a seamless hand-off with no flash or jump (App.tsx removes it).
+    -->
+    <style>
+      /* Paint the root dark from the very first frame so no white ever shows,
+         even in the instant before the overlay below is composited. */
+      html { background: #393939; }
+      :root[data-theme="light"] { background: #d1d1d1; }
+
+      #wb-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #393939;
+        font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      }
+      :root[data-theme="light"] #wb-splash { background: #d1d1d1; }
+
+      #wb-splash .wb-splash-inner {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      #wb-splash .wb-splash-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 6px;
+        background: #fbbf24;
+        animation: wb-splash-pulse 2s ease-in-out infinite;
+      }
+      #wb-splash .wb-splash-name {
+        margin-top: 20px;
+        font-size: 18px;
+        line-height: 26px;
+        font-weight: 500;
+        color: #f5f5f5;
+      }
+      :root[data-theme="light"] #wb-splash .wb-splash-name { color: #151515; }
+      #wb-splash .wb-splash-status {
+        margin-top: 6px;
+        font-size: 13px;
+        line-height: 20px;
+        color: #b4b4b4;
+      }
+      :root[data-theme="light"] #wb-splash .wb-splash-status { color: #454545; }
+
+      @keyframes wb-splash-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+      /* Motion is a vestibular trigger: hold the mark still, keep the brand. */
+      @media (prefers-reduced-motion: reduce) {
+        #wb-splash .wb-splash-mark { animation: none; }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="wb-splash" role="status" aria-label="Starting Workbench">
+      <div class="wb-splash-inner">
+        <div class="wb-splash-mark" aria-hidden="true"></div>
+        <div class="wb-splash-name">Workbench</div>
+        <div class="wb-splash-status">Starting Workbench…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
