@@ -42,19 +42,24 @@ from workbench_server.models.office_bridge import (
     WordText,
 )
 from workbench_server.models.office_host import HostAppKind
-from workbench_server.services.office_host.a1 import cell_ref, parse_cell, parse_range
+from workbench_server.services.office_host.a1 import cell_ref
 from workbench_server.services.office_host.backend import HostHandle
 from workbench_server.services.office_host.document_bridge import (
     DocGoneError,
     DocNotReadableError,
-    RangeInvalidError,
+)
+from workbench_server.services.office_host.document_window import (
+    Grid,
+    check_paragraph,
+    no_sheet_error,
+    parse_write_cell,
+    used_dims,
+    window_cells,
+    window_word,
 )
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
 
 log = structlog.get_logger()
-
-#: One worksheet as a sparse ``(row, col) -> text`` map, zero-based.
-Grid = dict[tuple[int, int], str]
 
 
 def _titleize(stem: str) -> str:
@@ -114,24 +119,6 @@ def excel_sheets(name: str) -> dict[str, Grid]:
     return {"Budget": budget, "Forecast": forecast}
 
 
-def _used_dims(grid: Grid) -> tuple[int, int]:
-    if not grid:
-        return 0, 0
-    return max(row for row, _ in grid) + 1, max(col for _, col in grid) + 1
-
-
-def _cap_cell(value: str, limit: int) -> str:
-    """One cell's text, truncated to ``limit`` chars with an ellipsis if cut.
-
-    Shared by the real bridge's contract: no single cell may dominate the window,
-    so a lone long cell is trimmed here rather than left to overrun the byte
-    budget the tool clamps at the far end.
-    """
-    if len(value) <= limit:
-        return value
-    return value[: max(limit - 1, 0)] + "…"
-
-
 class FakeDocumentBridge:
     """A scripted document reader. Satisfies the ``DocumentBridge`` protocol."""
 
@@ -178,133 +165,37 @@ class FakeDocumentBridge:
             sheets = [
                 SheetDim(name=sheet, rows=rows, cols=cols)
                 for sheet, grid in self._excel_book(handle).items()
-                for rows, cols in (_used_dims(grid),)
+                for rows, cols in (used_dims(grid),)
             ]
             return DocStructure(kind="excel", sheets=sheets)
         raise DocNotReadableError(f"{kind} documents cannot be read")
 
     async def read_word(self, handle: HostHandle, start_paragraph: int, max_chars: int) -> WordText:
-        paragraphs = self._word_body(handle)
-        total = len(paragraphs)
-        if total == 0:
-            return WordText(start_paragraph=0, returned_chars=0, total_paragraphs=0, text="")
-        if start_paragraph >= total:
-            raise RangeInvalidError(
-                f"start_paragraph {start_paragraph} is past the last paragraph ({total - 1})"
-            )
-        chunks: list[str] = []
-        length = 0
-        separator = "\n\n"
-        for paragraph in paragraphs[start_paragraph:]:
-            added = (len(separator) if chunks else 0) + len(paragraph)
-            if not chunks and len(paragraph) > max_chars:
-                # A lone paragraph longer than the whole window: truncate it, so
-                # a read is never empty when there is text to show.
-                chunks.append(paragraph[:max_chars])
-                break
-            if chunks and length + added > max_chars:
-                break
-            chunks.append(paragraph)
-            length += added
-        text = separator.join(chunks)
-        return WordText(
-            start_paragraph=start_paragraph,
-            returned_chars=len(text),
-            total_paragraphs=total,
-            text=text,
-        )
+        return window_word(self._word_body(handle), start_paragraph, max_chars)
 
     async def read_excel(
         self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int, max_chars: int
     ) -> CellWindow:
         sheets = self._excel_book(handle)
         if sheet not in sheets:
-            raise RangeInvalidError(
-                f"no sheet named {sheet!r}; sheets are {', '.join(sheets) or '(none)'}"
-            )
-        grid = sheets[sheet]
-        total_rows, total_cols = _used_dims(grid)
-        if total_rows == 0:
-            return CellWindow(
-                sheet=sheet,
-                a1_range="",
-                rows=0,
-                cols=0,
-                total_rows=0,
-                total_cols=0,
-                cells=[],
-            )
-        try:
-            row1, col1, row2, col2 = parse_range(a1_range) if a1_range else (0, 0, None, None)
-        except ValueError as error:
-            raise RangeInvalidError(f"bad range {a1_range!r}: {error}") from error
-        if row1 >= total_rows or col1 >= total_cols:
-            raise RangeInvalidError(
-                f"range starts at {cell_ref(row1, col1)}, past the used range "
-                f"{cell_ref(total_rows - 1, total_cols - 1)}"
-            )
-        last_row = total_rows - 1 if row2 is None else min(row2, total_rows - 1)
-        last_col = total_cols - 1 if col2 is None else min(col2, total_cols - 1)
-        ncols = last_col - col1 + 1
-        # Trim rows so the window fits the cell-count budget; never below one row,
-        # so a read always shows something and says how to widen it.
-        max_rows = max(1, max_cells // ncols)
-        last_row = min(last_row, row1 + max_rows - 1)
-        # Bound the *text volume* too, not just the cell count: a count cap alone
-        # does not stop a single long cell (a notes column, up to 32k chars in
-        # Excel) from blowing the window past the tool's byte budget on its own.
-        # Cap each cell so a full row of ``ncols`` cells stays within ``max_chars``,
-        # then stop adding rows once the aggregate would exceed it — keeping at
-        # least the first row so the read is never empty.
-        per_cell = max(1, max_chars // ncols)
-        cells: list[list[str]] = []
-        used = 0
-        for row in range(row1, last_row + 1):
-            row_cells = [
-                _cap_cell(grid.get((row, col), ""), per_cell) for col in range(col1, last_col + 1)
-            ]
-            row_chars = sum(len(cell) for cell in row_cells)
-            if cells and used + row_chars > max_chars:
-                break
-            cells.append(row_cells)
-            used += row_chars
-        last_row = row1 + len(cells) - 1
-        return CellWindow(
-            sheet=sheet,
-            a1_range=f"{cell_ref(row1, col1)}:{cell_ref(last_row, last_col)}",
-            rows=len(cells),
-            cols=ncols,
-            total_rows=total_rows,
-            total_cols=total_cols,
-            cells=cells,
-        )
+            raise no_sheet_error(sheet, list(sheets))
+        return window_cells(sheet, sheets[sheet], a1_range, max_cells, max_chars)
 
     async def write_word(self, handle: HostHandle, paragraph: int, text: str) -> WordEdit:
         paragraphs = self._word_body(handle)
-        total = len(paragraphs)
-        if total == 0:
-            # An empty document has no paragraph to replace — the invalid-target
-            # branch the tool renders as an explicit "empty", not a silent no-op.
-            raise RangeInvalidError("the document is empty; there is no paragraph to replace")
-        if paragraph < 0 or paragraph >= total:
-            raise RangeInvalidError(
-                f"paragraph {paragraph} is past the last paragraph ({total - 1})"
-            )
+        check_paragraph(paragraph, len(paragraphs))
         # Replace exactly the one addressed paragraph; every other paragraph, and
         # the document's shape, is left untouched — the fidelity the seam owes.
         paragraphs[paragraph] = text
-        return WordEdit(paragraph=paragraph, written_chars=len(text), total_paragraphs=total)
+        return WordEdit(
+            paragraph=paragraph, written_chars=len(text), total_paragraphs=len(paragraphs)
+        )
 
     async def write_excel(self, handle: HostHandle, sheet: str, cell: str, value: str) -> CellEdit:
         sheets = self._excel_book(handle)
         if sheet not in sheets:
-            raise RangeInvalidError(
-                f"no sheet named {sheet!r}; sheets are {', '.join(sheets) or '(none)'}"
-            )
-        try:
-            row, col = parse_cell(cell)
-        except ValueError as error:
-            raise RangeInvalidError(f"bad cell {cell!r}: {error}") from error
+            raise no_sheet_error(sheet, list(sheets))
+        row, col = parse_write_cell(cell)
         grid = sheets[sheet]
         # Set exactly the one addressed cell; empty value clears it (mirroring a
         # COM ``Range.Value = ""``), so the used range can shrink but no other
