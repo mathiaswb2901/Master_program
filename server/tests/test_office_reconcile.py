@@ -186,6 +186,35 @@ async def test_the_worst_list_is_capped_and_states_what_it_withheld(tmp_path: Pa
     assert f"{summary.withheld} more" in summary.next_step
 
 
+async def test_a_non_finite_expected_stays_valid_json(tmp_path: Path) -> None:
+    """An agent's tool-call JSON can carry ``"expected": 1e400`` — a valid JSON number
+    literal that Python's parser silently overflows to ``inf`` (``ExpectedValue.expected``
+    has no ``allow_inf_nan`` guard). That ``inf`` flows through the comparison into the
+    mismatch, and ``model_dump_json`` would emit the bare token ``Infinity`` — not valid
+    JSON per RFC 8259 — defeating the machine-readable result. The tool must drop the
+    non-finite value so the summary parses cleanly with no ``Infinity``/``NaN`` tokens."""
+    make_workbook(tmp_path / "book.xlsx", {"B2": 1.0})
+    runner = runner_for(tmp_path)
+    # Parse the args from raw JSON exactly as the SDK hands a tool call over, so the
+    # 1e400 literal overflows to float('inf') the same way it does in production.
+    args = json.loads(
+        '{"workbook": "book.xlsx", "default_tolerance": {"abs": 0.01}, '
+        '"expectations": [{"cell": "B2", "expected": 1e400, "unit": "MWh"}]}'
+    )
+    result = await handle_office_reconcile(runner, args)
+    text = result_text(result)
+    # The whole point: a strict JSON parser must accept it, and neither non-standard
+    # token may appear anywhere in the body.
+    json.loads(text)
+    assert "Infinity" not in text
+    assert "NaN" not in text
+    summary = summary_of(result)
+    assert summary.failed == 1
+    assert len(summary.worst) == 1
+    # The overflowing expected was dropped to None rather than serialized as Infinity.
+    assert summary.worst[0].expected is None
+
+
 # ------------------------------------------------------------------------------ budget
 
 

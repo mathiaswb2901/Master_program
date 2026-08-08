@@ -31,6 +31,7 @@ before a design one.
 """
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -1110,6 +1111,19 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(limit - 1, 0)] + "…"
 
 
+def _finite(value: float | None) -> float | None:
+    """Drop a non-finite float to ``None`` so the summary stays valid JSON.
+
+    ``ExpectedValue.expected`` is data the agent supplies: a JSON literal like
+    ``1e400`` overflows to ``inf`` in Python's parser with no guard, and a ``delta``
+    of two finite-but-huge floats can overflow the same way. ``model_dump_json``
+    would serialize ``inf``/``nan`` as the bare tokens ``Infinity``/``NaN`` — not
+    valid JSON per RFC 8259 — so a strict parser on the agent's side would choke on
+    the very result that promises to be machine-readable. Mapping to ``None`` mirrors
+    how ``actual``/``delta`` already go ``None`` for an unreadable cell."""
+    return value if value is None or math.isfinite(value) else None
+
+
 def _reconcile_summary(result: ValidationResult, runner: ReconciliationRunner) -> ReconcileSummary:
     """Fold one run into the compact confirmation, worst-first and budget-bounded.
 
@@ -1154,9 +1168,9 @@ def _reconcile_summary(result: ValidationResult, runner: ReconciliationRunner) -
     worst = [
         ReconcileMismatch(
             cell=_clip(c.cell, _RECONCILE_CELL_CLIP),
-            expected=c.expected,
-            actual=c.actual,
-            delta=c.delta,
+            expected=_finite(c.expected),
+            actual=_finite(c.actual),
+            delta=_finite(c.delta),
             reason=_clip(c.reason, _RECONCILE_REASON_CLIP) if c.reason else None,
         )
         for c in flagged[:RECONCILE_WORST_N]

@@ -24,8 +24,10 @@ class ReconcileMismatch(BaseModel):
 
     #: The A1 address (``Sheet1!D14``) or the wall-clock label of a time row.
     cell: str
-    #: The agent's computed value, in the compared unit.
-    expected: float
+    #: The agent's computed value, in the compared unit, or ``None`` when it was a
+    #: non-finite float (``inf``/``nan`` from an overflowing input) the tool dropped
+    #: so the serialized result stays valid JSON.
+    expected: float | None = None
     #: The workbook's value in the compared unit, or ``None`` when the cell was
     #: empty, non-numeric or unreadable.
     actual: float | None = None
