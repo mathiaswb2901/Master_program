@@ -1402,6 +1402,9 @@ export interface NamedSession {
   leases: LeaseRef[];
   created_at: number;
   last_attached_at: number;
+  /** The goal this session works toward (plan §3), or null. Set/cleared through
+   * the dedicated objective endpoints; the whole-manifest PUT carries it over. */
+  objective?: Objective | null;
 }
 
 /** POST body — the server assigns id/created_at/last_attached_at. Named
@@ -1428,6 +1431,36 @@ export interface SessionsResponse {
   sessions: NamedSession[];
   /** Why the sessions file was ignored, if it was. Never fatal. */
   problem: string | null;
+}
+
+/** A goal bound to a session (plan §3). A thin record — statement + optional
+ * acceptance note; the status is never stored here, it is derived from the
+ * validation evidence (`ObjectiveView`). */
+export interface Objective {
+  statement: string;
+  acceptance: string | null;
+}
+
+/** An objective's **derived** status. `met` requires a human-approved result
+ * (the plan's gate); `at-risk`/`failing` are an unapproved medium / high-or-worse
+ * latest result; `open` is the default and a passing-but-unsigned result. */
+export type ObjectiveStatus = "open" | "met" | "at-risk" | "failing";
+
+/** GET/PUT/DELETE `/api/sessions/{id}/objective` — the goal, its derived status,
+ * and the evidence it came from (the same `ValidationResult` the Review panel
+ * renders, so the two badges can never disagree). */
+export interface ObjectiveView {
+  session_id: string;
+  objective: Objective | null;
+  status: ObjectiveStatus;
+  evidence: ValidationResult | null;
+}
+
+/** PUT `/api/sessions/{id}/objective` — bind or re-state the goal. The derived
+ * status is never sent; it is computed from the evidence on read. */
+export interface SetObjectiveRequest {
+  statement: string;
+  acceptance?: string | null;
 }
 
 // ---- validation.py ----------------------------------------------------------

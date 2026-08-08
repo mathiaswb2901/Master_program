@@ -23,6 +23,7 @@ import { filesTool } from "./panels/FileTree";
 import { keyboardTool } from "./panels/Keyboard";
 import { layoutsTool } from "./panels/Layouts";
 import { missionTool } from "./panels/MissionControl";
+import { objectiveTool } from "./panels/ObjectivePanel";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
 import { panesTool } from "./panels/Panes";
@@ -63,6 +64,11 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // and the human approval gate (M6 PR3). Opened on demand; its status reading
   // and tab badge are always there.
   reviewTool,
+  // After Review, because it consumes the very evidence Review approves: an
+  // objective binds a session to a goal and is closed by an approved
+  // ValidationResult — the same result object, read as "is the goal met" rather
+  // than "how risky is this output" (M6 PR5, plan §3). Opened on demand.
+  objectiveTool,
   // Opened on demand from a plan card's Expand: one pane per drawn artifact,
   // rendering the same scene graph the card does (M5 item 3, PR 4).
   visualTool,

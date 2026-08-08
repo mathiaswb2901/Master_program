@@ -34,12 +34,14 @@ import type {
   PermissionAnswer,
   PermissionsSnapshot,
   NamedSession,
+  ObjectiveView,
   ProvenanceMap,
   RenameRequest,
   SessionInfo,
   SessionLimits,
   SessionsResponse,
   SetupStatus,
+  SetObjectiveRequest,
   ShortcutsState,
   SwitchWorkspaceRequest,
   TranscriptResponse,
@@ -235,6 +237,21 @@ export const createNamedSession = (body: CreateNamedSessionRequest): Promise<Nam
 
 export const deleteNamedSession = (id: string): Promise<void> =>
   requestVoid(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+/** A session's objective (plan §3): the goal, its evidence-derived status, and
+ * the result that status came from. The status is computed server-side over the
+ * validation results — never stored, never sent. */
+export const getObjective = (sessionId: string): Promise<ObjectiveView> =>
+  request(`/api/sessions/${encodeURIComponent(sessionId)}/objective`);
+
+export const setObjective = (
+  sessionId: string,
+  body: SetObjectiveRequest,
+): Promise<ObjectiveView> =>
+  request(`/api/sessions/${encodeURIComponent(sessionId)}/objective`, jsonInit("PUT", body));
+
+export const clearObjective = (sessionId: string): Promise<ObjectiveView> =>
+  request(`/api/sessions/${encodeURIComponent(sessionId)}/objective`, { method: "DELETE" });
 
 /** Every Claude conversation on this machine, grouped by the folder it ran in.
  * `limit` bounds only the expensive half — everything that exists is counted,

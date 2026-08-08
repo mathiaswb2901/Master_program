@@ -1,0 +1,179 @@
+/**
+ * The Objectives panel: a session's goal, its evidence-derived status badge, and
+ * the small typed action that sets or clears it (plan §3).
+ *
+ * Every colour is a DESIGN.md token — no raw hex, no invented colour. The status
+ * pill reuses `.wb-pill` from `review.css` and is coloured by the same semantic
+ * mapping (`objectives.ts`, `--pill-color` / `--pill-bg`); this stylesheet only
+ * lays out around it.
+ */
+
+.wb-objective {
+  height: 100%;
+  overflow: auto;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  padding: var(--space-4) var(--space-5);
+}
+
+.wb-objective-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* ---- the card ------------------------------------------------------------- */
+
+.wb-objective-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+}
+
+.wb-objective-head {
+  display: flex;
+  align-items: center;
+}
+
+.wb-objective-goal {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.wb-objective-acceptance {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.wb-objective-noevidence {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.wb-objective-evidence {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wb-objective-evidence:hover {
+  background: var(--surface-hover);
+}
+
+.wb-objective-evidence-label {
+  min-width: 0;
+}
+
+/* ---- the form ------------------------------------------------------------- */
+
+.wb-objective-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-objective-input {
+  width: 100%;
+  min-height: 3.5em;
+  resize: vertical;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.wb-objective-input:focus-visible {
+  outline: none;
+  border-color: var(--focus-ring);
+}
+
+.wb-objective-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* ---- the index + empty state ---------------------------------------------- */
+
+.wb-objective-index {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.wb-objective-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wb-objective-row:hover {
+  background: var(--surface-hover);
+}
+
+.wb-objective-row-goal {
+  min-width: 0;
+}
+
+.wb-objective-empty {
+  padding: var(--space-5);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ---- the status-bar reading (§6.7) ---------------------------------------- */
+
+.wb-objective-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wb-objective-status:hover {
+  color: var(--text-primary);
+}
