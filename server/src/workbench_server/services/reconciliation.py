@@ -12,9 +12,15 @@ Three domain failure modes are first-class here, not comments:
 * **Units are compared, not assumed** (:func:`convert`). A value read in kWh against an
   MWh expectation, or MWh against MW, cannot pass silently — the x1000 that hides inside
   a spreadsheet diff is caught, and a legitimate unit change is *named* in the evidence.
+  Prices are currency-aware: NOK/SEK/DKK are first-class alongside EUR, scaling within a
+  currency is a named multiply, and comparing *across* currencies is an explicit refusal
+  (:class:`CrossCurrency`) rather than an invented FX rate.
 * **Time-indexed rows are aligned by local wall-clock time** (:func:`_align_time_rows`),
-  distinguishing the repeated 02:00 of a fall-back DST day by order of appearance — a
-  naive positional join that drops or invents the duplicated hour is refused.
+  telling the repeated 02:00 of a fall-back DST day apart from an ordinary row that was
+  pasted twice by asking the *zone* whether that wall clock is genuinely ambiguous
+  (:func:`_is_ambiguous`) — never by order of appearance alone. A naive positional join
+  that drops or invents the duplicated hour is refused, and so is a duplicate row
+  masquerading as a fold.
 * **No look-ahead in the pairing.** Rows are matched by their own timestamp value, never
   by position, so a missing or extra row surfaces as an unmatched expectation rather than
   a comparison against the wrong hour.
@@ -27,9 +33,9 @@ via :meth:`ValidationContext.store_payload` — the table never rides the result
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import openpyxl
@@ -42,6 +48,7 @@ from workbench_server.models.reconciliation import (
     ReconciliationReport,
     ReconciliationSpec,
     TimeExpectation,
+    TimeIndexSpec,
     Tolerance,
 )
 from workbench_server.models.validation import (
@@ -58,28 +65,64 @@ log = structlog.get_logger()
 #: much was cut and how to narrow the run (AXI shape 1).
 MAX_COMPARISONS = 200
 
+#: Cap on the *named* duplicate-timestamp evidence lines. One paste accident can
+#: repeat thousands of rows, and a fail per row would bury the grouped verdict and
+#: blow the result's token budget; beyond this the rest are rolled into one line
+#: that says how many were withheld and how to see them (AXI shape 1).
+MAX_DUPLICATE_LINES = 20
+
 #: Least-to-most severe, for rolling per-cell outcomes up into one grouped verdict.
 _OUTCOME_SEVERITY: dict[CheckOutcome, int] = {"pass": 0, "skipped": 1, "warn": 2, "fail": 3}
 
-#: unit (upper-cased) → (dimension, factor to the dimension's base unit). Two units
-#: are comparable iff they share a dimension; the factor turns a value in the unit
-#: into the base unit (MWh for energy, MW for power, EUR/MWh for price, EUR for
-#: money). A x1000 conversion (kWh↔MWh, EUR/kWh↔EUR/MWh) therefore cannot happen by
-#: accident — it is a named, explicit multiply or it is a fail.
-_UNIT_TO_BASE: dict[str, tuple[str, float]] = {
-    "MWH": ("energy", 1.0),
-    "KWH": ("energy", 1e-3),
-    "GWH": ("energy", 1e3),
-    "WH": ("energy", 1e-6),
-    "MW": ("power", 1.0),
-    "KW": ("power", 1e-3),
-    "GW": ("power", 1e3),
-    "W": ("power", 1e-6),
-    "EUR/MWH": ("price_energy", 1.0),
-    "EUR/KWH": ("price_energy", 1e3),
-    "EUR": ("money", 1.0),
-    "%": ("ratio", 1.0),
-    "": ("dimensionless", 1.0),
+
+class _Unit(NamedTuple):
+    """One known unit: what it measures, how it scales to that dimension's base
+    unit, and — for monetary units only — which currency it is denominated in."""
+
+    dimension: str
+    factor: float
+    currency: str | None = None
+
+
+def _currency_units(code: str) -> dict[str, _Unit]:
+    """The three monetary units of one currency: the bare amount and the two
+    per-energy denominations an analyst actually types."""
+    return {
+        f"{code}/MWH": _Unit("price_energy", 1.0, code),
+        f"{code}/KWH": _Unit("price_energy", 1e3, code),
+        code: _Unit("money", 1.0, code),
+    }
+
+
+#: unit (upper-cased) → (dimension, factor to the dimension's base unit, currency).
+#: Two units are comparable iff they share a dimension **and**, when monetary, the
+#: same currency; the factor turns a value in the unit into the base unit (MWh for
+#: energy, MW for power, <ccy>/MWh for price, <ccy> for money). A x1000 conversion
+#: (kWh↔MWh, NOK/kWh↔NOK/MWh) therefore cannot happen by accident — it is a named,
+#: explicit multiply or it is a fail.
+#:
+#: The Nordic currencies are first-class, not an afterthought: Nord Pool publishes
+#: NO/SE/DK zone prices in both EUR and the local currency, and a model denominated
+#: in NOK/MWh is the normal case for this product's users — it must reconcile with a
+#: named x1000 like the EUR path does, not fall off the table as an "unknown unit".
+#: Deliberately hand-rolled rather than pulled from a units library: the whole value
+#: here is the *refusal* rules (dimension, currency), which a general converter would
+#: happily paper over.
+_UNIT_TO_BASE: dict[str, _Unit] = {
+    "MWH": _Unit("energy", 1.0),
+    "KWH": _Unit("energy", 1e-3),
+    "GWH": _Unit("energy", 1e3),
+    "WH": _Unit("energy", 1e-6),
+    "MW": _Unit("power", 1.0),
+    "KW": _Unit("power", 1e-3),
+    "GW": _Unit("power", 1e3),
+    "W": _Unit("power", 1e-6),
+    "%": _Unit("ratio", 1.0),
+    "": _Unit("dimensionless", 1.0),
+    **_currency_units("EUR"),
+    **_currency_units("NOK"),
+    **_currency_units("SEK"),
+    **_currency_units("DKK"),
 }
 
 
@@ -88,13 +131,28 @@ class UnitMismatch(Exception):
     or when an unknown unit cannot be matched by string equality."""
 
 
+class CrossCurrency(UnitMismatch):
+    """Raised when two *known, same-dimension* monetary units are denominated in
+    different currencies.
+
+    A subclass of :class:`UnitMismatch` so every existing caller keeps failing
+    safe, but a distinct type because it is a different verdict with a different
+    fix: nothing is unknown here and nothing is malformed — the gate is refusing
+    to invent an FX rate. Converting NOK/MWh to EUR/MWh needs a rate *for a
+    particular hour*, which is an input the analyst owns and the gate never
+    guesses. Silently applying one would be the same class of hidden multiply the
+    unit table exists to catch, only worse: wrong by a number nobody chose.
+    """
+
+
 def convert(value: float, from_unit: str, to_unit: str) -> tuple[float, str | None]:
     """Convert ``value`` from ``from_unit`` into ``to_unit``.
 
     Returns ``(converted, note)`` where ``note`` names the conversion when one
     actually happened (so a x1000 is always visible in the evidence) and is ``None``
     for an identity. Raises :class:`UnitMismatch` across incompatible dimensions or
-    for an unknown unit that does not string-match the target.
+    for an unknown unit that does not string-match the target, and the narrower
+    :class:`CrossCurrency` for two prices in different currencies.
     """
     a = from_unit.strip().upper()
     b = to_unit.strip().upper()
@@ -104,11 +162,15 @@ def convert(value: float, from_unit: str, to_unit: str) -> tuple[float, str | No
     known_b = _UNIT_TO_BASE.get(b)
     if known_a is None or known_b is None:
         raise UnitMismatch(f"unknown unit in {from_unit!r} vs {to_unit!r}")
-    dim_a, factor_a = known_a
-    dim_b, factor_b = known_b
-    if dim_a != dim_b:
-        raise UnitMismatch(f"{from_unit} is {dim_a}, {to_unit} is {dim_b}")
-    converted = value * factor_a / factor_b
+    if known_a.dimension != known_b.dimension:
+        raise UnitMismatch(f"{from_unit} is {known_a.dimension}, {to_unit} is {known_b.dimension}")
+    if known_a.currency != known_b.currency:
+        raise CrossCurrency(
+            f"{from_unit} is in {known_a.currency} and {to_unit} is in {known_b.currency}; "
+            "no FX rate will be invented — restate the expectation in "
+            f"{known_a.currency}, or convert it in your own code at the rate you meant"
+        )
+    converted = value * known_a.factor / known_b.factor
     return converted, f"converted {value:g} {from_unit} → {converted:g} {to_unit}"
 
 
@@ -230,6 +292,19 @@ def _compare_one(
         )
     try:
         converted, note = convert(actual, cell_unit, expected_unit)
+    except CrossCurrency as exc:
+        # Named apart from a unit mismatch on purpose: the units are both known and
+        # both prices, so "unit mismatch" would send the reader looking for a typo.
+        return CellComparison(
+            cell=address,
+            label=label,
+            expected=expected,
+            actual=actual,
+            unit=expected_unit,
+            delta=None,
+            outcome="fail",
+            reason=f"cross-currency comparison refused: {exc}",
+        )
     except UnitMismatch as exc:
         return CellComparison(
             cell=address,
@@ -289,27 +364,65 @@ def _as_local_datetime(value: object) -> datetime | None:
     return None
 
 
-def _align_time_rows(
-    pairs: list[tuple[object, object]],
-) -> dict[tuple[datetime, int], object]:
+def _is_ambiguous(local: datetime, zone: ZoneInfo) -> bool:
+    """Is this naive local wall-clock time one the zone genuinely writes **twice**?
+
+    True only on a fall-back transition — 2024-10-27 02:30 in ``Europe/Oslo`` is both
+    the CEST 02:30 and the CET 02:30 an hour later. PEP 495's own test: the two folds
+    of the same wall time carry different UTC offsets. The *imaginary* times of a
+    spring-forward gap also disagree on offset, so they are excluded first by the
+    round-trip — a wall time that does not survive local → UTC → local never happened,
+    and a row carrying it is not a second occurrence of anything.
+    """
+    fold0 = local.replace(tzinfo=zone, fold=0)
+    if fold0.astimezone(UTC).astimezone(zone).replace(tzinfo=None) != local:
+        return False  # imaginary: inside the spring-forward gap
+    return fold0.utcoffset() != local.replace(tzinfo=zone, fold=1).utcoffset()
+
+
+class _AlignedRows(NamedTuple):
+    """The wall-clock index, plus the timestamps that repeated when the zone says
+    they should not have."""
+
+    #: ``(local wall-clock, fold)`` → the value that row carried.
+    values: dict[tuple[datetime, int], object]
+    #: local wall-clock → how many rows carried it, for timestamps that repeated
+    #: **without** being an ambiguous (fall-back) local time in the zone.
+    duplicates: dict[datetime, int]
+
+
+def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _AlignedRows:
     """Map ``(local wall-clock, fold)`` → value, keyed by the timestamp the row
     *carries* and never by its position.
 
-    ``fold`` is assigned by order of appearance: the first row at a given wall-clock
-    is fold 0, a later row at the same wall-clock is fold 1 — which is how the two
-    02:00s of a fall-back day are told apart (the caller has already validated the
-    zone the folds belong to). Aligning by value (not index) is what keeps a missing
-    or extra row from silently shifting every later hour."""
+    A second row at the same wall-clock is a ``fold=1`` **only where ``zone`` actually
+    repeats that hour**. That test is the whole point: order of appearance alone cannot
+    tell the CET 02:00 of a fall-back day apart from an ordinary row someone pasted
+    twice, and a gate that guesses will *match* a fold-1 expectation against corrupt
+    input and report it reconciled. So a repeat at a non-ambiguous local time (and any
+    third-and-later repeat, which no zone produces) is not indexed at all: it is
+    reported to the caller as a duplicate row, and the expectation it would have
+    satisfied gets no value to satisfy it.
+
+    Aligning by value (not index) is what keeps a missing or extra row from silently
+    shifting every later hour."""
     seen: dict[datetime, int] = {}
-    aligned: dict[tuple[datetime, int], object] = {}
+    values: dict[tuple[datetime, int], object] = {}
+    duplicates: dict[datetime, int] = {}
     for ts_raw, value in pairs:
         local = _as_local_datetime(ts_raw)
         if local is None:
             continue
-        fold = seen.get(local, 0)
-        seen[local] = fold + 1
-        aligned[(local, fold)] = value
-    return aligned
+        occurrence = seen.get(local, 0)
+        seen[local] = occurrence + 1
+        if occurrence == 0:
+            values[(local, 0)] = value
+            continue
+        if occurrence == 1 and _is_ambiguous(local, zone):
+            values[(local, 1)] = value  # the genuine second pass of a fall-back hour
+            continue
+        duplicates[local] = seen[local]
+    return _AlignedRows(values=values, duplicates=duplicates)
 
 
 class ReconciliationCheck:
@@ -341,13 +454,17 @@ class ReconciliationCheck:
 
         try:
             comparisons = self._compare_cells(spec, reader)
-            comparisons += self._compare_time_rows(spec, reader)
+            time_rows, structural = self._compare_time_rows(spec, reader)
+            comparisons += time_rows
         except _CheckBlocked as blocked:
             return [self._spec_error(blocked.reason)]
         finally:
             reader.close()
 
-        return [self._grouped(spec, comparisons, ctx)]
+        # The grouped comparison line first (it is what a reader looks at), then any
+        # structural findings about the rows themselves. Both feed `derive_risk`, so a
+        # duplicated-row fail cannot be outvoted by comparisons that happened to match.
+        return [self._grouped(spec, comparisons, ctx), *structural]
 
     def _resolve(self, root: Path, relative: str) -> Path | None:
         """Jail the workbook path against the workspace root (the ``safe_path``
@@ -400,14 +517,16 @@ class ReconciliationCheck:
 
     def _compare_time_rows(
         self, spec: ReconciliationSpec, reader: WorkbookReader
-    ) -> list[CellComparison]:
+    ) -> tuple[list[CellComparison], list[EvidenceItem]]:
+        """The time-indexed comparisons, plus any structural evidence about the rows
+        themselves (duplicated timestamps) that is not a per-expectation verdict."""
         ti = spec.time_index
         if ti is None or not ti.expectations:
-            return []
+            return [], []
         if spec.timezone is None:
             raise _CheckBlocked("time_index is set but `timezone` is missing")
         try:
-            ZoneInfo(spec.timezone)  # validate the zone name; alignment is by wall-clock
+            zone = ZoneInfo(spec.timezone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise _CheckBlocked(f"unknown timezone {spec.timezone!r}: {exc}") from exc
 
@@ -438,8 +557,9 @@ class ReconciliationCheck:
                     reason=reason,
                 )
                 for exp in ti.expectations
-            ]
-        aligned = _align_time_rows(pairs)
+            ], []
+        aligned = _align_time_rows(pairs, zone)
+        structural = self._duplicate_evidence(spec, ti, aligned, zone)
 
         out: list[CellComparison] = []
         for exp in ti.expectations:
@@ -459,8 +579,29 @@ class ReconciliationCheck:
                     )
                 )
                 continue
+            if exp.fold and not _is_ambiguous(local, zone):
+                # A fold only exists where the zone repeats an hour. Asking for one
+                # anywhere else is a spec error, and saying "alignment gap" here would
+                # send the analyst hunting for a missing workbook row that was never
+                # supposed to exist.
+                out.append(
+                    CellComparison(
+                        cell=address,
+                        label=exp.label,
+                        expected=exp.expected,
+                        actual=None,
+                        unit=exp.unit,
+                        outcome="fail",
+                        reason=(
+                            f"fold {exp.fold} was requested but {exp.timestamp} is not an "
+                            f"ambiguous local time in {spec.timezone} — that wall clock "
+                            "occurs once, so there is no second occurrence to match"
+                        ),
+                    )
+                )
+                continue
             key = (local, exp.fold)
-            if key not in aligned:
+            if key not in aligned.values:
                 out.append(
                     CellComparison(
                         cell=address,
@@ -481,8 +622,82 @@ class ReconciliationCheck:
                     exp.expected,
                     exp.unit,
                     cell_unit,
-                    aligned[key],
+                    aligned.values[key],
                     _tolerance_for(spec, exp.timestamp),
+                )
+            )
+        return out, structural
+
+    def _duplicate_evidence(
+        self,
+        spec: ReconciliationSpec,
+        ti: TimeIndexSpec,
+        aligned: _AlignedRows,
+        zone: ZoneInfo,
+    ) -> list[EvidenceItem]:
+        """One ``fail`` line per duplicated timestamp — the defect that used to be a
+        silent ``fold=1``.
+
+        It is its own :class:`EvidenceItem` rather than a comparison row because it is
+        a statement about the *workbook*, not about any one expectation: the duplicate
+        is a fail whether or not an expectation happens to address that hour, and a
+        result that carries it can never derive ``pass``.
+
+        Bounded at :data:`MAX_DUPLICATE_LINES` named lines: one paste accident can
+        repeat thousands of rows, and the roll-up line that follows states how many
+        were withheld rather than leaving the reader to wonder.
+        """
+        out: list[EvidenceItem] = []
+        ordered = sorted(aligned.duplicates.items())
+        for local, count in ordered[:MAX_DUPLICATE_LINES]:
+            stamp = local.isoformat()
+            log.warning(
+                "reconciliation.duplicate_timestamp",
+                workbook=spec.workbook,
+                timestamp=stamp,
+                count=count,
+                timezone=spec.timezone,
+            )
+            if _is_ambiguous(local, zone):
+                # A genuine fall-back hour, but repeated *more* than the two times the
+                # zone writes it. Saying "not ambiguous" here would be a false statement
+                # in the evidence, and would send the analyst to the wrong fix.
+                why = (
+                    f"{spec.timezone} repeats that wall clock exactly twice (the DST "
+                    f"fall-back hour), so {count - 2} of these row(s) are duplicates"
+                )
+            else:
+                why = (
+                    f"it is not an ambiguous local time in {spec.timezone} — that wall "
+                    "clock occurs once, so these are duplicate rows, not a DST fall-back "
+                    "repeat"
+                )
+            out.append(
+                EvidenceItem(
+                    kind="numeric",
+                    label=f"duplicate timestamp row ({spec.workbook})",
+                    outcome="fail",
+                    detail=(
+                        f"{stamp} appears {count} times in column {ti.timestamp_column}, "
+                        f"but {why}. The duplicates were not matched against any "
+                        "expectation. Remove them (or fix the timestamps), then re-run."
+                    ),
+                )
+            )
+        withheld = len(ordered) - MAX_DUPLICATE_LINES
+        if withheld > 0:
+            out.append(
+                EvidenceItem(
+                    kind="numeric",
+                    label=f"duplicate timestamp rows, {withheld} more ({spec.workbook})",
+                    outcome="fail",
+                    detail=(
+                        f"{len(ordered)} distinct timestamps are duplicated in column "
+                        f"{ti.timestamp_column}; the {MAX_DUPLICATE_LINES} earliest are "
+                        f"named above and {withheld} more are not. De-duplicate the "
+                        f"timestamp column in {spec.workbook} and re-run to see whether "
+                        "any remain."
+                    ),
                 )
             )
         return out
