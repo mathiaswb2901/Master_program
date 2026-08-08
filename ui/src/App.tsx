@@ -14,6 +14,7 @@ import { QuickBar } from "./panels/QuickBar";
 import { StatusBar } from "./panels/StatusBar";
 import { Toasts } from "./panels/Toasts";
 import { groupActionsComponent, panelComponents, panelTabInfo } from "./registry";
+import { initBackendOrigin } from "./backend";
 import { awaitBackendReady, isTauri, onCloseRequested, setAttention } from "./shell";
 import { useStore } from "./store";
 import { initToken } from "./token";
@@ -98,11 +99,19 @@ export default function App() {
 
   useEffect(() => {
     let live = true;
-    void awaitBackendReady().then(() => {
-      if (live) setBackendReady(true);
-    });
-    void initToken().then(() => {
-      if (live) setTokenReady(true);
+    // Resolve where the backend lives *before* anything reaches it: in a browser
+    // this is an instant no-op (same-origin), in the shell it asks for the
+    // 127.0.0.1:<port> the backend was spawned on so every REST call and socket
+    // below targets it rather than the asset protocol (`backend.ts`). The token
+    // handshake's browser fallback rides this same seam, so it must land first.
+    void initBackendOrigin().then(() => {
+      if (!live) return;
+      void awaitBackendReady().then(() => {
+        if (live) setBackendReady(true);
+      });
+      void initToken().then(() => {
+        if (live) setTokenReady(true);
+      });
     });
     return () => {
       live = false;

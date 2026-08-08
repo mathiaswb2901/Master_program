@@ -37,6 +37,14 @@ workbench.toml
 # never committed — see the danger-zone rule in CLAUDE.md.
 .claude/
 
+# Staged standalone backend — the PyInstaller onedir the packaging step copies
+# here for `tauri build` to bundle. A large release artifact, never committed
+# (`packaging/build_backend.ps1`, `desktop/src-tauri/tauri.conf.json`). The
+# folder itself is tracked (via .gitkeep) because tauri.conf.json declares it as
+# a bundle resource and the build fails if the path does not exist.
+/desktop/src-tauri/backend/*
+!/desktop/src-tauri/backend/.gitkeep
+
 # OS noise
 Thumbs.db
 .DS_Store

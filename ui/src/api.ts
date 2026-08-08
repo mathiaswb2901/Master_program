@@ -1,5 +1,6 @@
 /** Typed REST client for the workbench server (proxied through Vite at /api). */
 
+import { apiUrl } from "./backend";
 import type { Theme } from "./theme";
 import { getToken } from "./token";
 import type {
@@ -71,7 +72,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token !== null) headers.set("X-Workbench-Token", token);
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(apiUrl(url), { ...init, headers });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -92,7 +93,7 @@ async function requestVoid(url: string, init?: RequestInit): Promise<void> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token !== null) headers.set("X-Workbench-Token", token);
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(apiUrl(url), { ...init, headers });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {

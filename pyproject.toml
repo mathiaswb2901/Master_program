@@ -40,6 +40,13 @@ dev = [
     "pre-commit>=4.6.1",
     "pytest-timeout>=2.4.0",
 ]
+# Release-only: freezes the backend into the standalone exe the desktop app
+# ships (`packaging/`). Deliberately *not* in `dev` — it is not needed for the
+# test gate, and `uv sync --dev` never installs it. Pull it in for a build with
+# `uv sync --group packaging` (or `uv run --group packaging pyinstaller …`).
+packaging = [
+    "pyinstaller>=6.11.0",
+]
 
 [project.scripts]
 workbench-server = "workbench_server.main:run"
