@@ -25,7 +25,14 @@
 import { expect, test } from "@playwright/test";
 
 import { openApp, treeItem } from "./app";
-import { DOCX_ALREADY_OPEN, DOCX_FILE, DOCX_REFUSES_EMBED, PPTX_FILE } from "./workspace";
+import {
+  DOCX_ALREADY_OPEN,
+  DOCX_FILE,
+  DOCX_REFUSES_EMBED,
+  PPTX_FILE,
+  XLSX_FILE,
+  XLSX_REFUSES_EMBED,
+} from "./workspace";
 
 /** --surface-paper is #FFFFFF in both themes: the card is literally paper. */
 const PAPER = "rgb(255, 255, 255)";
@@ -53,6 +60,36 @@ test("a .docx docks, and the panel names the application holding it", async ({ p
 
   await expect(page.locator(".wb-editor-tab").filter({ hasText: DOCX_FILE })).toBeVisible();
   expect(consoleErrors).toEqual([]);
+});
+
+test("an .xlsx docks, and the panel names Microsoft Excel", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+
+  await openApp(page);
+  await treeItem(page, XLSX_FILE).click();
+
+  // Excel walks the same launching -> embedding -> embedded the Word path does,
+  // and the badge names the *program* holding the window — the whole point of
+  // extending native hosting to XLMAIN.
+  await expect(page.locator(".wb-office-hosted")).toHaveText(/Microsoft Excel/i);
+  await expect(page.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+  await expect(page.locator(".wb-office-note")).toContainText("Simulated host");
+
+  await expect(page.locator(".wb-editor-tab").filter({ hasText: XLSX_FILE })).toBeVisible();
+  expect(consoleErrors).toEqual([]);
+});
+
+test("a workbook whose window will not dock ends in an editor, never a broken panel", async ({
+  page,
+}) => {
+  await openApp(page);
+  await treeItem(page, XLSX_REFUSES_EMBED).click();
+
+  const card = page.locator(".wb-office-card");
+  await expect(card.locator(".wb-office-card-title")).toHaveText("The window would not dock");
+  await card.getByRole("button", { name: "Open a preview here" }).click();
+  await expect(page.locator(".wb-office-card-title")).toHaveText(DEGRADED);
 });
 
 test("a document open somewhere else is explained, and still readable", async ({ page }) => {
