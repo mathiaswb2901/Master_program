@@ -20,6 +20,8 @@ from workbench_server.models.office_bridge import (
     WordText,
 )
 from workbench_server.services.agent_sessions import SessionManager
+from workbench_server.services.commands import CommandRelay
+from workbench_server.services.event_bus import EventBus
 from workbench_server.services.office_host.document_bridge import DocNotHostedError
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 
@@ -62,7 +64,9 @@ class _NoReader:
 @pytest.mark.timeout(300)
 async def test_real_sdk_round_trip(tmp_path: Path) -> None:
     manager = SessionManager(
-        tmp_path, sdk_client_factory(UiStateStore(), _NoReader()), max_sessions=1
+        tmp_path,
+        sdk_client_factory(UiStateStore(), _NoReader(), CommandRelay(EventBus())),
+        max_sessions=1,
     )
     session = manager.create("")
     queue = session.subscribe()
