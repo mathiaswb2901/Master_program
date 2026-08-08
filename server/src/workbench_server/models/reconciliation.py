@@ -66,8 +66,10 @@ class ExpectedValue(BaseModel):
     cell: str
     #: The code-computed value, in :attr:`unit`.
     expected: float
-    #: Unit of the *expected* value: ``MWh``, ``MW``, ``EUR/MWh``, ``EUR``, ``%`` or
-    #: ``""`` (dimensionless).
+    #: Unit of the *expected* value: ``MWh``, ``MW``, a price or amount in any of
+    #: EUR/NOK/SEK/DKK (``NOK/MWh``, ``EUR/kWh``, ``SEK``…), ``%`` or ``""``
+    #: (dimensionless). Scaling *within* a currency is a named conversion; comparing
+    #: *across* currencies is refused rather than resolved with an invented FX rate.
     unit: str = ""
     #: Declared unit of the *workbook cell*. ``None`` means "same as
     #: :attr:`unit`" (compare directly). When it differs, a compatible pair is
@@ -90,7 +92,10 @@ class TimeExpectation(BaseModel):
     #: Unit of the expected value (see :class:`ExpectedValue`).
     unit: str = ""
     #: Which occurrence of a repeated wall-clock time to match on the fall-back DST
-    #: day: ``0`` is the first 02:00, ``1`` the second. Ignored off a transition.
+    #: day: ``0`` is the first 02:00, ``1`` the second. A non-zero fold is only
+    #: meaningful where :attr:`ReconciliationSpec.timezone` genuinely repeats that
+    #: wall clock; asking for one anywhere else is a **fail** naming the timestamp,
+    #: never silently ignored — that silence is what let a duplicated row pass.
     fold: int = 0
     label: str | None = None
 
@@ -99,9 +104,10 @@ class TimeIndexSpec(BaseModel):
     """A time-indexed comparison: a timestamp column and a value column, and the
     expectations addressed by wall-clock time.
 
-    The gate reads the two columns, attaches the spec's zone to each timestamp
-    (distinguishing the repeated fall-back hour by order of appearance), and looks
-    each expectation up by ``(wall-clock, fold)`` — never by row position."""
+    The gate reads the two columns and looks each expectation up by
+    ``(wall-clock, fold)`` — never by row position. A second row at the same wall
+    clock becomes ``fold=1`` only where the spec's zone *actually* repeats that hour;
+    any other repeat is a duplicated row and is reported as its own ``fail``."""
 
     #: Column letter carrying the local timestamps, e.g. ``A``.
     timestamp_column: str

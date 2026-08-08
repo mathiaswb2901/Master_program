@@ -65,6 +65,12 @@ log = structlog.get_logger()
 #: much was cut and how to narrow the run (AXI shape 1).
 MAX_COMPARISONS = 200
 
+#: Cap on the *named* duplicate-timestamp evidence lines. One paste accident can
+#: repeat thousands of rows, and a fail per row would bury the grouped verdict and
+#: blow the result's token budget; beyond this the rest are rolled into one line
+#: that says how many were withheld and how to see them (AXI shape 1).
+MAX_DUPLICATE_LINES = 20
+
 #: Least-to-most severe, for rolling per-cell outcomes up into one grouped verdict.
 _OUTCOME_SEVERITY: dict[CheckOutcome, int] = {"pass": 0, "skipped": 1, "warn": 2, "fail": 3}
 
@@ -553,7 +559,7 @@ class ReconciliationCheck:
                 for exp in ti.expectations
             ], []
         aligned = _align_time_rows(pairs, zone)
-        structural = self._duplicate_evidence(spec, ti, aligned)
+        structural = self._duplicate_evidence(spec, ti, aligned, zone)
 
         out: list[CellComparison] = []
         for exp in ti.expectations:
@@ -623,7 +629,11 @@ class ReconciliationCheck:
         return out, structural
 
     def _duplicate_evidence(
-        self, spec: ReconciliationSpec, ti: TimeIndexSpec, aligned: _AlignedRows
+        self,
+        spec: ReconciliationSpec,
+        ti: TimeIndexSpec,
+        aligned: _AlignedRows,
+        zone: ZoneInfo,
     ) -> list[EvidenceItem]:
         """One ``fail`` line per duplicated timestamp — the defect that used to be a
         silent ``fold=1``.
@@ -632,9 +642,14 @@ class ReconciliationCheck:
         a statement about the *workbook*, not about any one expectation: the duplicate
         is a fail whether or not an expectation happens to address that hour, and a
         result that carries it can never derive ``pass``.
+
+        Bounded at :data:`MAX_DUPLICATE_LINES` named lines: one paste accident can
+        repeat thousands of rows, and the roll-up line that follows states how many
+        were withheld rather than leaving the reader to wonder.
         """
         out: list[EvidenceItem] = []
-        for local, count in sorted(aligned.duplicates.items()):
+        ordered = sorted(aligned.duplicates.items())
+        for local, count in ordered[:MAX_DUPLICATE_LINES]:
             stamp = local.isoformat()
             log.warning(
                 "reconciliation.duplicate_timestamp",
@@ -643,17 +658,45 @@ class ReconciliationCheck:
                 count=count,
                 timezone=spec.timezone,
             )
+            if _is_ambiguous(local, zone):
+                # A genuine fall-back hour, but repeated *more* than the two times the
+                # zone writes it. Saying "not ambiguous" here would be a false statement
+                # in the evidence, and would send the analyst to the wrong fix.
+                why = (
+                    f"{spec.timezone} repeats that wall clock exactly twice (the DST "
+                    f"fall-back hour), so {count - 2} of these row(s) are duplicates"
+                )
+            else:
+                why = (
+                    f"it is not an ambiguous local time in {spec.timezone} — that wall "
+                    "clock occurs once, so these are duplicate rows, not a DST fall-back "
+                    "repeat"
+                )
             out.append(
                 EvidenceItem(
                     kind="numeric",
                     label=f"duplicate timestamp row ({spec.workbook})",
                     outcome="fail",
                     detail=(
-                        f"{stamp} appears {count} times in column {ti.timestamp_column}, but "
-                        f"it is not an ambiguous local time in {spec.timezone} — that wall "
-                        "clock occurs once, so these are duplicate rows, not a DST fall-back "
-                        "repeat. The duplicates were not matched against any expectation. "
-                        "Remove them (or fix the timestamps), then re-run."
+                        f"{stamp} appears {count} times in column {ti.timestamp_column}, "
+                        f"but {why}. The duplicates were not matched against any "
+                        "expectation. Remove them (or fix the timestamps), then re-run."
+                    ),
+                )
+            )
+        withheld = len(ordered) - MAX_DUPLICATE_LINES
+        if withheld > 0:
+            out.append(
+                EvidenceItem(
+                    kind="numeric",
+                    label=f"duplicate timestamp rows, {withheld} more ({spec.workbook})",
+                    outcome="fail",
+                    detail=(
+                        f"{len(ordered)} distinct timestamps are duplicated in column "
+                        f"{ti.timestamp_column}; the {MAX_DUPLICATE_LINES} earliest are "
+                        f"named above and {withheld} more are not. De-duplicate the "
+                        f"timestamp column in {spec.workbook} and re-run to see whether "
+                        "any remain."
                     ),
                 )
             )

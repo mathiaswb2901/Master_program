@@ -40,6 +40,7 @@ from workbench_server.models.reconciliation import (
 from workbench_server.models.validation import ValidationResult, ValidationSpec, ValidationSubject
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.reconciliation import (
+    MAX_DUPLICATE_LINES,
     CrossCurrency,
     ReconciliationCheck,
     UnitMismatch,
@@ -465,6 +466,96 @@ async def test_a_fold_1_expectation_on_a_non_ambiguous_date_is_refused(tmp_path:
     reason = row.reason or ""
     assert "not an ambiguous" in reason and "Europe/Oslo" in reason
     assert "alignment gap" not in reason
+
+
+@pytest.mark.asyncio
+async def test_an_over_repeated_fall_back_hour_is_not_called_unambiguous(tmp_path: Path) -> None:
+    """A *third* 02:00 on the genuine fall-back day is still a duplicate — but the
+    evidence must not claim the timestamp "occurs once", which is false there and
+    points the analyst at the wrong fix. Europe/Oslo really does write 2024-10-27
+    02:00 twice; it is the third copy that is the paste accident."""
+    path = tmp_path / "prices.xlsx"
+    make_dst_workbook(path)
+    wb = openpyxl.load_workbook(path)
+    ws = wb["Prices"]
+    ws["A27"] = datetime(2024, 10, 27, 2)  # a third 02:00, appended past the 25 rows
+    ws["B27"] = 99.0
+    wb.save(path)
+    spec = ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[
+                TimeExpectation(
+                    timestamp="2024-10-27T02:00:00", expected=21.0, unit="EUR/MWh", fold=1
+                ),
+            ],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high", result.summary
+    dup = [e for e in result.evidence if "duplicate" in e.detail.lower()]
+    assert dup, [e.detail for e in result.evidence]
+    assert dup[0].outcome == "fail"
+    assert "2024-10-27T02:00:00" in dup[0].detail
+    assert "appears 3 times" in dup[0].detail
+    # The false sentence the first cut of this fix would have emitted.
+    assert "not an ambiguous local time" not in dup[0].detail
+    assert "twice" in dup[0].detail
+    # The two genuine folds still aligned, so fold 1 matched its real CET value.
+    row = report_of(service, result).comparisons[0]
+    assert row.outcome == "pass"
+    assert row.actual == pytest.approx(21.0)
+
+
+@pytest.mark.asyncio
+async def test_many_duplicated_timestamps_are_bounded_and_say_how_many_were_withheld(
+    tmp_path: Path,
+) -> None:
+    """A paste accident can duplicate thousands of rows. One fail line each would bury
+    the verdict and blow the result's token budget, so the named lines are capped and a
+    roll-up states the total and what to do — never a silent truncation (AXI shape 1)."""
+    path = tmp_path / "prices.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Prices"
+    ws["A1"] = "timestamp"
+    ws["B1"] = "price"
+    row = 2
+    for hour in range(24):  # every hour of an ordinary June day, written twice
+        for value in (float(hour), float(hour) + 0.5):
+            ws[f"A{row}"] = datetime(2024, 6, 15, hour)
+            ws[f"B{row}"] = value
+            row += 1
+    wb.save(path)
+    spec = ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[
+                TimeExpectation(timestamp="2024-06-15T00:00:00", expected=0.0, unit="EUR/MWh"),
+            ],
+        ),
+    )
+    _, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    named = [e for e in result.evidence if e.label.startswith("duplicate timestamp row (")]
+    assert len(named) == MAX_DUPLICATE_LINES
+    rollup = [e for e in result.evidence if "more (" in e.label]
+    assert len(rollup) == 1
+    assert rollup[0].outcome == "fail"
+    assert "24 distinct timestamps are duplicated" in rollup[0].detail
+    assert f"{24 - MAX_DUPLICATE_LINES} more" in rollup[0].detail
 
 
 # ------------------------------------------------------------- Nordic currencies
