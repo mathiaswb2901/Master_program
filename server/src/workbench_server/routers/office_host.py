@@ -44,14 +44,19 @@ router = APIRouter(prefix="/api/office", tags=["office-host"])
 
 #: A refusal is a policy answer, not a crash — each one maps to the status that
 #: says *why* without the client parsing prose.
+#:
+#: **Only the reasons a request can be refused *before* a host exists belong
+#: here.** Those are the two below: the service raises
+#: :class:`~...office_host.HostRefusedError` for an unhostable file type and for
+#: a machine that cannot host at all, and for nothing else. The "in use"
+#: outcomes — a document open in someone else's window, PowerPoint already
+#: running, the deck Workbench is itself hosting — are decided *after* the host
+#: record exists, so they come back as a settled ``200`` :class:`OfficeHostInfo`
+#: with ``state="failed"`` and the reason in the body, which is what the panel
+#: renders. Listing them here would be a mapping that never fires.
 _REFUSAL_STATUS: dict[HostReason, int] = {
     "native_hosting_disabled": 503,
     "unsupported_file": 415,
-    # Both are "the thing you asked for is in use" rather than a failure: the
-    # document in someone else's window, or the whole application in the user's
-    # own session. 409 either way, and the reason in the body says which.
-    "powerpoint_already_running": 409,
-    "document_open_elsewhere": 409,
 }
 
 

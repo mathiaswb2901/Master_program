@@ -1100,9 +1100,24 @@ no wall to build, and the protection is **not sharing the process at all**: a
 launch asks `GetActiveObject` *before* it creates any COM object and refuses with
 `powerpoint_already_running` when one is up — which is what keeps the user's own
 PowerPoint out of the `KILL_ON_JOB_CLOSE` job. With none running, `DispatchEx`
-starts a fresh process and it is ours on the same terms as Word's. Two
-consequences stated plainly: **one deck at a time** (a second would have to share
-the first's process, which the containment model does not refcount), and the
+starts a fresh process and it is ours on the same terms as Word's.
+
+That pre-flight is a **check, not an interlock**, and the difference is written
+down rather than glossed: an instance that appears between the answer and the
+`DispatchEx` is not excluded by it. Reaching the bad outcome needs a PowerPoint
+that both starts after the pid snapshot and is a live COM server microseconds
+later, which is not something a multi-second application start fits into — and if
+it happened anyway, two new frames would appear and `_identify` refuses to choose
+between them. Narrow, covered downstream, not absolute.
+
+Two more consequences stated plainly. **One deck at a time**: a second would have
+to share the first's process, which the containment model does not refcount — so
+it is reported as a `kind_note` (`powerpoint_hosted_here` if a launch races the
+report) and opens as a preview, naming *the Workbench tab* to close rather than a
+PowerPoint window the user cannot find, because the only instance is docked in a
+panel. That answer is read from the live host map and never from the window
+probe: docking reparents the frame into a child window, so a top-level
+`EnumWindows` walk stops being able to see our own hosted deck at all. And the
 window is identified by the pid+frame snapshot rather than a handle from COM —
 `Application.HWND` and `DocumentWindow.HWND` are *declared* in the type library
 and both raise "member not found" when read, late and early bound.

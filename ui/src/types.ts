@@ -997,6 +997,12 @@ export type HostReason =
    * user's own. Distinct from `document_open_elsewhere`: it is not this document
    * that is in use, it is the application — and the fix is different. */
   | "powerpoint_already_running"
+  /** The running PowerPoint is the one Workbench is hosting itself, so there is
+   * no separate window for the user to close — the deck is docked in a panel,
+   * possibly behind another tab. Same mechanism as
+   * `powerpoint_already_running`, different owner, and the only actionable
+   * sentence is a different one. */
+  | "powerpoint_hosted_here"
   | "unsupported_file"
   | "native_hosting_disabled";
 

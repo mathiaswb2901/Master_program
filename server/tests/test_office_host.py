@@ -10,6 +10,9 @@ The owner decisions are tested as rules, not as comments: a process we did not
 launch is never adopted, and PowerPoint — hostable since 2026-08-09, but only
 when Workbench started the process — is refused with a reason of its own when one
 is already running, and reported as unavailable *before* a launch is attempted.
+The refusal names *whose* instance is in the way, because only one of the two has
+a window the user can close: a deck Workbench is hosting is docked in a panel,
+and a top-level window probe cannot even see it once the frame is reparented.
 """
 
 import asyncio
@@ -1043,9 +1046,14 @@ def test_a_running_word_holds_nothing_back(tmp_path: Path) -> None:
     assert caps.hostable_kinds == ["word", "excel", "powerpoint"]
 
 
-def test_the_fake_backend_never_holds_powerpoint_back(tmp_path: Path) -> None:
+def test_the_fake_backend_never_consults_the_window_probe(tmp_path: Path) -> None:
     """CI runs the fake on machines with no Office and no window station, and the
-    fake shares no process with anything — so the probe is not even consulted."""
+    fake starts no processes — so there is no machine-wide instance to collide
+    with and the probe is not consulted at all.
+
+    Its own hosted decks are a different question, answered from the host map
+    rather than from a probe, and the test below asserts that one.
+    """
     service, _ = make_service(
         tmp_path, FakeHostBackend(), fake=True, running_kinds=frozenset({"powerpoint"})
     )
@@ -1054,6 +1062,74 @@ def test_the_fake_backend_never_holds_powerpoint_back(tmp_path: Path) -> None:
 
     assert caps.kind_notes == {}
     assert "powerpoint" in caps.hostable_kinds
+
+
+async def test_the_deck_workbench_is_hosting_holds_powerpoint_back(tmp_path: Path) -> None:
+    """The collision a window probe structurally cannot see.
+
+    Docking reparents the frame into a child window, so the top-level
+    ``EnumWindows`` walk behind ``running_probe`` stops finding it: the probe here
+    says nothing is running (``running_kinds`` is empty) *while Workbench is
+    holding the one instance there is*. Answered from the host map instead — or
+    the second deck a user clicks would be sent to a launch the pre-flight is
+    going to refuse, with a card telling them to close a PowerPoint that has no
+    window on their desktop.
+    """
+    service, _ = make_service(tmp_path, FakeHostBackend(), fake=False, running_kinds=frozenset())
+    (tmp_path / "deck-one.pptx").write_bytes(DOCX_BYTES)
+
+    assert "powerpoint" in service.capabilities(onlyoffice_enabled=False).hostable_kinds
+    docked = await service.open("deck-one.pptx", RECT)
+    assert docked.state == "embedded"
+
+    caps = service.capabilities(onlyoffice_enabled=False)
+
+    assert caps.hostable_kinds == ["word", "excel"]
+    note = caps.kind_notes["powerpoint"]
+    # The sentence names the tab to close, because that is the only window there
+    # is — "close PowerPoint" would name nothing the user can find.
+    assert "deck-one.pptx" in note
+    assert "Close that tab" in note
+    assert set(caps.kind_notes) == {"powerpoint"}
+
+    # And the kind comes back the moment that deck settles: a terminal host holds
+    # no process, so it must not hold the application either.
+    await service.close(docked.host_id)
+    assert service.capabilities(onlyoffice_enabled=False).kind_notes == {}
+    assert "powerpoint" in service.capabilities(onlyoffice_enabled=False).hostable_kinds
+
+
+async def test_a_second_deck_that_races_the_report_names_the_tab_to_close(
+    tmp_path: Path,
+) -> None:
+    """The same collision when ``kind_notes`` was read a moment too early.
+
+    The panel reads capabilities when it mounts, so a deck docked between that
+    read and this launch still reaches the backend and is still refused. What
+    must not happen is the *generic* refusal: the instance in the way is the one
+    Workbench is hosting, so the reason — and the card it renders — has to name
+    the tab, not a PowerPoint window that does not exist.
+    """
+    backend = FakeHostBackend()
+    service, _ = make_service(tmp_path, backend)
+    (tmp_path / "deck-one.pptx").write_bytes(DOCX_BYTES)
+    (tmp_path / "deck-two-app-running.pptx").write_bytes(DOCX_BYTES)
+
+    first = await service.open("deck-one.pptx", RECT)
+    assert first.state == "embedded"
+
+    second = await service.open("deck-two-app-running.pptx", RECT)
+
+    assert (second.state, second.reason) == ("failed", "powerpoint_hosted_here")
+    # Nothing was closed to make room: the deck the user is looking at survives a
+    # refusal aimed at a different one.
+    assert service.get(first.host_id).state == "embedded"
+
+    # With that deck gone the refusal is the other one again — the user really
+    # does have a PowerPoint of their own in the way, and the fix is theirs.
+    await service.close(first.host_id)
+    third = await service.open("deck-two-app-running.pptx", RECT)
+    assert (third.state, third.reason) == ("failed", "powerpoint_already_running")
 
 
 async def test_a_deck_walks_the_whole_lifecycle(tmp_path: Path) -> None:
@@ -1346,10 +1422,18 @@ def test_powerpoint_over_http_docks_like_the_others(tmp_path: Path) -> None:
 def test_a_deck_refused_over_http_says_powerpoint_is_the_thing_in_use(tmp_path: Path) -> None:
     """A settled ``failed`` host, not an HTTP error: the launch was attempted and
     the backend refused it, which is a state the panel renders rather than an
-    exception the client has to interpret."""
+    exception the client has to interpret.
+
+    The status is asserted for the same reason the router's table no longer names
+    this reason: an "in use" outcome is decided *after* the host record exists, so
+    it can only come back as a 200 with the reason in the body. A status mapping
+    for it would be one that never fires.
+    """
     (tmp_path / "app-running.pptx").write_bytes(DOCX_BYTES)
     with TestClient(hosting_app(tmp_path)) as client:
-        host = client.post("/api/office/host", json={"path": "app-running.pptx"}).json()
+        response = client.post("/api/office/host", json={"path": "app-running.pptx"})
+        assert response.status_code == 200
+        host = response.json()
         assert (host["state"], host["reason"]) == ("failed", "powerpoint_already_running")
 
 

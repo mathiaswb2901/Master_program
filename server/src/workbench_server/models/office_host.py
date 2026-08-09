@@ -21,7 +21,11 @@ comment somewhere:
   :data:`HostReason` ``powerpoint_already_running``, because the alternative is
   putting the user's own PowerPoint in a kill-on-close job object.
   :attr:`OfficeCapabilities.kind_notes` reports that condition before a launch is
-  attempted, so the UI degrades to preview from a fact rather than a failure.
+  attempted, so the UI degrades to preview from a fact rather than a failure —
+  and the *most common* instance in the way is Workbench's own: a deck already
+  docked here occupies the one process, which is why hosting one deck at a time
+  is a stated limitation and why ``powerpoint_hosted_here`` is a reason of its
+  own rather than prose inside ``powerpoint_already_running``.
 * ``document_open_elsewhere`` exists as a first-class terminal reason because
   "the document is already open in an instance we did not launch" must be a
   visible refusal, never a silent takeover.
@@ -100,6 +104,12 @@ HostReason = Literal[
     # ``document_open_elsewhere``: it is not *this document* that is open, it is
     # the application — and the fix the UI offers is different.
     "powerpoint_already_running",
+    # The running PowerPoint is the one **Workbench itself** is hosting. Same
+    # mechanism, different owner, and the difference is the whole point: "close
+    # PowerPoint and try again" names a window the user cannot find, because the
+    # only one is docked in a Workbench panel — possibly behind another tab.
+    # The actionable sentence is "close that tab", so it is its own reason.
+    "powerpoint_hosted_here",
     "unsupported_file",
     "native_hosting_disabled",
 ]

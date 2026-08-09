@@ -1568,18 +1568,25 @@ Build for real external users, not just the author. Consequences, tracked as wor
   produced. So the decision becomes conditional rather than absolute: **host it when
   Workbench started the process, refuse with `powerpoint_already_running` when it did
   not** — a pre-flight (`GetActiveObject`, 0.000 s for "none", 0.14 s to find one) that
-  runs *before* any COM object exists, so the user's instance is never touched, and never
-  reaches the `KILL_ON_JOB_CLOSE` job that reaps ours. `capabilities().kind_notes` reports
-  the condition before a launch is attempted, so the UI opens the preview directly instead
-  of failing first. Accepted limitations, stated rather than hidden: **one deck at a
-  time** (a second would share the first's process, which the containment model does not
-  refcount), a **read-only** document bridge (slides and shape text; a slide has no single
-  addressable write target the way a paragraph or a cell does), and no defence against the
-  user double-clicking a `.pptx` into our instance — the wall Excel gets does not exist
-  here. Rejected: shelling `POWERPNT.EXE` and re-attaching through the ROT (does not
-  produce a second process, so it buys nothing); DCOM `AppID`/`RunAs` reconfiguration
-  (changes machine-wide COM settings for every application, to make Office behave in a
-  way it is not built to).
+  runs *before* any COM object exists, so the user's instance is not touched on the way
+  out and does not reach the `KILL_ON_JOB_CLOSE` job that reaps ours. A **check, not an
+  interlock**, and recorded as such: an instance appearing between that answer and the
+  `DispatchEx` is not excluded by it, which needs a PowerPoint that starts after the pid
+  snapshot *and* is a registered COM server microseconds later — and if that happened, two
+  new frames would appear and `_identify` refuses to choose between them rather than
+  guess. `capabilities().kind_notes` reports the condition before a launch is attempted,
+  so the UI opens the preview directly instead of failing first. Accepted limitations,
+  stated rather than hidden: **one deck at a time** (a second would share the first's
+  process, which the containment model does not refcount — so it is a `kind_note` read
+  from the live host map, because docking reparents the frame and a top-level window walk
+  can no longer see our own hosted deck; the sentence names the Workbench tab to close,
+  since there is no separate PowerPoint window for the user to find), a **read-only**
+  document bridge (slides and shape text; a slide has no single addressable write target
+  the way a paragraph or a cell does), and no defence against the user double-clicking a
+  `.pptx` into our instance — the wall Excel gets does not exist here. Rejected: shelling
+  `POWERPNT.EXE` and re-attaching through the ROT (does not produce a second process, so
+  it buys nothing); DCOM `AppID`/`RunAs` reconfiguration (changes machine-wide COM
+  settings for every application, to make Office behave in a way it is not built to).
 
 - 2026-08-07 — **Office account identity + multi-account switching** (owner; reopens the
   freeze on the owner-decision ground, like new-document types). The docked native Office is

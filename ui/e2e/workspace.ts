@@ -97,6 +97,10 @@ export const PPTX_FILE = "slides.pptx";
  * `app-running` trigger, which is the one refusal unique to PowerPoint being
  * single-instance. */
 export const PPTX_APP_RUNNING = "slides-app-running.pptx";
+/** A second, ordinary deck. Nothing is wrong with *it*: it cannot dock only
+ * because {@link PPTX_FILE} is already holding the one PowerPoint there is, and
+ * that is the journey it exists for. */
+export const PPTX_SECOND = "slides-two.pptx";
 /** Body of the working shell shortcut; the terminal journey asserts this text
  * lands on the prompt line and that nothing ever ran it. */
 export const SHORTCUT_NAME = "Show the marker";
@@ -375,6 +379,7 @@ function seed(root: string): void {
     XLSX_REFUSES_EMBED,
     PPTX_FILE,
     PPTX_APP_RUNNING,
+    PPTX_SECOND,
   ]) {
     fs.writeFileSync(path.join(root, name), "not a real document\n", "utf-8");
   }

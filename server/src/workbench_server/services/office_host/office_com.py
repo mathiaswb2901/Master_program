@@ -35,6 +35,22 @@ Four measured facts shape it:
   user's PowerPoint out of a ``KILL_ON_JOB_CLOSE`` job. With nothing running,
   ``DispatchEx`` does start a fresh process (measured, ~2.4 s) and it is ours on
   the same terms as Word's.
+* **The pre-flight is a check, not an interlock, and the residual window is
+  stated rather than claimed away.** Three steps run in order and none of them is
+  atomic with the next: ``GetActiveObject`` answers "none", the pid and frame
+  snapshots are taken, and only then does ``DispatchEx`` run. A PowerPoint the
+  user starts *after* the snapshot is not in ``before_pids``, so it would look
+  new — and if it were also a registered COM server by the time ``DispatchEx``
+  runs, that call would bind to theirs and :func:`_identify` would call it ours.
+  Both halves must be true inside the same gap, which is where this stops being
+  reachable in practice: the gap is the microseconds between two local calls, and
+  a PowerPoint takes seconds to start and register. An instance that began
+  *before* the snapshot is in ``before_pids`` and comes back ``adopted`` (refused
+  by the service); one that begins inside the gap cannot be a live COM server by
+  the end of it, so ``DispatchEx`` starts our own process and *two* new frames
+  appear — which :func:`_identify` refuses to choose between rather than guess.
+  So: narrow, covered downstream, and not an absolute guarantee. Closing it for
+  real needs an interlock COM does not offer.
 * **PowerPoint offers no window handle over automation either** — which is worth
   stating because the type library says otherwise. ``Application.HWND`` and
   ``DocumentWindow.HWND`` are both *declared* and both raise "member not found"
@@ -415,6 +431,13 @@ def launch(
     # to the user's session rather than start our own (see the module docstring).
     # Refusing here is what makes the rest of this module's containment safe: a
     # process we did not start must never reach `_contain`.
+    #
+    # A check, not an interlock: an instance that appears between this answer and
+    # the `DispatchEx` below is not excluded by it. The snapshots are taken as
+    # late as possible for that reason, and the two backstops the module
+    # docstring sets out — `adopted` for anything that predates the snapshot, and
+    # `_identify` refusing to choose between two new processes — are what cover
+    # the remainder.
     if kind in SINGLE_INSTANCE_KINDS and instance_already_running(kind):
         raise InstanceBusyError(
             f"{kind} is already running, and it runs one instance for the whole session; "

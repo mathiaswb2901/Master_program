@@ -854,6 +854,34 @@ def test_word_and_excel_are_never_pre_flighted(
     assert frozenset({"powerpoint"}) == SINGLE_INSTANCE_KINDS
 
 
+def test_a_powerpoint_that_appears_during_the_launch_is_refused_not_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop under the pre-flight's residual window.
+
+    ``instance_already_running`` is a check and not an interlock: an instance the
+    user starts *after* it answers is not excluded by it, and one that starts
+    after the pid snapshot would not be in ``before_pids`` either. What keeps that
+    from becoming a takeover is what happens next. A PowerPoint cannot start and
+    register its class object inside the microseconds between the snapshot and
+    ``DispatchEx``, so the real shape of the race is *two* new processes — and
+    two is the one thing identification will not choose between. Nothing is
+    contained, so nothing of theirs is in a kill-on-close job; only our own COM
+    object is asked to quit.
+    """
+    app = FakePowerPoint()
+    frames = {0x11: 900, 0x22: 901}
+    released = _launch_against(monkeypatch, app, _powerpoint_at(frames), frames)
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"PK")
+
+    with pytest.raises(office_com.OfficeComError, match="refusing to guess"):
+        office_com.launch(deck, "powerpoint")
+
+    assert released == []  # no job was ever taken, so none is released or killed
+    assert app.quits == 1
+
+
 def test_powerpoints_alerts_use_its_own_polarity() -> None:
     """``ppAlertsNone`` is 1 and ``ppAlertsAll`` is 2 — PowerPoint's "off" is the
     truthy value, the opposite of Word's 0/-1 and Excel's False/True. Sharing

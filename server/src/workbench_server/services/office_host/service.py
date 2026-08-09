@@ -30,10 +30,22 @@ launch made while one is running returns the *user's* PowerPoint rather than a
 private one (measured; see ``office_com``) — and a process we did not start must
 never reach the job object that reaps ours. So the answer is neither "host it
 anyway" nor "preview-only forever": host it when Workbench started the process,
-refuse with ``powerpoint_already_running`` when it did not, and say which of
-those is true right now in ``capabilities().kind_notes`` so the UI degrades to
-preview from a fact rather than from a failed launch. Nothing here touches the
-OnlyOffice path, which stays exactly as it was.
+refuse when it did not, and say which of those is true right now in
+``capabilities().kind_notes`` so the UI degrades to preview from a fact rather
+than from a failed launch. Nothing here touches the OnlyOffice path, which stays
+exactly as it was.
+
+**And the instance most often in the way is our own.** Hosting one deck consumes
+the single process, so the second deck cannot dock either — the "one deck at a
+time" limitation, which is a *consequence* of single-instance hosting rather than
+a separate rule. It has to be answered from :attr:`_hosts` and not from a window
+probe, because docking reparents the frame into a child window and a top-level
+``EnumWindows`` walk stops being able to see it (``office_com``'s probe is
+deliberately window-based so it can answer a REST request off the apartment
+thread). Whose PowerPoint it is changes the only action the user can take —
+"close that tab" versus "close PowerPoint" — so the two are different reasons
+(``powerpoint_hosted_here`` / ``powerpoint_already_running``) and different
+sentences, never one message that is right half the time.
 """
 
 import asyncio
@@ -128,6 +140,15 @@ _WORD_EXE_GLOBS = (
     "Microsoft Office/root/Office*/WINWORD.EXE",
     "Microsoft Office/Office*/WINWORD.EXE",
 )
+
+#: The application's own name, for the sentences ``kind_notes`` puts on screen.
+#: :data:`~...office_host.HostAppKind` is a wire token — a user reads "PowerPoint",
+#: not "powerpoint".
+_APP_NAMES: dict[HostAppKind, str] = {
+    "word": "Word",
+    "excel": "Excel",
+    "powerpoint": "PowerPoint",
+}
 
 
 class HostRefusedError(Exception):
@@ -333,29 +354,95 @@ class OfficeHostService:
         )
 
     def _kind_notes(self) -> dict[HostAppKind, str]:
-        """Why a supported kind cannot be hosted *at this moment*.
+        """Why a supported kind cannot be hosted *at this moment*, and by whom.
 
-        Only the single-instance kinds can produce one, and only against a real
-        backend: the fake starts no processes and shares nothing, so under
-        ``WORKBENCH_OFFICE_FAKE`` every kind is always hostable and CI stays
-        deterministic on a machine with no Office and no windows at all.
+        Only the single-instance kinds can produce one, and there are two ways
+        for the one process to be taken.
 
-        Advisory, never the gate. It is read from the window list, which cannot
-        see an instance running without one, and the user can start PowerPoint a
-        second after the answer is sent. The launch pre-flight is the exact
-        question and the ownership check behind it is the guarantee; this exists
-        so the common case degrades to preview without a failed launch first.
+        **Workbench is already hosting one** — asked first, and asked of
+        :attr:`_hosts` rather than of a probe. This is the common case (open a
+        second deck) *and* the one a window probe structurally cannot answer:
+        docking reparents the frame into a child window, so the top-level
+        ``EnumWindows`` walk behind ``running_probe`` stops seeing it the moment
+        the embed lands. Reading our own map is also exact rather than advisory —
+        a host is live because we launched it — and it holds from ``launching``
+        onwards, so two decks opened in the same second cannot both be told yes.
+        The sentence names the document, because the window to close is a
+        Workbench tab and possibly behind another one.
+
+        **The user has one open outside Workbench** — the window probe, which is
+        advisory in both directions: it cannot see an instance running without a
+        window (an ``/AUTOMATION`` PowerPoint some other tool is driving), and
+        the user can start one a second after the answer is sent. The launch
+        pre-flight is the exact question and the ownership check behind it is the
+        guarantee; this exists so the common case degrades to preview without a
+        failed launch first.
+
+        The fake short-circuits the *probe* only: it starts no processes, so
+        under ``WORKBENCH_OFFICE_FAKE`` there is no machine-wide instance to
+        collide with and CI stays deterministic with no Office and no window
+        station. Our own hosts are not a probe — the fake creates them exactly as
+        the real backend does — so the first branch applies there too, which is
+        what lets the E2E suite walk the second-deck journey a user actually
+        hits.
         """
-        if self._fake:
-            return {}
-        return {
-            kind: (
-                f"{kind} is already running. It runs one instance for the whole session, so "
-                "Workbench cannot start its own — close it and reopen this file to dock it."
-            )
-            for kind in HOSTABLE_KINDS
-            if kind in SINGLE_INSTANCE_KINDS and self._running_probe(kind)
-        }
+        notes: dict[HostAppKind, str] = {}
+        for kind in HOSTABLE_KINDS:
+            if kind not in SINGLE_INSTANCE_KINDS:
+                continue
+            app = _APP_NAMES[kind]
+            hosted = self._hosted_path_for(kind)
+            if hosted is not None:
+                notes[kind] = (
+                    f"Workbench is already showing {hosted} in {app}, which runs one instance "
+                    "for the whole session. Close that tab to dock this file; until then it "
+                    "opens as a preview."
+                )
+            elif not self._fake and self._running_probe(kind):
+                notes[kind] = (
+                    f"{app} is already running outside Workbench. It runs one instance for "
+                    "the whole session, so Workbench cannot start its own — close it and "
+                    "reopen this file to dock it."
+                )
+        return notes
+
+    def _hosted_path_for(self, kind: HostAppKind, *, other_than: str | None = None) -> str | None:
+        """The document this application is already holding for us, if any.
+
+        ``other_than`` excludes one host by id: the host being launched is in the
+        map (and non-terminal) before its own launch returns, so a refusal has to
+        ask about *the others* or it would always find itself.
+        """
+        return next(
+            (
+                host.lifecycle.path
+                for host_id, host in self._hosts.items()
+                if host.lifecycle.kind == kind
+                and not host.lifecycle.terminal
+                and host_id != other_than
+            ),
+            None,
+        )
+
+    def _whose_instance(self, host: _Host, reason: HostReason) -> HostReason:
+        """Sharpen "the application is already running" into *whose* it is.
+
+        The backend knows only that one is up — the pre-flight it raises from is
+        a COM question about the machine, not about Workbench. The service knows
+        the other half: whether the instance in the way is the one it is hosting
+        itself. That changes the only action the user can take, so it changes the
+        reason rather than being left to a card that says "close PowerPoint"
+        about a window docked in a panel behind another tab.
+
+        Reached on the race the capabilities report cannot close: ``kind_notes``
+        is read when the panel mounts, and a deck docked in the moment between
+        that read and this launch still lands here.
+        """
+        if reason != "powerpoint_already_running":
+            return reason
+        if self._hosted_path_for(host.lifecycle.kind, other_than=host.lifecycle.host_id) is None:
+            return reason
+        return "powerpoint_hosted_here"
 
     async def identity(self) -> OfficeIdentity:
         """Which Microsoft account this machine's Office is signed in as.
@@ -445,13 +532,14 @@ class OfficeHostService:
             )
             return self._settle(host, "failed", "launch_timeout")
         except HostBackendError as error:
+            reason = self._whose_instance(host, error.reason)
             log.warning(
                 "office_host.launch_failed",
                 host=host.lifecycle.host_id,
-                reason=error.reason,
+                reason=reason,
                 detail=str(error),
             )
-            return self._settle(host, "failed", error.reason)
+            return self._settle(host, "failed", reason)
         if handle.adopted:
             # The document is already open in an instance we did not start.
             # Refuse it: reparenting here would take over the user's own window,
