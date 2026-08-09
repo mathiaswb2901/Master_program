@@ -82,20 +82,33 @@ class ExpectedValue(BaseModel):
 
 class TimeExpectation(BaseModel):
     """One code-computed number addressed by *local wall-clock time* rather than by
-    cell — how a time-indexed workbook is reconciled without a positional join."""
+    cell — how a time-indexed workbook is reconciled without a positional join.
 
-    #: Naive local timestamp, ISO-8601, e.g. ``2024-10-27T02:00:00``. Interpreted
-    #: in :attr:`ReconciliationSpec.timezone`.
+    The address is a **naive local wall clock plus a fold**, never an instant. Those
+    two fields together are what name one hour unambiguously in a zone that repeats
+    one: an offset-bearing timestamp is refused rather than normalised, because
+    stripping the offset would give the fall-back day's two 02:00s the same key.
+    """
+
+    #: **Naive** local timestamp, ISO-8601, e.g. ``2024-10-27T02:00:00``. Interpreted
+    #: in :attr:`ReconciliationSpec.timezone`, so it carries **no UTC offset and no
+    #: trailing ``Z``** — ``2024-10-27T02:00:00+01:00`` is a *fail* naming this rule,
+    #: not a value quietly stripped to its wall clock. Use :attr:`fold` to say which
+    #: occurrence of a repeated hour is meant; that is the whole reason the field
+    #: exists. (Enforced by the check, one named fail per row, rather than by a
+    #: validator here — a spec-level rejection would sink the whole run over one row.)
     timestamp: str
     #: The code-computed value for that hour.
     expected: float
     #: Unit of the expected value (see :class:`ExpectedValue`).
     unit: str = ""
     #: Which occurrence of a repeated wall-clock time to match on the fall-back DST
-    #: day: ``0`` is the first 02:00, ``1`` the second. A non-zero fold is only
-    #: meaningful where :attr:`ReconciliationSpec.timezone` genuinely repeats that
-    #: wall clock; asking for one anywhere else is a **fail** naming the timestamp,
-    #: never silently ignored — that silence is what let a duplicated row pass.
+    #: day: ``0`` is the first 02:00 (the summer-offset one), ``1`` the second. This
+    #: is the *only* way to address the second occurrence — an offset on
+    #: :attr:`timestamp` is refused. A non-zero fold is only meaningful where
+    #: :attr:`ReconciliationSpec.timezone` genuinely repeats that wall clock; asking
+    #: for one anywhere else is a **fail** naming the timestamp, never silently
+    #: ignored — that silence is what let a duplicated row pass.
     fold: int = 0
     label: str | None = None
 
@@ -109,7 +122,11 @@ class TimeIndexSpec(BaseModel):
     clock becomes ``fold=1`` only where the spec's zone *actually* repeats that hour;
     any other repeat is a duplicated row and is reported as its own ``fail``."""
 
-    #: Column letter carrying the local timestamps, e.g. ``A``.
+    #: Column letter carrying the local timestamps, e.g. ``A``. Naive local wall
+    #: clock, same contract as :attr:`TimeExpectation.timestamp`: a cell carrying a
+    #: UTC offset (a tz-aware value, or text like ``2024-10-27T02:00:00+01:00``) is
+    #: reported as its own ``fail`` and not indexed, because stripping the offset
+    #: would leave row order to decide which fall-back hour is which.
     timestamp_column: str
     #: Column letter carrying the values to reconcile, e.g. ``B``.
     value_column: str

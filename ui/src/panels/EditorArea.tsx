@@ -4,7 +4,12 @@ import { Fragment, lazy, Suspense, useEffect, useRef } from "react";
 import { focusPanel } from "../dock";
 import { loadMonaco, prefetchMonaco } from "../monaco";
 import { paneInstance } from "../panes";
-import { documentViewFor, documentViews, type WorkbenchTool } from "../registry";
+import {
+  documentViewFor,
+  documentViews,
+  type DocumentViewContribution,
+  type WorkbenchTool,
+} from "../registry";
 import { relativeTimePhrase } from "../relativeTime";
 import { useStore, type OpenFile } from "../store";
 import { TOOLS } from "../tools";
@@ -38,6 +43,17 @@ const CodeEditor = lazy(async () => {
   await loadMonaco();
   return import("./CodeEditor");
 });
+
+/**
+ * Whether the frame around this view is a **mat** (DESIGN.md §6.1).
+ *
+ * A text buffer never is. A document view is, unless it says it draws on the
+ * app's own surfaces (`surface: "app"`, `../registry.ts`) — the paper doctrine
+ * is for a canvas we cannot theme, not for one we render ourselves.
+ */
+function onMat(view: DocumentViewContribution | null): boolean {
+  return view !== null && view.surface !== "app";
+}
 
 /** Same marker as the tree row, for a tab the user has not looked at yet: an
  * agent can change a file that is open behind the active one. */
@@ -319,7 +335,13 @@ function EditorTabs() {
     // (DESIGN.md §6.1). It follows the *active view*, not the file extension:
     // whichever tool claims the kind decides, exactly as `documentViewFor` does
     // for the body below.
-    <div className={activeView === null ? "wb-editor" : "wb-editor is-document"}>
+    //
+    // A view says which ground it draws on (`surface`, `../registry.ts`), and
+    // only a `paper` one gets the mat. The default is `paper`, so every Office
+    // view is unchanged; the notebook draws on the app's own surfaces in the
+    // window's own theme, and a mat around it would be a mid-grey surround on
+    // something that is not a page.
+    <div className={onMat(activeView) ? "wb-editor is-document" : "wb-editor"}>
       <div className="wb-editor-tabs" role="tablist">
         {openFiles.map((f) => (
           <EditorTab key={f.path} file={f} active={f.path === activePath} />
