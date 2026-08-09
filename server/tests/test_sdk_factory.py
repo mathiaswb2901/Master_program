@@ -340,6 +340,37 @@ class TestTheBuiltinToolsAreGatedBothWays:
         assert options.max_budget_usd is None
 
 
+class TestBundledSkillsAreGatedForAnUnattendedReviewer:
+    """The fourth per-kind gate, and the one M6 PR 2 missed.
+
+    ``auto_allowed_for``, ``disallowed_for`` and ``is_unattended`` were all added
+    to tighten the reviewer, but the ``Skill(...)`` allow entries next to them
+    stayed unconditional. A whole-tool ``Skill(workbench:remember)`` in
+    ``allowed_tools`` auto-approves *ahead of* ``can_use_tool`` exactly like a
+    bare ``Write`` does — so an unattended reviewer would silently auto-invoke
+    ``workbench:remember`` (whose own trigger names the start of unfamiliar work,
+    which every fresh reviewer is), burn a turn out of its cap, and then stall
+    because Edit/Write are disallowed: a stalled reviewer recorded as a failed
+    review. The gate belongs on the same ``is_unattended`` seam its siblings use.
+    """
+
+    def test_a_reviewer_auto_allows_no_bundled_skill(self) -> None:
+        options = _options("reviewer")
+        # Not a vacuous pass: the *same* ``Settings()`` populates the plugin for a
+        # chat session, so a chat session really does carry ``Skill(...)`` entries.
+        # A reviewer carrying none is therefore the gate working, not the bundle
+        # being absent — which would make this assertion true for the wrong reason.
+        assert any(name.startswith("Skill(") for name in _options("chat").allowed_tools)
+        assert not any(name.startswith("Skill(") for name in options.allowed_tools)
+
+    def test_a_chat_session_still_auto_allows_the_two_named_skills(self) -> None:
+        """The ergonomics the skill allows exist to protect must not regress: an
+        attended session still opens plan-visual and remember without a prompt."""
+        allowed = _options("chat").allowed_tools
+        assert "Skill(workbench:plan-visual)" in allowed
+        assert "Skill(workbench:remember)" in allowed
+
+
 def _options(
     kind: SessionKind,
     *,

@@ -83,6 +83,18 @@ _CELL_TYPES: frozenset[str] = frozenset({"code", "markdown", "raw"})
 #: data, which is the branch that shows whatever representation it can find.
 _OUTPUT_TYPES: frozenset[str] = frozenset({"stream", "execute_result", "display_data", "error"})
 
+#: Outputs rendered per code cell. The per-output byte caps in ``models`` bound
+#: each output's *size*; this bounds their *number*. A cell rarely has more than
+#: a handful, and past this many it is not being read output-by-output anyway —
+#: while thousands of them (a ``display()`` in a tight loop, a progress bar
+#: re-emitting each step) is exactly what balloons a response those byte caps do
+#: not catch, because every dropped output is individually small. Mirrors the
+#: cell cap in shape: the overflow is dropped and a single trailing notice output
+#: says how many. That notice is an empty-``mime`` text output — the same shape
+#: :func:`_bundle` already emits for a bundle it cannot paint — so it states the
+#: cut without any renderer, or any model field, having to learn a new one.
+MAX_OUTPUTS_PER_CELL = 50
+
 
 @dataclass
 class _ImageBudget:
@@ -203,11 +215,7 @@ def _cell(index: int, raw: Any, budget: _ImageBudget) -> NotebookCell:
     if kind not in _CELL_TYPES:
         log.info("notebook.unknown_cell_type", cell_type=kind, index=index)
     source, source_cut = _cap(_joined(_get(raw, "source")), MAX_CELL_SOURCE_CHARS)
-    outputs = (
-        [_output(output, budget) for output in _as_list(_get(raw, "outputs"))]
-        if cell_type == "code"
-        else []
-    )
+    outputs = _outputs(raw, budget) if cell_type == "code" else []
     return NotebookCell(
         id=f"c{index}",
         cell_type=cell_type,
@@ -219,6 +227,37 @@ def _cell(index: int, raw: Any, budget: _ImageBudget) -> NotebookCell:
 
 
 # ---- outputs -----------------------------------------------------------------
+
+
+def _outputs(raw: Any, budget: _ImageBudget) -> list[NotebookOutput]:
+    """A code cell's outputs, capped in **count** as well as in bytes.
+
+    The per-output byte caps bound each output's size; this bounds their number
+    at :data:`MAX_OUTPUTS_PER_CELL`. The overflow is dropped in reading order —
+    so the outputs a reader reaches first are the ones that survive — and a
+    single trailing notice states how many went, in the empty-``mime`` text
+    shape :func:`_bundle` already produces for a bundle it cannot paint. Building
+    only the kept outputs is also why a cell of ten thousand figures is not ten
+    thousand base64 decodes before the budget above ever bites.
+    """
+    raw_outputs = _as_list(_get(raw, "outputs"))
+    kept = raw_outputs[:MAX_OUTPUTS_PER_CELL]
+    outputs = [_output(output, budget) for output in kept]
+    dropped = len(raw_outputs) - len(kept)
+    if dropped > 0:
+        outputs.append(
+            NotebookOutput(
+                output_type="display_data",
+                mime="",
+                text=(
+                    f"{dropped:,} more outputs not shown — this cell produced "
+                    f"{len(raw_outputs):,}, capped at {MAX_OUTPUTS_PER_CELL}. "
+                    "Open the notebook file to see the rest."
+                ),
+                truncated=True,
+            )
+        )
+    return outputs
 
 
 def _output(raw: Any, budget: _ImageBudget) -> NotebookOutput:
