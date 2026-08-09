@@ -112,9 +112,33 @@ class PtyManager:
 
     def release(self, session: PtySession) -> None:
         """Terminate the child and forget the session. **Blocks** — see
-        `_TEARDOWN_THREADS`; callers on the event loop want `release_async`."""
+        `_TEARDOWN_THREADS`; callers on the event loop want `release_async`.
+
+        Idempotent, and that is load-bearing rather than tidy. Two callers race
+        for every session: the socket handler's own `finally:` and `shutdown()`,
+        which snapshots `_sessions` and releases everything still in it. A
+        socket dropping just as the server is asked to stop — an ordinary deploy
+        with terminals open — puts *both* on the teardown pool for the same
+        session, because the snapshot is taken while the handler's release is
+        still queued and has not removed it yet. While `release` was synchronous
+        and awaited nothing, the single loop thread serialized any two calls to
+        it for free; running it on a real pool took that away and nothing
+        replaced it, so one pid would be signalled and reap-polled from two OS
+        threads at once.
+
+        So the dict *is* the claim, not just the bookkeeping: `pop` is one
+        atomic operation, whoever takes the session owns its teardown, and the
+        loser returns having touched no process. Popping first also means a
+        backend that raises still leaves the registry clean — see `shutdown`,
+        which logs that rather than letting it end the loop.
+        """
+        if self._sessions.pop(session.session_id, None) is None:
+            # Not ours to release: either another caller is mid-teardown on it
+            # right now, or it was already released. Both are no-ops, and both
+            # are normal.
+            log.debug("pty.release_not_owned", session_id=session.session_id)
+            return
         session.terminate()
-        self._sessions.pop(session.session_id, None)
         log.info("pty.released", session_id=session.session_id)
 
     async def release_async(self, session: PtySession) -> None:
@@ -129,8 +153,27 @@ class PtyManager:
         `REAP_TIMEOUT_S` of dead server before the process can exit, and a user
         who left four terminals open on hung SSH sessions would feel every one
         of them. Gathered, the whole shutdown is bounded by the slowest child.
+
+        `return_exceptions` is the other half of that promise. A bare `gather`
+        propagates the first failure and abandons the rest, and this one is
+        awaited from the lifespan's teardown: one backend raising something
+        `PtySession.terminate` does not catch would take out the sibling
+        releases *and* everything the lifespan still had to do after this line
+        (closing the shared HTTP client, logging that the server stopped). One
+        misbehaving child may not decide how the process exits, so every outcome
+        is collected and a bad one is logged against the session it came from.
         """
         sessions = list(self._sessions.values())
         if not sessions:
             return
-        await asyncio.gather(*(self.release_async(session) for session in sessions))
+        outcomes = await asyncio.gather(
+            *(self.release_async(session) for session in sessions), return_exceptions=True
+        )
+        for session, outcome in zip(sessions, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                log.error(
+                    "pty.release_failed",
+                    session_id=session.session_id,
+                    error=repr(outcome),
+                    exc_info=outcome,
+                )
