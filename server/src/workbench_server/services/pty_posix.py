@@ -115,6 +115,15 @@ class PosixSyscalls(Protocol):
     def close(self, fd: int) -> None: ...
     def kill(self, pid: int, *, force: bool) -> None: ...
 
+    def killpg(self, pgid: int, *, force: bool) -> None:
+        """Signal a whole process group — the shell *and* what it is running."""
+
+    def getpgid(self, pid: int) -> int:
+        """The process group of `pid`; `0` asks about this process."""
+
+    def foreground_pgid(self, fd: int) -> int:
+        """The group the terminal behind `fd` is giving the keyboard to."""
+
     def reap(self, pid: int) -> int | None:
         """Exit status, or None while the child is still running.
 
@@ -178,6 +187,33 @@ class _StdlibSyscalls:
             import signal
 
             os.kill(pid, signal.SIGKILL if force else signal.SIGHUP)
+
+    def killpg(self, pgid: int, *, force: bool) -> None:
+        if sys.platform == "win32":
+            raise RuntimeError("the POSIX PTY backend is not available on Windows")
+        else:
+            import signal
+
+            os.killpg(pgid, signal.SIGKILL if force else signal.SIGHUP)
+
+    def getpgid(self, pid: int) -> int:
+        if sys.platform == "win32":
+            raise RuntimeError("the POSIX PTY backend is not available on Windows")
+        else:
+            return os.getpgid(pid)
+
+    def foreground_pgid(self, fd: int) -> int:
+        """`TIOCGPGRP`, asked of the master side of the pty.
+
+        The kernel answers this one for a master even though the pty is not
+        *this* process's controlling terminal — the check that would refuse it
+        applies to the slave. A kernel that refuses anyway raises `OSError`, and
+        the caller treats that as "no job to signal" (see `_foreground_group`).
+        """
+        if sys.platform == "win32":
+            raise RuntimeError("the POSIX PTY backend is not available on Windows")
+        else:
+            return os.tcgetpgrp(fd)
 
     def reap(self, pid: int) -> int | None:
         if sys.platform == "win32":
