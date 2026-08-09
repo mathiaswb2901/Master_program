@@ -168,6 +168,49 @@ test("two panes on one file: one model, two views, and closing one keeps the oth
     expect(await topLine(pane(page, "Editor"))).toBe(before);
   });
 
+  await test.step("a closed pane reopens where it was looking, not at line 1", async () => {
+    // The other half of "view state belongs to the pane": it has to outlive the
+    // pane, or the promise is only about two panes that happen to be on screen
+    // together. This is the path that reads it back after a real unmount.
+    //
+    // Worth stating why the unmount is where it is read, because the ordering is
+    // subtle and easy to get backwards. `<Editor>` is a *child* of `CodeEditor`,
+    // and its own cleanup disposes the editor widget unconditionally — even with
+    // `keepCurrentModel`, which only spares the *model*
+    // (`@monaco-editor/react/dist/index.mjs`: `keepCurrentModel ? … :
+    // editor.getModel()?.dispose(), editor.dispose()`). A widget dispose nulls
+    // `_modelData`, so a `getModel()` after it returns null. What makes reading
+    // at unmount correct anyway is that React runs deletion cleanups **parent
+    // before child** — the opposite of mount order, and stated verbatim in its
+    // source (`commitPassiveUnmountEffectsInsideOfDeletedTree_begin`: "Deletion
+    // effects fire in parent -> child order"). So `CodeEditor`'s cleanup reads a
+    // live editor, and the child disposes it afterwards. If that ever inverts,
+    // the `getModel()` guard turns this into a silent no-op rather than a throw
+    // — and *this* step is what fails, by name.
+    const remembered = await topLine(pane(page, NAME));
+    expect(remembered, "the split pane is scrolled well away from the top").toBeGreaterThan(100);
+
+    await page.locator(".wb-panel-tab", { hasText: NAME }).first().click();
+    await page.keyboard.press("Alt+X");
+    await expect(page.locator(".wb-panel-tab", { hasText: NAME })).toHaveCount(0);
+
+    // Reopened the same way it was made, which gives it the same pane id
+    // (`editors#<path>`) — that id *is* the key the view state is filed under.
+    await page.locator(".wb-panel-tab", { hasText: "Editor" }).first().click();
+    await page.keyboard.press("Alt+S");
+    const dialog = page.getByRole("dialog", { name: "Split this pane to the right" });
+    await expect(dialog).toBeVisible();
+    await dialog.locator(".wb-qb-row", { hasText: NAME }).first().click();
+    await expect(dialog).toBeHidden();
+    await expect(editorIn(pane(page, NAME))).toBeVisible();
+
+    // Unfixed, view state is lost with the pane and this comes back at line 1.
+    await expect
+      .poll(() => topLine(pane(page, NAME)), { timeout: 10_000 })
+      .toBeGreaterThan(100);
+    expect(Math.abs((await topLine(pane(page, NAME))) - remembered)).toBeLessThanOrEqual(2);
+  });
+
   await test.step("closing one view leaves the other alive", async () => {
     await page.locator(".wb-panel-tab", { hasText: NAME }).first().click();
     await page.keyboard.press("Alt+X");

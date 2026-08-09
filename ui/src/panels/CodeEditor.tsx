@@ -84,13 +84,31 @@ export default function CodeEditor({ pane, file }: { pane: string; file: OpenFil
 
   /**
    * Remember where this pane was looking when it goes away, so reopening the
-   * same pane on the same file lands where it left off.
+   * same pane on the same file lands where it left off
+   * (`e2e/editorPanes.spec.ts`, "a closed pane reopens where it was looking").
    *
    * **Declared before the claim below on purpose.** React runs an unmount's
    * cleanups in declaration order, and releasing the last view of a file the
    * store has already closed disposes the model — after which there is no view
    * state left to read. Saving first makes this independent of that; the
    * `getModel()` guard is what catches it if the order ever changes.
+   *
+   * **Why reading the editor here is sound at all**, since the reasoning
+   * inverts the one two comments above and has been got backwards in review.
+   * `<Editor>` is a *child* of this component, and its own unmount cleanup
+   * disposes the editor widget **unconditionally** — `keepCurrentModel` spares
+   * the model, never the widget (`@monaco-editor/react/dist/index.mjs`:
+   * `keepCurrentModel ? … : editor.getModel()?.dispose(), editor.dispose()`).
+   * Monaco's `CodeEditorWidget.dispose()` detaches synchronously and nulls
+   * `_modelData`, so after it `getModel()` is null and there is nothing to save.
+   * That would make this a silent no-op — *if* children were cleaned up first.
+   * They are not: mount effects run child-before-parent, but React reverses it
+   * for a deleted subtree, in so many words
+   * (`commitPassiveUnmountEffectsInsideOfDeletedTree_begin`, react-dom: "Deletion
+   * effects fire in parent -> child order"). This cleanup therefore reads a live
+   * editor and the child disposes it afterwards. It is a React guarantee rather
+   * than ours, which is exactly why the guard stays and why the E2E step above
+   * exists to fail by name if a future React changes its mind.
    */
   useEffect(
     () => () => {
