@@ -30,6 +30,7 @@ from workbench_server.routers import (
     office_host,
     orchestrator,
     provenance,
+    reconcile_spec,
     search,
     sessions,
     setup,
@@ -71,6 +72,11 @@ from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.orchestrator import OrchestratorService
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
+from workbench_server.services.reconcile_spec import (
+    ReconcileSpecService,
+    SpecApprovalStore,
+    build_spec_runner,
+)
 from workbench_server.services.reconciliation import ReconciliationCheck
 from workbench_server.services.review import AdversarialReviewCheck
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
@@ -124,6 +130,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # against the workbook unit- and DST-aware. Additive registration — the frame
     # dispatches to it when a spec names its id ("reconciliation").
     validation_service.register(ReconciliationCheck())
+    # Productivity loops PR-B: **ambient CI for workbooks**. A checked-in
+    # `.workbench/reconcile/<name>.toml` names the analyst's own callables; a
+    # save of the workbook re-runs the gate above with the values they produce.
+    # It reuses #115's *mechanism* (bounded capture, fake-first runner, fixed
+    # argv, timeout discipline) and not its catalog: the argv is server-owned and
+    # the spec travels on stdin. The posture it widens — running in the live
+    # workspace root, which the toolchain gate refuses — is paid for by a
+    # one-time content-hash approval that covers the spec **and the code it
+    # names**, stored under the machine's app-data dir and never in `.workbench/`
+    # (a trust record inside the folder it authorises is one an attacker can
+    # write). `.workbench/gates.json` stays refused.
+    reconcile_spec_service = ReconcileSpecService(
+        workspace.root,
+        event_bus,
+        build_spec_runner(settings.reconcile_fake),
+        validation_service,
+        SpecApprovalStore(settings.app_data_root),
+        timeout_s=settings.reconcile_timeout_s,
+        debounce_s=settings.reconcile_debounce_s,
+    )
     # Workspace-wide content search (M7 V7b). Holds the live `Workspace`, so a
     # switch re-roots it with everything else and it owes no `set_workspace_root`.
     # Reuses the file tree's ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so search
@@ -419,6 +445,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # forget them, or a verdict about a file in the project just left
             # would attach to a same-named file in the one opened.
             validation_service,
+            # Reads `.workbench/reconcile/` out of the root and keys its debounce
+            # on workspace-relative workbook paths, so a switch has to re-root it
+            # or it keeps watching for saves in the project the user left. Its
+            # *approvals* are deliberately not forgotten: they live under the
+            # machine's app-data dir keyed by the root they were made for.
+            reconcile_spec_service,
             # Before the session manager, and that order is load-bearing: this
             # forgets a fleet whose every row was jailed against the workspace
             # being left, and the manager's own re-rooting then re-announces the
@@ -454,6 +486,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Binds to this loop, which is what lets it coalesce a burst of tool
         # calls into one frame instead of one frame per call.
         activity_service.start()
+        # After the watcher, because the loop it subscribes for is the watcher's
+        # own `FileChangedEvent` — keyed on the workbook, never on "any save".
+        reconcile_spec_service.start()
         office_host_service.start()
         # Reads the pool state and reconciles it with the disk. Never raises: a
         # machine with no git, or a workspace that is not a repository, reports
@@ -477,6 +512,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Every instance has been reaped above; this only lets the COM
             # apartment thread go.
             await host_backend.aclose()
+        # Before the watcher stops, so a debounced run that is mid-flight is
+        # cancelled rather than left holding a subprocess in the user's folder.
+        await reconcile_spec_service.stop()
         await provenance_service.stop()
         await activity_service.stop()
         await shortcuts_service.stop()
@@ -513,6 +551,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.shortcuts = shortcuts_service
     app.state.provenance = provenance_service
     app.state.validation = validation_service
+    app.state.reconcile_specs = reconcile_spec_service
     app.state.search = search_service
     app.state.layouts = layouts_service
     app.state.worktrees = worktree_service
@@ -572,6 +611,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(shortcuts.router)
     app.include_router(provenance.router)
     app.include_router(validation.router)
+    app.include_router(reconcile_spec.router)
     app.include_router(search.router)
     app.include_router(layouts.router)
     app.include_router(worktrees.router)
