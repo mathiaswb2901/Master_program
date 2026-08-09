@@ -14,6 +14,7 @@
 import type { WorkbenchTool } from "./registry";
 
 import { commandRelayTool } from "./commandRelay";
+import { settingsTool } from "./settings";
 import { setupTool } from "./setup";
 import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
@@ -89,6 +90,11 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // the welcome card teaches the window, Setup teaches the connections — and its
   // status chip is the Keys chip's neighbour, hidden the moment all is well.
   setupTool,
+  // Beside Setup, because the two are the same idea at two moments: Setup says
+  // what this machine can do, Settings decides what to do with it. Opened on
+  // demand (`Ctrl+,`), singular, and it contributes no status item — a settings
+  // panel has nothing to report to a quiet bar.
+  settingsTool,
   // After every capability it describes, and before the two that arrange them:
   // its reference is a rendering of everything above, and its status chip sits
   // just inside the layout chip at the bar's outer edge.

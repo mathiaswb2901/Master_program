@@ -43,6 +43,7 @@ import type {
   SessionInfo,
   SessionLimits,
   SessionsResponse,
+  SettingsState,
   SetupStatus,
   SetObjectiveRequest,
   ShortcutsState,
@@ -55,6 +56,7 @@ import type {
   ValidationResult,
   ValidationResults,
   ValidationSpec,
+  WorkbenchSettings,
   WorkspaceState,
   WorktreePool,
   WriteRequest,
@@ -312,6 +314,15 @@ export const getOfficeIdentity = (): Promise<OfficeIdentity> =>
  * readiness echoed from the capabilities), and whether this is a fresh workspace.
  * The Setup walkthrough degrades from this, never from a guess. */
 export const getSetupStatus = (): Promise<SetupStatus> => request("/api/setup/status");
+
+/** The stored settings, what is in force, and why they differ (M7 V8). */
+export const getSettings = (): Promise<SettingsState> => request("/api/settings");
+
+/** Replace the stored settings. The client holds the whole document and writes
+ * it whole (the layouts precedent), and the answer is the new state — so a save
+ * surfaces an override or a pending restart without a second call. */
+export const putSettings = (body: WorkbenchSettings): Promise<SettingsState> =>
+  request("/api/settings", jsonInit("PUT", body));
 
 export const openOfficeHost = (body: OpenHostRequest): Promise<OfficeHostInfo> =>
   request("/api/office/host", jsonInit("POST", body));

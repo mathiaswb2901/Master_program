@@ -198,6 +198,9 @@ describe("command registry", () => {
       // First run's connect half sits beside the Keyboard tool (its welcome
       // half), just before it in `tools.ts`.
       "setup.open",
+      // Settings beside it, and for the same reason: Setup says what this
+      // machine can do, Settings decides what to do with it (M7 V8).
+      "settings.open",
       "keys.open",
       "keys.welcome",
       // The two tools that arrange panels rather than being one, in the order
