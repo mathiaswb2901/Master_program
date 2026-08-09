@@ -18,6 +18,16 @@ its mirror: a *targeted* edit — one addressed paragraph or one cell — that l
 the rest of the document untouched, applied to the live in-memory instance so the
 user can undo it, never a whole-file rewrite.
 
+**Word gained an insert (PR 3).** A write that could only *replace* an existing
+paragraph meant an agent could reword a chapter but never draft into it, which is
+the difference between "Workbench edits my report" and "Workbench writes my
+report". :data:`WordWriteOp` is what an edit does — ``replace`` (the original,
+unchanged) or ``insert`` — and :class:`WordEdit` carries both back with the
+*new* paragraph count, because an insert is the one write that moves the
+addresses of everything after it. Excel keeps its single cell set: inserting a
+row is a different problem (formula and named-range fixups), deliberately not
+folded in here.
+
 PowerPoint arrived with its host and is **read-only** here: :class:`SlideDim` and
 :class:`SlideText` have no ``SlideEdit`` beside them. That is a stated boundary,
 not an oversight — a slide has no single addressable text run the way a paragraph
@@ -38,6 +48,25 @@ from workbench_server.models.office_host import HostAppKind
 #: numbers Excel is still in the middle of revising — which is a reason to wait,
 #: never a reason to call it a pass.
 CalculationState = Literal["done", "pending", "calculating"]
+
+#: What a Word write does to the document's shape. ``replace`` rewrites one
+#: existing paragraph and leaves the count alone; ``insert`` adds a new paragraph
+#: and shifts every index after it by one. They are named rather than inferred
+#: because that shift is the whole difference the caller has to know about: the
+#: paragraph numbers an agent read a moment ago are stale the instant an insert
+#: lands, and a result that did not say so would send the next write to the wrong
+#: place.
+WordWriteOp = Literal["replace", "insert"]
+
+#: The *intent* of an inserted paragraph, mapped to a real Word style by the
+#: bridge — body text or a heading at one of three levels. Deliberately an
+#: intent rather than a style name: a style name is locale-specific ("Heading 1"
+#: is "Overskrift 1" on a Norwegian Word) and template-specific, so an agent that
+#: named one would be guessing at the user's document. Omitting it entirely is
+#: the honest default and is *not* the same as ``body``: the new paragraph then
+#: takes the style Word's own Enter key would give it there
+#: (``document_window.following_style``).
+WordParagraphStyle = Literal["body", "heading1", "heading2", "heading3"]
 
 
 class LiveWorkbookStatus(BaseModel):
@@ -181,19 +210,37 @@ class SlideText(BaseModel):
 class WordEdit(BaseModel):
     """Confirmation of a single, targeted write to a Word paragraph.
 
-    The write replaces the text of one addressed paragraph and nothing else —
-    the mirror of :class:`WordText`'s windowed read. ``total_paragraphs`` travels
-    back so the caller knows the write did not change the document's shape (a
-    replace never adds or removes a paragraph), and ``written_chars`` is
-    ``len(new text)`` so a truncated echo in the tool result is self-describing.
+    The write touches one addressed paragraph and nothing else — the mirror of
+    :class:`WordText`'s windowed read. ``total_paragraphs`` travels back so the
+    caller knows what the write did to the document's shape, and
+    ``written_chars`` is ``len(new text)`` so a truncated echo in the tool result
+    is self-describing.
+
+    **Addressing honesty.** For a ``replace`` the shape is unchanged and
+    ``paragraph`` is the index that was rewritten. For an ``insert`` the shape
+    *did* change: ``paragraph`` is where the new paragraph landed and
+    ``total_paragraphs`` is the count **after** it, so the caller can work out
+    that every index from ``paragraph`` onwards has moved by one without asking
+    again. Defaults keep the replace path byte-identical to what it was before
+    the insert existed.
     """
 
-    #: Zero-based index of the paragraph whose text was replaced.
+    #: Zero-based index of the paragraph written — rewritten by a ``replace``,
+    #: newly occupied by an ``insert``.
     paragraph: int = Field(ge=0)
     #: ``len`` of the new paragraph text — 0 means the paragraph was emptied.
     written_chars: int = Field(ge=0)
-    #: The document's paragraph count after the edit (unchanged by a replace).
+    #: The document's paragraph count *after* the edit: unchanged by a replace,
+    #: one greater by an insert.
     total_paragraphs: int = Field(ge=0)
+    #: What this write did. ``replace`` is the default so an existing caller and
+    #: an existing serialized result mean exactly what they always did.
+    op: WordWriteOp = "replace"
+    #: The style the written paragraph carries afterwards, as the document itself
+    #: names it (``Style.NameLocal`` over COM — locale-specific on purpose: it is
+    #: what the user sees in Word's style gallery). ``None`` when the bridge did
+    #: not read one, which a replace never does: it changes text, not style.
+    style: str | None = None
 
 
 class CellEdit(BaseModel):

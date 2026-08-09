@@ -45,13 +45,87 @@ HANDLE = HostHandle(pid=PID, window_id=0xABCD)
 # discipline, one seam over.
 
 
+#: What Word resolves a ``WdBuiltinStyle`` id to. The stand-in knows the *ids*
+#: and not the names on purpose: assigning ``"Heading 1"`` here is an
+#: AssertionError, which is how these tests pin that the bridge never sends a
+#: style name — on this machine's Norwegian Word that string does not exist.
+BUILTIN_STYLE_IDS = {-1: "Normal", -2: "Heading 1", -3: "Heading 2", -4: "Heading 3"}
+
+#: ``WdInformation.wdWithInTable``, the only Information member the bridge asks for.
+WD_WITH_IN_TABLE = 12
+
+
+class FakeStyle:
+    """A Word ``Style``: what it is called, and what follows it.
+
+    ``NextParagraphStyle`` is the property Word's Enter key consults, and the one
+    an insert with no named style has to honour — a heading is followed by body
+    text, body text by itself.
+    """
+
+    def __init__(self, name: str, follows: "FakeStyle | None" = None) -> None:
+        self.NameLocal = name
+        self._follows = follows
+
+    @property
+    def NextParagraphStyle(self) -> "FakeStyle":
+        return self._follows or self
+
+
+NORMAL = FakeStyle("Normal")
+HEADING_1 = FakeStyle("Heading 1", follows=NORMAL)
+
+
 class FakeRange:
     """A Word ``Range``: its ``Text`` carries the trailing paragraph mark, the
     way Word's does, so the bridge is what strips it on read and re-adds it on
-    write."""
+    write. It also carries the paragraph's style and whether it sits in a table,
+    because an insert asks both before it touches anything."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        owner: "FakeParagraphs",
+        text: str,
+        style: FakeStyle = NORMAL,
+        in_table: bool = False,
+    ) -> None:
+        self._owner = owner
         self.Text = text
+        self._style = style
+        self._in_table = in_table
+
+    @property
+    def Style(self) -> FakeStyle:
+        return self._style
+
+    @Style.setter
+    def Style(self, value: Any) -> None:
+        if isinstance(value, FakeStyle):
+            self._style = value
+            return
+        if isinstance(value, int):
+            self._style = FakeStyle(BUILTIN_STYLE_IDS[value], follows=NORMAL)
+            return
+        raise AssertionError(f"Word takes a built-in style id or a Style, not {value!r}")
+
+    def Information(self, which: int) -> bool:
+        assert which == WD_WITH_IN_TABLE, f"unexpected Information member {which}"
+        return self._in_table
+
+    def _at(self) -> int:
+        return next(i for i, other in enumerate(self._owner._ranges) if other is self)
+
+    def _new_neighbour(self) -> "FakeRange":
+        # Word's InsertParagraph* splits this paragraph, so the new one inherits
+        # its formatting — the very reason the bridge re-applies a style rather
+        # than trusting what it got.
+        return FakeRange(self._owner, "\r", style=self._style, in_table=self._in_table)
+
+    def InsertParagraphAfter(self) -> None:
+        self._owner._ranges.insert(self._at() + 1, self._new_neighbour())
+
+    def InsertParagraphBefore(self) -> None:
+        self._owner._ranges.insert(self._at(), self._new_neighbour())
 
 
 class FakeParagraph:
@@ -60,10 +134,26 @@ class FakeParagraph:
 
 
 class FakeParagraphs:
-    def __init__(self, texts: list[str], *, dead_hresult: int | None = None) -> None:
+    def __init__(
+        self,
+        texts: list[str],
+        *,
+        dead_hresult: int | None = None,
+        styles: dict[int, FakeStyle] | None = None,
+        in_table: set[int] | None = None,
+    ) -> None:
         # Stored with the paragraph mark Word keeps; the same FakeRange instance
         # is handed back by Item, so a write mutates what a later read sees.
-        self._ranges = [FakeRange(text + "\r") for text in texts]
+        self._ranges: list[FakeRange] = []
+        for index, text in enumerate(texts):
+            self._ranges.append(
+                FakeRange(
+                    self,
+                    text + "\r",
+                    style=(styles or {}).get(index, NORMAL),
+                    in_table=index in (in_table or set()),
+                )
+            )
         self._dead = dead_hresult
 
     @property
@@ -76,9 +166,38 @@ class FakeParagraphs:
         return FakeParagraph(self._ranges[index - 1])
 
 
+class FakeContent:
+    """``Document.Content`` — reached only by the insert into a document with no
+    paragraphs at all, which Word does not produce but the seam allows."""
+
+    def __init__(self, paragraphs: FakeParagraphs) -> None:
+        self._paragraphs = paragraphs
+
+    def InsertAfter(self, text: str) -> None:
+        self._paragraphs._ranges.append(FakeRange(self._paragraphs, text + "\r"))
+
+
 class FakeWordDoc:
-    def __init__(self, texts: list[str], *, dead_hresult: int | None = None) -> None:
-        self.Paragraphs = FakeParagraphs(texts, dead_hresult=dead_hresult)
+    def __init__(
+        self,
+        texts: list[str],
+        *,
+        dead_hresult: int | None = None,
+        styles: dict[int, FakeStyle] | None = None,
+        in_table: set[int] | None = None,
+    ) -> None:
+        self.Paragraphs = FakeParagraphs(
+            texts, dead_hresult=dead_hresult, styles=styles, in_table=in_table
+        )
+        self.Content = FakeContent(self.Paragraphs)
+
+    def texts(self) -> list[str]:
+        """Every paragraph's raw range text, marks and all — what a fidelity
+        assertion compares before and after a write."""
+        return [range_.Text for range_ in self.Paragraphs._ranges]
+
+    def styles(self) -> list[str]:
+        return [range_.Style.NameLocal for range_ in self.Paragraphs._ranges]
 
 
 class FakeCell:
@@ -256,6 +375,147 @@ class TestWord:
         bridge = com("word", FakeWordDoc(["Only one."]))
         with pytest.raises(RangeInvalidError):
             await bridge.write_word(HANDLE, 9, "text")
+
+
+# ---- Word: the insert (the write that changes the document's shape) ---------
+
+
+def _chapter() -> FakeWordDoc:
+    """A chapter whose first paragraph is a heading — the anchor an insert must
+    not inherit from."""
+    return FakeWordDoc(["Chapter 3", "First body.", "Second body."], styles={0: HEADING_1})
+
+
+def _with_table() -> FakeWordDoc:
+    """A document with a two-cell table in the middle: paragraph 1 is inside a
+    cell and ends with an ordinary mark, paragraph 2 is the cell's *last*
+    paragraph and ends with the end-of-cell marker, paragraph 3 is the ordinary
+    body Word always keeps after a table."""
+    doc = FakeWordDoc(["Before.", "Hour", "SE3 price", "After."], in_table={1, 2})
+    doc.Paragraphs.Item(3).Range.Text = "SE3 price\x07"
+    return doc
+
+
+class TestWordInsert:
+    async def test_insert_after_a_paragraph_moves_nothing_else(self, com: Any) -> None:
+        doc = _chapter()
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, 0, "Drafted body.", None)
+        assert isinstance(edit, WordEdit)
+        assert (edit.op, edit.paragraph, edit.written_chars) == ("insert", 1, 13)
+        assert edit.total_paragraphs == 4
+        # The new paragraph is exactly where it was addressed, carrying an
+        # ordinary paragraph mark, and every existing paragraph is byte-for-byte.
+        assert doc.texts() == ["Chapter 3\r", "Drafted body.\r", "First body.\r", "Second body.\r"]
+        word = await bridge.read_word(HANDLE, 0, 6_000)
+        assert word.text.split("\n\n")[1] == "Drafted body."
+
+    async def test_no_anchor_appends_at_the_end(self, com: Any) -> None:
+        doc = _chapter()
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, None, "Closing remark.", None)
+        assert (edit.paragraph, edit.total_paragraphs) == (3, 4)
+        assert doc.texts()[-1] == "Closing remark.\r"
+        assert doc.texts()[:3] == ["Chapter 3\r", "First body.\r", "Second body.\r"]
+
+    async def test_minus_one_inserts_before_the_first_paragraph(self, com: Any) -> None:
+        doc = _chapter()
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, -1, "Front matter.", None)
+        assert (edit.paragraph, edit.total_paragraphs) == (0, 4)
+        assert doc.texts()[0] == "Front matter.\r"
+        # Splitting the first paragraph keeps its style, which is what typing at
+        # the very start of a document and pressing Enter gives you.
+        assert doc.styles()[0] == "Heading 1"
+        assert edit.style == "Heading 1"
+
+    async def test_a_named_style_is_applied_by_builtin_id(self, com: Any) -> None:
+        doc = _chapter()
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, 0, "3.1 Method", "heading2")
+        # The stand-in resolves ids, never names — so this also pins that the
+        # bridge sent wdStyleHeading2 and not the English string.
+        assert doc.styles() == ["Heading 1", "Heading 2", "Normal", "Normal"]
+        assert edit.style == "Heading 2"
+
+    async def test_no_style_after_a_heading_is_body_not_another_heading(self, com: Any) -> None:
+        # The fidelity trap: Word's InsertParagraphAfter copies the anchor's
+        # formatting, so an insert after a Heading 1 is a Heading 1 unless the
+        # bridge applies what Enter would have given — NextParagraphStyle.
+        doc = _chapter()
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, 0, "Drafted body.", None)
+        assert doc.styles()[1] == "Normal"
+        assert edit.style == "Normal"
+
+    async def test_an_end_of_cell_anchor_is_refused_and_nothing_changes(self, com: Any) -> None:
+        doc = _with_table()
+        before = doc.texts()
+        bridge = com("word", doc)
+        with pytest.raises(RangeInvalidError, match="table cell"):
+            await bridge.insert_word(HANDLE, 2, "Would corrupt the table.", None)
+        # The refusal is *before* the mutation: the table is exactly as it was.
+        assert doc.texts() == before
+
+    async def test_a_mid_cell_anchor_is_allowed_and_keeps_the_cell_marker(self, com: Any) -> None:
+        doc = _with_table()
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, 1, "09:00", None)
+        assert edit.paragraph == 2
+        # The new paragraph is inside the cell with an ordinary mark, and the
+        # cell's terminal marker is still the cell's.
+        assert doc.texts() == ["Before.\r", "Hour\r", "09:00\r", "SE3 price\x07", "After.\r"]
+
+    async def test_a_top_insert_into_a_table_is_refused(self, com: Any) -> None:
+        doc = FakeWordDoc(["In a cell.", "After."], in_table={0})
+        before = doc.texts()
+        bridge = com("word", doc)
+        with pytest.raises(RangeInvalidError, match="table cell"):
+            await bridge.insert_word(HANDLE, -1, "Front matter.", None)
+        assert doc.texts() == before
+
+    async def test_a_line_break_in_content_is_refused_before_anything_moves(self, com: Any) -> None:
+        doc = _chapter()
+        before = doc.texts()
+        bridge = com("word", doc)
+        with pytest.raises(RangeInvalidError, match="one paragraph"):
+            await bridge.insert_word(HANDLE, 0, "First line.\nSecond line.", None)
+        assert doc.texts() == before
+
+    async def test_an_anchor_past_the_end_is_refused(self, com: Any) -> None:
+        doc = _chapter()
+        bridge = com("word", doc)
+        with pytest.raises(RangeInvalidError, match="past the last paragraph"):
+            await bridge.insert_word(HANDLE, 9, "Nowhere.", None)
+        assert len(doc.texts()) == 3
+
+    async def test_inserting_into_a_document_with_no_paragraphs(self, com: Any) -> None:
+        # Word does not produce one (a blank document still has one empty
+        # paragraph), but the seam allows it and drafting starts here.
+        doc = FakeWordDoc([])
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, None, "The first sentence.", "heading1")
+        assert (edit.paragraph, edit.total_paragraphs) == (0, 1)
+        assert doc.texts() == ["The first sentence.\r"]
+        assert doc.styles() == ["Heading 1"]
+
+    async def test_the_new_total_is_re_read_from_word_not_computed(self, com: Any) -> None:
+        # If Word ever did something other than "one insert, one paragraph", the
+        # honest number is the one Word reports. A bridge that returned
+        # `total + 1` would be plausible and wrong, and the caller addresses from
+        # it. This stand-in inserts two paragraphs to prove the count is asked.
+        doc = _chapter()
+
+        class TwoAtOnce(FakeRange):
+            def InsertParagraphAfter(self) -> None:
+                super().InsertParagraphAfter()
+                super().InsertParagraphAfter()
+
+        doc.Paragraphs._ranges[0].__class__ = TwoAtOnce
+        bridge = com("word", doc)
+        edit = await bridge.insert_word(HANDLE, 0, "Drafted body.", None)
+        assert len(doc.texts()) == 5
+        assert edit.total_paragraphs == 5
 
 
 # ---- Excel ------------------------------------------------------------------

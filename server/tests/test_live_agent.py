@@ -18,7 +18,9 @@ from workbench_server.models.office_bridge import (
     DocStructure,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
+    WordWriteOp,
 )
 from workbench_server.services.agent_sessions import SessionManager
 from workbench_server.services.commands import CommandRelay
@@ -59,7 +61,10 @@ class _NoReader:
         path: str,
         *,
         content: str,
+        op: WordWriteOp = "replace",
         paragraph: int | None = None,
+        after_paragraph: int | None = None,
+        style: WordParagraphStyle | None = None,
         sheet: str | None = None,
         cell: str | None = None,
     ) -> WordEdit | CellEdit:

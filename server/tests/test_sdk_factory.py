@@ -40,7 +40,11 @@ from typing import Any
 from workbench_server.config import Settings
 from workbench_server.models.agents import SessionKind
 from workbench_server.models.commands import CommandInvokeResult, CommandManifest
-from workbench_server.models.office_bridge import DocStructure
+from workbench_server.models.office_bridge import (
+    DocStructure,
+    WordParagraphStyle,
+    WordWriteOp,
+)
 from workbench_server.models.orchestrator import (
     OrchestratorBudget,
     SpawnRefusal,
@@ -124,7 +128,10 @@ class _Reader:
         path: str,
         *,
         content: str,
+        op: WordWriteOp = "replace",
         paragraph: int | None = None,
+        after_paragraph: int | None = None,
+        style: WordParagraphStyle | None = None,
         sheet: str | None = None,
         cell: str | None = None,
     ) -> Any:  # pragma: no cover
