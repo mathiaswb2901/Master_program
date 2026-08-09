@@ -351,17 +351,48 @@ pub(super) fn open_synthetic_guest(
     host_id: String,
     rect: CssRect,
 ) -> Result<HostGeometry, HostError> {
-    let scale = scale_factor(window)?;
-    let parent = parent_window(window)?;
     let exe = guest::synthetic_guest_exe()?;
-    let launched = guest::launch(
+    open_guest(
+        app,
+        window,
+        host_id,
+        rect,
         &exe,
         &[],
         guest::SYNTHETIC_GUEST_CLASS,
+        // The fixture's strip is quoted at 100%, which is what a CSS pixel is.
+        f64::from(guest::SYNTHETIC_GUEST_CAPTION),
         SYNTHETIC_GUEST_TIMEOUT,
-    )?;
-    // The fixture's strip is quoted at 100%, which is what a CSS pixel is.
-    let inset_css = f64::from(guest::SYNTHETIC_GUEST_CAPTION);
+    )
+}
+
+/// Launch **any** application, find its frame by class, and dock it — the whole
+/// of what a hosted document is, with the choice of application left to the
+/// caller.
+///
+/// The synthetic guest and a real `WINWORD.EXE` differ here by four arguments
+/// and nothing else, which is the claim `guest.rs` makes and this is where it is
+/// cashed in: the demo hook can dock a real Word through the same code the
+/// Python service drives, so "the moat works" can be verified against Office
+/// rather than only against the fixture.
+///
+/// Debug builds only: it launches processes named by whoever calls it.
+#[cfg(debug_assertions)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_guest(
+    app: &AppHandle,
+    window: &tauri::Window,
+    host_id: String,
+    rect: CssRect,
+    exe: &std::path::Path,
+    args: &[&str],
+    class: &str,
+    inset_css: f64,
+    timeout: Duration,
+) -> Result<HostGeometry, HostError> {
+    let scale = scale_factor(window)?;
+    let parent = parent_window(window)?;
+    let launched = guest::launch(exe, args, class, timeout)?;
     let guest_window = launched.window;
     let mut process = Some(launched.process);
 
