@@ -25,6 +25,7 @@ approval API at all, read off its AST rather than its prose.
 
 import ast
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from pydantic import ValidationError
 from workbench_server.config import Settings
 from workbench_server.models.gates import SlotRef
 from workbench_server.models.review import (
+    MAX_FILE_DIFF_BYTES,
     MAX_FINDINGS,
     SEVERITY_ORDER,
     SEVERITY_OUTCOME,
@@ -44,9 +46,14 @@ from workbench_server.models.review import (
     ReviewSpec,
 )
 from workbench_server.models.validation import ValidationSpec, ValidationSubject
-from workbench_server.services.agent_sessions import TooManySessionsError
+from workbench_server.services.agent_sessions import SessionManager, TooManySessionsError
 from workbench_server.services.event_bus import EventBus
+from workbench_server.services.fake_agent import CLEAN_REVIEW_TRIGGER, fake_client_factory
 from workbench_server.services.review import (
+    DEFAULT_MAX_BUDGET_USD,
+    DEFAULT_MAX_TURNS,
+    DIFF_MARKER,
+    SETTING_MAX_BUDGET,
     SETTING_MAX_SESSIONS,
     SETTING_MAX_TURNS,
     SETTING_TIMEOUT,
@@ -339,6 +346,16 @@ class TestTheDiffSeesNewFiles:
         assert "blob.bin" in diff.text
         assert "new binary file" in diff.text
 
+    async def test_invalid_bytes_without_a_nul_are_still_binary(self, tmp_path: Path) -> None:
+        """The classification survives the fix. Binary is now decided by a NUL
+        byte first, so the case that has none — and is caught only by the decode
+        failing — has to be shown still working."""
+        base = git_repo(tmp_path)
+        (tmp_path / "latin.bin").write_bytes(b"\xff\xfe\xff\xfe" * 200)
+        diff = await build_diff(run_git, tmp_path, base)
+        assert diff is not None
+        assert "new binary file" in diff.text
+
     async def test_git_that_will_not_answer_is_none_never_clean(self, tmp_path: Path) -> None:
         """``None`` is not "no changes" and a caller must never read it as one:
         a checkout whose state git will not report is one no verdict may be
@@ -346,6 +363,93 @@ class TestTheDiffSeesNewFiles:
         plain = tmp_path / "not-a-repo"
         plain.mkdir()
         assert await build_diff(run_git, plain, "") is None
+
+
+#: A new file that is *ordinary text*, longer than the per-file cap, and whose
+#: character at the cut is multi-byte. Built in bytes rather than written through
+#: text mode on purpose: Windows would translate the ``\n`` and move the boundary
+#: this whole fixture exists to land on.
+STRADDLE_MARKER = "# STRADDLE_MARKER — an em dash, three bytes\n"
+
+
+def straddling_file(target: Path, cap: int = MAX_FILE_DIFF_BYTES) -> None:
+    """Write ``target`` so its ``cap``-th byte is *inside* an em dash.
+
+    An em dash (U+2014) is three bytes, and this codebase writes them by the
+    hundred. Placing one so it begins at ``cap - 1`` means every byte-counted
+    read near the cap — whether it stops at ``cap`` or at ``cap + 1`` — lands
+    between two of its bytes, which is the condition a strict ``decode`` cannot
+    survive and a truncated *source file* has no business being punished for.
+    """
+    lead = STRADDLE_MARKER.encode()
+    filler = b"a" * (cap - 1 - len(lead))
+    target.write_bytes(lead + filler + "—".encode() + b"z" * 5_000)
+
+
+class TestABigTextFileIsTruncatedNotCalledBinary:
+    """The regression test for a silent green wearing the wrong label.
+
+    A new file read up to a **byte** ceiling is almost never cut on a character
+    boundary. While the cut bytes were handed to a strict ``decode``, any new
+    module with a multi-byte character near the cap raised ``UnicodeDecodeError``
+    and came out of the diff as ``(new binary file, not shown)`` — so the
+    reviewer saw *none* of a perfectly reviewable file and the report described
+    the omission as binary rather than as truncation. A bug in that file was then
+    unreviewable by construction, which is the exact failure this check exists to
+    refuse.
+
+    Real git, a real file on disk, and the **production** cap, because the bug
+    lives in the arithmetic between the cap and the read.
+    """
+
+    async def test_the_text_is_shown_and_the_cut_is_named(self, tmp_path: Path) -> None:
+        base = git_repo(tmp_path)
+        straddling_file(tmp_path / "brand_new.py")
+        diff = await build_diff(run_git, tmp_path, base)
+        assert diff is not None
+        assert "new binary file" not in diff.text
+        assert "STRADDLE_MARKER" in diff.text
+        # …and the omission reads as what it is, with a size (AXI shape 1).
+        assert "more bytes of this file were not shown" in diff.text
+
+    async def test_the_stated_remainder_is_the_files_own(self, tmp_path: Path) -> None:
+        """The count is taken from ``stat``, not from the byte the read overshot
+        by. Reading ``cap + 1`` and reporting the difference would say "1 more
+        byte" of a 2 GB artifact — AXI shape 1 violated with a number attached,
+        which is worse than no number."""
+        base = git_repo(tmp_path)
+        straddling_file(tmp_path / "brand_new.py")
+        diff = await build_diff(run_git, tmp_path, base)
+        assert diff is not None
+        match = re.search(r"([\d,]+) more bytes of this file were not shown", diff.text)
+        assert match is not None
+        # The fixture puts 5,000 bytes past the cap; the read alone could only
+        # ever have known about a hundred or so of them.
+        assert int(match.group(1).replace(",", "")) >= 5_000
+
+    async def test_the_reviewer_is_actually_shown_it(self, tmp_path: Path) -> None:
+        """End to end, the way a user hits it: a worker writes a new module into
+        its slot and a review is run. What is asserted is the **prompt the
+        reviewer was sent** — the only place "the reviewer never saw this file"
+        can be observed."""
+        base = git_repo(tmp_path)
+        straddling_file(tmp_path / "brand_new.py")
+        check, sessions = build(SlotRef(slot="s1", path=str(tmp_path), base=base), reports([]))
+        evidence = await run_check(check, tmp_path)
+        assert evidence[0].outcome == "pass"
+        prompt = sessions.prompts[0]
+        assert "STRADDLE_MARKER" in prompt
+        assert "new binary file" not in prompt
+
+    async def test_a_short_multibyte_file_is_untouched(self, tmp_path: Path) -> None:
+        """The control: nothing about the fix depends on the file being large,
+        and a small file must still arrive whole and unclipped."""
+        base = git_repo(tmp_path)
+        (tmp_path / "small.py").write_bytes("VALUE = '— dash —'\n".encode())
+        diff = await build_diff(run_git, tmp_path, base)
+        assert diff is not None
+        assert "— dash —" in diff.text
+        assert "more bytes of this file were not shown" not in diff.text
 
 
 class TestTheDiffIsBounded:
@@ -570,9 +674,55 @@ class TestRefusals:
     def test_every_named_setting_is_real(self) -> None:
         """A refusal that quotes a variable nobody can set is worse than no hint."""
         fields = Settings.model_fields
-        for name in (SETTING_TIMEOUT, SETTING_MAX_TURNS):
+        for name in (SETTING_TIMEOUT, SETTING_MAX_TURNS, SETTING_MAX_BUDGET):
             assert name.removeprefix("WORKBENCH_").lower() in fields
         assert "max_concurrent_sessions" in fields
+
+
+class TestTheConfiguredCeilingsAreCeilings:
+    """A caller may ask for less. It may not ask for more.
+
+    ``ReviewSpec``'s own bounds are 100 turns and $100 — the schema's outer edge,
+    not a licence. Starting a review takes no per-run human approval, so a spec
+    honoured as written would let one ``POST /api/validation/run`` spend fifty
+    times what an operator who configured $2 "so a mistake survives" agreed to.
+    """
+
+    async def test_a_request_cannot_raise_the_operators_ceiling(self, tmp_path: Path) -> None:
+        base = git_repo(tmp_path)
+        (tmp_path / "new.py").write_text("X = 1\n", encoding="utf-8")
+        check, _ = build(SlotRef(slot="s1", path=str(tmp_path), base=base), reports([]))
+        evidence = await run_check(
+            check, tmp_path, params={"max_turns": 100, "max_budget_usd": 100.0}
+        )
+        assert check.reviewer_caps() == (DEFAULT_MAX_TURNS, DEFAULT_MAX_BUDGET_USD)
+        # …and the clamp is stated, not applied quietly: a caller that does not
+        # learn its number was lowered reads a shorter review as a complete one.
+        assert SETTING_MAX_TURNS in evidence[0].detail
+        assert SETTING_MAX_BUDGET in evidence[0].detail
+        assert evidence[0].outcome == "pass"  # a clamp changes cost, never verdict
+
+    async def test_a_request_may_ask_for_less(self, tmp_path: Path) -> None:
+        base = git_repo(tmp_path)
+        (tmp_path / "new.py").write_text("X = 1\n", encoding="utf-8")
+        check, _ = build(SlotRef(slot="s1", path=str(tmp_path), base=base), reports([]))
+        evidence = await run_check(check, tmp_path, params={"max_turns": 5, "max_budget_usd": 0.5})
+        assert check.reviewer_caps() == (5, 0.5)
+        assert SETTING_MAX_TURNS not in evidence[0].detail
+
+    async def test_an_absent_request_takes_the_configured_one(self, tmp_path: Path) -> None:
+        base = git_repo(tmp_path)
+        (tmp_path / "new.py").write_text("X = 1\n", encoding="utf-8")
+        check, _ = build(SlotRef(slot="s1", path=str(tmp_path), base=base), reports([]))
+        await run_check(check, tmp_path)
+        assert check.reviewer_caps() == (DEFAULT_MAX_TURNS, DEFAULT_MAX_BUDGET_USD)
+
+    def test_the_schema_bound_is_wider_than_the_default(self) -> None:
+        """The premise. If the two ever met, the clamp above would be untestable
+        and this class would silently stop proving anything."""
+        assert ReviewSpec(max_turns=100).max_turns == 100
+        assert DEFAULT_MAX_TURNS < 100
+        assert DEFAULT_MAX_BUDGET_USD < 100.0
 
 
 class TestAReviewThatCouldNotRunIsAFailure:
@@ -662,6 +812,83 @@ class TestAFindingMustNameWhatBreaksIt:
         too_many = [MUST_FIX] * (MAX_FINDINGS + 1)
         with pytest.raises(ValidationError):
             ReportFindingsRequest.model_validate({"findings": too_many})
+
+
+class TestTheScriptedReviewerDrivesTheRealChain:
+    """``WORKBENCH_FAKE_AGENT``'s reviewer, end to end, with nothing stubbed.
+
+    Everywhere else in this file the reviewer is a scripted ``AgentSession``
+    calling :meth:`receive_findings` directly — deterministic, and blind to the
+    two links in front of it. Here the objects are the shipped ones all the way
+    down: a real :class:`SessionManager` over
+    :func:`~workbench_server.services.fake_agent.fake_client_factory`, a real
+    :class:`AgentSession`, the real ``report_findings`` tool body with its schema
+    validation, the real receiver, ``derive_risk``.
+
+    **Both answers, not one.** The canned script leads with a ``must_fix``, which
+    left the other outcome — an empty report, which must arrive as a ``pass`` and
+    never as silence — proven through this chain by nothing at all. That is the
+    same gap, pointed the other way, that the canned findings were chosen to
+    close.
+    """
+
+    async def _review_with(self, tmp_path: Path, focus: str) -> tuple[list[Any], Any]:
+        base = git_repo(tmp_path)
+        (tmp_path / "brand_new.py").write_text("X = 1\n", encoding="utf-8")
+        check = AdversarialReviewCheck(
+            _Locator(SlotRef(slot="s1", path=str(tmp_path), base=base)), timeout_s=20.0
+        )
+        manager = SessionManager(tmp_path, fake_client_factory(None, check), max_sessions=4)
+        check.bind(manager)
+        service = ValidationService(tmp_path, EventBus())
+        service.register(check)
+        result = await service.run(
+            ValidationSpec(
+                subject=ValidationSubject(kind="session_output", ref="sess-1", label="w"),
+                checks=["review"],
+                params={"focus": focus},
+            )
+        )
+        return list(result.evidence), (service, result)
+
+    @pytest.mark.timeout(60)
+    async def test_a_clean_review_is_a_pass_through_the_real_tool_body(
+        self, tmp_path: Path
+    ) -> None:
+        """The half that had no coverage. An empty findings list is schema-valid,
+        reaches the receiver, and becomes a ``pass`` line that *says* it found
+        nothing — never blankness a reader has to interpret (AXI shape 2)."""
+        evidence, (service, result) = await self._review_with(tmp_path, CLEAN_REVIEW_TRIGGER)
+        assert len(evidence) == 1
+        assert evidence[0].outcome == "pass"
+        assert "No findings" in evidence[0].detail
+        assert result.risk == "pass"
+        ref = evidence[0].payload_ref
+        assert ref is not None
+        payload = service.payload("diff", ref)
+        assert isinstance(payload, ReviewReport)
+        assert payload.findings == []
+
+    @pytest.mark.timeout(60)
+    async def test_the_canned_findings_still_fail_and_await_a_human(self, tmp_path: Path) -> None:
+        """The control, and the half the E2E journey lands on: the same chain
+        with the default script is a ``fail`` at ``high`` risk with no approval
+        on it."""
+        evidence, (_service, result) = await self._review_with(tmp_path, "")
+        assert evidence[0].outcome == "fail"
+        assert "1 must_fix" in evidence[0].detail
+        assert result.risk == "high"
+        assert result.approval is None
+
+    def test_the_trigger_is_read_from_the_brief_and_not_from_the_diff(self) -> None:
+        """A trigger scanned across the whole prompt would let the change under
+        review decide what its own review says — a diff that merely *contained*
+        the words would come back clean."""
+        diff = _diff_stub()
+        diff.text = f"+# {CLEAN_REVIEW_TRIGGER}\n"
+        prompt = review_prompt(diff, "")
+        assert CLEAN_REVIEW_TRIGGER not in prompt.split(DIFF_MARKER, 1)[0].lower()
+        assert CLEAN_REVIEW_TRIGGER in prompt
 
 
 class TestTheCheckNeverApproves:

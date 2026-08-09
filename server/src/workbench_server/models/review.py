@@ -207,9 +207,17 @@ class ReviewSpec(BaseModel):
     focus: str = Field(default="", max_length=MAX_FOCUS_CHARS)
     #: Ceiling on the reviewer's turns, passed to the SDK as
     #: ``ClaudeAgentOptions.max_turns``. ``None`` takes the server's configured
-    #: default; a check that spends without a ceiling is one nobody leaves on.
+    #: value; a check that spends without a ceiling is one nobody leaves on.
+    #:
+    #: **This can only lower the server's ceiling, never raise it.** The bound
+    #: here is the schema's outer limit, not a licence: ``WORKBENCH_REVIEW_MAX_TURNS``
+    #: is what the operator agreed to, a review starts with no per-run human
+    #: approval, and ``services/review.py`` clamps to the smaller of the two and
+    #: says so on the evidence line when it did.
     max_turns: int | None = Field(default=None, ge=1, le=100)
-    #: Ceiling on the reviewer's spend, passed as ``max_budget_usd``.
+    #: Ceiling on the reviewer's spend, passed as ``max_budget_usd``. Clamped to
+    #: ``WORKBENCH_REVIEW_MAX_BUDGET_USD`` for the reason above — the difference
+    #: between the two bounds is $98 of someone else's money.
     max_budget_usd: float | None = Field(default=None, gt=0.0, le=100.0)
 
     @field_validator("focus")

@@ -47,7 +47,10 @@ handed a slice will report absence as evidence of absence.
 ``ClaudeAgentOptions`` (``max_turns`` / ``max_budget_usd``, both previously
 unused here), and a wall clock bounds the whole thing. Every one of them, when
 it binds, produces a ``fail`` line **naming the setting that raises it** — never
-an absence a reader could mistake for a clean review.
+an absence a reader could mistake for a clean review. A caller's own ceilings may
+only *lower* the configured ones: starting a review takes no per-run human
+approval, so honouring a spec that asked for the schema's maximum would let one
+API call spend fifty times what the operator agreed to.
 
 The isolation that makes "read-only" true — a toolset selected by kind, a
 kind-gated auto-allow list, ``disallowed_tools``, and a deny-and-log answer on
@@ -59,6 +62,7 @@ and it is asserted in ``test_sdk_factory.py``.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -108,11 +112,6 @@ DEFAULT_REVIEW_TIMEOUT_S = 600.0
 #: step, and the out-of-the-box numbers should be ones a mistake survives.
 DEFAULT_MAX_TURNS = 24
 DEFAULT_MAX_BUDGET_USD = 2.0
-
-#: Bytes of one untracked file read into the diff before the per-file cap bites.
-#: Read with a ceiling rather than read-then-cut so a checked-in 2 GB artifact
-#: costs this much memory and not 2 GB.
-_UNTRACKED_READ = MAX_FILE_DIFF_BYTES + 1
 
 #: How a per-file section is introduced when the file is untracked. ``git diff``
 #: has no header for a file it does not know about, so we mint one that reads
@@ -218,21 +217,27 @@ def _path_of(header: str) -> str:
     return candidate[2:] if candidate.startswith("b/") else candidate
 
 
-def _clip_section(section: _Section, cap: int) -> _Section:
+def _clip_section(section: _Section, cap: int, *, unread_bytes: int = 0) -> _Section:
     """One file's diff, cut to ``cap`` bytes with the cut named in the text.
 
     Marked inline and not only in the report's ``truncated``, for the reason the
     gate's log marker exists: a reader must never have to know that two adjacent
     lines were never adjacent.
+
+    ``unread_bytes`` is for the one caller that stops reading before it has the
+    whole file (:func:`_read_untracked`): the bytes it never loaded are added to
+    the count so the sentence states the file's *real* remainder rather than the
+    one byte the overshoot happened to see. Saying "1 more byte" of a 2 GB
+    artifact is AXI shape 1 violated with a number attached.
     """
     encoded = section.text.encode()
-    if len(encoded) <= cap:
+    if len(encoded) <= cap and not unread_bytes:
         return section
-    withheld = len(encoded) - cap
+    withheld = max(len(encoded) - cap, 0) + unread_bytes
     kept = encoded[:cap].decode(errors="ignore")
     return _Section(
         path=section.path,
-        text=f"{kept}\n… {withheld} more bytes of this file were not shown …\n",
+        text=f"{kept}\n… {withheld:,} more bytes of this file were not shown …\n",
         clipped=True,
     )
 
@@ -331,39 +336,87 @@ async def build_diff(
     )
 
 
+def _decode_untracked(raw: bytes, *, complete: bool) -> str | None:
+    """``raw`` as text, or ``None`` when these bytes are not text at all.
+
+    Two different questions used to be answered by one strict ``bytes.decode``,
+    and conflating them cost real source files their review. A file read up to a
+    **byte** ceiling is almost never cut on a character boundary, so any new
+    module whose 40,000th byte landed inside a multi-byte character — an em dash
+    is three of them, and this codebase is full of them — raised
+    ``UnicodeDecodeError`` and was filed as ``(new binary file, not shown)``. The
+    reviewer then saw not one byte of an ordinary Python file, and the report
+    called the omission *binary* rather than *truncation*: a silent green with a
+    plausible-looking label on it, arriving through the check written to stop
+    exactly that.
+
+    So the two questions are now asked separately:
+
+    * **Is this binary?** A NUL byte anywhere in what was read — git's own
+      heuristic (``buffer_is_binary``), and one that does not care where the read
+      stopped.
+    * **Where does the text end?** An incremental decoder, ``final=False`` when
+      the read was cut short, which *holds back* an incomplete trailing sequence
+      instead of raising on it. Genuinely invalid bytes still raise, and still
+      mean binary — the classification survives, it just stops firing on a cut.
+    """
+    if b"\0" in raw:
+        return None
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        return decoder.decode(raw, final=complete)
+    except UnicodeDecodeError:
+        return None
+
+
 def _read_untracked(root: Path, names: Sequence[str], cap: int) -> list[_Section]:
     """The untracked files' contents, bounded, as diff-shaped sections.
 
-    Blocking IO throughout, so callers run it in a thread. A file that cannot be
-    decoded as text is named and **not** included: handing a model a megabyte of
+    Blocking IO throughout, so callers run it in a thread. A file that is not
+    text is named and **not** included: handing a model a megabyte of
     replacement characters buys nothing and spends the window a source file
     needed. A file that cannot be read at all is named too — "there is a new file
-    here I could not show you" is a fact a reviewer should have.
+    here I could not show you" is a fact a reviewer should have. A file that is
+    text but longer than the cap is *truncated and said to be truncated*, which
+    is a third outcome and must never be reported as either of the first two.
     """
     sections: list[_Section] = []
     for name in names:
         target = root / name
         header = _UNTRACKED_HEADER.format(path=name)
         try:
+            # ``stat`` before the read, so the truncation sentence can state the
+            # true remainder; the read itself stops one byte past the cap, which
+            # is all it takes to know the cap bit and is what keeps a checked-in
+            # 2 GB artifact costing the cap in memory rather than 2 GB.
+            size = target.stat().st_size
             with target.open("rb") as handle:
-                raw = handle.read(_UNTRACKED_READ)
+                raw = handle.read(cap + 1)
         except OSError as err:
             sections.append(
                 _Section(path=name, text=f"{header}(new file, unreadable: {err.strerror or err})\n")
             )
             continue
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
+        complete = len(raw) <= cap
+        if not complete:
+            raw = raw[:cap]
+        text = _decode_untracked(raw, complete=complete)
+        if text is None:
             sections.append(
                 _Section(
                     path=name,
-                    text=f"{header}(new binary file, {len(raw):,} bytes, not shown)\n",
+                    text=f"{header}(new binary file, {size:,} bytes, not shown)\n",
                 )
             )
             continue
         body = "".join(f"+{line}\n" for line in text.splitlines())
-        sections.append(_clip_section(_Section(path=name, text=header + body), cap))
+        sections.append(
+            _clip_section(
+                _Section(path=name, text=header + body),
+                cap,
+                unread_bytes=0 if complete else max(size - cap, 0),
+            )
+        )
     return sections
 
 
@@ -402,6 +455,14 @@ as one.
 """
 
 
+#: Where the server's instructions stop and the change begins in
+#: :func:`review_prompt`. Exported because a reader of the prompt has to be able
+#: to tell the two apart: ``services/fake_agent.py``'s scripted reviewer keys its
+#: script off the caller's ``focus``, and scanning the whole prompt for a trigger
+#: would let the *diff under review* decide what the reviewer reports.
+DIFF_MARKER = "\n--- the change ---\n"
+
+
 def review_prompt(diff: _Diff, focus: str) -> str:
     """The brief, what was withheld, the caller's focus, and the diff.
 
@@ -423,7 +484,7 @@ def review_prompt(diff: _Diff, focus: str) -> str:
         )
     if focus:
         parts.append(f"The person who asked for this review added: {focus}")
-    parts.append("\n--- the change ---\n")
+    parts.append(DIFF_MARKER)
     parts.append(diff.text)
     return "\n".join(parts)
 
@@ -588,8 +649,32 @@ class AdversarialReviewCheck:
         """Spawn the reviewer, wait for it, and turn the answer into evidence."""
         sessions = self._sessions
         assert sessions is not None  # noqa: S101 — guarded by the caller
-        turns_cap = spec.max_turns or self._max_turns
-        budget_cap = spec.max_budget_usd or self._max_budget_usd
+        # **The configured ceilings are ceilings, not defaults.** A spec may ask
+        # for less; asking for more is clamped, because starting a review takes
+        # no per-run human approval and ``ReviewSpec``'s own schema bound is 100
+        # turns / $100 — fifty times what an operator who set $2 "so a mistake
+        # survives" agreed to spend. Clamped rather than refused so an over-ask
+        # still gets a review, and said out loud rather than clamped quietly:
+        # a caller who does not learn its number was lowered will read a
+        # truncated review as a complete one.
+        asked_turns = spec.max_turns or self._max_turns
+        asked_budget = spec.max_budget_usd or self._max_budget_usd
+        turns_cap = min(asked_turns, self._max_turns)
+        budget_cap = min(asked_budget, self._max_budget_usd)
+        caps_note = ""
+        if asked_turns > turns_cap or asked_budget > budget_cap:
+            log.warning(
+                "review.caps_clamped",
+                asked_turns=asked_turns,
+                asked_budget_usd=asked_budget,
+                turns=turns_cap,
+                budget_usd=budget_cap,
+            )
+            caps_note = (
+                f"The request asked for {asked_turns} turns / ${asked_budget:.2f}; this "
+                f"server allows at most {turns_cap} / ${budget_cap:.2f} and the review ran "
+                f"under those — raise {SETTING_MAX_TURNS} or {SETTING_MAX_BUDGET} to spend more."
+            )
         self._caps = (turns_cap, budget_cap)
 
         label = f"review of {slot.slot or path.name}"
@@ -644,14 +729,17 @@ class AdversarialReviewCheck:
         turns, cost = self._spend(reviewer_id) if self._spend is not None else (0, 0.0)
         if pending.report is None:
             return [
-                _failed_review(
-                    diff,
-                    reviewer_id,
-                    timed_out=timed_out,
-                    turn_error=pending.turn_error,
-                    timeout_s=self._timeout_s,
-                    turns_cap=turns_cap,
-                    budget_cap=budget_cap,
+                _with_note(
+                    _failed_review(
+                        diff,
+                        reviewer_id,
+                        timed_out=timed_out,
+                        turn_error=pending.turn_error,
+                        timeout_s=self._timeout_s,
+                        turns_cap=turns_cap,
+                        budget_cap=budget_cap,
+                    ),
+                    caps_note,
                 )
             ]
 
@@ -673,7 +761,7 @@ class AdversarialReviewCheck:
             findings=len(report.findings),
             files=report.files_reviewed,
         )
-        return [_evidence(report, ctx, note=pending.report.note)]
+        return [_with_note(_evidence(report, ctx, note=pending.report.note), caps_note)]
 
     @staticmethod
     async def _watch(reviewer_id: str, queue: asyncio.Queue[BaseModel], pending: _Pending) -> None:
@@ -810,6 +898,19 @@ def _failed_review(
             f"review. Reviewer session {reviewer_id}."
         ),
     )
+
+
+def _with_note(item: EvidenceItem, note: str) -> EvidenceItem:
+    """The same line with a *server-side* caveat appended, or the line unchanged.
+
+    Separate from the reviewer's own ``note`` on purpose: that field is what the
+    model said about its coverage, and folding the server's clamp message into it
+    would attribute the server's sentence to the reviewer. The outcome is never
+    touched — a clamped ceiling changes what a review cost, not what it found.
+    """
+    if not note:
+        return item
+    return item.model_copy(update={"detail": f"{item.detail} {note}"})
 
 
 def _refusal(detail: str) -> EvidenceItem:

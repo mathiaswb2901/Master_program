@@ -155,6 +155,14 @@ class Settings(BaseSettings):
     # started it will wait. Every refusal names the one that bit — a cap a user
     # cannot see the way out of is the dead button the pane rules forbid.
     #
+    # These two are **hard ceilings, not defaults**. A caller may put its own
+    # `max_turns`/`max_budget_usd` in `ValidationSpec.params`, and
+    # `services/review.py` clamps them to these — a review starts with no
+    # per-run human approval, so an unclamped spec could take one API call to
+    # the schema's own 100-turn/$100 bound and spend fifty times what was set
+    # here. A spec asking for less is honoured, and a clamp is stated on the
+    # evidence line rather than applied quietly.
+    #
     # There is no setting here through which a prompt, a path or a command
     # reaches the reviewer: the brief is server-owned (`services/review.py`) and
     # the checkout is resolved from the subject session's own slot.

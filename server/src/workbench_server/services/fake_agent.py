@@ -66,7 +66,12 @@ calling ``report_findings`` with canned findings, through the **real**
 reports what it said — and it is what lets CI prove spawn → diff → findings →
 grouped evidence → risk → *still awaiting approval* with no Claude login and no
 tokens. It is a **script, not a special path**: the check, the receiver, the
-session manager, the bus and the evidence are all the shipped ones.
+session manager, the bus and the evidence are all the shipped ones. It has two
+scripts, selected by the review's own ``focus``: canned findings by default, and
+an empty report when the focus carries :data:`CLEAN_REVIEW_TRIGGER` — because
+"the reviewer found nothing" and "the reviewer never answered" are the two
+outcomes this milestone exists to keep apart, and only one of them was reachable
+from CI while there was a single script.
 
 Never enabled by default (``Settings.fake_agent``), and ``main.py`` logs a
 warning on startup when it is: a workbench that quietly answers with canned
@@ -119,6 +124,7 @@ from workbench_server.services.agent_tools import (
     OrchestratorHandle,
     handle_report_findings,
 )
+from workbench_server.services.review import DIFF_MARKER
 
 log = structlog.get_logger()
 
@@ -201,6 +207,23 @@ FAKE_FINDINGS: list[dict[str, Any]] = [
 
 #: The one sentence a scripted reviewer adds about its own coverage.
 FAKE_REVIEW_NOTE = "The generated migration was truncated out of the diff and not read."
+
+#: Put this in a review's ``focus`` and the scripted reviewer reports **nothing**
+#: — an empty findings list and no coverage note, through the same real
+#: ``report_findings`` body, receiver and evidence assembly the canned findings
+#: take.
+#:
+#: The clean half needs its own exercise for the same reason the failing half
+#: did: "no findings" and "the reviewer never answered" are the two outcomes this
+#: milestone exists to keep apart, and a fake that could only ever come back
+#: *dirty* leaves the ``pass`` line — schema validation of an empty list, the
+#: receiver, ``derive_risk``, the gallery — proven by nothing but inspection.
+#:
+#: Matched against the *instructions*, never the whole prompt: everything after
+#: :data:`~workbench_server.services.review.DIFF_MARKER` is the change under
+#: review, and a trigger scanned there would let the reviewed diff decide what
+#: its own review says.
+CLEAN_REVIEW_TRIGGER = "report nothing"
 
 #: How long ``stay busy`` holds the turn open (before the reply, or after the
 #: tool result when ``use tool`` is asked for too). Long enough for a UI test to
@@ -662,7 +685,7 @@ class FakeAgentClient:
             # "read", and a reviewer that tripped ``write file`` would put bytes
             # on disk from the one session kind that is supposed to be incapable
             # of it — proving the opposite of what this branch exists to prove.
-            for message in self._review():
+            for message in self._review(prompt):
                 yield message
             yield ResultMessage(self._session_id)
             return
@@ -750,7 +773,7 @@ class FakeAgentClient:
                 lines.append(f"spawned {outcome.worker_id} in {outcome.slot or 'the workspace'}")
         return "\n\n" + "\n".join(lines) + "\n"
 
-    def _review(self) -> list[Any]:
+    def _review(self, prompt: str) -> list[Any]:
         """Call the *real* ``report_findings`` handler, and report what it said.
 
         The ``_spawn_workers`` posture: the fake drives the production receiver
@@ -760,18 +783,32 @@ class FakeAgentClient:
         service. A fake that fabricated a ``ReviewReport`` would prove nothing
         about any of that.
 
+        **Two scripts, not one.** The default is :data:`FAKE_FINDINGS` — a
+        ``must_fix`` first, so the ``fail``/``high``/still-awaiting-approval half
+        is the one a browser journey lands on. A review whose ``focus`` carries
+        :data:`CLEAN_REVIEW_TRIGGER` reports an empty list instead, which is the
+        *other* answer this milestone has to keep distinguishable from silence
+        and which the same real tool body, receiver and ``derive_risk`` have to
+        turn into a ``pass``. Keyed off the caller's focus and read only from the
+        instruction half of the prompt (:data:`DIFF_MARKER`), because a trigger
+        scanned across the whole prompt would let the diff under review choose
+        its own verdict.
+
         Announced and settled as two frames, exactly as a real tool call is, so
         the reviewer's row in the fleet activity feed looks like every other
         tool call rather than like a fourth kind of frame.
         """
+        instructions = prompt.split(DIFF_MARKER, 1)[0].lower()
+        clean = CLEAN_REVIEW_TRIGGER in instructions
+        findings = [] if clean else FAKE_FINDINGS
+        args = {"findings": findings, "note": "" if clean else FAKE_REVIEW_NOTE}
         call_id = f"fake-tool-{uuid.uuid4().hex[:8]}"
-        args = {"findings": FAKE_FINDINGS, "note": FAKE_REVIEW_NOTE}
         result = handle_report_findings(self._findings, self._bridge.session_id, args)
         blocks = result.get("content") or [{}]
         text = str(blocks[0].get("text", "")) if isinstance(blocks[0], dict) else ""
         return [
             AssistantMessage(
-                [ToolUseBlock("report_findings", {"findings": len(FAKE_FINDINGS)}, call_id)]
+                [ToolUseBlock("report_findings", {"findings": len(findings)}, call_id)]
             ),
             UserMessage([ToolResultBlock(call_id, text, is_error=bool(result.get("is_error")))]),
         ]
