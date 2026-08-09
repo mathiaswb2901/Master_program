@@ -126,6 +126,74 @@ export type WorkspaceEvent =
   | WorkspaceChangedEvent
   | CommandInvokeEvent;
 
+// ---- notebook.py ------------------------------------------------------------
+// A `.ipynb`, read and never run. There is no execution in this feature — no
+// kernel, no run endpoint, and nothing below that could describe one — so a
+// cell's `execution_count` is history, not state.
+
+export type NotebookCellType = "code" | "markdown" | "raw";
+
+export type NotebookOutputType = "stream" | "execute_result" | "display_data" | "error";
+
+export type NotebookImageMime = "image/png" | "image/jpeg" | "image/gif";
+
+/** Base64 exactly as the notebook stores it — the panel builds a `data:` URI,
+ * so the bytes never become a URL anything could be asked to fetch. */
+export interface NotebookImage {
+  mime: NotebookImageMime;
+  base64: string;
+}
+
+/**
+ * One output, already reduced server-side to the single representation worth
+ * painting; `mime` names which one was chosen out of the file's MIME bundle.
+ *
+ * `html_source` is HTML **as source text**, never markup. Notebook HTML is
+ * arbitrary author-controlled markup and this app renders none of it (the same
+ * call `markdown.tsx` makes for chat); the field name is what stops a renderer
+ * quietly changing its mind.
+ */
+export interface NotebookOutput {
+  output_type: NotebookOutputType;
+  mime: string;
+  /** "stdout" | "stderr" for a stream output; null otherwise. */
+  stream: string | null;
+  text: string | null;
+  html_source: string | null;
+  image: NotebookImage | null;
+  ename: string | null;
+  evalue: string | null;
+  /** `text`/`html_source` was cut at the server's cap, and the panel says so. */
+  truncated: boolean;
+}
+
+export interface NotebookCell {
+  /** Positional (`c0`, `c1`, …) and unique within one response — a list key,
+   * not a link target. */
+  id: string;
+  cell_type: NotebookCellType;
+  source: string;
+  execution_count: number | null;
+  outputs: NotebookOutput[];
+  truncated: boolean;
+}
+
+export interface NotebookDocument {
+  path: string;
+  nbformat: number;
+  nbformat_minor: number;
+  /** Lowercased highlighting language. A default (`python`), never a claim. */
+  language: string;
+  kernel: string | null;
+  cells: NotebookCell[];
+  /** The file's cell count, which is not `cells.length` when `truncated`. */
+  cell_count: number;
+  truncated: boolean;
+  /** Schema validity. False still renders — see `validation_message`. */
+  valid: boolean;
+  validation_message: string | null;
+}
+
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
 // never a guess at the most recent session.
