@@ -52,21 +52,45 @@ const UI_ROOT = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..",
 /**
  * Third-party rules that animate something the allowlist forbids.
  *
- * Every entry has been read. The first is overridden in
- * `ui/src/styles/dockview.css` — the source rule survives in the bundle because
- * a later override cannot delete an earlier line — and the rest are inside
- * Monaco's own paint area, where they cost the editor and not the app's layout.
+ * Every entry has been read. They fall into three groups.
+ *
+ *  1. **Overridden.** The two drop-target rules are neutralised in
+ *     `ui/src/styles/dockview.css` (opacity only); the source rules survive in
+ *     the bundle because a later override cannot delete an earlier line.
+ *  2. **Unreachable.** The `dv-tab--*` and `dv-tab-group-chip--*` rules are
+ *     dockview 7's `tabAnimation: 'smooth'` tab-drag mode and its tab-group
+ *     chips. Every class in them is applied behind a `tabAnimation === 'smooth'`
+ *     check, and `App.tsx` states `tabAnimation: 'default'` on the theme rather
+ *     than relying on that being the library default — which is what makes
+ *     "unreachable" a property of this app rather than of this dockview
+ *     version. Tab groups are never created at all (`createTabGroup` is not
+ *     called anywhere).
+ *  3. **Monaco's own paint area**, where they cost the editor and not the app's
+ *     layout.
+ *
  * Asserted for equality in both directions: an entry that stops appearing is as
  * much a failure as one that appears, because a stale quarantine is a
  * quarantine nobody re-reads.
  */
 const VENDOR_LEDGER: Record<string, string[]> = {
+  // (1) overridden
   ".dv-drop-target>.dv-drop-target-dropzone>.dv-drop-target-selection": [
     "top",
     "left",
     "width",
     "height",
   ],
+  ".dv-drop-target-container .dv-drop-target-anchor": ["top", "left", "width", "height"],
+  // (2) unreachable: `tabAnimation: 'smooth'` only, and tab groups
+  ".dv-tab.dv-tab--shifting": ["margin-left", "margin-right", "margin-top", "margin-bottom"],
+  ".dv-tab.dv-tab--dragging,.dv-tab.dv-tab--group-collapsed": ["width", "padding", "margin"],
+  ".dv-tab.dv-tab--group-expanding": ["width", "padding", "margin"],
+  ".dv-tabs-container-vertical .dv-tab.dv-tab--dragging": ["height", "padding", "margin"],
+  ".dv-tabs-container-vertical .dv-tab.dv-tab--group-collapsed": ["height", "padding", "margin"],
+  ".dv-tabs-container-vertical .dv-tab.dv-tab--group-expanding": ["height", "padding", "margin"],
+  ".dv-tab-group-chip.dv-tab-group-chip--shifting": ["margin-left"],
+  ".dv-tab-group-chip.dv-tab-group-chip--dragging": ["width", "padding", "margin"],
+  // (3) Monaco
   ".monaco-progress-container.discrete .progress-bit": ["width"],
   ".monaco-workbench:not(.reduce-motion) .monaco-tree-type-filter": ["top"],
   ".monaco-editor .cursors-layer.cursor-smooth-caret-animation>.cursor": ["all"],

@@ -1,9 +1,10 @@
-import {
-  type DockviewApi,
-  DockviewReact,
-  type DockviewReadyEvent,
-  type IDockviewPanelHeaderProps,
-} from "dockview";
+// Two packages, one library. dockview 7 renamed them: `dockview` is the
+// framework-agnostic core (every type below, the `DockviewApi` every tool
+// holds) and `dockview-react` is the React binding — the one component in this
+// file. Everything else in `ui/` imports types only, so it keeps importing
+// from `dockview` and this is the whole of the split's footprint.
+import { type DockviewApi, type DockviewReadyEvent, type IDockviewPanelHeaderProps } from "dockview";
+import { DockviewReact } from "dockview-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { BootGate } from "./BootGate";
@@ -79,7 +80,27 @@ function PanelTab(props: IDockviewPanelHeaderProps) {
   );
 }
 
-const WORKBENCH_THEME = { name: "workbench", className: "dockview-theme-workbench" };
+/**
+ * `className` is the whole theme: `ui/src/styles/dockview.css` maps dockview's
+ * `--dv-*` variables onto the design tokens (DESIGN.md §6.1).
+ *
+ * `tabAnimation` is stated rather than left to the default, because dockview 7
+ * ships a `'smooth'` tab-drag mode that animates `width`, `padding` and
+ * `margin` — three layout properties, on a drag, which DESIGN.md §5 does not
+ * allow. It is off by default; saying so here is what stops a future dockview
+ * changing that default from quietly turning it on, and it is the reason those
+ * rules sit in `e2e/perf/motion.spec.ts`'s vendor ledger as unreachable rather
+ * than as something the app has to override.
+ *
+ * Not set: `colorScheme`. It is a static property of a theme object, and this
+ * app's light/dark flip is the `data-theme` attribute the tokens follow — one
+ * theme, two palettes — so there is no honest value to put here.
+ */
+const WORKBENCH_THEME = {
+  name: "workbench",
+  className: "dockview-theme-workbench",
+  tabAnimation: "default",
+} as const;
 
 export default function App() {
   const attention = useStore((s) => anyNeedsAttention(s.sessionStates));

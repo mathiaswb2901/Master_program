@@ -155,6 +155,15 @@
   transition: opacity var(--motion-tint);
 }
 
+/* Same override, same reason, for the *edge* drop anchor dockview 7 added
+ * (`dndEdges`): it transitions `top`, `left`, `width` and `height` while a drag
+ * is in flight. The box is still positioned by dockview; only its opacity is
+ * eased. Both source rules remain in the bundle — a later rule cannot delete an
+ * earlier line — so both are pinned in `ui/e2e/perf/motion.spec.ts`. */
+.dv-drop-target-container .dv-drop-target-anchor {
+  transition: opacity var(--motion-tint);
+}
+
 /* The tab-strip scrollbars fade their background over **one second** upstream,
  * and dockview shows them on resize and on scroll as well as on hover — so the
  * window has four overlay hairlines quietly fading in and out whenever anything

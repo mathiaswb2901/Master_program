@@ -162,6 +162,86 @@ test("a nested grid serialized by dockview 4.13 opens panel-for-panel", async ({
   });
 });
 
+/**
+ * Pane size constraints, through the whole round trip.
+ *
+ * The dockview-7 vetting warned that v7 does not serialize panel constraints,
+ * which would mean a min/max width set on a pane silently disappears on the
+ * next launch. Read against 7.0.4 that is **not** true —
+ * `DockviewPanel.prototype.toJSON` writes all four keys, and its `fromJSON`
+ * reads them — and nothing in this app sets a constraint today, so there was
+ * nothing to re-apply on adoption.
+ *
+ * "Not true today" is worth exactly one test, though, because the failure it
+ * would cause is invisible: a pane quietly loses its floor and the window is
+ * subtly wrong on the launch after next. This drives the whole path a real
+ * constraint would take — our vetting pass, dockview's deserializer, dockview's
+ * serializer, and the file the next launch reads — so the day one is set, it is
+ * already covered, and the day a dockview upgrade drops them, this says so.
+ */
+test("a pane's size constraints survive the save/restore round trip", async ({ page }) => {
+  const withConstraints = fixture("layout-v4-grid");
+  const panels_ = withConstraints.panels as Record<string, Record<string, unknown>>;
+  panels_.files = {
+    ...panels_.files,
+    minimumWidth: 180,
+    maximumWidth: 520,
+    minimumHeight: 120,
+    maximumHeight: 4000,
+  };
+
+  await openOn(page, withConstraints, ["Terminal 2"]);
+  await noRestoreFailure(page);
+
+  await test.step("make the window write itself back out", async () => {
+    // Necessary, not incidental: a restore no longer echoes itself to disk, so
+    // reading the file straight after one would read back the bytes this test
+    // wrote and prove nothing. Focus mode in and out is a real change, so what
+    // lands on disk afterwards is dockview's own `toJSON` of what it
+    // deserialized — which is the round trip under test.
+    const writes: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "PUT" && request.url().includes("/api/layouts")) {
+        writes.push(request.url());
+      }
+    });
+    await page.keyboard.press("Control+1");
+    await page.keyboard.press("Alt+M");
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Focused");
+    await page.keyboard.press("Alt+M");
+    await expect(page.locator(".wb-layout-chip")).not.toHaveText("Focused");
+    await expect.poll(() => writes.length, { timeout: 10_000 }).toBeGreaterThan(0);
+  });
+
+  await test.step("and are still there in the file the next launch reads", async () => {
+    await expect
+      .poll(
+        async () => {
+          const response = (await (await page.request.get("/api/layouts")).json()) as LayoutsResponse;
+          const current = response.state.current as {
+            panels?: Record<string, Record<string, unknown>>;
+          } | null;
+          const files = current?.panels?.files;
+          return files === undefined
+            ? null
+            : {
+                minimumWidth: files.minimumWidth,
+                maximumWidth: files.maximumWidth,
+                minimumHeight: files.minimumHeight,
+                maximumHeight: files.maximumHeight,
+              };
+        },
+        { timeout: 15_000 },
+      )
+      .toEqual({
+        minimumWidth: 180,
+        maximumWidth: 520,
+        minimumHeight: 120,
+        maximumHeight: 4000,
+      });
+  });
+});
+
 test("a 4.13 layout saved in focus mode comes back in focus mode", async ({ page }) => {
   await openOn(page, fixture("layout-v4-maximized"), ["Scratchpad", "Terminal 2"]);
 

@@ -41,6 +41,7 @@
 import type {
   DockviewApi,
   DockviewGroupPanel,
+  DockviewIDisposable,
   IDockviewHeaderActionsProps,
   IDockviewPanel,
 } from "dockview";
@@ -409,6 +410,46 @@ function themePopoutWindow(win: Window): void {
   win.addEventListener("load", apply);
 }
 
+// ---- the popout lifecycle ---------------------------------------------------
+
+/**
+ * Everything that has to happen to a popped-out window, wherever it came from.
+ *
+ * dockview 7 announces popout windows as they open (`onDidAddPopoutGroup`) and
+ * enumerates the open ones (`getPopouts()`). Before that, the only hook was the
+ * `onDidOpen` option on the `addPopoutGroup` call *this file* makes — one
+ * callback, for the one window that call opened, once. So a popout dockview
+ * opened by itself, restoring one from `layouts.json`, went un-themed: it got
+ * whatever `popout.html` read out of `localStorage`, which is the last
+ * *persisted* theme rather than the one on screen. And no popout could ever be
+ * re-themed afterwards, because nothing in the app still held a handle to it.
+ *
+ * Both are fixed here: every popout is themed as it appears, whoever opened it,
+ * and a theme flip repaints the ones already out.
+ *
+ * `onDidRemovePopoutGroup` is deliberately not subscribed to — a closing window
+ * takes its own listeners with it and the pane it held re-grids itself, so
+ * there is nothing this tool owns to undo.
+ */
+let popoutListeners: DockviewIDisposable[] = [];
+let unsubscribeTheme: (() => void) | null = null;
+
+function onDockReady(dock: DockviewApi | null): void {
+  for (const listener of popoutListeners) listener.dispose();
+  popoutListeners = [];
+  unsubscribeTheme?.();
+  unsubscribeTheme = null;
+  if (dock === null) return;
+  popoutListeners = [dock.onDidAddPopoutGroup(({ window }) => themePopoutWindow(window))];
+  // Repaint the windows that are already out. The store is the app-wide theme
+  // (`store.ts`), and `documentTheme()` inside `themePopoutWindow` reads the
+  // attribute the flip has already set, so this needs no argument.
+  unsubscribeTheme = useStore.subscribe((state, previous) => {
+    if (state.theme === previous.theme) return;
+    for (const popout of dock.getPopouts()) themePopoutWindow(popout.window);
+  });
+}
+
 /**
  * Pop the focused pane out into a separate window, unless a pane in it refuses.
  *
@@ -447,10 +488,10 @@ export async function popOutFocusedPane(): Promise<void> {
   popoutInProgress = true;
   let opened: boolean;
   try {
-    opened = await dock.addPopoutGroup(group, {
-      popoutUrl: POPOUT_URL,
-      onDidOpen: ({ window }) => themePopoutWindow(window),
-    });
+    // No `onDidOpen` here any more: theming is `onDidAddPopoutGroup`'s job now,
+    // so that a window dockview opens on its own — restoring one from
+    // `layouts.json` — is themed by the same code as one this call opens.
+    opened = await dock.addPopoutGroup(group, { popoutUrl: POPOUT_URL });
   } finally {
     popoutInProgress = false;
   }
@@ -478,21 +519,26 @@ export const isPoppingOut = (): boolean => popoutInProgress;
  * any. Closing the window is what triggers dockview's own re-grid — there is no
  * public "move this popout back" call, and closing is the same path a restart or
  * a blocked popup takes.
+ *
+ * "Any" is `getPopouts()` (dockview 7) rather than a scan of `dock.groups` for a
+ * `location.type === "popout"`: with nested popout windows a group in the grid
+ * is no longer the only thing that can be out there, and the enumeration is the
+ * library's own answer to the question.
  */
 export function popInFocusedPane(): void {
   const dock = dockApiHandle();
   if (dock === null) return;
   const focused = focusedGroup(dock);
-  const candidate =
-    focused !== undefined && focused.api.location.type === "popout"
-      ? focused
-      : dock.groups.find((group) => group.api.location.type === "popout");
-  const location = candidate?.api.location;
-  if (location === undefined || location.type !== "popout") {
+  if (focused !== undefined && focused.api.location.type === "popout") {
+    focused.api.location.getWindow().close();
+    return;
+  }
+  const popout = dock.getPopouts()[0];
+  if (popout === undefined) {
     toast("warn", "No pane is popped out.");
     return;
   }
-  location.getWindow().close();
+  popout.window.close();
 }
 
 // ---- the split affordance ---------------------------------------------------
@@ -688,4 +734,8 @@ export const panesTool: WorkbenchTool = {
   ],
   shortcuts: chords,
   groupActions: PaneActions,
+  // The pane capability operates on the dock rather than living in it, so it
+  // takes the handle the same way the layout system does — here, to follow
+  // popout windows through their lifecycle (`onDockReady` above).
+  onDockReady,
 };
