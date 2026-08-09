@@ -1,4 +1,4 @@
-"""Starting a real Word or Excel, and being able to prove it is ours.
+"""Starting a real Word, Excel or PowerPoint, and being able to prove it is ours.
 
 Everything in this module is **synchronous Win32/COM**, called from the single
 apartment thread :mod:`~workbench_server.services.office_host.shell_backend`
@@ -20,6 +20,29 @@ Four measured facts shape it:
   (:func:`_isolate_instance`), so the user's workbooks open in *their* Excel and
   never land in the one Workbench is hosting. Word has no such server and needs
   no such wall.
+* **PowerPoint cannot be given a private process at all, and the honest answer
+  is to refuse rather than to share.** Measured 2026-08-09 on Office 16: its COM
+  class factory is *multi-use*, so ``DispatchEx("PowerPoint.Application")``
+  returns whatever PowerPoint is already running — 0.17 s, no new pid, bound
+  straight to a user-started instance. Shelling ``POWERPNT.EXE`` twice merges
+  into one process as well (two frames, one pid), and there is no ``/x``: the
+  only switch its registration carries is the ``/AUTOMATION`` that COM itself
+  passes. ``IgnoreRemoteRequests`` does not exist on its ``Application``
+  (``AttributeError``, measured). So every wall Excel gets is unavailable, and
+  what remains is the one that actually matters: :func:`launch` asks
+  :func:`instance_already_running` **before** it creates any COM object, and
+  refuses with :class:`InstanceBusyError` when one is up. That is what keeps the
+  user's PowerPoint out of a ``KILL_ON_JOB_CLOSE`` job. With nothing running,
+  ``DispatchEx`` does start a fresh process (measured, ~2.4 s) and it is ours on
+  the same terms as Word's.
+* **PowerPoint offers no window handle over automation either** — which is worth
+  stating because the type library says otherwise. ``Application.HWND`` and
+  ``DocumentWindow.HWND`` are both *declared* and both raise "member not found"
+  when read, late-bound or early-bound through the generated typelib wrapper
+  (measured 2026-08-09). So PowerPoint identifies its frame the way Word does,
+  by the snapshot comparison below — which is safer for PowerPoint than for
+  Word, because the pre-flight has already established that no other PowerPoint
+  exists to be confused with.
 * The window is reached through ``doc.ActiveWindow.Hwnd`` and then
   ``GetAncestor(GA_ROOT)`` — Word has no ``Application.Hwnd``. Excel does, and
   is asked directly.
@@ -79,7 +102,8 @@ from typing import Any
 
 import structlog
 
-from workbench_server.models.office_host import HostAppKind
+from workbench_server.models.office_host import SINGLE_INSTANCE_KINDS, HostAppKind
+from workbench_server.services.office_host.document_window import SlideContent
 
 log = structlog.get_logger()
 
@@ -110,10 +134,12 @@ _SYNCHRONIZE = 0x00100000
 PROG_IDS: dict[HostAppKind, str] = {
     "word": "Word.Application",
     "excel": "Excel.Application",
+    "powerpoint": "PowerPoint.Application",
 }
 FRAME_CLASSES: dict[HostAppKind, str] = {
     "word": "OpusApp",
     "excel": "XLMAIN",
+    "powerpoint": "PPTFrameClass",
 }
 
 #: How long a COM call that comes back "server busy" is retried. Office rejects
@@ -158,6 +184,19 @@ class OfficeComError(Exception):
 
 class DocumentBusyError(OfficeComError):
     """The document is already open in an instance we did not launch."""
+
+
+class InstanceBusyError(OfficeComError):
+    """The *application* is already running, and it only runs one of itself.
+
+    PowerPoint's class factory is multi-use, so the instance a launch would get
+    is the user's own (see the module docstring). Refusing is the only answer
+    that keeps their session out of our job object — and it is raised *before*
+    any COM object is created, so nothing of theirs is touched on the way out.
+
+    Distinct from :class:`DocumentBusyError`: nothing is wrong with the document,
+    and closing PowerPoint is the fix rather than closing a file.
+    """
 
 
 class ForeignWindowError(OfficeComError):
@@ -250,6 +289,8 @@ def frame_windows(kind: HostAppKind) -> dict[int, int]:
     Used twice, and never to *find* a window to adopt: to tell which frame is
     the one our own launch produced, and to prove the pid behind it is new.
     """
+    if not WINDOWS:  # pragma: no cover - platform split
+        return {}
     expected = FRAME_CLASSES[kind]
     found: dict[int, int] = {}
 
@@ -262,6 +303,54 @@ def frame_windows(kind: HostAppKind) -> dict[int, int]:
     with contextlib.suppress(Exception):
         win32gui.EnumWindows(visit, None)
     return found
+
+
+def instance_already_running(kind: HostAppKind) -> bool:
+    """Is an instance of this application already up? The launch-time pre-flight.
+
+    **Only meaningful for the single-instance kinds**, and only ever used to
+    refuse: for Word and Excel a running instance is irrelevant, because
+    ``DispatchEx`` gives us our own process either way.
+
+    ``GetActiveObject`` is the exact question — it asks the Running Object Table
+    whether this ProgID has a live registered instance — and it is the *cheap*
+    one: measured 2026-08-09, 0.000 s to say "none" and 0.14 s to find a
+    user-started PowerPoint. It runs on the apartment thread, where COM is
+    initialised, which is why the capabilities report uses the window probe
+    (:func:`application_window_exists`) instead: that one needs no apartment and
+    so can answer a REST request directly.
+
+    A probe that cannot run answers ``False``. That is the deliberate direction:
+    a false negative costs one refused launch further down (the ownership check
+    catches an adopted pid regardless), where a false positive would refuse a
+    launch that was perfectly safe.
+    """
+    if not WINDOWS:  # pragma: no cover - platform split
+        return False
+    prog_id = PROG_IDS.get(kind)
+    if prog_id is None:  # pragma: no cover - every kind has a ProgID
+        return False
+    try:
+        win32com.client.GetActiveObject(prog_id)
+    except Exception:
+        # The documented failure for "nothing registered" (MK_E_UNAVAILABLE), and
+        # the honest answer for a COM that would not answer at all.
+        return False
+    return True
+
+
+def application_window_exists(kind: HostAppKind) -> bool:
+    """Does this application have a frame window open right now?
+
+    The apartment-free half of :func:`instance_already_running`, for the
+    capabilities report: pure ``EnumWindows``, no COM, so it answers on whatever
+    thread the request arrived on. It misses an instance running *without* a
+    window — an ``/AUTOMATION`` PowerPoint some other tool is driving — which is
+    why it is only the advisory answer and never the gate. The launch pre-flight
+    above is exact, and the pid-snapshot ownership check behind it catches
+    anything both of them miss.
+    """
+    return bool(frame_windows(kind))
 
 
 def document_is_open_elsewhere(path: Path) -> bool:
@@ -313,13 +402,24 @@ def launch(
     needs it.
 
     Raises :class:`DocumentBusyError` when the document is already open
-    somewhere else, and :class:`OfficeComError` for everything else.
+    somewhere else, :class:`InstanceBusyError` when a single-instance
+    application is already running, and :class:`OfficeComError` for everything
+    else.
     """
     if not WINDOWS:  # pragma: no cover - platform split
         raise OfficeComError("native Office hosting needs Windows")
     prog_id = PROG_IDS.get(kind)
     if prog_id is None:
         raise OfficeComError(f"{kind} cannot be hosted")
+    # Before any COM object exists, for the kinds where creating one would bind
+    # to the user's session rather than start our own (see the module docstring).
+    # Refusing here is what makes the rest of this module's containment safe: a
+    # process we did not start must never reach `_contain`.
+    if kind in SINGLE_INSTANCE_KINDS and instance_already_running(kind):
+        raise InstanceBusyError(
+            f"{kind} is already running, and it runs one instance for the whole session; "
+            f"close it and try again, and Workbench will start its own"
+        )
     if document_is_open_elsewhere(path):
         raise DocumentBusyError(f"{path.name} is already open in another {kind} window")
 
@@ -481,11 +581,22 @@ def _open_document(instance: OfficeInstance, path: Path) -> None:
             False,  # ReadOnly
             False,  # AddToRecentFiles
         )
-        window = int(_com_call(getattr, document.ActiveWindow, "Hwnd"))
-    else:
+        root = _root_window(int(_com_call(getattr, document.ActiveWindow, "Hwnd")))
+    elif instance.kind == "excel":
         document = _com_call(app.Workbooks.Open, str(path), 0, False)
-        window = int(_com_call(getattr, app, "Hwnd"))
-    root = int(win32gui.GetAncestor(window, GA_ROOT) or window)
+        root = _root_window(int(_com_call(getattr, app, "Hwnd")))
+    else:
+        # PowerPoint has no AddToRecentFiles parameter and no usable window
+        # handle to read back (module docstring), so the frame is confirmed from
+        # the window list instead. ``WithWindow=True`` is what makes there be one.
+        document = _com_call(
+            app.Presentations.Open,
+            str(path),
+            False,  # ReadOnly
+            False,  # Untitled
+            True,  # WithWindow
+        )
+        root = _powerpoint_frame(instance)
     _assert_frame_class(root, instance.kind)
     if root != instance.window_id:
         # The document landed in a frame other than the one this launch made.
@@ -511,6 +622,52 @@ def _open_document(instance: OfficeInstance, path: Path) -> None:
     instance.document = document
 
 
+def _root_window(window: int) -> int:
+    """The top-level ancestor of a window COM handed us."""
+    return int(win32gui.GetAncestor(window, GA_ROOT) or window)
+
+
+def _powerpoint_frame(instance: OfficeInstance) -> int:
+    """Which frame the presentation landed in, with no handle to ask COM for.
+
+    ``Application.HWND`` and ``DocumentWindow.HWND`` both refuse to be read
+    (module docstring), so this is the substitute — and it is a real check, not a
+    shrug. Measured 2026-08-09: ``Presentations.Open`` opens into the frame the
+    launch already produced rather than adding one, so the expected answer is the
+    frame we contained, still alive and still owned by our pid.
+
+    The fallback covers the one benign way that can be false — PowerPoint
+    replacing its start-screen frame with the presentation's — and only when our
+    process owns exactly one frame, so it can never widen into a guess. There the
+    instance is *re-pointed* at the replacement rather than merely told about it:
+    the pid is unchanged, so the containment taken at launch still holds, and the
+    window id is what the embed will later hand the shell. Anything else is
+    ambiguity, and ambiguity is refused here exactly as it is in
+    :func:`_identify`: the launch fails, and the caller reaps the process it
+    started rather than reparenting a window it cannot name.
+
+    Every candidate is filtered by pid first, which is what makes the fallback
+    safe: one frame on screen is not one frame *of ours*.
+    """
+    ours = {window for window, pid in frame_windows("powerpoint").items() if pid == instance.pid}
+    if instance.window_id in ours:
+        return instance.window_id
+    if len(ours) == 1:
+        replacement = next(iter(ours))
+        log.info(
+            "office_host.powerpoint_frame_replaced",
+            pid=instance.pid,
+            was=instance.window_id,
+            now=replacement,
+        )
+        instance.window_id = replacement
+        return replacement
+    raise OfficeComError(
+        f"powerpoint opened the presentation but its process (pid {instance.pid}) owns "
+        f"{len(ours)} frame windows; refusing to guess which one holds the document"
+    )
+
+
 def _window_pid(window: int) -> int | None:
     try:
         return int(win32process.GetWindowThreadProcessId(window)[1])
@@ -533,9 +690,22 @@ def abandon(instance: OfficeInstance) -> None:
     _release_job(instance, kill=True)
 
 
+#: ``DisplayAlerts`` off and on, per application. Three applications, three
+#: unrelated encodings of the same idea — ``wdAlertsNone``/``wdAlertsAll`` are
+#: ``0``/``-1``, Excel takes a plain boolean, and ``ppAlertsNone``/``ppAlertsAll``
+#: are ``1``/``2`` (measured 2026-08-09; note that PowerPoint's "off" is the
+#: truthy value, so any attempt to share Word's constants here would silently
+#: turn alerts *on* for PowerPoint). A table because a conditional expression
+#: over three kinds is where that mistake gets made.
+_ALERTS: dict[HostAppKind, tuple[Any, Any]] = {
+    "word": (0, -1),
+    "excel": (False, True),
+    "powerpoint": (1, 2),
+}
+
+
 def _silence_alerts(app: Any, kind: HostAppKind) -> None:
-    # wdAlertsNone is 0; Excel's DisplayAlerts is a plain boolean.
-    with_value: Any = 0 if kind == "word" else False
+    with_value = _ALERTS[kind][0]
     try:
         _com_call(setattr, app, "DisplayAlerts", with_value)
     except Exception as error:  # not fatal: it only changes what a failure looks like
@@ -552,6 +722,10 @@ def _isolate_instance(app: Any, kind: HostAppKind) -> None:
     rules exist to prevent. ``IgnoreRemoteRequests = True`` closes that door.
 
     Excel only: Word runs no such server, and the property does not exist on it.
+    **Nor on PowerPoint** — measured, ``AttributeError`` — which is one of the
+    reasons PowerPoint is refused outright when an instance is already running
+    rather than walled off like Excel: there is no wall to build, so the
+    protection has to be "do not share the process at all" (module docstring).
     Non-fatal — a wall that will not go up only widens what a stray open could
     do, it does not fail the launch — and set on the same principle as
     :func:`_silence_alerts`: before ``Documents.Open`` can be raced.
@@ -574,8 +748,7 @@ def _restore_alerts(app: Any, kind: HostAppKind) -> None:
     """
     if app is None:
         return
-    # wdAlertsAll is -1; Excel's DisplayAlerts is a plain boolean.
-    value: Any = -1 if kind == "word" else True
+    value = _ALERTS[kind][1]
     try:
         _com_call(setattr, app, "DisplayAlerts", value)
     except Exception as error:  # not fatal: the window is the user's either way
@@ -733,8 +906,14 @@ def _quit(instance: OfficeInstance) -> None:
 def _close_document(document: Any, kind: HostAppKind) -> None:
     if kind == "word":
         _com_call(document.Close, 0)  # wdDoNotSaveChanges
-    else:
+    elif kind == "excel":
         _com_call(document.Close, False)
+    else:
+        # ``Presentation.Close`` takes no SaveChanges argument — PowerPoint reads
+        # ``Saved`` instead. It is already True here (``close`` only reaches this
+        # after a save that worked), so there is nothing to prompt about and
+        # nothing to discard.
+        _com_call(document.Close)
 
 
 def _quit_quietly(app: Any, kind: HostAppKind) -> None:
@@ -968,6 +1147,85 @@ def excel_grid(worksheet: Any) -> dict[tuple[int, int], str]:
             if text:
                 grid[(base_row + row_offset, base_col + col_offset)] = text
     return grid
+
+
+def powerpoint_slide_count(instance: OfficeInstance) -> int:
+    """How many slides the live deck has."""
+    return int(_com_call(getattr, instance.document.Slides, "Count"))
+
+
+def powerpoint_slides(instance: OfficeInstance) -> list[SlideContent]:
+    """Every slide's title and shape text, in deck order.
+
+    Read straight from the live ``Presentation`` — including edits the user has
+    not saved, which is the whole reason for hosting a real PowerPoint rather
+    than rendering a preview.
+
+    A slide has no paragraph stream: its text lives in *shapes*, and a shape only
+    has any if it carries a text frame with something in it. Both guards are
+    asked before the text is touched, because reading ``TextRange.Text`` off a
+    picture or an empty placeholder raises rather than returning "". A shape that
+    refuses to be read is skipped rather than failing the whole deck — one
+    unreadable SmartArt should cost its own text, not the other fifty slides.
+    """
+    document = instance.document
+    count = int(_com_call(getattr, document.Slides, "Count"))
+    slides: list[SlideContent] = []
+    for index in range(1, count + 1):
+        slide = _com_call(document.Slides.Item, index)
+        title, title_id = _slide_title(slide)
+        slides.append(SlideContent(title=title, texts=_shape_texts(slide, title_id)))
+    return slides
+
+
+def _slide_title(slide: Any) -> tuple[str | None, int | None]:
+    """The slide's title text and the *id* of the shape holding it.
+
+    ``HasTitle`` is asked first: reading ``Shapes.Title`` on a layout without one
+    raises, and a layout with an *empty* title is a title of ``""`` — reported as
+    None so the reader never shows an empty heading it cannot distinguish from a
+    missing one.
+
+    The id travels with it because the title placeholder is also an ordinary
+    member of ``Shapes``: without it the title comes back twice, once as the
+    block's heading and once as its first line — measured against a real deck.
+    Token cost is the reason that matters, and identity is the reason it is an id
+    rather than a string comparison: a body line that legitimately repeats the
+    title is the user's text and stays.
+    """
+    try:
+        if not bool(_com_call(getattr, slide.Shapes, "HasTitle")):
+            return None, None
+        title = _com_call(getattr, slide.Shapes, "Title")
+        text = str(_com_call(getattr, title.TextFrame.TextRange, "Text")).strip()
+        shape_id = int(_com_call(getattr, title, "Id"))
+    except Exception:  # a layout that will not answer has no title we can name
+        return None, None
+    return text or None, shape_id
+
+
+def _shape_texts(slide: Any, title_id: int | None) -> list[str]:
+    texts: list[str] = []
+    count = int(_com_call(getattr, slide.Shapes, "Count"))
+    for index in range(1, count + 1):
+        try:
+            shape = _com_call(slide.Shapes.Item, index)
+            if title_id is not None and int(_com_call(getattr, shape, "Id")) == title_id:
+                continue  # already the block's heading
+            if not bool(_com_call(getattr, shape, "HasTextFrame")):
+                continue
+            frame = _com_call(getattr, shape, "TextFrame")
+            if not bool(_com_call(getattr, frame, "HasText")):
+                continue
+            text = str(_com_call(getattr, frame.TextRange, "Text")).strip()
+        except Exception as error:
+            # A shape that will not be read (SmartArt, an OLE object, a chart)
+            # costs its own text and nothing else.
+            log.debug("office_host.shape_unreadable", shape=index, detail=str(error))
+            continue
+        if text:
+            texts.append(text)
+    return texts
 
 
 def set_excel_cell(worksheet: Any, row: int, col: int, value: str) -> None:

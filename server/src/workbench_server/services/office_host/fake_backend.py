@@ -18,6 +18,9 @@ failure from the UI without a special API):
 * ``already-open``      -> a handle marked ``adopted``: the fake found the
   document open in an instance it did not launch. Returned rather than raised,
   so what gets exercised is the *service's* own never-adopt rule.
+* ``app-running``       -> :class:`InstanceBusyError`: the application is already
+  running and only runs one of itself. The PowerPoint refusal, walkable with no
+  PowerPoint and no window — it is what the real pre-flight raises.
 * ``refuse-close``      -> docks normally and then will not quit, which is the
   ``close_failed`` path: a real Word sitting on the desktop with an unsaved
   edit in it because a "Save changes?" modal ate the close. The instance stays
@@ -43,6 +46,7 @@ from workbench_server.services.office_host.backend import (
     HostBackendError,
     HostHandle,
     HostLiveness,
+    InstanceBusyError,
     LaunchFailedError,
     LaunchTimeoutError,
 )
@@ -57,6 +61,7 @@ FakeFailure = Literal[
     "crash_after_embed",
     "already_open",
     "refuse_close",
+    "instance_busy",
 ]
 
 #: Filename fragment -> failure, matched case-insensitively on the whole path.
@@ -67,6 +72,7 @@ FAILURE_TRIGGERS: dict[str, FakeFailure] = {
     "crash-after-embed": "crash_after_embed",
     "already-open": "already_open",
     "refuse-close": "refuse_close",
+    "app-running": "instance_busy",
 }
 
 #: Fake pids start well above the ones a test machine hands out, so a number
@@ -122,6 +128,12 @@ class FakeHostBackend:
             raise LaunchFailedError(f"fake backend could not start {kind}")
         if branch == "launch_timeout":
             raise LaunchTimeoutError(f"fake {kind} never produced a window")
+        if branch == "instance_busy":
+            # The PowerPoint branch: the application is already running, so a
+            # real launch would bind to the user's instance instead of starting
+            # ours. Nothing is created here either — which is the point of the
+            # real pre-flight this stands in for.
+            raise InstanceBusyError(f"a fake {kind} is already running")
         pid = next(self._pids)
         handle = HostHandle(
             pid=pid, window_id=next(self._windows), adopted=branch == "already_open"

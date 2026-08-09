@@ -1087,19 +1087,36 @@ unsaved work as an ordinary window on their desktop. Same for one that will not
 close after a save that worked. Either way the host record carries
 `close_failed` and the sweep re-asks until the window is really gone.
 
-**Two owner decisions are encoded, not just documented** (2026-08-05).
-PowerPoint is **preview-only**: it is single-instance and exposes no
-`Application.Hwnd` to prove a window is ours, so the service refuses a
-PowerPoint host (`powerpoint_preview_only`) rather than risk reparenting the
-user's own open presentation. And native hosting stays behind
-`WORKBENCH_OFFICE_NATIVE`, where **`auto` now resolves to hosting natively
-wherever the machine can** — Windows, an Office to launch, and the desktop shell
-attached — because the hang isolation it was conditional on is built and
-measured (see below, and the decisions log).
+**PowerPoint docks too, on one condition, and the condition is measured**
+(2026-08-09, superseding the 2026-08-05 "preview-only" decision). Its frame is
+`PPTFrameClass` and the *window* half of hosting is class-agnostic — proved by a
+`cargo test` that docks a synthetic guest registered under that class. The hard
+part is the process. PowerPoint's COM class factory is **multi-use**, so
+`DispatchEx("PowerPoint.Application")` returns whatever PowerPoint is already
+running (measured: 0.17 s, no new pid, bound straight to a user-started
+instance), and shelling `POWERPNT.EXE` twice merges into one process as well.
+There is no `/x`, and no `IgnoreRemoteRequests` to stand in for it. So there is
+no wall to build, and the protection is **not sharing the process at all**: a
+launch asks `GetActiveObject` *before* it creates any COM object and refuses with
+`powerpoint_already_running` when one is up — which is what keeps the user's own
+PowerPoint out of the `KILL_ON_JOB_CLOSE` job. With none running, `DispatchEx`
+starts a fresh process and it is ours on the same terms as Word's. Two
+consequences stated plainly: **one deck at a time** (a second would have to share
+the first's process, which the containment model does not refcount), and the
+window is identified by the pid+frame snapshot rather than a handle from COM —
+`Application.HWND` and `DocumentWindow.HWND` are *declared* in the type library
+and both raise "member not found" when read, late and early bound.
+
+Native hosting stays behind `WORKBENCH_OFFICE_NATIVE`, where **`auto` resolves to
+hosting natively wherever the machine can** — Windows, an Office to launch, and
+the desktop shell attached — because the hang isolation it was conditional on is
+built and measured (see below, and the decisions log).
 `GET /api/office/capabilities` says all of this out loud (mode, whether hosting
 is available at all, whether Office was detected, whether a shell is attached,
-whether the *fake* backend is answering, and whether the fallback is OnlyOffice
-or read-only preview) so the UI degrades from a fact rather than a guess.
+whether the *fake* backend is answering, which applications can be docked right
+now, `kind_notes` for one that cannot and why, and whether the fallback is
+OnlyOffice or read-only preview) so the UI degrades from a fact rather than a
+guess — for PowerPoint, *before* a launch it knows will be refused.
 
 **The fake backend** (`WORKBENCH_OFFICE_FAKE=1`, off by default, warned about at
 startup — the `WORKBENCH_FAKE_AGENT` precedent) walks the same lifecycle in

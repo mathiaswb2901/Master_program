@@ -6,8 +6,10 @@ Win32 one will, so the states a user can actually get stuck in (the launch that
 never produces a window, the embed that is refused, the application that dies
 under us, the close that lands mid-embed) are reachable and asserted in CI.
 
-The two owner decisions of 2026-08-05 are tested as rules, not as comments:
-PowerPoint is refused, and a process we did not launch is never adopted.
+The owner decisions are tested as rules, not as comments: a process we did not
+launch is never adopted, and PowerPoint — hostable since 2026-08-09, but only
+when Workbench started the process — is refused with a reason of its own when one
+is already running, and reported as unavailable *before* a launch is attempted.
 """
 
 import asyncio
@@ -99,15 +101,17 @@ def make_service(
     mode: str = "on",
     fake: bool = True,
     office_installed: bool = False,
+    running_kinds: frozenset[str] = frozenset(),
     poll_interval_s: float = 60.0,
     launch_timeout_s: float = LAUNCH_TIMEOUT_S,
     operation_timeout_s: float = OPERATION_TIMEOUT_S,
 ) -> tuple[OfficeHostService, RecordingBus]:
     """A service on a real workspace with a scripted backend.
 
-    ``office_installed`` is injected rather than probed: the suite must give the
-    same answer on the author's machine (which has Office) and on CI (which does
-    not).
+    ``office_installed`` and ``running_kinds`` are injected rather than probed:
+    the suite must give the same answer on the author's machine (which has Office,
+    and may well have PowerPoint open) and on CI (which has neither, and no window
+    station to enumerate).
     """
     bus = RecordingBus()
     service = OfficeHostService(
@@ -117,6 +121,7 @@ def make_service(
         mode=mode,  # type: ignore[arg-type]
         fake=fake,
         detector=lambda: office_installed,
+        running_probe=lambda kind: kind in running_kinds,
         poll_interval_s=poll_interval_s,
         launch_timeout_s=launch_timeout_s,
         operation_timeout_s=operation_timeout_s,
@@ -820,22 +825,41 @@ async def test_a_handle_for_another_process_is_refused_even_for_a_resize(
 # ---- policy refusals ---------------------------------------------------------
 
 
-async def test_powerpoint_is_refused_with_a_reason(tmp_path: Path) -> None:
-    """Preview-only in v1: PowerPoint is single-instance and exposes no window
-    handle to prove ownership with, so hosting it risks reparenting the user's
-    own open presentation."""
+async def test_a_deck_docks_like_a_document(tmp_path: Path) -> None:
+    """PowerPoint is hosted, not previewed: the same launching -> embedding ->
+    embedded walk Word and Excel take, as a ``powerpoint`` host."""
     backend = FakeHostBackend()
-    service, _ = make_service(tmp_path, backend)
+    service, events = make_service(tmp_path, backend)
     (tmp_path / "deck.pptx").write_bytes(DOCX_BYTES)
 
-    with pytest.raises(HostRefusedError) as raised:
-        await service.open("deck.pptx", RECT)
+    info = await service.open("deck.pptx", RECT)
 
-    assert raised.value.reason == "powerpoint_preview_only"
-    assert host_app_kind("deck.pptx") == "powerpoint"  # the type is known...
-    assert "powerpoint" not in HOSTABLE_KINDS  # ...it is simply not hosted
-    assert backend.calls == []  # nothing was launched to find out
-    assert service.snapshot().hosts == []  # and no phantom host is left behind
+    assert host_app_kind("deck.pptx") == "powerpoint"
+    assert "powerpoint" in HOSTABLE_KINDS
+    assert (info.kind, info.state, info.reason) == ("powerpoint", "embedded", None)
+    assert events.states() == ["launching", "embedding", "embedded"]
+    assert backend.calls[0] == ("launch", "deck.pptx")
+
+
+async def test_a_deck_is_refused_while_powerpoint_is_already_running(tmp_path: Path) -> None:
+    """The single-instance rule, end to end.
+
+    PowerPoint's COM class factory is multi-use, so a launch made while one is
+    running returns the *user's* instance — which must never reach the job object
+    that reaps ours. The backend refuses before creating anything, and the host
+    settles with a reason that names the fix (close PowerPoint), not a generic
+    failure.
+    """
+    backend = FakeHostBackend()
+    service, _ = make_service(tmp_path, backend)
+    (tmp_path / "app-running-deck.pptx").write_bytes(DOCX_BYTES)
+
+    info = await service.open("app-running-deck.pptx", RECT)
+
+    assert (info.state, info.reason) == ("failed", "powerpoint_already_running")
+    # Nothing was embedded, and no process was left behind to reap: the refusal
+    # happens before anything is launched.
+    assert [call for call, _ in backend.calls] == ["launch"]
 
 
 async def test_a_file_that_is_not_a_document_is_refused(tmp_path: Path) -> None:
@@ -975,9 +999,103 @@ def test_capabilities_report_hosting_honestly(
     assert caps.native_hosting is hosting
     assert caps.fake_backend is (fake and hosting)
     assert caps.hostable_kinds == (list(HOSTABLE_KINDS) if hosting else [])
-    assert "powerpoint" not in caps.hostable_kinds
+    # All three applications, PowerPoint included: under the fake backend there
+    # is no real instance to collide with, so nothing is held back and
+    # ``kind_notes`` is empty. The conditional half is its own test below.
+    assert ("powerpoint" in caps.hostable_kinds) is hosting
+    assert caps.kind_notes == {}
     assert caps.fallback == ("native" if hosting else "preview")
     assert caps.detail
+
+
+def test_powerpoint_is_held_back_while_one_is_already_running(tmp_path: Path) -> None:
+    """The conditional half of PowerPoint hosting, reported before it is hit.
+
+    A real backend with a PowerPoint already up cannot host one: the launch would
+    bind to the user's instance. So the kind leaves ``hostable_kinds`` and the
+    reason arrives with it, which is what lets the UI open the preview directly
+    instead of attempting a launch that is going to be refused.
+    """
+    service, _ = make_service(
+        tmp_path, FakeHostBackend(), fake=False, running_kinds=frozenset({"powerpoint"})
+    )
+
+    caps = service.capabilities(onlyoffice_enabled=False)
+
+    assert caps.native_hosting is True
+    assert caps.hostable_kinds == ["word", "excel"]
+    assert "powerpoint" in caps.kind_notes
+    assert "already running" in caps.kind_notes["powerpoint"]
+    # Word and Excel are unaffected: a running instance is irrelevant to them.
+    assert set(caps.kind_notes) == {"powerpoint"}
+
+
+def test_a_running_word_holds_nothing_back(tmp_path: Path) -> None:
+    """Only the single-instance kinds can produce a note. ``DispatchEx`` gives
+    Word and Excel their own process however many are open."""
+    service, _ = make_service(
+        tmp_path, FakeHostBackend(), fake=False, running_kinds=frozenset({"word", "excel"})
+    )
+
+    caps = service.capabilities(onlyoffice_enabled=False)
+
+    assert caps.kind_notes == {}
+    assert caps.hostable_kinds == ["word", "excel", "powerpoint"]
+
+
+def test_the_fake_backend_never_holds_powerpoint_back(tmp_path: Path) -> None:
+    """CI runs the fake on machines with no Office and no window station, and the
+    fake shares no process with anything — so the probe is not even consulted."""
+    service, _ = make_service(
+        tmp_path, FakeHostBackend(), fake=True, running_kinds=frozenset({"powerpoint"})
+    )
+
+    caps = service.capabilities(onlyoffice_enabled=False)
+
+    assert caps.kind_notes == {}
+    assert "powerpoint" in caps.hostable_kinds
+
+
+async def test_a_deck_walks_the_whole_lifecycle(tmp_path: Path) -> None:
+    """Dock, move, hide, detach, re-embed, close — the full fake-first walk, with
+    no PowerPoint, no window and no Rust. This is what CI drives."""
+    backend = FakeHostBackend()
+    service, events = make_service(tmp_path, backend)
+    (tmp_path / "deck.pptx").write_bytes(DOCX_BYTES)
+
+    info = await service.open("deck.pptx", RECT)
+    assert (info.kind, info.state) == ("powerpoint", "embedded")
+
+    await service.set_bounds(info.host_id, MOVED)
+    await service.set_visible(info.host_id, False)
+    detached = await service.detach(info.host_id)
+    assert detached.state == "detached"
+
+    # Re-opening a detached deck re-embeds the window we already have rather than
+    # launching a second PowerPoint — which for this kind is not merely wasteful,
+    # it is impossible.
+    again = await service.open("deck.pptx", RECT)
+    assert (again.host_id, again.state) == (info.host_id, "embedded")
+
+    closed = await service.close(info.host_id)
+    assert (closed.state, closed.reason) == ("closed", "user_closed")
+    assert closed.close_failed is False
+    assert [call for call, _ in backend.calls] == [
+        "launch",
+        "embed",
+        "set_bounds",
+        "set_visible",
+        "detach",
+        "embed",
+        # The re-embed re-applies the hidden state rather than assuming a fresh
+        # window is visible: the panel was behind another tab when it detached,
+        # and a real PowerPoint reappearing over the user's work is exactly the
+        # bug `set_visible` exists to prevent.
+        "set_visible",
+        "close",
+    ]
+    assert backend.calls[-2] == ("set_visible", "hide")
+    assert events.states()[-1] == "closed"
 
 
 def test_auto_hosts_natively_only_where_it_actually_can(tmp_path: Path) -> None:
@@ -1155,7 +1273,8 @@ def test_capabilities_over_http(tmp_path: Path) -> None:
         caps = client.get("/api/office/capabilities").json()
     assert caps["native_hosting"] is True
     assert caps["fake_backend"] is True
-    assert caps["hostable_kinds"] == ["word", "excel"]
+    assert caps["hostable_kinds"] == ["word", "excel", "powerpoint"]
+    assert caps["kind_notes"] == {}
     assert caps["onlyoffice"] is False
     assert caps["fallback"] == "native"
 
@@ -1216,13 +1335,22 @@ def test_visibility_over_http(tmp_path: Path) -> None:
         )
 
 
-def test_powerpoint_over_http_is_a_refusal_with_a_message(tmp_path: Path) -> None:
+def test_powerpoint_over_http_docks_like_the_others(tmp_path: Path) -> None:
     (tmp_path / "deck.pptx").write_bytes(DOCX_BYTES)
     with TestClient(hosting_app(tmp_path)) as client:
-        response = client.post("/api/office/host", json={"path": "deck.pptx"})
-        assert response.status_code == 409
-        assert "preview-only" in response.json()["detail"]
-        assert client.get("/api/office/hosts").json()["hosts"] == []
+        host = client.post("/api/office/host", json={"path": "deck.pptx"}).json()
+        assert (host["kind"], host["state"]) == ("powerpoint", "embedded")
+        assert client.get("/api/office/hosts").json()["hosts"][0]["kind"] == "powerpoint"
+
+
+def test_a_deck_refused_over_http_says_powerpoint_is_the_thing_in_use(tmp_path: Path) -> None:
+    """A settled ``failed`` host, not an HTTP error: the launch was attempted and
+    the backend refused it, which is a state the panel renders rather than an
+    exception the client has to interpret."""
+    (tmp_path / "app-running.pptx").write_bytes(DOCX_BYTES)
+    with TestClient(hosting_app(tmp_path)) as client:
+        host = client.post("/api/office/host", json={"path": "app-running.pptx"}).json()
+        assert (host["state"], host["reason"]) == ("failed", "powerpoint_already_running")
 
 
 def test_http_errors_for_the_paths_a_client_can_get_wrong(tmp_path: Path) -> None:

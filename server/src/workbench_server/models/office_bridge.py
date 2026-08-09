@@ -17,6 +17,13 @@ instead of a preview. The write half (PR 2, the ``*Edit`` return values below) i
 its mirror: a *targeted* edit — one addressed paragraph or one cell — that leaves
 the rest of the document untouched, applied to the live in-memory instance so the
 user can undo it, never a whole-file rewrite.
+
+PowerPoint arrived with its host and is **read-only** here: :class:`SlideDim` and
+:class:`SlideText` have no ``SlideEdit`` beside them. That is a stated boundary,
+not an oversight — a slide has no single addressable text run the way a paragraph
+or a cell does (text lives in shapes, which are positional and typed), so a write
+seam for it needs an addressing scheme this PR does not invent. Reading is the
+half that pays for itself immediately: an agent can check the deck it just built.
 """
 
 from pydantic import BaseModel, Field
@@ -37,13 +44,31 @@ class SheetDim(BaseModel):
     cols: int = Field(ge=0)
 
 
+class SlideDim(BaseModel):
+    """One PowerPoint slide, named the way a reader would pick it out.
+
+    ``title`` is the slide's title placeholder when it has one — the thing that
+    lets an agent choose a slide without reading the whole deck — and ``None``
+    when the layout has no title or the placeholder is empty, never a fabricated
+    stand-in. ``shapes`` counts the shapes carrying text *besides* the title, so
+    a slide whose only content is its heading reads as ``0`` rather than
+    promising a body that is not there.
+    """
+
+    #: One-based, as PowerPoint numbers slides everywhere the user sees them.
+    index: int = Field(ge=1)
+    title: str | None = None
+    shapes: int = Field(ge=0)
+
+
 class DocStructure(BaseModel):
     """The shape of a hosted document, cheap enough to fetch before reading.
 
-    Exactly one of ``paragraph_count`` / ``sheets`` is set, chosen by ``kind``:
-    Word documents are a flat paragraph stream, Excel workbooks are a set of
-    named sheets. It is what the tool returns when asked to read an Excel
-    document without naming a sheet — the list of sheets to pick from.
+    Exactly one of ``paragraph_count`` / ``sheets`` / ``slides`` is set, chosen
+    by ``kind``: Word documents are a flat paragraph stream, Excel workbooks are
+    a set of named sheets, PowerPoint decks are an ordered list of slides. It is
+    what the tool returns when asked to read an Excel document without naming a
+    sheet — the list of sheets to pick from.
     """
 
     kind: HostAppKind
@@ -51,6 +76,8 @@ class DocStructure(BaseModel):
     paragraph_count: int | None = None
     #: Excel only: every worksheet and its used-range dimensions.
     sheets: list[SheetDim] | None = None
+    #: PowerPoint only: every slide, in deck order.
+    slides: list[SlideDim] | None = None
 
 
 class WordText(BaseModel):
@@ -91,6 +118,30 @@ class CellWindow(BaseModel):
     #: Row-major grid of cell text, ``rows`` lists of ``cols`` strings. Blank
     #: cells are the empty string, never null, so the grid is always rectangular.
     cells: list[list[str]] = Field(default_factory=list)
+
+
+class SlideText(BaseModel):
+    """A window onto a PowerPoint deck's text, addressed by slide.
+
+    The PowerPoint mirror of :class:`WordText`: whole slides, starting at
+    ``start_slide`` and stopping when ``max_chars`` would be exceeded, so the
+    caller widens the window by asking again from a later slide — which is why
+    ``total_slides`` travels with every read. A deck's text is the text of the
+    shapes on each slide; there is no equivalent of a paragraph stream, so the
+    slide is the unit of both addressing and truncation.
+    """
+
+    #: One-based index of the first slide in ``text``, matching :class:`SlideDim`
+    #: and what PowerPoint shows the user.
+    start_slide: int = Field(ge=1)
+    #: How many slides ``text`` actually covers — the caller's next start is
+    #: ``start_slide + returned_slides``.
+    returned_slides: int = Field(ge=0)
+    #: ``len(text)`` — stated so a truncated read is self-describing.
+    returned_chars: int = Field(ge=0)
+    #: The deck's slide count, so the reader knows what it did not see.
+    total_slides: int = Field(ge=0)
+    text: str
 
 
 class WordEdit(BaseModel):

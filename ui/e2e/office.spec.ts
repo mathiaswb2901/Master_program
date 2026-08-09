@@ -16,8 +16,9 @@
  *     else" is Workbench keeping its promise never to take over a window it did
  *     not start — and one click reads the document anyway.
  *  3. An embed that fails ends in a working editor, not a broken panel.
- *  4. PowerPoint is preview-only and says why, in a sentence rather than an
- *     error.
+ *  4. All three applications dock — and a PowerPoint that cannot, because the
+ *     user already has one open, says so in a sentence naming the fix rather
+ *     than an error.
  *  5. The degraded card is still the floor under all of it, on paper colors
  *     (DESIGN.md §2.8/§6.1).
  */
@@ -29,6 +30,7 @@ import {
   DOCX_ALREADY_OPEN,
   DOCX_FILE,
   DOCX_REFUSES_EMBED,
+  PPTX_APP_RUNNING,
   PPTX_FILE,
   XLSX_FILE,
   XLSX_REFUSES_EMBED,
@@ -119,17 +121,41 @@ test("an embed that is refused ends in an editor, never a broken panel", async (
   await expect(page.locator(".wb-office-card-title")).toHaveText(DEGRADED);
 });
 
-test("PowerPoint is preview-only, on paper, and says why", async ({ page }) => {
+test("a .pptx docks, and the panel names Microsoft PowerPoint", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+
   await openApp(page);
   await treeItem(page, PPTX_FILE).click();
 
-  // Straight to the preview path — no launch is attempted at all — with the
-  // reason above the document rather than an error in place of it.
-  await expect(page.locator(".wb-office-note")).toContainText("PowerPoint runs one instance");
+  // The third application walks the same launching -> embedding -> embedded the
+  // Word and Excel paths do. PPTFrameClass is not a special case in the panel:
+  // it resolves through `hostable_kinds` like the other two.
+  await expect(page.locator(".wb-office-hosted")).toHaveText(/Microsoft PowerPoint/i);
+  await expect(page.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+  await expect(page.locator(".wb-office-note")).toContainText("Simulated host");
+
+  await expect(page.locator(".wb-editor-tab").filter({ hasText: PPTX_FILE })).toBeVisible();
+  expect(consoleErrors).toEqual([]);
+});
+
+test("a deck refused because PowerPoint is open explains itself, on paper", async ({ page }) => {
+  await openApp(page);
+  await treeItem(page, PPTX_APP_RUNNING).click();
+
+  // The one refusal unique to PowerPoint: it runs a single instance per session,
+  // so Workbench will not start its own alongside the user's — and will not take
+  // over theirs. A sentence with the action that changes the answer, not an error.
   const card = page.locator(".wb-office-card");
+  await expect(card.locator(".wb-office-card-title")).toHaveText("PowerPoint is already open");
+  await expect(card.locator(".wb-office-card-hint")).toContainText(
+    "will not take over the one you are working in",
+  );
+  await expect(card.locator(".wb-office-card-file")).toHaveText(PPTX_APP_RUNNING);
+
+  // And it is not a dead end: the preview path is one click away.
+  await card.getByRole("button", { name: "Open a preview here" }).click();
   await expect(card.locator(".wb-office-card-title")).toHaveText(DEGRADED);
-  await expect(card.locator(".wb-office-card-file")).toHaveText(PPTX_FILE);
-  await expect(card.getByRole("button", { name: "Copy full path" })).toBeVisible();
   await expect
     .poll(() => card.evaluate((el) => getComputedStyle(el).backgroundColor))
     .toBe(PAPER);

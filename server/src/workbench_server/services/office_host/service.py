@@ -22,10 +22,18 @@ conditional on is built and measured (``host::mover`` in the shell — a hung
 guest costs a resize frame ~1.5 ms instead of ~1 s), so the remaining conditions
 are ones the machine answers, not ones a reviewer has to. Windows, an Office to
 launch, and a desktop shell attached to the host channel: any of them missing is
-reported by ``capabilities`` and the UI falls back to OnlyOffice. PowerPoint is
-refused whatever the mode — it is single-instance and offers no window handle to
-prove ownership with, so preview is the honest answer in v1. Nothing here
-touches the OnlyOffice path, which stays exactly as it was.
+reported by ``capabilities`` and the UI falls back to OnlyOffice.
+
+**PowerPoint is hosted conditionally, and the condition is reported before it is
+hit.** It is genuinely single-instance — its COM class factory is multi-use, so a
+launch made while one is running returns the *user's* PowerPoint rather than a
+private one (measured; see ``office_com``) — and a process we did not start must
+never reach the job object that reaps ours. So the answer is neither "host it
+anyway" nor "preview-only forever": host it when Workbench started the process,
+refuse with ``powerpoint_already_running`` when it did not, and say which of
+those is true right now in ``capabilities().kind_notes`` so the UI degrades to
+preview from a fact rather than from a failed launch. Nothing here touches the
+OnlyOffice path, which stays exactly as it was.
 """
 
 import asyncio
@@ -45,11 +53,14 @@ from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
     DocStructure,
+    SlideText,
     WordEdit,
     WordText,
 )
 from workbench_server.models.office_host import (
     HOSTABLE_KINDS,
+    SINGLE_INSTANCE_KINDS,
+    HostAppKind,
     HostReason,
     HostState,
     OfficeCapabilities,
@@ -76,6 +87,7 @@ from workbench_server.services.office_host.document_bridge import (
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
 from workbench_server.services.office_host.fake_document_bridge import FakeDocumentBridge
 from workbench_server.services.office_host.identity import fake_identity, probe_identity
+from workbench_server.services.office_host.office_com import application_window_exists
 from workbench_server.services.office_host.real_document_bridge import ShellDocumentBridge
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.office_host.shell_channel import ShellChannel
@@ -255,6 +267,7 @@ class OfficeHostService:
         fake: bool = False,
         channel: ShellChannel | None = None,
         detector: Callable[[], bool] = detect_office,
+        running_probe: Callable[[HostAppKind], bool] = application_window_exists,
         clock: Callable[[], float] = time.time,
         poll_interval_s: float = POLL_INTERVAL_S,
         launch_timeout_s: float = LAUNCH_TIMEOUT_S,
@@ -275,6 +288,12 @@ class OfficeHostService:
         #: ``office_read`` tool reports that plainly rather than failing opaquely.
         self._bridge = None if mode == "off" else bridge
         self._office_detected = detector()
+        #: "Is one of these already running?", for the single-instance kinds.
+        #: Injected like ``detector`` so tests drive it without a real window —
+        #: and called per ``capabilities()`` rather than cached, because the user
+        #: can open PowerPoint at any moment and a cached "no" would send them to
+        #: a launch that is going to be refused.
+        self._running_probe = running_probe
         self._clock = clock
         self._poll_interval_s = poll_interval_s
         self._launch_timeout_s = launch_timeout_s
@@ -299,17 +318,44 @@ class OfficeHostService:
         the UI never has to combine them itself.
         """
         native = self.hosting_available
+        notes = self._kind_notes() if native else {}
         return OfficeCapabilities(
             office_native=self._mode,
             native_hosting=native,
             office_detected=self._office_detected,
             fake_backend=self._fake and native,
             shell_attached=self._shell_attached,
-            hostable_kinds=list(HOSTABLE_KINDS) if native else [],
+            hostable_kinds=[kind for kind in HOSTABLE_KINDS if kind not in notes] if native else [],
+            kind_notes=notes,
             onlyoffice=onlyoffice_enabled,
             fallback="native" if native else ("onlyoffice" if onlyoffice_enabled else "preview"),
             detail=self._detail(onlyoffice_enabled),
         )
+
+    def _kind_notes(self) -> dict[HostAppKind, str]:
+        """Why a supported kind cannot be hosted *at this moment*.
+
+        Only the single-instance kinds can produce one, and only against a real
+        backend: the fake starts no processes and shares nothing, so under
+        ``WORKBENCH_OFFICE_FAKE`` every kind is always hostable and CI stays
+        deterministic on a machine with no Office and no windows at all.
+
+        Advisory, never the gate. It is read from the window list, which cannot
+        see an instance running without one, and the user can start PowerPoint a
+        second after the answer is sent. The launch pre-flight is the exact
+        question and the ownership check behind it is the guarantee; this exists
+        so the common case degrades to preview without a failed launch first.
+        """
+        if self._fake:
+            return {}
+        return {
+            kind: (
+                f"{kind} is already running. It runs one instance for the whole session, so "
+                "Workbench cannot start its own — close it and reopen this file to dock it."
+            )
+            for kind in HOSTABLE_KINDS
+            if kind in SINGLE_INSTANCE_KINDS and self._running_probe(kind)
+        }
 
     async def identity(self) -> OfficeIdentity:
         """Which Microsoft account this machine's Office is signed in as.
@@ -359,11 +405,9 @@ class OfficeHostService:
         kind = host_app_kind(path)
         if kind is None:
             raise HostRefusedError("unsupported_file", f"{path} is not an Office document")
-        if kind not in HOSTABLE_KINDS:
+        if kind not in HOSTABLE_KINDS:  # pragma: no cover - every kind is hostable today
             raise HostRefusedError(
-                "powerpoint_preview_only",
-                "PowerPoint is preview-only in this version: it is single-instance and "
-                "offers no way to prove a window is one we launched",
+                "unsupported_file", f"{kind} documents cannot be docked in this version"
             )
         file_path = self._workspace.safe_path(path)
         if not file_path.is_file():
@@ -741,19 +785,23 @@ class OfficeHostService:
         sheet: str | None = None,
         a1_range: str | None = None,
         start_paragraph: int = 0,
-    ) -> WordText | CellWindow:
+        start_slide: int = 1,
+    ) -> WordText | CellWindow | SlideText:
         """Read a window of the live document at ``path``.
 
         Word documents are read by ``start_paragraph``/``max_chars``; Excel
         worksheets by ``sheet``/``a1_range``, trimmed to ``max_cells`` cells and
         ``max_chars`` of aggregate cell text so one long cell cannot overrun the
-        window. Reading
+        window; PowerPoint decks by ``start_slide``/``max_chars``, whole slides at
+        a time. Reading
         an Excel document without a ``sheet`` is a caller error here — the tool
         returns the structure instead — so it is refused rather than guessed.
         """
         host, bridge, handle = self._live_document(path, "reading")
         if host.lifecycle.kind == "word":
             return await self._guarded_op(bridge.read_word(handle, start_paragraph, max_chars))
+        if host.lifecycle.kind == "powerpoint":
+            return await self._guarded_op(bridge.read_powerpoint(handle, start_slide, max_chars))
         if sheet is None:
             raise DocNotReadableError("name a sheet to read from an Excel document")
         return await self._guarded_op(
@@ -782,6 +830,16 @@ class OfficeHostService:
         reports (not docked, still opening, foreign window, gone, unavailable).
         """
         host, bridge, handle = self._live_document(path, "writing")
+        if host.lifecycle.kind == "powerpoint":
+            # Read-only by design, not by omission: a slide has no single
+            # addressable text target the way a paragraph or a cell does (its
+            # text lives in positional, typed shapes), so there is nothing here
+            # to write *to* yet. Said plainly so an agent stops rather than
+            # retrying with a different guess at the arguments.
+            raise RangeInvalidError(
+                "PowerPoint decks are read-only in Workbench: a slide has no single text "
+                "target to address. Read it with office_read, and edit it in the panel."
+            )
         if host.lifecycle.kind == "word":
             if paragraph is None:
                 raise RangeInvalidError("name a paragraph to write in a Word document")

@@ -82,9 +82,10 @@ impl Fixture {
 
     /// Dock a guest that registers itself under `class`.
     ///
-    /// The default class stands in for both Word (`OpusApp`) and Excel
-    /// (`XLMAIN`); a test names one explicitly to prove the mechanism keys on
-    /// nothing but the class string it is handed.
+    /// The default class stands in for all three frames — Word's `OpusApp`,
+    /// Excel's `XLMAIN` and PowerPoint's `PPTFrameClass`; a test names one
+    /// explicitly to prove the mechanism keys on nothing but the class string it
+    /// is handed.
     fn with_class(size: (i32, i32), caption_inset: i32, class: &str) -> Self {
         let serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
         let exe = guest::synthetic_guest_exe().expect("the synthetic guest binary should be built");
@@ -306,6 +307,47 @@ fn an_xlmain_frame_docks_the_way_words_opusapp_frame_does() {
         parent_of(guest_hwnd),
         Some(fixture.clip),
         "the XLMAIN guest is not inside the clip child",
+    );
+}
+
+#[test]
+fn a_pptframeclass_frame_docks_the_way_the_other_two_do() {
+    // PowerPoint's top-level frame is `PPTFrameClass`. Like the XLMAIN case
+    // above, this proves the *window* half of hosting is class-agnostic — which
+    // matters more for PowerPoint than for Excel, because everything difficult
+    // about hosting it is on the server side (its COM server is single-instance,
+    // so the launch has to refuse rather than share). Nothing about docking the
+    // frame is special, and this is the test that says so rather than assuming
+    // it: found by class+pid, reparented into the clip child, stripped of
+    // caption and resize frame, exactly as Word's OpusApp is.
+    let mut fixture = Fixture::with_class((820, 560), 0, "PPTFrameClass");
+    assert_eq!(
+        guest::find_window(fixture.guest_process.pid(), "PPTFrameClass"),
+        Some(fixture.guest_window),
+        "the PPTFrameClass frame was not found by its own class and pid",
+    );
+
+    let guest_hwnd = fixture.guest_window.hwnd();
+    assert_eq!(
+        style_of(guest_hwnd) & WS_CHILD.0,
+        0,
+        "the PPTFrameClass guest should start as a top-level window",
+    );
+
+    fixture.embed();
+
+    let after = style_of(guest_hwnd);
+    assert_eq!(
+        after & WS_CHILD.0,
+        WS_CHILD.0,
+        "the PPTFrameClass guest is not a child"
+    );
+    assert_eq!(after & WS_CAPTION.0, 0, "the caption survived the restyle");
+    assert_eq!(after & WS_THICKFRAME.0, 0, "the resize frame survived");
+    assert_eq!(
+        parent_of(guest_hwnd),
+        Some(fixture.clip),
+        "the PPTFrameClass guest is not inside the clip child",
     );
 }
 

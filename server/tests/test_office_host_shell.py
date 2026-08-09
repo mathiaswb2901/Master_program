@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from workbench_server.models.office_host import (
+    HOSTABLE_KINDS,
+    SINGLE_INSTANCE_KINDS,
     HostAppKind,
     HostCommand,
     HostCommandAck,
@@ -360,8 +362,12 @@ class FakeDocument:
             raise OSError("the network share went away")
         self.Saved = True
 
-    def Close(self, save_changes: object) -> None:
-        self.closed.append(save_changes)
+    def Close(self, *save_changes: object) -> None:
+        # Varargs because the three applications disagree: Word takes
+        # ``wdDoNotSaveChanges``, Excel a bool, and PowerPoint takes *nothing* —
+        # it reads ``Saved`` instead. A fixed arity here would make the
+        # PowerPoint call untestable rather than wrong.
+        self.closed.append(save_changes[0] if save_changes else ())
 
 
 class FakeDocuments:
@@ -753,3 +759,334 @@ def test_a_launch_that_fails_for_any_other_reason_still_reaps_what_it_started(
         office_com.launch(document, "word")
 
     assert released == [True]
+
+
+# ---- PowerPoint: the isolation it can and cannot give -------------------------
+#
+# Every fact these assert was measured on Office 16 (2026-08-09) and is written
+# up in `office_com`'s module docstring. They are unit tests of *decisions*, in
+# the spirit of this file's header: whether a launch may proceed, and which
+# window it may claim, are the two places where being wrong costs the user their
+# session — and for PowerPoint the cost is higher than for Word, because the
+# process a mistake would contain is one they are working in.
+
+
+class FakePresentations:
+    """PowerPoint's ``Presentations`` collection: records the open arguments."""
+
+    def __init__(self, document: FakeDocument) -> None:
+        self._document = document
+        self.opened: list[tuple[str, tuple[object, ...]]] = []
+
+    def Open(self, path: str, *args: object) -> FakeDocument:
+        self.opened.append((path, args))
+        return self._document
+
+
+class FakePowerPoint(FakeApp):
+    """A ``FakeApp`` shaped like PowerPoint: it has ``Presentations``, and no
+    ``IgnoreRemoteRequests`` — the real one raises ``AttributeError`` when that
+    is read (measured), which is why nothing may set it."""
+
+    def __init__(self, document: FakeDocument | None = None) -> None:
+        super().__init__(document=document)
+        self.Presentations = FakePresentations(document or FakeDocument())
+
+
+def test_powerpoint_is_refused_before_any_com_object_is_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the pre-flight.
+
+    ``DispatchEx("PowerPoint.Application")`` binds to a running instance instead
+    of starting one (measured: 0.17 s, no new pid), so a launch made while the
+    user has PowerPoint open would hand us *their* process — which ``_contain``
+    would then put in a kill-on-close job. The refusal therefore has to happen
+    before the COM object exists, and this asserts that it does: the COM layer is
+    never reached at all.
+    """
+    dispatched: list[str] = []
+
+    class RecordingCom(FakeCom):
+        def DispatchEx(self, prog_id: str) -> FakeApp:
+            dispatched.append(prog_id)
+            return self.app
+
+    monkeypatch.setattr(office_com, "WINDOWS", True)
+    monkeypatch.setattr(office_com, "instance_already_running", lambda kind: True)
+    monkeypatch.setattr(office_com, "win32com", RecordingCom(FakePowerPoint()), raising=False)
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"PK")
+
+    with pytest.raises(office_com.InstanceBusyError, match="already running"):
+        office_com.launch(deck, "powerpoint")
+
+    assert dispatched == []  # nothing created, so nothing of theirs was touched
+
+
+def test_word_and_excel_are_never_pre_flighted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A running Word is irrelevant — ``DispatchEx`` gives us our own process
+    either way — so asking would refuse launches that are perfectly safe. The
+    probe is gated on ``SINGLE_INSTANCE_KINDS``, not called and then ignored."""
+    asked: list[str] = []
+
+    def probe(kind: str) -> bool:
+        asked.append(kind)
+        return True
+
+    monkeypatch.setattr(office_com, "WINDOWS", True)
+    monkeypatch.setattr(office_com, "instance_already_running", probe)
+    monkeypatch.setattr(office_com, "document_is_open_elsewhere", lambda path: False)
+    monkeypatch.setattr(office_com, "win32com", FakeCom(FakeApp()), raising=False)
+    monkeypatch.setattr(office_com, "running_pids", set)
+    monkeypatch.setattr(office_com, "frame_windows", lambda kind: {})
+    monkeypatch.setattr(office_com, "FRAME_WAIT_S", 0.05)
+    document = tmp_path / "report.docx"
+    document.write_bytes(b"PK")
+
+    # It fails for the usual "no frame appeared" reason, not for a busy instance.
+    with pytest.raises(office_com.OfficeComError, match="never showed"):
+        office_com.launch(document, "word")
+
+    assert asked == []
+    assert frozenset({"powerpoint"}) == SINGLE_INSTANCE_KINDS
+
+
+def test_powerpoints_alerts_use_its_own_polarity() -> None:
+    """``ppAlertsNone`` is 1 and ``ppAlertsAll`` is 2 — PowerPoint's "off" is the
+    truthy value, the opposite of Word's 0/-1 and Excel's False/True. Sharing
+    Word's constants here would silently turn alerts *on* for the one
+    application whose modal dialogs we most need suppressed."""
+    app = FakePowerPoint()
+
+    office_com._silence_alerts(app, "powerpoint")
+    office_com._restore_alerts(app, "powerpoint")
+
+    # Asserted as the whole sequence rather than twice on `alerts[-1]`: the two
+    # values are what the test is about, and one list says both at once.
+    assert app.alerts == [1, 2]
+
+    # And the other two still get theirs, from the same table.
+    word, excel = FakePowerPoint(), FakePowerPoint()
+    office_com._silence_alerts(word, "word")
+    office_com._silence_alerts(excel, "excel")
+    assert word.alerts == [0]
+    assert excel.alerts == [False]
+
+
+def test_powerpoint_is_not_asked_to_ignore_remote_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It has no such property (measured ``AttributeError``), so the Excel wall
+    cannot be built for it — which is exactly why it is refused outright when an
+    instance is already running instead of being walled off."""
+    monkeypatch.setattr(office_com, "_IDENTIFY_SETTLE_S", 0.0)
+    monkeypatch.setattr(office_com, "frame_windows", lambda kind: {0x33: 900})
+    app = FakePowerPoint()
+
+    office_com._identify(app, "powerpoint", {1}, {})
+
+    assert app.ignore_remote_requests is None
+
+
+def _powerpoint_at(frames: dict[int, int]) -> FakeWin32:
+    return FakeWin32(classes=dict.fromkeys(frames, "PPTFrameClass"), pids=frames)
+
+
+def _open_deck_against(
+    monkeypatch: pytest.MonkeyPatch, frames: dict[int, int], app: FakePowerPoint
+) -> office_com.OfficeInstance:
+    """An instance whose contained frame is 0x77, against a given window list."""
+    win32 = _powerpoint_at(frames)
+    monkeypatch.setattr(office_com, "frame_windows", lambda kind: frames)
+    monkeypatch.setattr(office_com, "win32gui", win32, raising=False)
+    monkeypatch.setattr(office_com, "win32process", win32, raising=False)
+    return an_instance(None, app, kind="powerpoint", window_id=0x77)
+
+
+def test_the_frame_a_presentation_lands_in_is_confirmed_from_the_window_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PowerPoint hands back no window handle at all — ``Application.HWND`` and
+    ``DocumentWindow.HWND`` are declared in the type library and both raise
+    "member not found" when read (measured, late *and* early bound). So the
+    frame is confirmed from the window list instead, and the expected answer is
+    the frame the launch already produced: ``Presentations.Open`` opens into it
+    rather than adding one."""
+    document = FakeDocument()
+    app = FakePowerPoint(document)
+    instance = _open_deck_against(monkeypatch, {0x77: 4321}, app)
+
+    office_com._open_document(instance, tmp_path / "deck.pptx")
+
+    assert instance.document is document
+    # ReadOnly=False, Untitled=False, WithWindow=True — the last is what makes
+    # there be a frame to host at all, and there is no AddToRecentFiles here.
+    assert app.Presentations.opened[0][1] == (False, False, True)
+
+
+def test_a_powerpoint_owning_several_frames_is_refused_rather_than_guessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frame we contained is gone and the process owns two others: there is
+    no evidence which holds our presentation, and picking one would dock a
+    window we cannot name. Refused, exactly as ``_identify`` refuses ambiguity."""
+    instance = _open_deck_against(monkeypatch, {0x81: 4321, 0x82: 4321}, FakePowerPoint())
+
+    with pytest.raises(office_com.OfficeComError, match="refusing to guess"):
+        office_com._open_document(instance, tmp_path / "deck.pptx")
+
+    assert instance.document is None
+
+
+def test_a_replaced_start_screen_frame_is_still_ours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one benign way the contained frame can vanish: PowerPoint replacing
+    its start-screen window with the presentation's. Our process owns exactly
+    one frame, so there is nothing to guess between — and it is ours by pid.
+
+    The instance is re-pointed at it, which is the part that matters: the embed
+    hands the shell ``window_id``, so a stale one would dock a window that no
+    longer exists. The pid is untouched, so the containment still holds."""
+    instance = _open_deck_against(monkeypatch, {0x91: 4321}, FakePowerPoint())
+
+    office_com._open_document(instance, tmp_path / "deck.pptx")
+
+    assert instance.document is not None
+    assert instance.window_id == 0x91
+    assert instance.pid == 4321  # containment unaffected
+
+
+def test_a_frame_of_another_process_is_never_claimed_as_ours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pid filter is what makes the fallback above safe: one frame on screen
+    is not one frame *of ours*. A PowerPoint belonging to somebody else leaves
+    our process owning none, which is refused rather than adopted."""
+    instance = _open_deck_against(monkeypatch, {0x95: 9999}, FakePowerPoint())
+
+    with pytest.raises(office_com.OfficeComError, match="0 frame windows"):
+        office_com._open_document(instance, tmp_path / "deck.pptx")
+
+
+def test_a_deck_is_closed_without_a_save_changes_argument() -> None:
+    """``Presentation.Close`` takes no ``SaveChanges``: PowerPoint reads ``Saved``
+    instead. Passing Word's ``wdDoNotSaveChanges`` would raise, and passing
+    Excel's ``False`` would be a silently different call."""
+    document = FakeDocument()
+
+    office_com._close_document(document, "powerpoint")
+
+    assert document.closed == [()]
+
+
+class FakeTextRange:
+    def __init__(self, text: str) -> None:
+        self.Text = text
+
+
+class FakeTextFrame:
+    def __init__(self, text: str) -> None:
+        self.HasText = bool(text)
+        self.TextRange = FakeTextRange(text)
+
+
+class FakeShape:
+    """One PowerPoint shape. ``Id`` is what tells the title placeholder apart
+    from an ordinary text box — it is a member of ``Shapes`` like any other.
+
+    ``unreadable`` stands in for the shapes that raise instead of answering:
+    SmartArt, an OLE object, a chart.
+    """
+
+    def __init__(self, shape_id: int, text: str | None, *, unreadable: bool = False) -> None:
+        self.Id = shape_id
+        self._unreadable = unreadable
+        self._has_text_frame = text is not None
+        self.TextFrame = FakeTextFrame(text or "")
+
+    @property
+    def HasTextFrame(self) -> bool:
+        if self._unreadable:
+            raise RuntimeError("this shape does not answer")
+        return self._has_text_frame
+
+
+class FakeShapes:
+    def __init__(self, shapes: list[FakeShape], title: FakeShape | None) -> None:
+        self._shapes = shapes
+        self.Count = len(shapes)
+        self.HasTitle = title is not None
+        self.Title = title
+
+    def Item(self, index: int) -> FakeShape:
+        return self._shapes[index - 1]
+
+
+class FakeSlide:
+    def __init__(self, shapes: FakeShapes) -> None:
+        self.Shapes = shapes
+
+
+def test_a_slides_title_is_not_read_back_as_body_text() -> None:
+    """Found by running it against a real deck, not by reasoning about it.
+
+    The title placeholder is an ordinary member of ``Shapes``, so reading every
+    text-bearing shape returns the title *again* — once as the block's heading
+    and once as its first line. Every read of every deck paid for that twice,
+    which is precisely the token cost agent-facing tools are judged on.
+
+    The de-duplication is by shape **id**, not by string: a body line that
+    happens to repeat the title is the user's text and must survive.
+    """
+    title = FakeShape(2, "Findings")
+    body = FakeShape(3, "SE3 prices are quoted in EUR/MWh.")
+    echo = FakeShape(4, "Findings")  # a real body line that repeats the title
+    slide = FakeSlide(FakeShapes([title, body, echo], title))
+
+    text, shape_id = office_com._slide_title(slide)
+
+    assert (text, shape_id) == ("Findings", 2)
+    assert office_com._shape_texts(slide, shape_id) == [
+        "SE3 prices are quoted in EUR/MWh.",
+        "Findings",
+    ]
+
+
+def test_a_slide_with_no_title_reports_none_and_keeps_every_shape() -> None:
+    """A blank layout has no title to strip, and ``None`` must not be treated as
+    "shape id 0" — which would silently drop whichever shape had that id."""
+    body = FakeShape(0, "just a text box")
+    slide = FakeSlide(FakeShapes([body], None))
+
+    text, shape_id = office_com._slide_title(slide)
+
+    assert (text, shape_id) == (None, None)
+    assert office_com._shape_texts(slide, shape_id) == ["just a text box"]
+
+
+def test_a_shape_that_will_not_be_read_costs_only_its_own_text() -> None:
+    """SmartArt, an OLE object, a chart: one unreadable shape must not fail the
+    whole deck, or a single embedded object costs the other fifty slides."""
+
+    slide = FakeSlide(
+        FakeShapes([FakeShape(1, "", unreadable=True), FakeShape(2, "survived")], None)
+    )
+
+    assert office_com._shape_texts(slide, None) == ["survived"]
+
+
+def test_every_hostable_kind_has_a_prog_id_a_frame_class_and_alerts() -> None:
+    """The three tables and the hostable list cannot drift apart: a kind that can
+    be hosted but has no ProgID fails at launch with a confusing message, one
+    with no frame class raises ``KeyError`` from the ownership assert, and one
+    missing from the alerts table raises before a document is ever opened."""
+    for kind in HOSTABLE_KINDS:
+        assert kind in office_com.PROG_IDS, kind
+        assert kind in office_com.FRAME_CLASSES, kind
+        assert kind in office_com._ALERTS, kind
+    assert office_com.FRAME_CLASSES["powerpoint"] == "PPTFrameClass"
+    assert office_com.PROG_IDS["powerpoint"] == "PowerPoint.Application"

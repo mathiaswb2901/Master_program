@@ -47,7 +47,10 @@ router = APIRouter(prefix="/api/office", tags=["office-host"])
 _REFUSAL_STATUS: dict[HostReason, int] = {
     "native_hosting_disabled": 503,
     "unsupported_file": 415,
-    "powerpoint_preview_only": 409,
+    # Both are "the thing you asked for is in use" rather than a failure: the
+    # document in someone else's window, or the whole application in the user's
+    # own session. 409 either way, and the reason in the body says which.
+    "powerpoint_already_running": 409,
     "document_open_elsewhere": 409,
 }
 
