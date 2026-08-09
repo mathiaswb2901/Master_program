@@ -1,19 +1,27 @@
 """The toolchain gate — M6 staged review, PR 1.
 
 Fake-first, and the split is deliberate. Everything about *judgement* — which
-gates ran, what their outcomes mean, where the run is allowed to happen, what
-happens when the tree moves under it — is driven through :class:`FakeGateRunner`
-and a scripted ``GitRunner``, so it is deterministic on any machine and CI never
-runs a real ``pytest`` inside a slot. Everything about *process handling* — the
-hard timeout, the bounded capture of a chatty command, a command that cannot
-start — is driven through the **real** :class:`SubprocessGateRunner` against
-short ``sys.executable`` programs, because a fake cannot prove that a hung
-process is killed or that 300 KB of output costs 8 KiB of memory.
+gates ran, what their outcomes mean, where the run is allowed to happen — is
+driven through :class:`FakeGateRunner` and a scripted ``GitRunner``, so it is
+deterministic on any machine and CI never runs a real ``pytest`` inside a slot.
+Everything about *process handling* — the hard timeout, the bounded capture of a
+chatty command, a command that cannot start, and whether the ``npm`` argv this
+platform ships can be started at all — is driven through the **real**
+:class:`SubprocessGateRunner`, because a fake cannot prove that a hung process is
+killed, that 300 KB of output costs 8 KiB of memory, or that an executable
+resolves.
 
 The claim the whole milestone rests on has its own test: **a tree that moved
 mid-run yields ``skipped``, never a pass.** Silent green is the enemy this
 feature exists to kill, and a gate that reported one for a tree that no longer
-exists would be the most expensive kind of lie this codebase can tell.
+exists would be the most expensive kind of lie this codebase can tell. That
+claim is proven twice over. A scripted ``GitRunner`` drives its *shape* —
+``HEAD`` moving, the dirty set growing, git refusing to answer — and
+:class:`TestTheSameFilesDifferentBytes` drives its substance against **real git
+and a real working tree**, with a writer editing the tree between the two
+fingerprint reads. That half cannot be faked: a stub that returns whatever a
+test handed it can only show the plumbing, and the fingerprint's job is to read
+what is on the disk.
 """
 
 import ast

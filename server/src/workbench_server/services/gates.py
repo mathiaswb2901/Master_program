@@ -803,11 +803,9 @@ class ToolchainGateCheck:
                 detail=(refused or head).first_error_line(),
             )
             return None
-        dirty = tuple(name for name in f"{changed.out}\0{untracked.out}".split("\0") if name)
-        content = await asyncio.to_thread(content_digest, path, dirty, FINGERPRINT_READ_BUDGET)
-        return _Fingerprint(
-            head=head.out.splitlines()[0].strip(), dirty=len(dirty), content=content
-        )
+        dirt = tuple(name for name in f"{changed.out}\0{untracked.out}".split("\0") if name)
+        content = await asyncio.to_thread(content_digest, path, dirt, FINGERPRINT_READ_BUDGET)
+        return _Fingerprint(head=head.out.splitlines()[0].strip(), dirty=len(dirt), content=content)
 
 
 def _session_of(ctx: ValidationContext) -> str | None:
