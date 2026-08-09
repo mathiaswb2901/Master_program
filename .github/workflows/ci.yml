@@ -275,7 +275,9 @@ jobs:
           for r in $results; do
             # `skipped` is allowed for exactly one reason: `desktop` is
             # path-filtered. server/ui/e2e/perf/changes carry no `if:` and no
-            # `needs:`, so they can never be skipped — unreachable there.
+            # `needs:`, so they can never be skipped — unreachable there, and
+            # `test_only_the_path_filtered_job_can_ever_be_skipped` fails the
+            # build if a future edit hands one of them a condition.
             if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
               echo "a required job did not succeed"; exit 1
             fi

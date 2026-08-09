@@ -75,3 +75,27 @@ def test_the_quality_gate_waits_on_every_job() -> None:
     others = set(jobs) - {"quality-gate"}
     assert needed == others, f"quality-gate ignores {others - needed}"
     assert gate["if"] is True or str(gate["if"]).strip() == "always()"
+
+
+def test_only_the_path_filtered_job_can_ever_be_skipped() -> None:
+    """The gate's `skipped is allowed` carve-out has exactly one beneficiary.
+
+    `quality-gate` runs with `if: always()` and passes a job whose result is
+    `skipped`, because `desktop` is path-filtered — a PR that touches no Rust
+    must not pay minutes of `cargo build`, and a skip there is the filter
+    working. That carve-out is safe only while `desktop` is the *only* job that
+    can be skipped at all: give `server` or `e2e` a condition and its result
+    turns into `skipped` instead of `success`, which the gate would wave
+    through. Nothing else in the workflow says so, so it is said here.
+
+    A job's own `if:` is the only way to reach that state. `needs:` cannot
+    (`changes` is the sole dependency of `desktop`, and a skipped dependency is
+    what `desktop`'s filter is *for*), and a step-level `if:` — the `ui` job
+    uses several — decides nothing about the job's result.
+    """
+    jobs = _ci()["jobs"]
+    conditional = {name for name, job in jobs.items() if "if" in job}
+    assert conditional <= {"desktop", "quality-gate"}, (
+        f"{conditional - {'desktop', 'quality-gate'}} can now be skipped, and "
+        "quality-gate treats a skip as a pass"
+    )
