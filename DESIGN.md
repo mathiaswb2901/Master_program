@@ -185,8 +185,9 @@ both — and ≥ 3:1 on every chrome surface, which is what a 2px rule needs (WC
 **The two meanings, and nothing else.** *Where I am*: the focused pane's live rule
 (§6.1), a selected row, the field you are typing in, the drop target under the pointer,
 the sash you are dragging, the focus ring. *Changing right now*: an agent working, a
-meter filling, focus mode holding the window, the one action the app is blocked on
-(`Allow`, `Approve` — `--accent-fill`).
+meter filling, focus mode holding the window, a microphone that is open (§5.4's voice
+recording mark — the one that is true only while a finger is on the button), the one
+action the app is blocked on (`Allow`, `Approve` — `--accent-fill`).
 
 **Demoted when ANVIL landed**, each because it was still true when you looked away:
 
@@ -486,7 +487,8 @@ Every row is a decision with a reason. Add to this table before adding motion.
 | **List/tree selection, QuickBar row selection** | **No** | — | It tracks a key. See §5.1.4. |
 | **Chat autoscroll** | **No** | — | Not restraint — mechanism. The chat pins to the bottom by comparing `scrollHeight − scrollTop − clientHeight`; a smooth scroll makes that gap large while it catches up, so the pin releases and the view stops following the stream. A smooth *jump to bottom* is fine, and belongs with the jump-to-bottom control that does not exist yet. |
 | **Theme switch** | **No**, and it is suppressed on purpose | §5.7 | — |
-| **Agent "working" dot** | **Yes** | opacity 1 → 0.35 → 1 over 2s `ease-in-out`, infinite | The only looping animation in the app. |
+| **Agent "working" dot** | **Yes** | opacity 1 → 0.35 → 1 over 2s `ease-in-out`, infinite | The app's one looping keyframe (`wb-pulse`). |
+| **Voice "recording" mark** | **Yes** | the *same* keyframe — `.u-agent-pulse`, no second animation | A microphone that is open is the strongest "changing right now" the app has, and unlike every mark §2.4 demoted it **stops on its own**: it is true for exactly as long as a finger is on the button. It reuses the one loop rather than declaring a second, so reduced motion still stops it in one place (§5.6). It is the only other looping thing on screen, and it cannot be on screen for long. |
 
 ### 5.5 What may be animated
 

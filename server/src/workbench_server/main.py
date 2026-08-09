@@ -37,6 +37,7 @@ from workbench_server.routers import (
     terminal,
     usage,
     validation,
+    voice,
     workspaces,
     worktrees,
 )
@@ -80,6 +81,8 @@ from workbench_server.services.setup import SetupService, detect_claude_login
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
 from workbench_server.services.validation import ValidationService
+from workbench_server.services.voice import VoiceService
+from workbench_server.services.voice import build_backend as build_voice_backend
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
 from workbench_server.services.workspaces import RecentsStore, WorkspaceService
@@ -153,7 +156,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # workspace by design — so without this every row of a working worker
         # would read "(outside the workspace)". Naming, not opening: the feed's
         # clickable target is still workspace-only (services/activity.py).
-        extra_roots=[("", worktree_service.root)],
+        #
+        # Asked for per call, not captured: the pool root is keyed on the
+        # workspace it serves, so it moves on every switch, and a copy taken
+        # here would be the old one for the rest of the process.
+        extra_roots=lambda: [("", worktree_service.root)],
     )
     ui_state_store = UiStateStore()
     # The in-app settings (M7 V8): the knobs that were environment variables, in
@@ -345,6 +352,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else (lambda: detect_claude_login(Path.home(), os.environ))
         ),
     )
+    # Voice input (M7 §3). Deliberately workspace-agnostic — an utterance is
+    # about a microphone, not about a project — so it copies no root and owes no
+    # `set_workspace_root`. The backend is None on any machine with no
+    # transcriber registered, which is not an error: `GET /api/voice/capabilities`
+    # reports it and the composer simply offers no microphone.
+    voice_backend = build_voice_backend(
+        mode=settings.voice, fake=settings.voice_fake, name=settings.voice_backend
+    )
+    if settings.voice_fake and voice_backend is not None:
+        log.warning(
+            "voice.fake_mode_enabled",
+            detail="WORKBENCH_VOICE_FAKE is set: transcripts are scripted, nothing is heard",
+        )
+    voice_service = VoiceService(voice_backend, mode=settings.voice, fake=settings.voice_fake)
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
     # this list is the *only* place a switch is coordinated — a service added
@@ -363,6 +384,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # forget them, or a verdict about a file in the project just left
             # would attach to a same-named file in the one opened.
             validation_service,
+            # Before the session manager, and that order is load-bearing: this
+            # forgets a fleet whose every row was jailed against the workspace
+            # being left, and the manager's own re-rooting then re-announces the
+            # sessions that are still running with the labels it just derived.
+            # Reversed, those announcements would land in a service about to
+            # drop them and Mission Control would go blank until the next tool
+            # call (services/activity.py::set_workspace_root).
+            activity_service,
             session_manager,
             # Half B of the session browser (M5 item 12): after a switch the
             # browser must judge each folder against the workspace the user just
@@ -405,6 +434,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Office instance nobody owns, still wearing our panel's chrome.
         await office_host_service.shutdown()
         await host_channel.close()
+        # A microphone still open must not outlive the server that was
+        # listening: every in-flight utterance is cancelled and its audio
+        # discarded, never transcribed on the way out.
+        await voice_service.shutdown()
         if isinstance(host_backend, ShellHostBackend):
             # Every instance has been reaped above; this only lets the COM
             # apartment thread go.
@@ -455,6 +488,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.documents = document_service
     app.state.sessions = sessions_store
     app.state.setup = setup_service
+    app.state.voice = voice_service
     # `settings` is already the process configuration on app.state; the service
     # that owns the *user's* stored choices is a different thing and says so.
     app.state.settings_service = settings_service
@@ -512,6 +546,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workspaces.router)
     app.include_router(sessions.router)
     app.include_router(setup.router)
+    app.include_router(voice.router)
     app.include_router(settings_router.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
