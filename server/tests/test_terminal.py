@@ -252,7 +252,7 @@ class FloodingManager:
     def spawn(self, cwd: Path, rows: int = 24, cols: int = 80) -> PtySession:
         return scripted_session(ScriptedProc(list(self._chunks)))
 
-    def release(self, session: PtySession) -> None:
+    async def release_async(self, session: PtySession) -> None:
         self.released += 1
 
 
