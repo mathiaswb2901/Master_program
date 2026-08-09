@@ -29,6 +29,10 @@
 import { create } from "zustand";
 
 import * as api from "./api";
+// The one thing this module reads from the app store: a prompt is app-wide
+// state (a chat pane renders the same one as a card), so answering it here has
+// to move the shared record rather than only this board's copy.
+import { useStore } from "./store";
 import type {
   OrchestratorSnapshot,
   PendingPermission,
@@ -351,6 +355,13 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
         )
         .filter((row) => row.pending.length > 0),
     }));
+    // The same prompt may be on screen as a *card* in a chat pane, and that card
+    // renders one shared record (`store.permissions`). Settling it here is what
+    // makes the two surfaces one decision: without it the card kept its Allow
+    // and Deny buttons under a question this click had already answered, and
+    // pressing one of them hit a settled prompt (404). Recorded before the POST
+    // for the same reason the chip goes first — this is the click landing.
+    useStore.getState().settlePermission(requestId, allow ? "allow" : "deny");
     try {
       await api.answerPermission(sessionId, { request_id: requestId, allow });
     } catch {

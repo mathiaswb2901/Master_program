@@ -217,6 +217,21 @@ function SessionPane({ sessionId, api }: { sessionId: string; api: DockviewPanel
     return () => subscription.dispose();
   }, [api, attachable, sessionId]);
 
+  // Seeing a conversation is what spends its "finished/failed since last
+  // viewed" marker (DESIGN.md §2.6), and a pane can be *looked at* without
+  // becoming the pane the keyboard is in: selecting its tab in a group the
+  // focus is not in makes it visible and never active. `focusSession` above
+  // covers the other half; both end in the same store seam rather than each
+  // clearing the flags itself.
+  useEffect(() => {
+    if (!attachable) return;
+    if (api.isVisible) useStore.getState().markSessionViewed(sessionId);
+    const subscription = api.onDidVisibilityChange((event) => {
+      if (event.isVisible) useStore.getState().markSessionViewed(sessionId);
+    });
+    return () => subscription.dispose();
+  }, [api, attachable, sessionId]);
+
   // The tab follows the conversation: a session is "new session" until its
   // first message names it, and a pane still calling it that is a pane you
   // cannot tell from the other three.

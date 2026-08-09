@@ -7,7 +7,15 @@
  * two that can disagree).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Answering a prompt from the board settles the *shared* record every surface
+// renders (`store.permissions`), so this module reaches the app store — which
+// reads `document` at import, and the suite is node-only. None of the pure
+// folds below touch it.
+vi.mock("./store", () => ({
+  useStore: { getState: () => ({ settlePermission: () => undefined }) },
+}));
 
 import {
   buildCards,

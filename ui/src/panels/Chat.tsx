@@ -94,9 +94,21 @@ export function StatusBadge({ state, flags }: { state: SessionState; flags?: Ses
  * Warn-rimmed while it is a question and neutral once it is answered: a card
  * that keeps its alarm after you have decided is a standing warning about
  * something that already happened, which is the §2.4 mistake one hue over.
+ *
+ * **Everything it renders comes from the store's record for this request id**
+ * (`store.permissions`, see `permissions.ts`) — the row in the transcript
+ * carries the id and nothing else. The same prompt is also a chip on the Mission
+ * Control board and is retracted by the server on a ten-minute timeout, so a
+ * card that remembered its own click kept asking a question that was already
+ * settled, and answering it again reached a closed prompt (404 by design). One
+ * record, every surface: whatever settles it, every card for it settles.
  */
-function PermissionCard({ item }: { item: Extract<ChatItem, { kind: "permission" }> }) {
-  const decide = (allow: boolean): void => useStore.getState().decidePermission(item.requestId, allow);
+function PermissionCard({ row }: { row: Extract<ChatItem, { kind: "permission" }> }) {
+  const item = useStore((s) => s.permissions[row.requestId]);
+  const decide = (allow: boolean): void => useStore.getState().decidePermission(row.requestId, allow);
+  // Only reachable if a record were dropped while its row survived, which
+  // nothing does today: rendering an unanswerable card would be worse.
+  if (item === undefined) return null;
   const decided = item.decision !== null;
   return (
     <div className={"wb-perm-card" + (decided ? " is-decided" : "")}>
@@ -116,6 +128,14 @@ function PermissionCard({ item }: { item: Extract<ChatItem, { kind: "permission"
           >
             Deny
           </button>
+        </div>
+      ) : item.decision === "settled" ? (
+        // Closed, and this window never learned which way. Saying "Allowed"
+        // here would claim an approval the agent may never have received; the
+        // hollow dot is the picker's own "no state to report" shape (§6.12).
+        <div className="wb-perm-decision" title="Answered in another window, or timed out">
+          <span className="wb-dot is-elsewhere" aria-hidden="true" />
+          No longer waiting
         </div>
       ) : (
         <div className="wb-perm-decision">
@@ -210,7 +230,7 @@ function ChatItemView({ item }: { item: ChatItem }) {
     case "tool":
       return <ToolRow item={item} />;
     case "permission":
-      return <PermissionCard item={item} />;
+      return <PermissionCard row={item} />;
     case "plan":
       return <PlanCard plan={item.plan} />;
     case "error":
