@@ -72,6 +72,11 @@ vi.mock("./monacoBundle", () => ({
       getEditors: () => editors,
     },
   }),
+  // `loadMonaco` takes the theme builder off the bundle by reference, so the
+  // mock owes it one even though nothing here paints (`monacoLoad.test.ts`
+  // stubs it the same way). This file is about model lifetime; the theme is
+  // somebody else's suite.
+  workbenchThemeData: (theme: string) => ({ base: theme }),
 }));
 
 beforeEach(() => {
