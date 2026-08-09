@@ -145,7 +145,9 @@ fn set_caption_tint(window: tauri::Window, tint: caption::CaptionTint) {
 #[tauri::command]
 fn confirm_close(app: tauri::AppHandle, window: tauri::Window) -> tauri::Result<()> {
     GUARD.confirm();
-    release_hosted_windows(&app);
+    // A synchronous command: this *is* the main thread, so the teardown runs
+    // inline and cannot report anything but success.
+    let _ = release_hosted_windows(&app);
     window.close()
 }
 
@@ -187,11 +189,25 @@ async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
 /// Idempotent, and a no-op on a build or platform with no hosting. Called from
 /// every path that ends with this window going away, because the one thing that
 /// must never happen is a guest still parented into a window being destroyed.
-fn release_hosted_windows(app: &tauri::AppHandle) {
+///
+/// **Always on the main thread, whoever asks.** What it does is `SetParent`,
+/// `SetWindowLongPtrW` and `DestroyWindow` on windows the main thread created,
+/// and Win32 only lets the owning thread destroy a window. Three of the four
+/// callers below already *are* the main thread and the hop costs nothing; the
+/// fourth is the close-ack watchdog, which spawns a thread precisely because the
+/// UI has stopped answering — and used to run the teardown on it. `host::shutdown`
+/// marshals it and gives up on a bound rather than doing it from the wrong
+/// thread; the returned `false` says it gave up.
+fn release_hosted_windows(app: &tauri::AppHandle) -> bool {
     #[cfg(windows)]
-    host::shutdown(app);
+    {
+        host::shutdown(app)
+    }
     #[cfg(not(windows))]
-    let _ = app;
+    {
+        let _ = app;
+        true
+    }
 }
 
 pub fn run() {
@@ -251,8 +267,9 @@ pub fn run() {
             };
             let Decision::AskUi { ticket } = GUARD.on_close_requested() else {
                 // Closing for real, and this is the last moment at which a
-                // hosted guest is still a child of a window that exists.
-                release_hosted_windows(window.app_handle());
+                // hosted guest is still a child of a window that exists. Window
+                // events run on the main thread, so this is inline.
+                let _ = release_hosted_windows(window.app_handle());
                 return;
             };
             api.prevent_close();
@@ -272,7 +289,18 @@ pub fn run() {
                          {CLOSE_ACK_TIMEOUT:?}; closing anyway"
                     ));
                     GUARD.confirm();
-                    release_hosted_windows(window.app_handle());
+                    // **This is not the main thread**, and the teardown touches
+                    // windows only the main thread may touch. It is asked for,
+                    // never performed here; if the ask is not serviced in time
+                    // the close goes ahead untorn-down rather than issuing
+                    // `DestroyWindow` from the wrong thread. See
+                    // `release_hosted_windows`.
+                    if !release_hosted_windows(window.app_handle()) {
+                        backend::log(
+                            "the hosted panels were left as they are; closing the window \
+                             without touching a guest from this thread",
+                        );
+                    }
                     if let Err(err) = window.close() {
                         backend::log(&format!("forced close failed: {err}"));
                     }
@@ -360,7 +388,10 @@ pub fn run() {
             }
             // Last line of defence: every close path above already released,
             // but a path nobody thought of must not leave an orphan either.
-            RunEvent::Exit => release_hosted_windows(app),
+            // The event loop's own thread, so this is inline too.
+            RunEvent::Exit => {
+                let _ = release_hosted_windows(app);
+            }
             _ => {}
         });
 }
