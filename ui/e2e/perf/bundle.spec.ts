@@ -64,10 +64,17 @@ const METAFILE = path.join(DIST, "bundle-metafile.json");
  *
  * ## Raised for dockview 7, 2026-08-09
  *
- * | | entry chunk | gzipped | dockview attributed |
+ * | | entry chunk | gzipped | dockview packages attributed |
  * |---|---|---|---|
  * | dockview 4.13.1 | 879.8 KiB | 236.5 KiB | 451 KiB over 80 modules |
  * | dockview 7.0.4  | 1032.2 KiB | 271.9 KiB | 666 KiB over 4 modules |
+ *
+ * That last column sums all three packages — `dockview` + `dockview-core` +
+ * `dockview-react`. ROADMAP.md quotes `dockview-core` **alone** for the same two
+ * builds (423 KiB → 597 KiB): a different scope over the same measurement, not a
+ * second measurement that disagrees. On 7.0.4 the split is dockview-core 597 +
+ * dockview 36 + dockview-react 33, and on 4.13.1 the 66 shakeable modules below
+ * are dockview-core's share of that row's 80.
  *
  * **+35.4 KiB gzipped, +15.0%**, and it is packaging rather than features. v4
  * resolved to per-module ESM, so rollup could see 66 dockview-core modules and

@@ -302,8 +302,10 @@ attribution and fails if any `node_modules/monaco-editor` module is back in the 
 JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptance
 criterion), the terminal's renderer and frame coalescing, and a virtualised file tree —
 the last two now the largest things left in the entry chunk (xterm 285 kB, dockview-core
-597 kB attributed since the dockview 7 upgrade — 7 publishes one pre-bundled ESM module
-where 4 published 66 shakeable ones) as well as the reason a *row* still costs ~900 ms.
+alone 597 kB attributed since the dockview 7 upgrade — 7 publishes one pre-bundled ESM
+module where 4 published 66 shakeable ones; `ui/e2e/perf/bundle.spec.ts` quotes 666 kB
+for the same build because it sums all three dockview packages) as well as the reason a
+*row* still costs ~900 ms.
 
 **The picker that moved the pane** (landed): the launch layout-shift budget existed to
 catch a webfont swap and caught something better. Measured 2026-08-06 on the pinned
