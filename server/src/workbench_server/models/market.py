@@ -31,6 +31,16 @@ promise a later edit could quietly break:
   That is what every market in the catalog uses, and it is also what makes the
   alignment test sound as written (see ``services/market_check.py``).
 
+Two of the catalog's fields are read by a table that lives in another module, and
+each is covered by a test that fails at catalog-edit time rather than in an
+analyst's evidence: :attr:`ResolutionPeriod.resolution` against
+:data:`RESOLUTION_MINUTES` here, and :attr:`MarketSpec.currency` against
+``services/reconciliation.py``'s ``UNIT_TO_BASE``. The currency one is also
+*derived* — ``currencies_for(MARKETS.values())`` registers every catalog currency
+as a price unit — because the alternative failure is silent and permanent: a market
+whose own currency is not a known unit has a price check that can never pass, and
+the refusal recommends the exact format the analyst already supplied.
+
 None of these types is a REST/WS body of its own — the same posture as
 ``models/reconciliation.py``. A :class:`MarketCheckSpec` travels *inside*
 ``ValidationSpec.params`` (a ``dict`` on the wire) and a
@@ -113,7 +123,10 @@ class MarketSpec(BaseModel):
     timezone: str
     #: The currency the market's prices are denominated in, upper-case ISO-4217
     #: (``EUR``, ``GBP``). A price column in any other currency is a **refusal**,
-    #: not a conversion — see ``services/market_check.py``.
+    #: not a conversion — see ``services/market_check.py``. A currency named here is
+    #: registered as a price unit by ``services/reconciliation.py``'s
+    #: ``currencies_for``; nothing else is needed to add one, and the module
+    #: docstring says why that is derived rather than restated.
     currency: str
     #: Day-ahead auction gate closure, as **local wall-clock time** in
     #: :attr:`timezone` on the day :attr:`day_ahead_gate_closure_days_before`
@@ -177,7 +190,9 @@ class MarketSpec(BaseModel):
 #: DST transitions happen at the same instant but at *different local wall clocks*),
 #: gate closure (12:00 vs 09:20), settlement resolution (60/15 vs 30 minutes) and
 #: currency (EUR vs GBP). Adding a third market is one row here and one line in
-#: ``test_market_check.py``.
+#: ``test_market_check.py`` — including a market in a currency neither of these
+#: settles in, because ``currencies_for`` derives the price units from this dict
+#: (see the module docstring).
 MARKETS: dict[str, MarketSpec] = {
     market.id: market
     for market in (

@@ -12,9 +12,11 @@ Three domain failure modes are first-class here, not comments:
 * **Units are compared, not assumed** (:func:`convert`). A value read in kWh against an
   MWh expectation, or MWh against MW, cannot pass silently — the x1000 that hides inside
   a spreadsheet diff is caught, and a legitimate unit change is *named* in the evidence.
-  Prices are currency-aware: NOK/SEK/DKK are first-class alongside EUR, scaling within a
-  currency is a named multiply, and comparing *across* currencies is an explicit refusal
-  (:class:`CrossCurrency`) rather than an invented FX rate.
+  Prices are currency-aware: NOK/SEK/DKK are first-class alongside EUR — as is every
+  currency the market-rules catalog settles in, which :func:`currencies_for` derives
+  rather than restates — scaling within a currency is a named multiply, and comparing
+  *across* currencies is an explicit refusal (:class:`CrossCurrency`) rather than an
+  invented FX rate.
 * **Time-indexed rows are aligned by local wall-clock time** (:func:`_align_time_rows`),
   telling the repeated 02:00 of a fall-back DST day apart from an ordinary row that was
   pasted twice by asking the *zone* whether that wall clock is genuinely ambiguous
@@ -33,6 +35,7 @@ via :meth:`ValidationContext.store_payload` — the table never rides the result
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -42,6 +45,7 @@ import openpyxl
 import structlog
 from pydantic import ValidationError
 
+from workbench_server.models.market import MARKETS, MarketSpec
 from workbench_server.models.reconciliation import (
     CellComparison,
     ExpectedValue,
@@ -101,6 +105,31 @@ def _currency_units(code: str) -> dict[str, Unit]:
     }
 
 
+#: The currencies an analyst types at this gate regardless of any market: Nord Pool
+#: publishes NO/SE/DK zone prices in both EUR and the local currency, so a model
+#: denominated in NOK/MWh must reconcile with a named x1000 rather than fall off the
+#: table as an "unknown unit".
+_ANALYST_CURRENCIES = ("EUR", "NOK", "SEK", "DKK")
+
+
+def currencies_for(markets: Iterable[MarketSpec]) -> tuple[str, ...]:
+    """Every currency :data:`UNIT_TO_BASE` must know, given a market catalog.
+
+    The catalog's own settlement currencies are **derived, not typed out a second
+    time**. ``services/market_check.py`` asks this table whether a bid file's price
+    column is denominated in the market's currency, so a catalog currency missing
+    here would not merely be a gap — it would make that check *unpassable*: a
+    correctly denominated ``price_pln_mwh`` column on a PLN market would be refused
+    as an unrecognised unit by a message recommending ``PLN/MWh``, the format the
+    analyst already used, with nothing pointing at the real cause. Deriving it is
+    what makes ``models/market.py``'s "adding a market is one row" true.
+
+    Order is stable and duplicate-free: the analyst set first, then catalog
+    currencies in catalog order.
+    """
+    return tuple(dict.fromkeys((*_ANALYST_CURRENCIES, *(market.currency for market in markets))))
+
+
 #: unit (upper-cased) → (dimension, factor to the dimension's base unit, currency).
 #: Two units are comparable iff they share a dimension **and**, when monetary, the
 #: same currency; the factor turns a value in the unit into the base unit (MWh for
@@ -108,18 +137,16 @@ def _currency_units(code: str) -> dict[str, Unit]:
 #: (kWh↔MWh, NOK/kWh↔NOK/MWh) therefore cannot happen by accident — it is a named,
 #: explicit multiply or it is a fail.
 #:
-#: The Nordic currencies are first-class, not an afterthought: Nord Pool publishes
-#: NO/SE/DK zone prices in both EUR and the local currency, and a model denominated
-#: in NOK/MWh is the normal case for this product's users — it must reconcile with a
-#: named x1000 like the EUR path does, not fall off the table as an "unknown unit".
-#: Deliberately hand-rolled rather than pulled from a units library: the whole value
-#: here is the *refusal* rules (dimension, currency), which a general converter would
-#: happily paper over.
+#: The Nordic currencies are first-class, not an afterthought (see
+#: :data:`_ANALYST_CURRENCIES`). Deliberately hand-rolled rather than pulled from a
+#: units library: the whole value here is the *refusal* rules (dimension, currency),
+#: which a general converter would happily paper over.
 #:
-#: GBP joined the list with the GB day-ahead market in the rules catalog
-#: (``models/market.py``): a currency a catalog entry settles in must never reach an
-#: analyst as "unknown unit" — the honest answer to a GBP column on a EUR market is
-#: the same principled cross-currency refusal the Nordic currencies already get.
+#: The monetary half is built by :func:`currencies_for` from the market-rules catalog
+#: (``models/market.py``), which is how GBP got here — a currency a catalog entry
+#: settles in must never reach an analyst as "unknown unit". The honest answer to a
+#: GBP column on a EUR market is the principled cross-currency refusal the Nordic
+#: currencies already get, and that answer is only available for a *known* unit.
 UNIT_TO_BASE: dict[str, Unit] = {
     "MWH": Unit("energy", 1.0),
     "KWH": Unit("energy", 1e-3),
@@ -131,11 +158,11 @@ UNIT_TO_BASE: dict[str, Unit] = {
     "W": Unit("power", 1e-6),
     "%": Unit("ratio", 1.0),
     "": Unit("dimensionless", 1.0),
-    **_currency_units("EUR"),
-    **_currency_units("NOK"),
-    **_currency_units("SEK"),
-    **_currency_units("DKK"),
-    **_currency_units("GBP"),
+    **{
+        unit: base
+        for code in currencies_for(MARKETS.values())
+        for unit, base in _currency_units(code).items()
+    },
 }
 
 

@@ -20,6 +20,9 @@ is the *domain* behaviour that has no analogue in a generic file linter:
 * ``MW`` against a 15-minute market time unit is a warn that names the factor of 4,
   and a NOK price column on a EUR market is the same **principled refusal**
   ``services/reconciliation.py`` makes — never an invented rate, never "unknown unit";
+* the catalog and that unit table cannot drift apart: a price column in *each* catalog
+  market's own currency passes, because the table's currencies are derived from the
+  catalog rather than restated beside it;
 * an artifact the check cannot parse is a stated ``fail``, never a pass;
 * the check registers into the production wiring, and one result stays inside a
   stated byte ceiling.
@@ -28,6 +31,8 @@ is the *domain* behaviour that has no analogue in a generic file linter:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -56,6 +61,7 @@ from workbench_server.services.market_check import (
     periods_in_local_day,
     split_header,
 )
+from workbench_server.services.reconciliation import UNIT_TO_BASE, currencies_for
 from workbench_server.services.validation import ValidationService
 
 OSLO = ZoneInfo("Europe/Oslo")
@@ -124,8 +130,16 @@ def oslo_spring_quarters() -> list[datetime]:
     return [datetime(2026, 3, 29, hour, minute) for hour in hours for minute in quarters]
 
 
+def local_periods(day: date, minutes: int) -> list[datetime]:
+    """Every delivery period of an *ordinary* local day at ``minutes`` resolution —
+    the generic form the per-market tests need, so a market added to the catalog is
+    covered without a hand-written fixture. DST days are written out instead."""
+    start = datetime.combine(day, time(0, 0))
+    return [start + timedelta(minutes=minutes * step) for step in range(24 * 60 // minutes)]
+
+
 def ordinary_hours(day: date) -> list[datetime]:
-    return [datetime.combine(day, time(hour, 0)) for hour in range(24)]
+    return local_periods(day, 60)
 
 
 def bid_rows(stamps: list[datetime], volume: float = 10.0) -> list[tuple[Any, ...]]:
@@ -716,6 +730,33 @@ async def test_a_price_in_the_market_currency_passes(tmp_path: Path) -> None:
     assert line(result, "price unit").outcome == "pass"
 
 
+@pytest.mark.parametrize("market_id", sorted(MARKETS))
+@pytest.mark.asyncio
+async def test_a_price_in_each_catalog_markets_own_currency_passes(
+    tmp_path: Path, market_id: str
+) -> None:
+    """The user-visible half of the catalog↔unit-table invariant, end to end for
+    *every* market the catalog carries rather than for the two written out above.
+
+    A market whose own settlement currency is not a known price unit has a price
+    check that can never pass: the column is correctly formatted and correctly
+    denominated, and the refusal recommends the format it already uses. Parametrised
+    over the catalog so a market added tomorrow is covered without a new test.
+    """
+    market = MARKETS[market_id]
+    row = market.resolution_for(date(2024, 6, 15))
+    assert row is not None, f"{market_id} does not vouch for an ordinary 2024 day"
+    stamps = local_periods(date(2024, 6, 15), RESOLUTION_MINUTES[row.resolution])
+    write_xlsx(
+        tmp_path / "bid.xlsx",
+        ["delivery_start", "volume_mwh", f"price_{market.currency.lower()}_mwh"],
+        bid_rows(stamps),
+    )
+    _, result = await run_check(tmp_path, hourly_spec(market=market_id, price_column="price"))
+    price = line(result, "price unit")
+    assert price.outcome == "pass", price.detail
+
+
 @pytest.mark.asyncio
 async def test_a_declared_unit_overrides_the_header(tmp_path: Path) -> None:
     write_xlsx(
@@ -920,3 +961,143 @@ def test_resolution_minutes_covers_every_resolution_the_catalog_uses() -> None:
     for market in MARKETS.values():
         for row in market.resolutions:
             assert row.resolution in RESOLUTION_MINUTES
+
+
+def test_the_unit_table_knows_every_currency_the_catalog_settles_in() -> None:
+    """The catalog's other cross-module dependency, and the one whose failure is
+    silent: ``services/reconciliation.py``'s unit table is what decides whether a bid
+    file's price column is denominated in the market's currency, so a catalog
+    currency it does not know makes that check permanently unpassable. Derived by
+    :func:`currencies_for` so it cannot drift; asserted here so un-deriving it fails
+    at catalog-edit time rather than in an analyst's evidence."""
+    for market in MARKETS.values():
+        for unit in (market.currency, f"{market.currency}/MWH", f"{market.currency}/KWH"):
+            assert unit in UNIT_TO_BASE, f"{market.id} settles in {market.currency}"
+        priced = UNIT_TO_BASE[f"{market.currency}/MWH"]
+        assert priced.dimension == "price_energy"
+        assert priced.currency == market.currency
+
+
+#: A third catalog market, in a currency the shipped unit table never listed, run in
+#: a **child interpreter**: the table is built from the catalog at import time, so the
+#: only faithful way to add a market is to add it before anything imports
+#: ``services/reconciliation.py`` — which is what a real row in ``MARKETS`` does and
+#: what monkeypatching the dict inside this suite cannot do. It is also the reason this
+#: is worth a subprocess: run the other way round it reproduces the pre-fix defect
+#: exactly, and the defect is not the polite one you would guess. ``split_header``
+#: asks the same table what a unit is, so ``price_pln_mwh`` splits as
+#: ``("price pln", "mwh")`` and the column cannot even be *found*: the whole check is
+#: blocked with "no column named 'price'… rename the header", about a header that is
+#: already correct.
+_THIRD_MARKET_SCRIPT = '''\
+"""Add a PLN market to the catalog, then validate a correct PLN bid file."""
+
+import asyncio
+import sys
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+
+import openpyxl
+
+from workbench_server.models.market import MARKETS, MarketSpec, ResolutionPeriod
+
+MARKETS["pl-day-ahead"] = MarketSpec(
+    id="pl-day-ahead",
+    label="PL day-ahead auction",
+    timezone="Europe/Warsaw",
+    currency="PLN",
+    day_ahead_gate_closure=time(10, 30),
+    intraday_lead_minutes=60,
+    resolutions=[ResolutionPeriod(effective_from=date(2020, 1, 1), resolution="PT60M")],
+    source="a third market, added the way a real one would be",
+)
+
+from workbench_server.models.market import MarketCheckSpec  # noqa: E402
+from workbench_server.models.validation import ValidationSpec, ValidationSubject  # noqa: E402
+from workbench_server.services.event_bus import EventBus  # noqa: E402
+from workbench_server.services.market_check import MarketRulesCheck  # noqa: E402
+from workbench_server.services.validation import ValidationService  # noqa: E402
+
+root = Path(sys.argv[1])
+book = openpyxl.Workbook()
+sheet = book.active
+sheet.append(["delivery_start", "volume_mwh", "price_pln_mwh"])
+midnight = datetime.combine(date(2024, 6, 15), time(0, 0))
+for step in range(24):
+    sheet.append([midnight + timedelta(hours=step), 10.0, 40.0])
+book.save(root / "bid.xlsx")
+
+
+async def main() -> None:
+    service = ValidationService(root, EventBus())
+    service.register(MarketRulesCheck())
+    spec = MarketCheckSpec(artifact="bid.xlsx", market="pl-day-ahead", price_column="price")
+    result = await service.run(
+        ValidationSpec(
+            subject=ValidationSubject(kind="file", ref="bid.xlsx", label="bid.xlsx"),
+            checks=["market_rules"],
+            params=spec.model_dump(),
+        )
+    )
+    for item in result.evidence:
+        print("VERDICT|" + item.outcome + "|" + item.label)
+
+
+asyncio.run(main())
+'''
+
+
+def test_a_third_catalog_market_validates_end_to_end(tmp_path: Path) -> None:
+    """The PR's claim, executed: adding a market is *one row* in the catalog.
+
+    A market settling in a currency nothing else in the tree mentions gets a clean
+    verdict on a correct bid file — no unrecognised unit, no unfindable column, and
+    no second edit in ``services/reconciliation.py`` that a future author would have
+    no way of knowing was owed. See :data:`_THIRD_MARKET_SCRIPT` for why it runs in a
+    child interpreter and what happens without the fix.
+    """
+    script = tmp_path / "third_market.py"
+    script.write_text(_THIRD_MARKET_SCRIPT, encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    done = subprocess.run(  # noqa: S603 - the arguments are this file's own literals
+        [sys.executable, str(script), str(workspace)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    verdicts = {
+        label: outcome
+        for _, outcome, label in (
+            out.split("|", 2) for out in done.stdout.splitlines() if out.startswith("VERDICT|")
+        )
+    }
+    assert verdicts, done.stdout + done.stderr
+    for needle in ("price unit", "delivery-period grid"):
+        matched = [label for label in verdicts if needle in label]
+        assert matched, list(verdicts)
+        assert verdicts[matched[0]] == "pass", verdicts
+
+
+def test_a_market_in_an_unlisted_currency_brings_its_own_price_units() -> None:
+    """The scenario the derivation exists for, on a currency the table never listed:
+    a third catalog entry settling in PLN registers PLN/MWh with it, instead of
+    needing a second edit in another module that nobody remembers to make."""
+    poland = MarketSpec(
+        id="pl-day-ahead",
+        label="PL day-ahead auction",
+        timezone="Europe/Warsaw",
+        currency="PLN",
+        day_ahead_gate_closure=time(10, 30),
+        intraday_lead_minutes=60,
+        resolutions=[ResolutionPeriod(effective_from=date(2020, 1, 1), resolution="PT60M")],
+        source="test",
+    )
+    shipped = currencies_for(MARKETS.values())
+    assert "PLN" not in shipped
+    with_poland = currencies_for([*MARKETS.values(), poland])
+    assert "PLN" in with_poland
+    # …and the currencies already there keep their place: adding a market appends.
+    assert with_poland[: len(shipped)] == shipped
