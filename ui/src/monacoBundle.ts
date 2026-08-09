@@ -79,6 +79,17 @@ import "monaco-editor/esm/vs/language/json/monaco.contribution";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 
+/**
+ * The ANVIL theme rides *this* chunk, and it is re-exported rather than imported
+ * by `monaco.ts` for the same reason everything else here is: `monaco.ts` is on
+ * the launch path (the store imports it), so an import of the colour tables
+ * there would put them in the entry chunk — a few kilobytes of editor palette
+ * parsed before the first pixel by a window that may never open a file. Reached
+ * from here they arrive with the editor, on one request, and `loadMonaco` takes
+ * the builder off this module as it lands.
+ */
+export { workbenchThemeData } from "./editorTheme";
+
 export type MonacoApi = typeof monaco;
 
 /**

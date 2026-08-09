@@ -38,11 +38,14 @@
 
 import Editor, { type OnMount } from "@monaco-editor/react";
 
+// `editorTheme` is the palette's module, off the launch path by construction
+// (`../editorTheme`). This component is only ever reached through `React.lazy`
+// behind `loadMonaco`, so importing it here costs the entry chunk nothing.
+import { editorFontOptions } from "../editorTheme";
 import {
   acquireModel,
   editorPathProp,
   languageForPath,
-  MONO_FONT,
   monacoThemeName,
   recallViewState,
   releaseModel,
@@ -157,9 +160,9 @@ export default function CodeEditor({ pane, file }: { pane: string; file: OpenFil
       }}
       loading={<div className="wb-editor-message">Loading editor…</div>}
       options={{
-        fontSize: 13,
-        lineHeight: 20,
-        fontFamily: MONO_FONT,
+        // Type from `--type-code`, not from two numbers repeated here
+        // (DESIGN.md §3; `../editorTheme.ts`).
+        ...editorFontOptions(),
         fontLigatures: false,
         minimap: { enabled: false },
         automaticLayout: true,
