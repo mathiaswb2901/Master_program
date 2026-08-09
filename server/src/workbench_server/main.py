@@ -147,7 +147,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # workspace by design — so without this every row of a working worker
         # would read "(outside the workspace)". Naming, not opening: the feed's
         # clickable target is still workspace-only (services/activity.py).
-        extra_roots=[("", worktree_service.root)],
+        #
+        # Asked for per call, not captured: the pool root is keyed on the
+        # workspace it serves, so it moves on every switch, and a copy taken
+        # here would be the old one for the rest of the process.
+        extra_roots=lambda: [("", worktree_service.root)],
     )
     ui_state_store = UiStateStore()
     # The in-app settings (M7 V8): the knobs that were environment variables, in

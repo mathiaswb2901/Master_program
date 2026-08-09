@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.activity import SessionActivityEvent
+from workbench_server.services import worktrees as worktrees_service
 from workbench_server.services.activity import (
     ACTIVITY_WINDOW_S,
     MAX_ENTRIES_PER_SESSION,
@@ -284,6 +285,81 @@ def test_a_path_outside_the_workspace_is_redacted_not_printed(tmp_path: Path) ->
     assert target is None
     assert summary == f"Read: {OUTSIDE_WORKSPACE}"
     assert "someone" not in summary
+
+
+def test_a_named_root_outside_the_workspace_is_named_but_never_clickable(tmp_path: Path) -> None:
+    """A Mission Control worker's cwd is a pooled slot, outside the workspace by
+    design, so without ``extra_roots`` every row of a working worker would read
+    ``(outside the workspace)``. Naming and opening are separate answers: the
+    slot is spelled out, and ``target`` — what the panel makes clickable — stays
+    ``None`` because the jail is not widened by it.
+    """
+    workspace = tmp_path / "ws"
+    pool = tmp_path / "pool"
+    summary, target = describe(
+        workspace,
+        workspace,
+        "Read",
+        {"file_path": str(pool / "slot-01" / "server" / "main.py")},
+        [("", pool)],
+    )
+    assert summary == "Read: slot-01/server/main.py"
+    assert target is None
+    # A path in neither the workspace nor a named root is still redacted.
+    outside, _ = describe(
+        workspace,
+        workspace,
+        "Read",
+        {"file_path": str(tmp_path / "elsewhere" / "x.py")},
+        [("", pool)],
+    )
+    assert outside == f"Read: {OUTSIDE_WORKSPACE}"
+
+
+def test_a_named_root_can_carry_a_label(tmp_path: Path) -> None:
+    """The label prefixes what the row shows, so two named roots stay tellable
+    apart. Production passes ``""`` — the pool root's own slot names already
+    read as slots."""
+    workspace = tmp_path / "ws"
+    pool = tmp_path / "pool"
+    summary, _ = describe(
+        workspace,
+        workspace,
+        "Read",
+        {"file_path": str(pool / "slot-01" / "a.py")},
+        [("pool", pool)],
+    )
+    assert summary == "Read: pool/slot-01/a.py"
+
+
+def test_the_feed_asks_for_its_named_roots_rather_than_remembering_them(tmp_path: Path) -> None:
+    """The pool root is itself workspace-derived and moves on every switch, so a
+    copy taken at construction is the old one for the rest of the process — the
+    same staleness as the jail, one indirection out. Asked for per call, it
+    cannot go stale and no re-rooting order has to be got right.
+    """
+    pool = tmp_path / "pool-alpha"
+    named = [("", pool)]
+    svc, _ = service(tmp_path, extra_roots=lambda: named)
+
+    def summary_for(call_id: str, path: Path) -> str:
+        svc.note_tool_started(
+            session_id="w1",
+            session_title="a worker",
+            folder=path.parent,
+            folder_relative=path.parent.as_posix(),
+            call_id=call_id,
+            tool="Read",
+            tool_input={"file_path": str(path)},
+        )
+        return svc.snapshot().sessions[0].entries[0].summary
+
+    assert summary_for("c1", pool / "slot-01" / "a.py") == "Read: slot-01/a.py"
+    moved = tmp_path / "pool-beta"
+    named[:] = [("", moved)]
+    assert summary_for("c2", moved / "slot-01" / "a.py") == "Read: slot-01/a.py"
+    # And the root it left is no more nameable than any other stranger's.
+    assert summary_for("c3", pool / "slot-01" / "a.py") == f"Read: {OUTSIDE_WORKSPACE}"
 
 
 def test_a_call_that_names_no_path_still_reads_as_something(tmp_path: Path) -> None:
@@ -625,6 +701,87 @@ async def test_a_session_re_announced_after_a_switch_is_not_also_reported_gone(
         assert [row.session_id for row in frame.sessions] == ["s1"]
     finally:
         await svc.stop()
+
+
+def test_a_switch_does_not_reshuffle_the_fleet_that_survives_it(tmp_path: Path) -> None:
+    """A survivor keeps the age it had, because that is what orders the panel.
+
+    Every survivor is re-announced inside one tick, so rebuilding the rows with
+    "now" stamps them all with the same instant and "most recently active first"
+    degrades to whatever order the announcements happened to arrive in — which
+    is iteration order over the session manager's map, not a reading of the
+    fleet. Here they come back oldest-first, which is exactly what that map can
+    give you.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    svc, _ = service(tmp_path)
+    svc.note_session(session_id="idle", title="idle for hours", folder="")
+    svc.note_session(session_id="busy", title="just worked", folder="")
+    assert [row.session_id for row in svc.snapshot().sessions] == ["busy", "idle"]
+
+    svc.set_workspace_root(elsewhere)
+    svc.note_session(session_id="idle", title="idle for hours", folder="")
+    svc.note_session(session_id="busy", title="just worked", folder="")
+    assert [row.session_id for row in svc.snapshot().sessions] == ["busy", "idle"]
+
+
+def test_a_worker_row_still_names_its_slot_after_a_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The naming half of the re-rooting rule, one indirection out.
+
+    A Mission Control worker's cwd is a pooled slot outside the workspace, so
+    the feed is handed the worktree pool root as a root it may *name*. That root
+    is itself keyed on the workspace (``default_pool_root``) and ``WorktreeService``
+    moves it on every switch — so a feed holding a copy of it answers
+    ``(outside the workspace)`` for every worker row afterwards, which is this
+    PR's own bug wearing a different hat.
+
+    Driven through ``create_app`` rather than a hand-wired service because the
+    thing that can regress is the *wiring*: a snapshot in ``main.py`` reads
+    identically to a provider until a switch happens. And it is the wiring that
+    makes re-deriving in ``set_workspace_root`` insufficient — ``WorktreeService``
+    is an async rootable, so at that moment the pool has not moved yet.
+    """
+    monkeypatch.setattr(worktrees_service, "app_data_dir", lambda: tmp_path / "appdata")
+    alpha, beta = _two_projects(tmp_path)
+    app = _switching_app(alpha, tmp_path)
+    with TestClient(app) as client:
+        portal = client.portal
+        assert portal is not None
+
+        def worker_reads(session_id: str, call_id: str) -> str:
+            """One worker's announced tool call, made *on the loop* — which is
+            where a real session makes it, and what keeps the assertion below
+            about the fix rather than about thread scheduling."""
+            slot = app.state.worktrees.root / "slot-01"
+
+            def note() -> None:
+                app.state.activity.note_tool_started(
+                    session_id=session_id,
+                    session_title="a worker",
+                    folder=slot,
+                    folder_relative=slot.as_posix(),
+                    call_id=call_id,
+                    tool="Read",
+                    tool_input={"file_path": str(slot / "server" / "main.py")},
+                )
+
+            portal.call(note)
+            return str(_rows(client)[session_id]["entries"][0]["summary"])
+
+        pool_before = app.state.worktrees.root
+        assert worker_reads("w1", "c1") == "Read: slot-01/server/main.py"
+
+        assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+        # Without this the test would pass on the bug: an unmoved pool root is
+        # nameable by a stale copy of itself.
+        assert app.state.worktrees.root != pool_before
+
+        assert (
+            worker_reads("w2", "c2") == "Read: slot-01/server/main.py"
+        ), "the feed is still naming the pool of the workspace the user left"
 
 
 def test_a_switch_re_jails_the_feed_against_the_new_workspace(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ to keep serving a workspace the user has left.
 import asyncio
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -486,15 +487,32 @@ def test_no_service_the_app_built_still_holds_the_root_the_user_left(tmp_path: P
     built and asserts that after a real switch nothing still holds the previous
     root.
 
-    Deliberately narrow: equality with the *old root* is the whole test, because
-    that is the one shape the rule is about. A path merely derived from it (a
-    ``.workbench`` file under it) is not caught here, and a service that stores
-    no path at all is not accused of anything.
+    Narrow in one dimension and deliberately not in the other. **Equality with
+    the old root** is the whole criterion: a path merely *derived* from it (a
+    ``.workbench`` file under it, or a pool directory keyed on it) is not caught
+    here, and a service that stores no path at all is not accused of anything.
+    But **where** that path sits is not narrowed — a field holding a bare
+    ``Path`` and a field holding ``[("", Path)]`` are the same mistake, and the
+    activity feed shipped both. A sweep that only read bare fields would have
+    walked past the second one.
     """
     alpha, beta = _two_projects(tmp_path)
     app = create_app(Settings(workspace_root=alpha, app_data_root=tmp_path / "appdata"))
     with TestClient(app) as client:
         assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+
+    def paths_in(value: object) -> Iterator[Path]:
+        """Every ``Path`` a field holds, through the plain containers a service
+        keeps them in. Not a general object walk: it descends the builtin
+        collections and stops, so it cannot wander into somebody's cache."""
+        if isinstance(value, Path):
+            yield value
+        elif isinstance(value, list | tuple | set | frozenset):
+            for item in value:
+                yield from paths_in(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from paths_in(item)
 
     # Starlette keeps `app.state`'s contents in a plain dict, and reading it is
     # the point: a sweep over a list of services someone remembered to name here
@@ -507,7 +525,7 @@ def test_no_service_the_app_built_still_holds_the_root_the_user_left(tmp_path: P
         # a record of how this process was started and is meant to keep saying so.
         if name != "settings" and hasattr(service, "__dict__")
         for field, value in vars(service).items()
-        if isinstance(value, Path) and value == alpha
+        if any(path == alpha for path in paths_in(value))
     )
     assert stale == [], f"still rooted in the workspace the user left: {stale}"
 
