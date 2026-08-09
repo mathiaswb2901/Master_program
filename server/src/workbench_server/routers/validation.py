@@ -1,14 +1,21 @@
 """Validation REST API. Thin: the service owns the checks and the map."""
 
+import structlog
 from fastapi import APIRouter, HTTPException, Request
 
+from workbench_server.models.evidence import EvidencePayload
+from workbench_server.models.gates import GateLog
+from workbench_server.models.reconciliation import ReconciliationReport
 from workbench_server.models.validation import (
     ApproveRequest,
+    EvidenceKind,
     ValidationResult,
     ValidationResults,
     ValidationSpec,
 )
 from workbench_server.services.validation import ValidationService
+
+log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/validation", tags=["validation"])
 
@@ -35,6 +42,34 @@ async def results(request: Request) -> ValidationResults:
     validated yet, and it is also what a restart reports — in-memory only.
     """
     return _service(request).snapshot()
+
+
+@router.get("/payload/{kind}/{ref}")
+async def payload(request: Request, kind: EvidenceKind, ref: str) -> EvidencePayload:
+    """The detail behind one ``EvidenceItem.payload_ref``.
+
+    The gap the #82 frame left: it stored payloads in a bounded per-kind LRU and
+    shipped no way to redeem the reference, so ``payload_ref`` was a dead handle
+    in the browser. Survivable for reconciliation (the grouped line carries the
+    counts); not for a toolchain gate, whose *entire* value is the captured log.
+
+    **404 once the LRU has dropped it** — the store is bounded and honest about
+    it, and the Review panel renders that as "this log has been evicted" rather
+    than a spinner that never resolves. Declared above ``/{validation_id}`` so
+    the reading order matches the routing.
+    """
+    found = _service(request).payload(kind, ref)
+    if found is None:
+        raise HTTPException(status_code=404, detail="unknown or evicted payload")
+    if isinstance(found, ReconciliationReport):
+        return EvidencePayload(kind=kind, ref=ref, reconciliation=found)
+    if isinstance(found, GateLog):
+        return EvidencePayload(kind=kind, ref=ref, gate_log=found)
+    # A payload shape this build has no field for. Refused rather than returned
+    # as an envelope with every field null, which a client can only read as
+    # either "empty" or "broken" — the emptiness AXI shape 2 exists to forbid.
+    log.warning("validation.payload_unrenderable", kind=kind, ref=ref, shape=type(found).__name__)
+    raise HTTPException(status_code=404, detail="no payload shape this server can render")
 
 
 @router.get("/{validation_id}")
