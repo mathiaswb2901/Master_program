@@ -49,7 +49,7 @@
 import { publishCommandManifest, reportCommandResult } from "./api";
 import { paramsSchema, validateParams } from "./commandParams";
 import type { Command } from "./commands";
-import { isBindableFromFile, isRelayInvocable } from "./registry";
+import { isRelayInvocable } from "./registry";
 import type { WorkbenchTool } from "./registry";
 import type {
   CommandInvokeEvent,
@@ -112,6 +112,19 @@ export interface CommandOutcome {
  * `relayRequiresParams` case — is where that flag stops being a claim and starts
  * being enforced. An empty `params` on one of those is the bare gesture wearing
  * a schema, and it is refused here, not narrowed later.
+ *
+ * **That refusal reads the flag itself**, not `isBindableFromFile`. The two
+ * happen to select the same two commands today — both of PR-E's
+ * `relayRequiresParams` declarations are also denied by the from-file bar — but
+ * they are logically independent, and testing the wrong one is a refusal that
+ * evaporates the moment a command is both safe enough to be bindable from a
+ * file *and* declares that the relay may only invoke it with arguments. Such a
+ * command would fall straight through to `validateParams`, which passes an empty
+ * object whenever every field is optional, and `run({})` would be the bare
+ * gesture the flag exists to forbid. Reading `declared.relayRequiresParams` is
+ * strictly wider than the old check — anything not bindable from file has
+ * already been refused above by `isRelayInvocable` unless it set the flag — so
+ * nothing that was refused becomes runnable.
  */
 export function executeCommandById(
   id: string,
@@ -135,7 +148,7 @@ export function executeCommandById(
   }
   let values: Record<string, string> | undefined;
   if (declared !== undefined) {
-    if (Object.keys(params).length === 0 && !isBindableFromFile(command)) {
+    if (Object.keys(params).length === 0 && declared.relayRequiresParams === true) {
       const names = declared.fields.map((field) => field.name).join(", ");
       return { ok: false, detail: `“${id}” may only be invoked from outside with: ${names}` };
     }

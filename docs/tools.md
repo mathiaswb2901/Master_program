@@ -155,6 +155,19 @@ opens a folder dialog onto the whole filesystem, `{path}` is refused unless the 
 the recent list. A `shortcuts.md` file is unaffected either way; it binds a chord, and a
 chord carries nothing.
 
+The flag is also what that refusal *reads*. The two commands carrying it today are both
+denied by `isBindableFromFile` as well, so keying the refusal to the from-file bar would
+look right and enforce nothing: set `relayRequiresParams` on a command safe enough to be
+bindable from a file and the bare invoke would fall through to the validator, which passes
+an empty object whenever every field is optional. Declare the flag and the bare gesture is
+refused — whatever the from-file bar happens to say about the same id.
+
+**A path argument is compared case- and separator-insensitively**, matching
+`os.path.normcase` server-side. The recent list is Python's `str(Path(...))` — backslashes
+on Windows — while a hand-written `routine.json` says `C:/work/alpha`, because JSON makes
+you double a backslash. Both name one workspace, and the command still switches to the
+list's own canonical string.
+
 ## Tooltips name their chord — and ask the registry for it
 
 If your capability puts a control on screen for something that also has a chord, its

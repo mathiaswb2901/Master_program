@@ -17,6 +17,10 @@
  *     drives a folder that exists, is readable, and is inside the workspace —
  *     and it is refused, because the user never opened it *as* a workspace. A
  *     path off the recent list is not resolved, and the window does not move.
+ *     The first test drives the other half: a folder that *is* on the list,
+ *     written with forward slashes the way a hand-written `routine.json` writes
+ *     a Windows path, is accepted. The recent list is Python's backslashes, so a
+ *     match on case alone refused the window's own workspace.
  *  3. **The batch mode is the feature.** The four-op script is measured against
  *     four separate invocations of the same binary; the assertion is on the
  *     ratio, because otherwise `--script` is a refactor with a flag.
@@ -167,9 +171,19 @@ test("one script puts the window into the morning arrangement", async ({ page })
     expect(lines).toContain("panel.terminal :: Focus Terminal panel");
   });
 
+  // **Written the way a person writes a Windows path in JSON.** The recent list
+  // holds what Python's `str(Path(...))` produced — always backslashes — but a
+  // backslash has to be doubled inside a JSON string, so the idiomatic
+  // `routine.json` says `C:/work/alpha`. It is the same folder, and the routine
+  // has to agree: matching on a lower-cased string alone made it a different one
+  // and refused the window's own current workspace as "not on the recent list",
+  // stopping the script at op 1. On a POSIX root this line is a no-op and the
+  // op is unchanged.
+  const recentRootAsWritten = recentRoot.replace(/\\/g, "/");
+
   const routine = JSON.stringify({
     ops: [
-      { command_id: "workspace.open", params: { path: recentRoot } },
+      { command_id: "workspace.open", params: { path: recentRootAsWritten } },
       { command_id: "layout.switch", params: { name: MORNING } },
       { command_id: "panel.agent" },
       { command_id: "session.start", params: { prompt: PROMPT, cwd: SRC_DIR } },

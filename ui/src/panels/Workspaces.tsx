@@ -140,9 +140,27 @@ const toast = (kind: "error" | "warn" | "info" | "success", message: string): vo
 const detailOf = (err: unknown): string =>
   err instanceof api.ApiError ? err.detail : err instanceof Error ? err.message : String(err);
 
-/** Same key everywhere: a workspace is its path, case-insensitively, because
- * Windows paths are. Mirrors `RecentsStore._key` server-side. */
-const samePath = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+/**
+ * Same key everywhere: a workspace is its path, case-folded *and* separator-
+ * folded. Mirrors `RecentsStore._key` server-side, which is `os.path.normcase`
+ * — and on Windows `normcase` does both, which is the half this used to miss.
+ *
+ * Case alone is not enough because the two sides are written by different hands.
+ * Every path in `recents` was produced by Python's `str(Path(...))` on Windows,
+ * so it always comes back with backslashes (`C:\Users\alice\work`). The paths
+ * *compared against* it need not: a `--script` routine is JSON, and the
+ * idiomatic way to write a Windows path in JSON is with forward slashes,
+ * because a backslash has to be doubled. `{"path": "C:/Users/alice/work"}` is
+ * the same folder, and lower-casing alone made it a different one — so
+ * `openRecentWorkspace` refused the user's own current workspace with "not on
+ * the recent workspaces list", stopping the routine at that op.
+ *
+ * Folding `/` to `\` rather than the reverse matches `normcase`'s direction, so
+ * the two ends agree byte for byte about what one workspace is.
+ */
+const pathKey = (path: string): string => path.replace(/\//g, "\\").toLowerCase();
+
+const samePath = (a: string, b: string): boolean => pathKey(a) === pathKey(b);
 
 // ---- adopting a workspace ---------------------------------------------------
 
@@ -292,6 +310,13 @@ export function requestWorkspaceSwitch(path: string, onSwitched?: () => void): v
  * person at the keyboard choosing a folder is a different threat model from an
  * unattended process reaching in, and pretending otherwise would be a worse
  * product for no more safety.
+ *
+ * Membership is decided by `samePath`, so the caller may write the path in
+ * either slash direction — `C:/work/alpha` and `C:\work\alpha` name the same
+ * recent. That is not a widening: the *set* is unchanged, and the switch is
+ * still handed `match.path`, the server's own canonical string. It is what makes
+ * the narrowing survive contact with JSON, where a backslash must be doubled and
+ * so almost nobody writes one.
  */
 export function openRecentWorkspace(path: string): void {
   const trimmed = path.trim();

@@ -160,6 +160,47 @@ describe("the command relay's window half", () => {
     expect(wrongType.detail).toContain("must be a string");
   });
 
+  it("refuses the bare gesture on the flag, not on a check that happens to agree", () => {
+    // A *hypothetical* command the shipped set does not contain: safe enough to
+    // be bindable from a `shortcuts.md` file (no `unsafeFromFile`, not on the
+    // denylist) and also declaring that the relay may only invoke it with
+    // arguments. Today's two `relayRequiresParams` commands are both denied by
+    // the from-file bar as well, so a refusal keyed to *that* would look correct
+    // while enforcing nothing — and this command, whose one field is optional,
+    // would sail through `validateParams` and reach `run({})`.
+    const ran = vi.fn();
+    const hypothetical = {
+      id: "report.export",
+      title: "Export the report",
+      category: "Test",
+      params: {
+        fields: [{ name: "format", required: false, detail: "pdf or html" }],
+        relayRequiresParams: true,
+      },
+      run: ran,
+    };
+    const bare = executeCommandById("report.export", [hypothetical]);
+    expect(bare.ok).toBe(false);
+    expect(bare.detail).toContain("may only be invoked from outside with: format");
+    expect(ran).not.toHaveBeenCalled();
+
+    // …and with the argument it insisted on, it runs.
+    const armed = executeCommandById("report.export", [hypothetical], { format: "pdf" });
+    expect(armed.ok).toBe(true);
+    expect(ran).toHaveBeenCalledWith({ format: "pdf" });
+  });
+
+  it("leaves a parameterised command that did not set the flag alone", () => {
+    // The other side of the same asymmetry: `layout.switch` is bindable from a
+    // file and sets no `relayRequiresParams`, so an empty invoke must reach the
+    // ordinary validator and be refused for the *missing field* — not by the
+    // bare-gesture rule, which it never opted into.
+    const outcome = executeCommandById("layout.switch", builtinCommands(), {});
+    expect(outcome.ok).toBe(false);
+    expect(outcome.detail).toContain("needs “name”");
+    expect(outcome.detail).not.toContain("may only be invoked from outside");
+  });
+
   it("refuses arguments to a command that declared none", () => {
     const before = mocks.state.toggleTheme.mock.calls.length;
     const outcome = executeCommandById("view.toggleTheme", builtinCommands(), { dark: "yes" });
