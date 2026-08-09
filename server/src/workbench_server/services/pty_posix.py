@@ -32,6 +32,43 @@ reason: an unset `TERM` makes readline and every curses program degrade.
   (`winpty.PtyProcess.terminate` is signals plus bounded sleeps), and this keeps
   the two backends honest about the same worst case.
 
+* **Terminating signals process *groups*, never just the pid.** `pty.fork()`
+  calls `setsid()`, so the shell is a session and group leader and every command
+  the user runs is inside that session. Signalling `self.pid` alone kills the
+  shell and leaves what it was running — the build, the `ssh`, the dev server —
+  alive with no terminal and no parent, for the life of the box. The kernel does
+  not close that gap: when a session leader dies its only cleanup is a **SIGHUP
+  to the terminal's foreground group**, and SIGHUP is precisely what a
+  long-running job is likely to have opted out of (`nohup`, a handler of its own,
+  a `trap '' HUP` to survive a dropped connection).
+
+  So `terminate` signals two groups, with the same HUP/KILL ladder and the same
+  bounded reap as before — only the *target* changed:
+
+  - the terminal's current **foreground group** (`TIOCGPGRP` on the master),
+    which is the running job's own group once an interactive shell has done job
+    control, and
+  - the child's **own group**, which is where its children are when job control
+    is off — a non-interactive shell, `set +m`, a shell that has none.
+
+  In that order: the shell's death is free to empty its group, and an emptied
+  group's number is free to be reused, so the job is signalled while its group is
+  still demonstrably the job's. Two guards make it safe to point SIGKILL at a
+  group at all — **never a group that is ours** (`getpgid(0)`; a child sharing
+  our group would mean `setsid` did not happen, and the kill would take uvicorn
+  and every other terminal with it) and never the same group twice. Any refusal
+  from the kernel (`ESRCH`: the group is gone; `EPERM`: it was never ours) falls
+  back to the pid path rather than leaving the child unsignalled, and nothing
+  here raises out of `terminate` — `routers/terminal.py` calls it from a
+  `finally:`.
+
+  What is still outside the blast radius, stated rather than implied: a
+  **background** job (`make &`) sits in a third group that is neither of these,
+  a child that called `setsid` itself has left the session entirely, and a shell
+  that exited on its own before the pane closed is never signalled at all
+  (`isalive()` short-circuits). Those need a session-wide sweep, which is not
+  portable in the way these two calls are.
+
 * **The master fd has exactly one owner, and it is claimed under a lock.** This
   class is driven from *two* threads: `read` blocks in a worker thread
   (`PtySession.read` -> `asyncio.to_thread`) while `terminate`, `write` and
@@ -346,13 +383,88 @@ class PosixPty:
         self._exit_status = status
         return False
 
+    def _child_group(self) -> int | None:
+        """The child's own process group, or None if it is not safe to signal.
+
+        `pty.fork()` calls `setsid()`, so a healthy child is a session and group
+        leader and this is its own pid. The comparison against our own group is
+        not ceremony: if the fork path ever stopped calling `setsid` the child
+        would share the server's group, and a group SIGKILL would take uvicorn,
+        this process and every other terminal down with one closed pane. Anything
+        that is not demonstrably the child's own group falls back to the pid.
+        """
+        try:
+            pgid = self._sys.getpgid(self.pid)
+            ours = self._sys.getpgid(0)
+        except OSError:  # the child is gone; the pid path will find that out too
+            log.debug("pty.posix_no_child_group", pid=self.pid)
+            return None
+        if pgid <= 0 or pgid == ours:
+            log.warning("pty.posix_child_shares_our_group", pid=self.pid, pgid=pgid)
+            return None
+        return pgid
+
+    def _foreground_group(self, child_pgid: int | None) -> int | None:
+        """The group the terminal is giving the keyboard to — the *running job*.
+
+        An interactive shell puts every job it starts in a process group of its
+        own, so the shell's group holds nothing but the shell and killing it
+        leaves the build the user was running untouched. This is the group that
+        has it.
+
+        The number is safe to signal because of where it comes from: a tty's
+        foreground group is by construction inside that tty's session, this tty
+        is one we created for this child, and the kernel pins the number for as
+        long as the tty holds it, so it cannot have been recycled onto something
+        else. The two guards that remain are the two that matter — never our own
+        group, and never a group already covered by the child's.
+
+        A kernel that will not answer `TIOCGPGRP` from the master side raises,
+        and that is a degradation (the child's own group is still signalled), not
+        a failure.
+        """
+        with self._borrow_fd() as fd:
+            if fd == -1:  # the reader already released the master; nothing to ask
+                return None
+            try:
+                pgid = self._sys.foreground_pgid(fd)
+                ours = self._sys.getpgid(0)
+            except OSError:
+                log.debug("pty.posix_no_foreground_group", pid=self.pid)
+                return None
+        if pgid <= 0 or pgid in (ours, child_pgid):  # unset, ours, or already covered
+            return None
+        return pgid
+
+    def _killpg(self, pgid: int, *, force: bool) -> bool:
+        """Signal one group; False when the kernel refused (ESRCH/EPERM)."""
+        try:
+            self._sys.killpg(pgid, force=force)
+        except OSError as exc:
+            log.debug("pty.posix_killpg_refused", pid=self.pid, pgid=pgid, error=str(exc))
+            return False
+        return True
+
+    def _signal(self, *, force: bool) -> None:
+        """Signal the job, then the shell's group — or the bare pid if neither took.
+
+        Raises whatever the pid-level `kill` raises, which `terminate` reads as
+        the child having exited between the liveness check and the signal.
+        """
+        child_pgid = self._child_group()
+        job_pgid = self._foreground_group(child_pgid)
+        if job_pgid is not None:
+            self._killpg(job_pgid, force=force)
+        if child_pgid is None or not self._killpg(child_pgid, force=force):
+            self._sys.kill(self.pid, force=force)
+
     def terminate(self, force: bool = False) -> bool:
-        """Signal the child and reap it; `force` is SIGKILL, else SIGHUP."""
+        """Signal the child's process groups and reap it; `force` is SIGKILL, else SIGHUP."""
         if not self.isalive():
             self._close_fd()
             return True
         try:
-            self._sys.kill(self.pid, force=force)
+            self._signal(force=force)
         except OSError:  # exited between the check and the signal
             # It is gone and nothing will signal it again, so it has to be
             # waited on *here* — the manager has already dropped this session,
