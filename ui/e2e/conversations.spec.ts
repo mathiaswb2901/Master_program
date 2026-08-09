@@ -31,7 +31,7 @@ import path from "node:path";
 import { expect, request, test, type Locator, type Page } from "@playwright/test";
 
 import type { LayoutsResponse } from "../src/types";
-import { openApp, treeItem, typeInEditor } from "./app";
+import { openApp, settledStyle, tokenColor, treeItem, typeInEditor } from "./app";
 import {
   CONV_GONE_KEY,
   CONV_GONE_TITLE,
@@ -152,7 +152,20 @@ test.describe.serial("the conversation browser", () => {
       // on the way in) rather than blocked, and it says so in words (§7).
       await expect(outside).toHaveClass(/is-switch/);
       await expect(outside).not.toHaveClass(/is-blocked/);
-      await expect(outside.locator(".wb-conv-switch")).toBeVisible();
+      const marker = outside.locator(".wb-conv-switch");
+      await expect(marker).toBeVisible();
+      // …and it is an outlined neutral, not amber. A row is outside the
+      // workspace for as long as the workspace is what it is, so this marker is
+      // still true when you look away — and a browser can put a column of them
+      // on screen at once. Standing amber is what §2.4 spends the one colour
+      // that has to mean *now* on nothing. Read from what the browser computed,
+      // because that is the thing the rule is about.
+      const color = await settledStyle(marker, "color");
+      const border = await settledStyle(marker, "border-top-color");
+      const accent = await tokenColor(page, "--accent");
+      expect(color).not.toBe(accent);
+      expect(border).not.toBe(accent);
+      expect(color).toBe(await tokenColor(page, "--text-secondary"));
       // The reason is on the folder, in words, next to the conversation.
       const reasons = await page.locator(".wb-conv-reason").allTextContents();
       expect(reasons.join(" ")).toContain("Outside this workspace");
