@@ -69,9 +69,12 @@ not a default that a future release might quietly flip:
   *zero* network requests, because that is a safety property only a real browser can
   prove.
 - **Anything that would change this ships off by default and behind explicit consent**,
-  and says so in plain words. That is why the planned voice input transcribes locally
+  and says so in plain words. That is why voice input transcribes **on your machine**
   rather than using the browser speech API, which streams your microphone to a cloud
-  vendor.
+  vendor. What ships today is the wiring plus a scripted stand-in
+  (`WORKBENCH_VOICE_FAKE=1`); the local transcriber is not bundled, and
+  `GET /api/voice/capabilities` says plainly that voice is unavailable rather than
+  quietly reaching for a cloud one. There is no setting that would add a cloud path.
 
 You do not have to take this on faith. There is no analytics, telemetry, or updater
 dependency in `pyproject.toml`, `ui/package.json` or `desktop/src-tauri/Cargo.toml`;
