@@ -84,4 +84,15 @@ test("New document from the tree menu writes a valid OOXML PowerPoint", async ({
   const bytes = fs.readFileSync(workspacePath(PPTX_FILE));
   expect(bytes.length).toBeGreaterThan(1000);
   expect(bytes.subarray(0, 2).toString("latin1")).toBe("PK");
+
+  // Give the one PowerPoint back. A docked deck holds the single instance the
+  // application gives out for as long as its tab is open — the server reports
+  // that in `capabilities().kind_notes`, so a deck left open here would send
+  // every later journey in the run to a preview. Closing the tab is what a user
+  // does with a document they are finished with, and it is what fires the host's
+  // `close`. The suite shares one server; this is the hygiene that costs.
+  await page.getByRole("button", { name: "Close newdoc-deck.pptx" }).click();
+  await expect(
+    page.locator(".wb-editor-tab").filter({ hasText: "newdoc-deck.pptx" }),
+  ).toHaveCount(0);
 });
