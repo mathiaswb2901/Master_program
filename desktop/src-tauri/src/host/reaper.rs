@@ -97,8 +97,11 @@ pub(super) fn reap(process: GuestProcess, then: impl FnOnce() + Send + 'static) 
 /// supplies a `spawn` that refuses, and checks the continuation ran anyway and
 /// within the bound — see
 /// `hosting_tests::a_reaper_thread_that_never_starts_still_hands_the_keyboard_back`.
-pub(super) fn reap_with<S>(mut process: GuestProcess, then: Box<dyn FnOnce() + Send + 'static>, spawn: S)
-where
+pub(super) fn reap_with<S>(
+    mut process: GuestProcess,
+    then: Box<dyn FnOnce() + Send + 'static>,
+    spawn: S,
+) where
     S: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> io::Result<()>,
 {
     // Condemned on the calling thread, deliberately: whatever the reaper thread
@@ -122,11 +125,16 @@ where
     }));
 
     let unhanded = match started {
-        Ok(()) => tx
-            .send((process, then))
-            .err()
-            .map(|err| ("the reaper thread was gone before it could be handed the instance".to_string(), err.0)),
-        Err(err) => Some((format!("no thread to wait out a closed guest: {err}"), (process, then))),
+        Ok(()) => tx.send((process, then)).err().map(|err| {
+            (
+                "the reaper thread was gone before it could be handed the instance".to_string(),
+                err.0,
+            )
+        }),
+        Err(err) => Some((
+            format!("no thread to wait out a closed guest: {err}"),
+            (process, then),
+        )),
     };
     let Some((why, (mut process, then))) = unhanded else {
         return;
