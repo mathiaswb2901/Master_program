@@ -35,12 +35,22 @@ agent wrote. A session with no slot gets a **refusal**, never a fallback to the
 live workspace root: running ``pytest`` there would write caches into the folder
 the user is editing and judge a tree that includes their unsaved changes.
 
-**3. The tree is fingerprinted before and after.** ``git rev-parse HEAD`` plus
-the ``--porcelain`` count, on both sides. If either moved, the whole run is
-``skipped`` — never a pass or a fail attributed to a tree that no longer exists.
-This is ``_verify_reset``'s posture in ``services/worktrees.py`` applied one
-level up: two git processes with a gap between them means you re-read rather than
-hope. Silent green is the enemy this milestone exists to kill.
+**3. The tree is fingerprinted before and after — on its bytes, not its shape.**
+``git rev-parse HEAD`` plus a digest of the *contents* of every path that
+differs from ``HEAD`` or is untracked (:func:`content_digest`). If either side
+moved, the whole run is ``skipped`` — never a pass or a fail attributed to a tree
+that no longer exists. This is ``_verify_reset``'s posture in
+``services/worktrees.py`` applied one level up: two git processes with a gap
+between them means you re-read rather than hope.
+
+A *count* of dirty files would not do, and the reason is the likeliest way this
+guard gets tested in production: no lease is taken here by design, so the
+session that owns the slot keeps writing to it while the gates read it. A file
+that was already dirty when the run started and is still being saved into leaves
+``HEAD`` unchanged and the file count identical, and a run that compared only
+those two numbers would report an ordinary pass over bytes that are no longer
+there. Silent green is the enemy this milestone exists to kill, and that is the
+door it would walk in through.
 
 **4. The log is bounded while the pipes drain.** :class:`_BoundedCapture` keeps a
 head buffer and a ring tail as output arrives, so a gate that prints 500 MB costs
@@ -57,7 +67,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
+import shutil
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -70,6 +82,7 @@ from pydantic import ValidationError
 
 from workbench_server.models.gates import (
     MAX_GATE_LOG_BYTES,
+    MAX_GATES_PER_RUN,
     GateCommand,
     GateLog,
     GateRunReport,
@@ -82,6 +95,36 @@ from workbench_server.services.validation import ValidationContext
 from workbench_server.services.worktrees import GIT_TIMEOUT_S, GitError, GitRunner, run_git
 
 log = structlog.get_logger()
+
+
+def launcher(name: str) -> str:
+    """The executable ``create_subprocess_exec`` should be handed for ``name``.
+
+    Windows-first, and this is one of the few places the difference is not
+    cosmetic. Every gate is started through ``create_subprocess_exec`` and never
+    a shell — which is the whole no-injection story — but a shell is also what
+    normally does the ``PATHEXT`` search. ``CreateProcess`` does not: given an
+    extension-less name it appends ``.exe`` and looks for nothing else. Node
+    ships npm on Windows as ``npm.cmd``, so a bare ``"npm"`` argv is a gate that
+    can *never* start there — it fails with "could not start" on every run,
+    marking the UI suite permanently red whatever that suite actually says.
+
+    ``shutil.which`` performs the real ``PATHEXT`` lookup and hands back the full
+    path, so the resolved argv is also self-describing in the evidence. When it
+    finds nothing we still name the file a Windows box would have had, so the
+    failure a developer reads is "npm is not installed" rather than a puzzle
+    about extensions.
+
+    Applied where it is needed rather than everywhere: ``uv`` and ``git`` really
+    are ``.exe`` on Windows, so a bare name resolves for them exactly as it does
+    on POSIX, and resolving them would only bake a machine-specific path into
+    evidence that reads better without one.
+    """
+    found = shutil.which(name)
+    if found is not None:
+        return found
+    return f"{name}.cmd" if os.name == "nt" else name
+
 
 #: The built-in catalog. Server-owned data: an operator picks *which* of these
 #: run and how long they may take, and nobody — REST caller or agent — supplies
@@ -111,7 +154,9 @@ GATE_CATALOG: tuple[GateCommand, ...] = (
     ),
     GateCommand(
         id="npm-test",
-        argv=("npm", "--prefix", "ui", "run", "test"),
+        # Resolved, not bare: see :func:`launcher`. On Windows npm is a ``.cmd``
+        # shim and an extension-less argv[0] cannot be started at all.
+        argv=(launcher("npm"), "--prefix", "ui", "run", "test"),
         label="npm run test (ui)",
         timeout_s=900.0,
     ),
@@ -426,12 +471,84 @@ def workspace_config_refusal(*roots: Path) -> EvidenceItem | None:
 # ---- the fingerprint ----------------------------------------------------------
 
 
+#: Bytes of dirty file content one fingerprint reads before it stops hashing
+#: bytes and falls back to size-and-timestamp for whatever is left.
+#:
+#: A budget rather than a per-file cap because the thing worth bounding is the
+#: work, and a slot mid-change is a handful of source files — kilobytes, read
+#: twice per gate run against a ``pytest`` that takes minutes. The ceiling only
+#: engages on a tree nobody should be gating (a multi-gigabyte untracked build
+#: output), and even then the digest keeps every path's size and timestamp, so
+#: it degrades to the coarser answer rather than to no answer.
+FINGERPRINT_READ_BUDGET = 16 * 1024 * 1024
+
+#: Bytes pulled per read while folding a dirty file into the digest.
+_HASH_CHUNK = 1 << 16
+
+
 @dataclass(frozen=True)
 class _Fingerprint:
-    """What a checkout looked like at one instant: its commit and its dirt."""
+    """What a checkout looked like at one instant: its commit, and its bytes.
+
+    :attr:`dirty` is a number for a sentence to quote and nothing more. What the
+    equality check turns on is :attr:`content`, because a *count* is identical
+    across the exact case this guard exists for — a file that was already dirty
+    when the run started and is still being written into while it runs. ``HEAD``
+    has not moved, the file count has not changed, and the gates nevertheless
+    judged bytes that are no longer on disk. A guard that compared counts would
+    wave that through as an ordinary pass: the silent green, arriving through the
+    check written to stop it.
+    """
 
     head: str
     dirty: int
+    content: str
+
+
+def content_digest(root: Path, paths: Sequence[str], budget: int) -> str:
+    """Digest what is *in* the dirty part of a tree, not how much of it there is.
+
+    Each path contributes its name, its size, its modification time and — up to
+    ``budget`` bytes in total across the whole tree — its actual contents. The
+    contents are what make this a fingerprint rather than a headcount: a same-
+    length edit to a file that was already dirty moves nothing else, and on
+    Windows it may not even move the timestamp, whose granularity is the system
+    clock tick rather than the ~100 ns NTFS can store.
+
+    Reading a file that is being written at this moment yields a torn read, which
+    hashes differently on the two sides and reports the tree as moved. That is
+    the correct answer: it *is* moving.
+
+    A path that cannot be opened is folded in as absent or unreadable rather than
+    skipped — "the file is gone now" is a state this has to be able to tell apart
+    from "nothing changed". Blocking ``stat`` and ``read`` calls throughout, so
+    callers run it in a thread.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for name in paths:
+        digest.update(b"\0" + name.encode("utf-8", errors="replace"))
+        target = root / name
+        try:
+            info = target.stat()
+        except OSError:
+            digest.update(b"\0absent")
+            continue
+        digest.update(f"\0{info.st_size}:{info.st_mtime_ns}".encode())
+        if budget <= 0:
+            continue
+        try:
+            with target.open("rb") as handle:
+                while budget > 0:
+                    chunk = handle.read(min(_HASH_CHUNK, budget))
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    budget -= len(chunk)
+        except OSError:
+            # A directory, a socket, a file another process holds exclusively.
+            # Named, because "could not read it" is itself a state worth pinning.
+            digest.update(b"\0unreadable")
+    return digest.hexdigest()
 
 
 def _now_utc() -> datetime:
@@ -465,7 +582,18 @@ class ToolchainGateCheck:
         try:
             spec = GateSpec.model_validate(ctx.params)
         except ValidationError as exc:
-            return [_refusal(f"invalid gate spec: {exc.error_count()} error(s)")]
+            # The first error in words, not just a count: the one a caller
+            # realistically trips is the `MAX_GATES_PER_RUN` cap, and "1 error(s)"
+            # would leave them to guess which of two fields it was about.
+            first = exc.errors()[0]
+            where = ".".join(str(part) for part in first["loc"]) or "params"
+            return [
+                _refusal(
+                    f"invalid gate spec: {where} — {first['msg']}. At most "
+                    f"{MAX_GATES_PER_RUN} gate ids may be named in one run "
+                    "(repeats fold into one)."
+                )
+            ]
 
         session_id = _session_of(ctx)
         if session_id is None:
@@ -550,8 +678,15 @@ class ToolchainGateCheck:
     def _select(self, spec: GateSpec) -> tuple[list[GateCommand], list[EvidenceItem]]:
         """Resolve ids to commands. An unknown id is a ``fail`` line naming what
         is available — never a silent skip (the frame's unregistered-check
-        precedent, which exists for exactly this mistake)."""
-        wanted = spec.gates or list(self._default_gates)
+        precedent, which exists for exactly this mistake).
+
+        De-duplicated on the way in, so the number of processes this run starts
+        can never exceed the size of the catalog. :class:`GateSpec` already folds
+        a caller's repeats; this also covers the operator's own default set,
+        where ``WORKBENCH_GATES=ruff,ruff`` would otherwise buy two identical
+        ``ruff`` runs over one unchanged tree.
+        """
+        wanted = list(dict.fromkeys(spec.gates or self._default_gates))
         commands: list[GateCommand] = []
         unknown: list[EvidenceItem] = []
         available = ", ".join(sorted(self._catalog))
@@ -627,7 +762,19 @@ class ToolchainGateCheck:
         )
 
     async def _fingerprint(self, path: Path) -> _Fingerprint | None:
-        """``HEAD`` plus the dirty-file count, or ``None`` when git would not say.
+        """``HEAD`` plus a digest of the tree's dirt, or ``None`` when git would
+        not say.
+
+        Three reads, and the two that name paths are asked for separately on
+        purpose. ``diff HEAD --name-only`` is every tracked path that differs
+        from the commit — added, modified, deleted, staged or not — and
+        ``ls-files --others --exclude-standard`` is every untracked one that is
+        not ignored. Between them they are the whole of what the gates could
+        possibly have judged beyond ``HEAD`` itself, and each emits **bare
+        ``-z``-separated paths**: no status letters to parse, and no C-quoting to
+        undo on a name holding a space or a non-ASCII byte. The status
+        *letters* are deliberately not part of the fingerprint — staging a change
+        does not alter a single byte the gates ran against.
 
         ``None`` is not "clean" and callers must not read it as one: a checkout
         whose state cannot be vouched for is one no verdict may be attributed to
@@ -635,17 +782,32 @@ class ToolchainGateCheck:
         """
         try:
             head = await self._git(path, ("rev-parse", "HEAD"), GIT_TIMEOUT_S)
-            status = await self._git(
-                path, ("--no-optional-locks", "status", "--porcelain"), GIT_TIMEOUT_S
+            changed = await self._git(
+                path,
+                ("--no-optional-locks", "diff", "HEAD", "--name-only", "-z"),
+                GIT_TIMEOUT_S,
+            )
+            untracked = await self._git(
+                path,
+                ("--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z"),
+                GIT_TIMEOUT_S,
             )
         except GitError as err:
             log.warning("gates.fingerprint_failed", path=str(path), detail=str(err))
             return None
-        if not head.ok or not head.out or not status.ok:
-            log.warning("gates.fingerprint_failed", path=str(path), detail=head.first_error_line())
+        refused = next((result for result in (head, changed, untracked) if not result.ok), None)
+        if refused is not None or not head.out:
+            log.warning(
+                "gates.fingerprint_failed",
+                path=str(path),
+                detail=(refused or head).first_error_line(),
+            )
             return None
-        dirty = len([line for line in status.out.splitlines() if line.strip()])
-        return _Fingerprint(head=head.out.splitlines()[0].strip(), dirty=dirty)
+        dirty = tuple(name for name in f"{changed.out}\0{untracked.out}".split("\0") if name)
+        content = await asyncio.to_thread(content_digest, path, dirty, FINGERPRINT_READ_BUDGET)
+        return _Fingerprint(
+            head=head.out.splitlines()[0].strip(), dirty=len(dirty), content=content
+        )
 
 
 def _session_of(ctx: ValidationContext) -> str | None:
@@ -670,8 +832,15 @@ def _moved(before: _Fingerprint, after: _Fingerprint | None, ran: int) -> Eviden
         moved = "git could not re-read the checkout afterwards"
     elif after.head != before.head:
         moved = f"HEAD moved from {before.head[:12]} to {after.head[:12]}"
-    else:
+    elif after.dirty != before.dirty:
         moved = f"the working tree changed ({before.dirty} → {after.dirty} file(s))"
+    else:
+        # The case a file count cannot see, and the likeliest one in practice:
+        # the session that owns this slot never stopped writing to it.
+        moved = (
+            f"the same {before.dirty} file(s) are dirty but their contents changed — "
+            "different bytes, same shape"
+        )
     return _refusal(
         f"the tree moved under the gate while it ran — {moved}. "
         f"{ran} gate(s) ran, and their results are discarded rather than attributed "

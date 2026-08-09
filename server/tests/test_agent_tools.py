@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
 from workbench_server.models.commands import CommandInvokeResult, CommandManifest
-from workbench_server.models.gates import MAX_GATE_LOG_BYTES, GateLog
+from workbench_server.models.gates import MAX_GATE_LOG_BYTES, MAX_GATES_PER_RUN, GateLog
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
@@ -760,3 +760,31 @@ class TestRunGatesBudget:
         service.payloads.clear()
         text = result_text(await handle_run_gates(service, "wrk_1", {}))
         assert "evicted" in text
+
+    def test_the_schema_declares_the_cap_rather_than_only_enforcing_it(self) -> None:
+        """Every id in ``gates`` buys a whole toolchain run, so the list is
+        bounded — and a model that can *see* the bound asks inside it, where one
+        that cannot spends a turn discovering it."""
+        assert RUN_GATES.input_schema["properties"]["gates"]["maxItems"] == MAX_GATES_PER_RUN
+        assert RUN_GATES.schema_bytes <= RUN_GATES.max_schema_bytes
+
+    async def test_the_same_gate_asked_for_fifty_times_is_asked_for_once(self) -> None:
+        """``["pytest"] * 50`` would otherwise be fifty serial ``pytest`` runs —
+        hours — over one unchanged tree, holding the session's slot throughout."""
+        service = failing_gates("1 failed\n")
+        await handle_run_gates(service, "wrk_1", {"gates": ["pytest"] * 50})
+        assert service.specs[0].params["gates"] == ["pytest"]
+
+    async def test_ids_past_the_cap_are_stated_not_silently_dropped(self) -> None:
+        """AXI shape 1 on an argument instead of on a log: say what was cut and
+        how to get the rest. The tool clips rather than raising, because a raise
+        costs the session a whole turn to learn it asked for too much."""
+        service = failing_gates("1 failed\n")
+        asked = [f"gate-{index}" for index in range(MAX_GATES_PER_RUN + 3)]
+        text = result_text(await handle_run_gates(service, "wrk_1", {"gates": asked}))
+
+        assert service.specs[0].params["gates"] == asked[:MAX_GATES_PER_RUN]
+        assert f"Only the first {MAX_GATES_PER_RUN} gate ids ran" in text
+        assert "3 more were not" in text
+        assert "second call" in text
+        assert len(text.encode()) <= RUN_GATES.max_result_bytes

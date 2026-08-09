@@ -40,7 +40,12 @@ from pydantic import BaseModel, ValidationError
 from workbench_server.models.agent_reconcile import ReconcileMismatch, ReconcileSummary
 from workbench_server.models.agents import SessionKind, UiState
 from workbench_server.models.commands import CommandInvokeResult, CommandManifest
-from workbench_server.models.gates import MAX_GATE_LOG_BYTES, GateLog, GateSpec
+from workbench_server.models.gates import (
+    MAX_GATE_LOG_BYTES,
+    MAX_GATES_PER_RUN,
+    GateLog,
+    GateSpec,
+)
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
@@ -1469,6 +1474,9 @@ RUN_GATES = AgentToolSpec(
             "gates": {
                 "type": "array",
                 "items": {"type": "string"},
+                # Declared, not merely enforced: a model that can see the cap
+                # asks inside it, where one that cannot spends a turn finding out.
+                "maxItems": MAX_GATES_PER_RUN,
                 "description": "Gate ids to run, e.g. ruff. Omit to run all configured.",
             },
             "log_bytes": {
@@ -1533,11 +1541,15 @@ async def handle_run_gates(
     location, which is where the model should read next (shape 3).
     """
     raw_gates = args.get("gates")
-    gates = (
-        [str(item) for item in raw_gates if isinstance(item, str)]
-        if isinstance(raw_gates, list)
-        else []
-    )
+    # Folded and capped here as well as in ``GateSpec``, because past the cap the
+    # model *raises* — and a tool that raises costs the session a whole turn to
+    # discover it asked for too much. Repeats fold silently (the same gate twice
+    # is the same gate once, over the same unchanged tree); the surplus past the
+    # cap is stated in the result rather than dropped, which is AXI shape 1 on an
+    # argument instead of on a log.
+    wanted = raw_gates if isinstance(raw_gates, list) else []
+    named = list(dict.fromkeys(item for item in wanted if isinstance(item, str)))
+    gates, surplus = named[:MAX_GATES_PER_RUN], named[MAX_GATES_PER_RUN:]
     raw_bytes = args.get("log_bytes")
     excerpt_budget = (
         min(raw_bytes, MAX_GATE_LOG_BYTES)
@@ -1555,6 +1567,12 @@ async def handle_run_gates(
     )
     result = await runner.run(spec)
     body = _format_gates(result, runner, excerpt_budget)
+    if surplus:
+        body = (
+            f"Only the first {MAX_GATES_PER_RUN} gate ids ran; "
+            f"{len(surplus)} more were not ({_clip(', '.join(surplus), 120)}) — "
+            "ask for those in a second call.\n"
+        ) + body
     return text_result(clamp_result(body, RUN_GATES.max_result_bytes))
 
 

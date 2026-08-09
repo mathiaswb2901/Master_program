@@ -17,18 +17,23 @@ exists would be the most expensive kind of lie this codebase can tell.
 """
 
 import ast
+import os
+import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
+import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.gates import (
     MAX_GATE_LOG_BYTES,
+    MAX_GATES_PER_RUN,
     MIN_GATE_LOG_BYTES,
     GateCommand,
     GateLog,
@@ -53,9 +58,12 @@ from workbench_server.services.gates import (
     SubprocessGateRunner,
     ToolchainGateCheck,
     _BoundedCapture,
+    _Fingerprint,
     build_catalog,
     build_runner,
     configured_gate_ids,
+    content_digest,
+    launcher,
     workspace_config_refusal,
 )
 from workbench_server.services.validation import (
@@ -63,7 +71,7 @@ from workbench_server.services.validation import (
     ValidationService,
     derive_risk,
 )
-from workbench_server.services.worktrees import GitResult
+from workbench_server.services.worktrees import GitResult, run_git
 
 GATES_SOURCE = (
     Path(__file__).resolve().parents[1] / "src" / "workbench_server" / "services" / "gates.py"
@@ -95,11 +103,18 @@ class _Locator:
 
 
 class _ScriptedGit:
-    """A ``GitRunner`` whose two fingerprint reads a test drives.
+    """A ``GitRunner`` whose fingerprint reads a test drives.
 
     Each list yields its head until one value is left, which then repeats — so
     ``["a"]`` is a stable tree and ``["a", "b"]`` is one that moved between the
-    before and after reads.
+    before and after reads. ``dirt`` is how many tracked paths ``git diff HEAD
+    --name-only -z`` should name; the untracked read answers empty.
+
+    This double can drive *shape*: HEAD moving, the dirty set growing, git
+    refusing to answer. It deliberately cannot drive the case where the same
+    files hold different bytes — a stub that answers whatever it was told cannot
+    show that the fingerprint reads the disk. :class:`TestTheSameFilesDifferentBytes`
+    drives that against real git and a real working tree.
     """
 
     def __init__(self, heads: list[str], dirt: list[int]) -> None:
@@ -112,8 +127,79 @@ class _ScriptedGit:
             if not head:
                 return GitResult(128, "", "fatal: not a git repository")
             return GitResult(0, head, "")
+        if "ls-files" in args:
+            return GitResult(0, "", "")
         count = self._dirt.pop(0) if len(self._dirt) > 1 else self._dirt[0]
-        return GitResult(0, "\n".join(f" M file{index}.py" for index in range(count)), "")
+        return GitResult(0, "\0".join(f"file{index}.py" for index in range(count)), "")
+
+
+class _EditingRunner:
+    """A gate that writes into the tree while it "runs".
+
+    Not a contrived double: **no lease is taken** (decision 2), so the session
+    that owns the slot is free to keep saving into it for the whole of a
+    ``pytest`` run. This is that session, compressed into the window between the
+    two fingerprint reads.
+    """
+
+    def __init__(self, target: Path, text: str) -> None:
+        self._target = target
+        self._text = text
+
+    async def run(self, command: GateCommand, cwd: Path, window: int) -> GateLog:
+        self._target.write_text(self._text, encoding="utf-8")
+        return GateLog(
+            gate=command.id, argv=list(command.argv), exit_code=0, duration_ms=1, text="ok\n"
+        )
+
+
+def git(repo: Path, *args: str) -> str:
+    """Synchronous git, for building a fixture. The check's own git is async.
+
+    The same shape (and the same two suppressions) as ``test_worktrees.py``: the
+    async rules ruff enforces are about production code, and a fixture that
+    shells out is the entire point of this one.
+    """
+    done = subprocess.run(  # noqa: S603 - the arguments are this file's own literals
+        ["git", *args],  # noqa: S607 - git is on PATH wherever this suite runs
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
+def make_repo(root: Path) -> Path:
+    """A real repository with one commit and one tracked file.
+
+    Real git rather than a scripted one, because the claim under test is about
+    what is *on disk*: a double that returns the answers a test handed it can
+    only prove the plumbing, and the plumbing was never the thing that was wrong.
+    ``core.autocrlf=false`` per-repo — a developer machine may well have it on
+    globally (``test_worktrees.py`` says the same), and the byte counts here
+    would then depend on the machine.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    git(root, "init", "-b", "main")
+    git(root, "config", "user.email", "test@workbench.invalid")
+    git(root, "config", "user.name", "Workbench Test")
+    git(root, "config", "core.autocrlf", "false")
+    (root / "dispatch.py").write_text("VERSION = 1\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "-c", "commit.gpgsign=false", "commit", "-m", "first")
+    return root
+
+
+def real_gate(slot: Path, runner: GateRunner) -> ToolchainGateCheck:
+    """A check pointed at a real checkout, with **real git** as its runner."""
+    return ToolchainGateCheck(
+        _Locator(SlotRef(slot="slot-01", path=str(slot), base="c0ffee")),
+        runner,
+        catalog={"ruff": GATE_CATALOG[0]},
+        default_gates=["ruff"],
+        git=run_git,
+    )
 
 
 class _Stashing:
@@ -339,6 +425,13 @@ class TestTheTreeThatMoved:
         assert [item.outcome for item in evidence] == ["skipped"]
         assert "0 → 3 file(s)" in evidence[0].detail
 
+    async def test_the_fingerprint_is_a_digest_of_bytes_not_a_headcount(self) -> None:
+        """The property every test below leans on, asserted directly: two trees
+        with the same *number* of dirty files and different contents do not
+        fingerprint the same."""
+        assert _Fingerprint("c0ffee", 2, "aaaa") == _Fingerprint("c0ffee", 2, "aaaa")
+        assert _Fingerprint("c0ffee", 2, "aaaa") != _Fingerprint("c0ffee", 2, "bbbb")
+
     async def test_git_that_will_not_answer_is_a_refusal_not_a_clean_tree(
         self, tmp_path: Path
     ) -> None:
@@ -353,6 +446,104 @@ class TestTheTreeThatMoved:
 
         assert [item.outcome for item in evidence] == ["skipped"]
         assert "git could not read" in evidence[0].detail
+
+
+class TestTheSameFilesDifferentBytes:
+    """Real git, a real working tree, and a real writer editing it mid-run.
+
+    The case a dirty-file *count* is blind to, and the one the design invites:
+    the gate takes no lease, so the session that owns the slot never stopped
+    saving into it. ``HEAD`` has not moved and the same one file is dirty on both
+    sides — a run that compared only those two numbers would call this a pass and
+    attribute it to bytes that are no longer on disk.
+    """
+
+    async def test_a_tracked_file_rewritten_mid_run_is_caught(self, tmp_path: Path) -> None:
+        """The file was **already dirty before the run started**, and the rewrite
+        is the same length as what it replaced — so neither the file count nor
+        the file's size moves, and on Windows the timestamp may not either
+        (its granularity is the system clock tick, not what NTFS can store).
+        Only the contents say what happened."""
+        slot = make_repo(tmp_path / "slot")
+        target = slot / "dispatch.py"
+        target.write_text("VERSION = 2\n", encoding="utf-8")
+        before = target.stat().st_size
+
+        gate = real_gate(slot, _EditingRunner(target, "VERSION = 3\n"))
+        evidence = await gate.run(context(tmp_path))
+
+        assert target.stat().st_size == before  # the count *and* the size held still
+        assert [item.outcome for item in evidence] == ["skipped"]
+        assert "the tree moved under the gate" in evidence[0].detail
+        assert "different bytes, same shape" in evidence[0].detail
+        assert "1 gate(s) ran" in evidence[0].detail
+        # Nothing survives that could be read as a verdict on this tree.
+        assert by_outcome(evidence, "pass") == []
+        assert evidence[0].payload_ref is None
+        assert derive_risk(evidence) != "pass"
+
+    async def test_an_untracked_file_rewritten_mid_run_is_caught_too(self, tmp_path: Path) -> None:
+        """The half a diff against ``HEAD`` cannot see: a file the commit never
+        had. An agent writing a *new* module and still saving it is the ordinary
+        shape of this, not an exotic one."""
+        slot = make_repo(tmp_path / "slot")
+        target = slot / "new_module.py"
+        target.write_text("draft = 1\n", encoding="utf-8")
+
+        gate = real_gate(slot, _EditingRunner(target, "draft = 2\n"))
+        evidence = await gate.run(context(tmp_path))
+
+        assert [item.outcome for item in evidence] == ["skipped"]
+        assert "different bytes, same shape" in evidence[0].detail
+
+    async def test_a_tree_nobody_touched_really_does_pass(self, tmp_path: Path) -> None:
+        """The control, and it is not optional: a guard that reported ``skipped``
+        for everything would pass every test above while making the feature
+        useless. Same real repository, same real git, dirty file left alone."""
+        slot = make_repo(tmp_path / "slot")
+        (slot / "dispatch.py").write_text("VERSION = 2\n", encoding="utf-8")
+
+        gate = real_gate(slot, FakeGateRunner({"ruff": (0, "All checks passed!\n")}))
+        evidence = await gate.run(context(tmp_path))
+
+        assert [item.outcome for item in evidence] == ["pass"]
+        assert derive_risk(evidence) == "pass"
+
+    def test_the_digest_reads_the_disk_rather_than_the_directory_listing(
+        self, tmp_path: Path
+    ) -> None:
+        """:func:`content_digest` on its own: same name, same size, different
+        bytes is a different digest — and a file that has gone is a third answer
+        again, never the same as one that never changed."""
+        target = tmp_path / "dispatch.py"
+        target.write_text("VERSION = 2\n", encoding="utf-8")
+        stamp = target.stat().st_mtime_ns
+        first = content_digest(tmp_path, ("dispatch.py",), 4_096)
+
+        target.write_text("VERSION = 3\n", encoding="utf-8")
+        os.utime(target, ns=(stamp, stamp))  # same name, same size, same clock
+        assert content_digest(tmp_path, ("dispatch.py",), 4_096) != first
+
+        target.write_text("VERSION = 2\n", encoding="utf-8")
+        os.utime(target, ns=(stamp, stamp))
+        assert content_digest(tmp_path, ("dispatch.py",), 4_096) == first
+
+        target.unlink()
+        assert content_digest(tmp_path, ("dispatch.py",), 4_096) != first
+
+    def test_the_read_budget_bounds_the_work_without_losing_the_path(self, tmp_path: Path) -> None:
+        """Past the budget the digest stops reading bytes and keeps size and
+        timestamp — a coarser answer, never no answer, and never an unbounded
+        read inside a request."""
+        target = tmp_path / "huge.bin"
+        target.write_bytes(b"a" * 4_096)
+        stamp = target.stat().st_mtime_ns
+        starved = content_digest(tmp_path, ("huge.bin",), 0)
+
+        target.write_bytes(b"b" * 4_096)  # same size, new bytes…
+        os.utime(target, ns=(stamp, stamp))  # …and the timestamp held still
+        assert content_digest(tmp_path, ("huge.bin",), 0) == starved  # metadata alone
+        assert content_digest(tmp_path, ("huge.bin",), 4_096) != starved  # bytes, once read
 
 
 # --------------------------------------------------------------------------- the bounded log
@@ -500,6 +691,119 @@ class TestTheCatalogIsServerOwned:
     def test_build_runner_honours_the_fake_flag(self) -> None:
         assert isinstance(build_runner(True), FakeGateRunner)
         assert isinstance(build_runner(False), SubprocessGateRunner)
+
+
+class TestOneRunCannotAskForHoursOfWork:
+    """``gates`` is the one field a caller fills, and every id in it buys a whole
+    toolchain run. Unbounded, ``["pytest"] * 50`` is fifty serial ``pytest``
+    invocations — hours — inside a single request, holding the session's slot for
+    every one of them, reachable from the ``run_gates`` tool *and* from a plain
+    ``POST /api/validation/run``."""
+
+    def test_the_same_gate_named_fifty_times_is_one_gate(self) -> None:
+        """Folded in the model, so both callers inherit it. A repeat can only
+        mean one thing, and the second run would judge the identical tree."""
+        assert GateSpec(gates=["pytest"] * 50).gates == ["pytest"]
+        # Order survives the fold — the caller still gets what it asked for, once.
+        assert GateSpec(gates=["mypy", "ruff", "mypy"]).gates == ["mypy", "ruff"]
+
+    def test_more_distinct_ids_than_a_run_may_name_is_refused_in_words(self) -> None:
+        too_many = [f"gate-{index}" for index in range(MAX_GATES_PER_RUN + 1)]
+        with pytest.raises(ValidationError):
+            GateSpec(gates=too_many)
+
+    async def test_the_check_refuses_an_over_long_spec_rather_than_running_it(
+        self, tmp_path: Path
+    ) -> None:
+        """And says which field and what the cap is — "1 error(s)" would leave a
+        caller to guess between the two fields the spec has."""
+        gate = check(SlotRef(slot="slot-01", path=str(tmp_path), base="c0ffee"))
+        evidence = await gate.run(
+            context(
+                tmp_path,
+                params={"gates": [f"gate-{index}" for index in range(MAX_GATES_PER_RUN + 1)]},
+            )
+        )
+
+        assert [item.outcome for item in evidence] == ["skipped"]
+        assert "invalid gate spec: gates" in evidence[0].detail
+        assert str(MAX_GATES_PER_RUN) in evidence[0].detail
+
+    async def test_a_repeated_id_starts_one_process_not_fifty(self, tmp_path: Path) -> None:
+        """The claim that actually matters, asserted on what *ran* rather than on
+        what was parsed: one evidence line, one gate."""
+        gate = check(SlotRef(slot="slot-01", path=str(tmp_path), base="c0ffee"))
+        evidence = await gate.run(context(tmp_path, params={"gates": ["pytest", "pytest"]}))
+
+        assert [item.label for item in evidence] == ["pytest -q"]
+
+    async def test_an_operators_repeated_default_is_folded_too(self, tmp_path: Path) -> None:
+        """``WORKBENCH_GATES=ruff,ruff`` is the other way in, and it never passes
+        through :class:`GateSpec` at all."""
+        gate = check(
+            SlotRef(slot="slot-01", path=str(tmp_path), base="c0ffee"),
+            gates=["ruff", "ruff", "mypy"],
+        )
+        evidence = await gate.run(context(tmp_path))
+
+        assert [item.label for item in evidence] == ["ruff check .", "mypy --strict"]
+
+    def test_the_shipped_catalog_fits_inside_the_cap(self) -> None:
+        """The cap is "no more than a catalog could hold". If a fifth gate ships,
+        this is the line that says so before a caller finds out the hard way."""
+        assert len(GATE_CATALOG) <= MAX_GATES_PER_RUN
+
+
+class TestTheNpmGateCanActuallyStart:
+    """Windows-first, and the one catalog entry where it is not cosmetic.
+
+    Every gate is started with ``create_subprocess_exec`` and never a shell —
+    which is the no-injection story — but a shell is also what normally performs
+    the ``PATHEXT`` search. ``CreateProcess`` does not: handed an extension-less
+    name it appends ``.exe`` and looks no further, and node ships npm as
+    ``npm.cmd``. A bare ``"npm"`` argv is a gate that can never start on the
+    platform this project targets, failing "could not start" on every run and
+    marking the UI suite permanently red whatever that suite actually says.
+    """
+
+    NPM = next(command for command in GATE_CATALOG if command.id == "npm-test")
+
+    def test_the_catalog_names_a_startable_executable_not_a_bare_npm(self) -> None:
+        assert self.NPM.argv[1:] == ("--prefix", "ui", "run", "test")
+        named = Path(self.NPM.argv[0])
+        assert named.stem.lower() == "npm"
+        if os.name == "nt":
+            assert named.suffix.lower() in {".cmd", ".bat", ".exe"}, self.NPM.argv[0]
+
+    def test_the_resolver_falls_back_to_a_name_this_platform_could_run(self) -> None:
+        """Nothing on ``PATH`` still yields a plausible file, so the failure a
+        developer reads is "npm is not installed" rather than a puzzle about
+        extensions."""
+        missing = launcher("workbench-no-such-binary-2f9a")
+        assert missing == (
+            "workbench-no-such-binary-2f9a.cmd"
+            if os.name == "nt"
+            else "workbench-no-such-binary-2f9a"
+        )
+
+    @pytest.mark.skipif(shutil.which("npm") is None, reason="node/npm is not installed here")
+    async def test_the_resolved_npm_really_starts_through_the_real_runner(
+        self, tmp_path: Path
+    ) -> None:
+        """The assertion a ``sys.executable`` probe cannot make. Every other
+        real-subprocess test here runs Python, which resolves bare on every
+        platform — precisely the property npm does not have, so the bug lived in
+        the one argv no test ever started."""
+        command = GateCommand(
+            id="npm-test",
+            argv=(self.NPM.argv[0], "--version"),
+            label="npm --version",
+            timeout_s=120.0,
+        )
+        entry = await SubprocessGateRunner().run(command, tmp_path, MAX_GATE_LOG_BYTES)
+
+        assert entry.exit_code == 0, entry.text
+        assert entry.text.strip()[:1].isdigit(), entry.text
 
 
 class TestWorkspaceConfigIsRefused:

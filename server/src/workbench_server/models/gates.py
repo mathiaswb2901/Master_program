@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from workbench_server.models.validation import EvidenceTruncation
 
@@ -53,6 +53,21 @@ MIN_GATE_LOG_BYTES = 256
 #: How much of a window is head. ``1/4`` of 8,192 is 2,048 — the plan's 2 KiB
 #: head and 6 KiB tail, expressed once so a narrowed window keeps the same shape.
 GATE_LOG_HEAD_FRACTION = 4
+
+#: Ceiling on how many gate ids one :class:`GateSpec` may name.
+#:
+#: A cap rather than trust, because :attr:`GateSpec.gates` is the one field a
+#: caller fills and every id in it costs a *whole toolchain run*: unbounded,
+#: ``{"gates": ["pytest"] * 50}`` is fifty serial ``pytest`` invocations — hours
+#: — inside one request, holding the session's slot for every one of them. That
+#: is reachable both from the ``run_gates`` tool and from a plain
+#: ``POST /api/validation/run``, so the bound belongs here, on the shape both
+#: share, rather than in either caller.
+#:
+#: Repeats fold away first (:meth:`GateSpec._fold_repeats`), so this only ever
+#: bites a caller naming more *distinct* ids than any catalog could hold;
+#: ``test_gates.py`` asserts the shipped catalog fits inside it.
+MAX_GATES_PER_RUN = 8
 
 
 def head_bytes(window: int) -> int:
@@ -98,14 +113,34 @@ class GateSpec(BaseModel):
     #: Ids from the catalog; empty runs the configured default set. An id that is
     #: not in the catalog becomes a ``fail`` evidence line naming what is
     #: available — never a silent skip (the frame's unregistered-check
-    #: precedent).
-    gates: list[str] = Field(default_factory=list)
+    #: precedent). At most :data:`MAX_GATES_PER_RUN` of them, because each one is
+    #: a whole toolchain run and a list is otherwise a way to ask for hours of
+    #: them in a single request.
+    gates: list[str] = Field(default_factory=list, max_length=MAX_GATES_PER_RUN)
     #: Bytes of each gate's output to capture. ``None`` is
     #: :data:`MAX_GATE_LOG_BYTES`, which is also the ceiling; a smaller value
     #: narrows the stored payload for a caller that wants a cheaper one. Clamped
     #: into ``[MIN_GATE_LOG_BYTES, MAX_GATE_LOG_BYTES]`` rather than rejected, so
     #: a typo costs a smaller log rather than a failed run.
     log_bytes: int | None = None
+
+    @field_validator("gates", mode="before")
+    @classmethod
+    def _fold_repeats(cls, value: object) -> object:
+        """Name a gate twice and it runs once — folded *before* the cap applies.
+
+        A repeated id can only mean one thing, and honouring the repeat is pure
+        cost: the second ``pytest`` judges the byte-for-byte tree the first one
+        did. Folding here rather than in the check covers the REST body and the
+        ``run_gates`` tool in one place, and keeps :data:`MAX_GATES_PER_RUN` a
+        bound on *work* rather than on how verbosely the work was asked for.
+        Order is preserved, so the caller still gets its gates in the sequence it
+        named them. Anything that is not a list of strings is handed on
+        untouched, so the ordinary type error is the one the caller sees.
+        """
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return value
+        return list(dict.fromkeys(value))
 
     def window(self) -> int:
         """The captured window this spec asks for, clamped into the legal band."""
