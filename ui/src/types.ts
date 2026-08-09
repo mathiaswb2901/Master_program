@@ -1551,8 +1551,14 @@ export interface SetObjectiveRequest {
 export type RiskLevel = "pass" | "low" | "medium" | "high" | "blocked";
 
 /** One check's verdict on one thing. `skipped` = did not apply / could not
- * evaluate, distinct from `fail` (evaluated, disagreed). */
-export type CheckOutcome = "pass" | "warn" | "fail" | "skipped";
+ * evaluate, distinct from `fail` (evaluated, disagreed).
+ *
+ * `blocked` is a refusal to judge that still says something: the reconciliation
+ * gate uses it when a docked workbook has unsaved changes it cannot read, where
+ * reconciling the stale file on disk would be a green badge about numbers nobody
+ * read. It is the most severe outcome — worse than `fail` — for the same reason
+ * `RiskLevel.blocked` sorts highest. */
+export type CheckOutcome = "pass" | "warn" | "fail" | "skipped" | "blocked";
 
 /** The kind of evidence, and the key its detail payload is stored under. */
 export type EvidenceKind = "numeric" | "gate" | "diff" | "log" | "artifact";
@@ -1669,6 +1675,33 @@ export interface CellComparison {
   reason: string | null;
 }
 
+/** Whether Excel had finished working out what the formulas say — mirrors
+ * `Application.CalculationState`. Anything but `done` means a live read caught
+ * numbers that were still moving. */
+export type CalculationState = "done" | "pending" | "calculating";
+
+/** Where a report's numbers actually came from.
+ *
+ * There are two readers — the `.xlsx` on disk, and the live Excel that has the
+ * workbook docked — and once that is true a badge that does not say which is not
+ * proof, it is a colour. The two shapes differ because what makes each
+ * trustworthy differs: a live read by whether Excel had finished calculating and
+ * how it stood against the file, a file read by the file's age and by whether
+ * Excel had ever cached values into it. All timestamps are naive local wall
+ * clock (ISO 8601 strings, no offset). */
+export interface ReadSource {
+  kind: "live" | "file";
+  read_at: string;
+  /** Live only. */
+  calculation: CalculationState | null;
+  /** Live only: `Workbook.Saved` at read time — false means the file was stale. */
+  saved: boolean | null;
+  /** File only. */
+  mtime: string | null;
+  /** File only: false means openpyxl found no cached values at all. */
+  cached_values: boolean | null;
+}
+
 /** The payload behind a `numeric` EvidenceItem: the workbook↔code table,
  * bounded worst-first with `truncated` stating the cut (AXI shape 1). */
 export interface ReconciliationReport {
@@ -1676,6 +1709,8 @@ export interface ReconciliationReport {
   matched: number;
   mismatched: number;
   total: number;
+  /** Which reader produced the numbers above. Never absent. */
+  source: ReadSource;
   comparisons: CellComparison[];
   truncated: EvidenceTruncation | null;
 }

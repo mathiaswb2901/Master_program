@@ -33,7 +33,19 @@ RiskLevel = Literal["pass", "low", "medium", "high", "blocked"]
 
 #: One check's verdict on one thing. ``skipped`` is "did not apply / could not
 #: evaluate this item", distinct from ``fail`` (evaluated, disagreed).
-CheckOutcome = Literal["pass", "warn", "fail", "skipped"]
+#:
+#: ``blocked`` is the fourth, and it is a *refusal to judge that still speaks*.
+#: Before it existed the only way a result could reach a ``blocked`` risk was by
+#: producing **no evidence at all** — which threw away the one sentence that
+#: makes a refusal useful (what is wrong, and what to do about it). A check that
+#: can see it would have to guess now says so on the record: the reconciliation
+#: gate uses it when a docked workbook has unsaved changes it cannot read
+#: (``services/reconciliation.py``), because reconciling the stale file on disk
+#: would be a green badge about numbers nobody read. It is the most severe
+#: outcome — worse than ``fail`` — for the reason ``RiskLevel.blocked`` already
+#: sorts highest: a gate that could not run is worse than one that ran and
+#: disagreed.
+CheckOutcome = Literal["pass", "warn", "fail", "skipped", "blocked"]
 
 #: The kind of evidence an item carries, which is also the key its detail
 #: payload is stored under (the per-kind payload store).
