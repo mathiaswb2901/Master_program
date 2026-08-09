@@ -50,6 +50,10 @@ import type {
   StartVoiceRequest,
   SetObjectiveRequest,
   ShortcutsState,
+  SpecApprovalRequest,
+  SpecRunReport,
+  SpecState,
+  SpecStates,
   SwitchWorkspaceRequest,
   TranscriptResponse,
   TreeNode,
@@ -184,6 +188,32 @@ export const approveValidation = (
   body: ApproveRequest,
 ): Promise<ValidationResult> =>
   request(`/api/validation/${encodeURIComponent(validationId)}/approve`, jsonInit("POST", body));
+
+// ---- reconciliation specs (productivity loops, PR-B) ------------------------
+// Reading the list runs nothing: opening a workspace with twenty specs in it
+// spawns no process and prompts for nothing. Everything that *does* run is
+// behind the approval below.
+
+/** Every spec in `.workbench/reconcile/`, with whether it may run. An empty
+ * list is the common answer and `detail` says so. */
+export const getSpecs = (): Promise<SpecStates> => request("/api/reconcile/specs");
+
+/** The one-time trust decision for this spec **and the code it names**. The
+ * `digest` is the one the row was rendered with; a digest that moved since is
+ * **409** (the `ApiError.status` the panel reads to say "re-read it first"),
+ * never a 200 a caller could misread as a decision that landed. */
+export const approveSpec = (name: string, body: SpecApprovalRequest): Promise<SpecState> =>
+  request(`/api/reconcile/specs/${encodeURIComponent(name)}/approve`, jsonInit("POST", body));
+
+/** Withdraw the decision. The spec stays and simply runs nothing again. */
+export const revokeSpec = (name: string): Promise<SpecState> =>
+  request(`/api/reconcile/specs/${encodeURIComponent(name)}/revoke`, { method: "POST" });
+
+/** Run one spec now — the manual half of a loop whose point is that nobody has
+ * to. An unapproved or stale spec answers with a report and a reason rather
+ * than an error: the refusal *is* the result. */
+export const runSpec = (name: string): Promise<SpecRunReport> =>
+  request(`/api/reconcile/specs/${encodeURIComponent(name)}/run`, { method: "POST" });
 
 /** Redeem an `EvidenceItem.payload_ref` — the bounded detail behind one evidence
  * line (a captured gate log, a reconciliation table). **404 once the per-kind LRU
