@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
+from workbench_server.services import reconcile_spec as reconcile_spec_service
 from workbench_server.services import sessions as sessions_service
 from workbench_server.services import settings as settings_service
 from workbench_server.services import shortcuts as shortcuts_service
@@ -82,6 +83,11 @@ def app_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # reason: a test that saved settings would otherwise rewrite the theme and
     # the Office mode of the developer running it.
     monkeypatch.setattr(settings_service, "app_data_dir", lambda: path)
+    # And for the reconcile-spec approvals, for the fourth time and with the
+    # sharpest reason: that document is a *trust record*, and a test run that
+    # wrote into the developer's real one could leave a spec approved on their
+    # machine that they never approved.
+    monkeypatch.setattr(reconcile_spec_service, "app_data_dir", lambda: path)
     return path
 
 
