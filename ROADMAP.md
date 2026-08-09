@@ -942,14 +942,21 @@ because other sections and five running lanes reference these numbers.
     not have to know that a spreadsheet is spelled `.xlsx`. Exit: every listed kind is
     created from inside the app, opens in its own editor or native host without a repair
     prompt, and a `.ipynb` opens in the notebook view rather than as raw JSON.
-    **Partially landed (PR #62): template creation, the `POST /api/files/document` API,
-    and the "New document…" UI landed** — the owner-preferred answer won, blank OOXML +
+    **Landed in two parts. PR #62: template creation, the `POST /api/files/document`
+    API, and the "New document…" UI** — the owner-preferred answer won, blank OOXML +
     `.ipynb` templates shipped as package data (a few KB each, valid with no Office
     installed, zero new runtime dependencies), offered by name from the tree context
-    menu, the tree toolbar and the QuickBar. **The notebook-view half is deferred**:
-    there is no notebook rendering panel in the app yet, so a `.ipynb` opens in Monaco
-    as raw JSON, not the notebook view the exit line asks for — that last clause is the
-    one open sub-piece.
+    menu, the tree toolbar and the QuickBar. **The notebook view closes the last
+    clause** (M4 tail): `.ipynb` is its own `OpenFile` kind, so clicking one in the tree
+    opens a rendered notebook — markdown cells, coloured code, and real outputs
+    (streams, images from their own bytes, tracebacks) — rather than raw JSON in Monaco.
+    Read-only and deliberately so: no kernel, no run control, and nothing behind one.
+    Server-side parse is nbformat (`services/notebook.py`), the one new runtime
+    dependency, taken for the two things it alone knows — migrating an nbformat-3
+    notebook instead of calling it corrupt, and the schema `validate` that lets a bad
+    file say *why*. Registered as a plural tool (`ui/src/panels/Notebook.tsx` plus one
+    line in `tools.ts`), so a notebook also opens in a pane of its own, two at a time,
+    surviving a reload.
 17. ~~**Discoverability — the app tells you what it can do**~~ **done** (2026-08-06), on
     the owner's change request below: after a day of features landing, *"I am not sure how
     to use these features."* That is a product failure, not a user failure — we shipped a
@@ -1062,11 +1069,29 @@ named as deferred rather than blocking. Summary of the sequence:
   permission policy; pass/fail evidence (a `ValidationResult` reaching `pass`) closes it. It
   **reuses the named-session store (#70)** — an `Objective` references a `session_id` and
   adds only a goal, a spec and caps; no second session store, no `store.activeObjective`.
-- **Deferred past M6's first cut** (named, not forgotten): the staged adversarial
-  fresh-context review + intent-directed E2E checks (they plug into `ValidationCheck`
-  later), the push/PR babysitter with bounded retries, the live-COM reconciliation reader
-  (needs the owner's Office box), and persisting results/objectives to `.workbench/` (M6
-  stays in memory, the provenance/activity/usage posture).
+- **Staged review** (`docs/plan/staged-review.md`) — the deferred checks, scoped as two
+  PRs that add no mechanism: both are `ValidationCheck` implementations, so everything
+  downstream (risk, gallery, bus event, replay, the one human approval) is the #82 frame's.
+  **PR 1 — the toolchain gate** (`models/gates.py`, `models/evidence.py`,
+  `services/gates.py`): a check with id `gates` that runs a **server-owned** catalog of
+  gate commands (`ruff`/`mypy`/`pytest`/`npm-test`, selected by id — never an argv from a
+  caller) inside the borrowed checkout the subject session is writing in, and turns each
+  into one `gate` `EvidenceItem` with a bounded head+tail log. It takes no lease,
+  fingerprints the tree before and after (a tree that moved is `skipped`, never a pass),
+  refuses a session with no slot rather than falling back to the live workspace root, and
+  refuses a per-workspace `.workbench/gates.json` out loud. It also closes the frame's one
+  gap — `GET /api/validation/payload/{kind}/{ref}`, which makes the Review panel's expander
+  work — and ships the `run_gates` agent tool (the `office_reconcile` precedent: a session
+  proves its own work). `WORKBENCH_GATES` / `WORKBENCH_GATE_TIMEOUT_S` configure it;
+  `WORKBENCH_GATE_FAKE=1` is the CI posture.
+  **PR 2 — the adversarial review**: a fresh-context reviewer session over the subject's
+  diff, delivering typed findings through `report_findings`. Never approves anything.
+- **Deferred past M6's first cut** (named, not forgotten): the intent-directed E2E check
+  (it plugs into `ValidationCheck` later), the push/PR babysitter with bounded retries, the
+  live-COM reconciliation reader (needs the owner's Office box), per-workspace gate
+  configuration (it needs an explicit one-time trust prompt, which is a feature), and
+  persisting results/objectives to `.workbench/` (M6 stays in memory, the
+  provenance/activity/usage posture).
 
 ### M7 — Premium & Public (identity + OSS release)
 

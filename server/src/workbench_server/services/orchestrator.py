@@ -59,6 +59,7 @@ from pathlib import Path
 import structlog
 
 from workbench_server.models.agents import SessionInfo
+from workbench_server.models.gates import SlotRef
 from workbench_server.models.orchestrator import (
     MAX_TASK_CHARS,
     OrchestratorBudget,
@@ -223,6 +224,43 @@ class OrchestratorService:
     def workers_of(self, orchestrator_id: str) -> list[WorkerInfo]:
         roster = self._rosters.get(orchestrator_id)
         return [] if roster is None else [self._info(w) for w in roster.workers.values()]
+
+    def slot_of(self, session_id: str) -> SlotRef | None:
+        """Which borrowed checkout is this session writing in? ``None`` for one
+        that holds none — a chat, an orchestrator, or a worker whose slot has
+        already gone back.
+
+        This is the ``SlotLocator`` the toolchain gate
+        (``services/gates.py``) is constructed with, and it is *read-only*: it
+        takes no lease and creates nothing. The session holds the lease; the gate
+        is a reader of a checkout somebody else borrowed, exactly as the Review
+        panel is a view onto a result it does not own. Acquiring a second slot
+        would be worse than useless — it would validate a different tree than the
+        one the agent wrote.
+
+        A **released** worker deliberately resolves to ``None``. Its path still
+        exists on disk and its roster entry is kept for the board's history, but
+        the slot has been reset and may already belong to somebody else; running
+        a gate there would judge another session's work and call it this one's.
+        """
+        for roster in self._rosters.values():
+            worker = roster.workers.get(session_id)
+            if worker is None or worker.released:
+                continue
+            return SlotRef(slot=worker.slot, path=worker.path, base=self._base_of(worker.slot))
+        return None
+
+    def _base_of(self, slot: str | None) -> str:
+        """The commit a slot was leased at — ``WorktreeInfo.head`` carries it for
+        the life of the lease, so it is read from the pool rather than copied
+        into the roster where it would be a second figure to keep honest.
+        Empty when the pool cannot say, which a caller reads as "unknown"."""
+        if slot is None or self._worktrees is None:
+            return ""
+        for info in self._worktrees.snapshot().slots:
+            if info.slot == slot:
+                return info.head or ""
+        return ""
 
     def _spend_of(self, worker: _Worker) -> tuple[int, float]:
         """This worker's turns and dollars — the one figure the board and the

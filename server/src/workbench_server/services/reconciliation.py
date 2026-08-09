@@ -22,7 +22,10 @@ Three domain failure modes are first-class here, not comments:
   pasted twice by asking the *zone* whether that wall clock is genuinely ambiguous
   (:func:`is_ambiguous_local`) — never by order of appearance alone. A naive positional join
   that drops or invents the duplicated hour is refused, and so is a duplicate row
-  masquerading as a fold.
+  masquerading as a fold. A timestamp that carries a **UTC offset** is refused rather
+  than normalised (:class:`OffsetNotAllowed`): the two occurrences of a fall-back hour
+  differ *only* by their offset, so stripping it hands them the same lookup key and the
+  fold gate falls over on the one day it exists for.
 * **No look-ahead in the pairing.** Rows are matched by their own timestamp value, never
   by position, so a missing or extra row surfaces as an unmatched expectation rather than
   a comparison against the wrong hour.
@@ -74,6 +77,10 @@ MAX_COMPARISONS = 200
 #: blow the result's token budget; beyond this the rest are rolled into one line
 #: that says how many were withheld and how to see them (AXI shape 1).
 MAX_DUPLICATE_LINES = 20
+
+#: Character clip on the offending timestamp quoted back in the offset finding. The
+#: cell content is the workbook's, so it is bounded before it reaches the evidence.
+_OFFSET_SAMPLE_CLIP = 40
 
 #: Least-to-most severe, for rolling per-cell outcomes up into one grouped verdict.
 _OUTCOME_SEVERITY: dict[CheckOutcome, int] = {"pass": 0, "skipped": 1, "warn": 2, "fail": 3}
@@ -387,18 +394,69 @@ def _time_address(exp: TimeExpectation) -> str:
     return exp.timestamp + (f" (fold {exp.fold})" if exp.fold else "")
 
 
+class OffsetNotAllowed(ValueError):
+    """Raised when a timestamp that must be a naive local wall clock carries a UTC
+    offset.
+
+    A subclass of :class:`ValueError` so every existing caller keeps failing safe, but
+    a distinct type because it is a different verdict with a different fix: nothing is
+    malformed here — the value parses perfectly. The gate is refusing to *reinterpret*
+    it, exactly as :class:`CrossCurrency` refuses to invent an FX rate.
+
+    Stripping the offset is not a harmless normalisation on a fall-back day. The two
+    02:00s of ``2024-10-27`` in ``Europe/Oslo`` differ **only** by their offset
+    (``+02:00`` then ``+01:00``) — that is the idiomatic, DST-safe way a pandas or
+    Python export writes them. Dropping it collapses both to the same naive wall clock
+    with ``fold`` defaulting to 0, so the two carry the *same* lookup key: the genuine
+    fold-1 row is never consulted and the second expectation is silently scored against
+    the first one's value. The fold gate is defeated on precisely the day it exists to
+    protect, and the run comes back green.
+    """
+
+
+#: The refusal an offset-bearing timestamp earns, on both sides of the comparison.
+#: Kept short enough to survive the ``office_reconcile`` reason clip (140 chars) with
+#: the lesson intact — a truncated lesson is not a lesson — and it never repeats the
+#: offending value, which the comparison row already carries as its address.
+_OFFSET_REFUSAL = (
+    "timestamp carries a UTC offset; this field is naive local wall clock — "
+    "drop the offset and use fold (0/1) to pick the fall-back occurrence"
+)
+
+
 def _parse_local(ts: str) -> datetime:
-    """A naive local ISO timestamp string. Raises ``ValueError`` on anything else."""
+    """A naive local ISO timestamp string.
+
+    Raises :class:`OffsetNotAllowed` when the string carries a UTC offset (or a ``Z``),
+    and a plain ``ValueError`` when it is not an ISO timestamp at all. Both are
+    ``ValueError``, which the callers already turn into a *named* per-row fail rather
+    than an exception that sinks the run."""
     parsed = datetime.fromisoformat(ts)
-    return parsed.replace(tzinfo=None)
+    if parsed.tzinfo is not None:
+        raise OffsetNotAllowed(_OFFSET_REFUSAL)
+    return parsed
 
 
 def _as_local_datetime(value: object) -> datetime | None:
+    """One workbook cell as a naive local wall clock, or ``None`` when it is not a
+    timestamp at all.
+
+    Raises :class:`OffsetNotAllowed` for an offset-bearing value — a tz-aware
+    ``datetime`` object or a string like ``2024-10-27T02:00:00+01:00`` (what
+    ``df.index.astype(str)`` writes). Refused on this side too, and for the same
+    reason: with the offset stripped, which of a fall-back day's two 02:00 rows is
+    fold 0 would be decided by **row order alone**, and order of appearance is the one
+    thing :func:`_align_time_rows` promises never to infer a fold from. A descending
+    export would silently swap the two hours."""
     if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
+        if value.tzinfo is not None:
+            raise OffsetNotAllowed(_OFFSET_REFUSAL)
+        return value
     if isinstance(value, str):
         try:
             return _parse_local(value)
+        except OffsetNotAllowed:
+            raise
         except ValueError:
             return None
     return None
@@ -426,13 +484,19 @@ def is_ambiguous_local(local: datetime, zone: ZoneInfo) -> bool:
 
 class _AlignedRows(NamedTuple):
     """The wall-clock index, plus the timestamps that repeated when the zone says
-    they should not have."""
+    they should not have, plus the rows refused for carrying a UTC offset."""
 
     #: ``(local wall-clock, fold)`` → the value that row carried.
     values: dict[tuple[datetime, int], object]
     #: local wall-clock → how many rows carried it, for timestamps that repeated
     #: **without** being an ambiguous (fall-back) local time in the zone.
     duplicates: dict[datetime, int]
+    #: How many rows were refused for carrying a UTC offset (see
+    #: :class:`OffsetNotAllowed`), and the first one of them, for the evidence. A
+    #: count and one sample rather than a list: a whole tz-aware column is 8,760
+    #: rows and one finding covers them all.
+    offset_rows: int = 0
+    offset_sample: str | None = None
 
 
 def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _AlignedRows:
@@ -448,13 +512,26 @@ def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _Ali
     reported to the caller as a duplicate row, and the expectation it would have
     satisfied gets no value to satisfy it.
 
+    A row whose timestamp carries a UTC offset is **refused, not stripped**, and the
+    count comes back to the caller as its own finding: normalising it away would put
+    the fold decision back on row order, which is the guess this function exists to
+    refuse.
+
     Aligning by value (not index) is what keeps a missing or extra row from silently
     shifting every later hour."""
     seen: dict[datetime, int] = {}
     values: dict[tuple[datetime, int], object] = {}
     duplicates: dict[datetime, int] = {}
+    offset_rows = 0
+    offset_sample: str | None = None
     for ts_raw, value in pairs:
-        local = _as_local_datetime(ts_raw)
+        try:
+            local = _as_local_datetime(ts_raw)
+        except OffsetNotAllowed:
+            offset_rows += 1
+            if offset_sample is None:
+                offset_sample = str(ts_raw)[:_OFFSET_SAMPLE_CLIP]
+            continue
         if local is None:
             continue
         occurrence = seen.get(local, 0)
@@ -466,7 +543,12 @@ def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _Ali
             values[(local, 1)] = value  # the genuine second pass of a fall-back hour
             continue
         duplicates[local] = seen[local]
-    return _AlignedRows(values=values, duplicates=duplicates)
+    return _AlignedRows(
+        values=values,
+        duplicates=duplicates,
+        offset_rows=offset_rows,
+        offset_sample=offset_sample,
+    )
 
 
 class ReconciliationCheck:
@@ -603,13 +685,41 @@ class ReconciliationCheck:
                 for exp in ti.expectations
             ], []
         aligned = _align_time_rows(pairs, zone)
-        structural = self._duplicate_evidence(spec, ti, aligned, zone)
+        structural = [
+            *self._offset_evidence(spec, ti, aligned),
+            *self._duplicate_evidence(spec, ti, aligned, zone),
+        ]
 
         out: list[CellComparison] = []
         for exp in ti.expectations:
             address = _time_address(exp)
             try:
                 local = _parse_local(exp.timestamp)
+            except OffsetNotAllowed as exc:
+                # Named apart from an unparseable string on purpose: this one parses
+                # fine. Stripping the offset is what used to make the two occurrences
+                # of a fall-back hour share a lookup key, so the fold-1 expectation
+                # was scored against the fold-0 row and the run came back green.
+                log.warning(
+                    "reconciliation.offset_bearing_expectation",
+                    workbook=spec.workbook,
+                    # Not `timestamp=`: structlog's own TimeStamper writes that key
+                    # last, so a field by that name never reaches the log line.
+                    expectation=exp.timestamp,
+                    timezone=spec.timezone,
+                )
+                out.append(
+                    CellComparison(
+                        cell=address,
+                        label=exp.label,
+                        expected=exp.expected,
+                        actual=None,
+                        unit=exp.unit,
+                        outcome="fail",
+                        reason=str(exc),
+                    )
+                )
+                continue
             except ValueError:
                 out.append(
                     CellComparison(
@@ -672,6 +782,47 @@ class ReconciliationCheck:
             )
         return out, structural
 
+    def _offset_evidence(
+        self, spec: ReconciliationSpec, ti: TimeIndexSpec, aligned: _AlignedRows
+    ) -> list[EvidenceItem]:
+        """One ``fail`` line for a timestamp column that carries UTC offsets.
+
+        Its own :class:`EvidenceItem`, like the duplicate finding, because it is a
+        statement about the *workbook* rather than about any one expectation — and
+        because the alternative is worse than a fail: the refused rows are not indexed,
+        so without this line the expectations at those hours would come back as a bare
+        "alignment gap" and send the analyst hunting for rows that are sitting right
+        there. One line for the whole column, not one per row: a tz-aware export is
+        8,760 of them.
+        """
+        if aligned.offset_rows == 0:
+            return []
+        log.warning(
+            "reconciliation.offset_bearing_column",
+            workbook=spec.workbook,
+            column=ti.timestamp_column,
+            rows=aligned.offset_rows,
+            sample=aligned.offset_sample,
+            timezone=spec.timezone,
+        )
+        return [
+            EvidenceItem(
+                kind="numeric",
+                label=f"timestamp column carries UTC offsets ({spec.workbook})",
+                outcome="fail",
+                detail=(
+                    f"{aligned.offset_rows} row(s) in column {ti.timestamp_column} carry a "
+                    f"UTC offset (first: {aligned.offset_sample!r}). The offset is not "
+                    "stripped: dropping it would leave row order to decide which of the two "
+                    f"02:00 rows of a {spec.timezone} fall-back day is the first pass, and "
+                    "order of appearance is exactly what a fold must never be inferred from. "
+                    "Those rows were not indexed, so expectations at those hours report an "
+                    "alignment gap. Write the column as naive local wall clock in "
+                    f"{spec.timezone} (the repeated hour twice, in order), then re-run."
+                ),
+            )
+        ]
+
     def _duplicate_evidence(
         self,
         spec: ReconciliationSpec,
@@ -698,7 +849,10 @@ class ReconciliationCheck:
             log.warning(
                 "reconciliation.duplicate_timestamp",
                 workbook=spec.workbook,
-                timestamp=stamp,
+                # `local_time`, not `timestamp`: structlog's TimeStamper owns that
+                # key, so the duplicated hour this line exists to name was being
+                # overwritten by the log's own clock and never appeared.
+                local_time=stamp,
                 count=count,
                 timezone=spec.timezone,
             )

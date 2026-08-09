@@ -1,0 +1,314 @@
+/* The notebook view (ROADMAP M4 tail). Tokens only — never a literal colour.
+
+   Ground: the app's own surfaces, not the paper mat. DESIGN.md §2.8 gives the
+   paper doctrine to canvases we cannot theme (the OnlyOffice iframe, a real
+   Word window) and puts everything we *draw* on the ramp — Monaco's buffer is
+   `--surface-code` in both themes, and a notebook is the same thing one step
+   out: a scrolling stack of code and results, not a page. So the surround is
+   `--surface-panel` and every code well below it is `--surface-code`, one step
+   deeper, exactly as §2.1 describes the window descending.
+
+   Syntax colours are the ANSI palette (§2.7), the same values `monaco.ts` builds
+   the editor theme from, so a code cell reads like the editor rather than like a
+   second opinion about what a keyword looks like. */
+
+.wb-notebook-host,
+.wb-nb {
+  height: 100%;
+  min-height: 0;
+}
+
+.wb-nb {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+}
+
+/* ---- the one header line ------------------------------------------------- */
+
+.wb-nb-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--row-height-lg);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--type-xs-size);
+}
+
+.wb-nb-name {
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-nb-meta {
+  min-width: 0;
+  color: var(--text-tertiary);
+}
+
+/* Said once, where the document is named. The absence of a run control is the
+   other half of the same sentence — there is no kernel behind this view. */
+.wb-nb-readonly {
+  margin-left: auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+  letter-spacing: var(--tracking-label);
+  white-space: nowrap;
+}
+
+/* ---- the scroll of cells -------------------------------------------------- */
+
+.wb-nb-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* One notice line above the cells, in the wash for what it means (§6.1's bar
+   rule, applied to a panel-wide notice rather than to a buffer bar). */
+.wb-nb-notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--info-bg);
+  color: var(--text-secondary);
+  font-size: var(--type-xs-size);
+}
+
+.wb-nb-notice.is-warn {
+  background: var(--warn-bg);
+}
+
+.wb-nb-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* A markdown cell is prose in the panel, so it takes the app's own markdown
+   rendering (`markdown.tsx`, styled in `agent.css`) and only its colour back:
+   chat sets `--text-primary` for a message, and a notebook's prose sits beside
+   code rather than being the thing being said. */
+.wb-nb-cell.is-markdown .wb-md {
+  gap: var(--space-3);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+}
+
+.wb-nb-cell.is-markdown .wb-md h1,
+.wb-nb-cell.is-markdown .wb-md h2,
+.wb-nb-cell.is-markdown .wb-md h3,
+.wb-nb-cell.is-markdown .wb-md h4,
+.wb-nb-cell.is-markdown .wb-md h5,
+.wb-nb-cell.is-markdown .wb-md h6 {
+  color: var(--text-primary);
+}
+
+/* ---- code cells ----------------------------------------------------------- */
+
+.wb-nb-code-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+/* History, not a control. Fixed width so a column of counts lines up whatever
+   they run to, and tertiary so it never competes with the code beside it. */
+.wb-nb-count {
+  flex: 0 0 auto;
+  min-width: 3.5ch;
+  padding-top: var(--space-3);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.wb-nb-code,
+.wb-nb-raw,
+.wb-nb-out-text {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-code);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--type-code-size);
+  line-height: var(--type-code-line);
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.wb-nb-code {
+  flex: 1;
+  min-width: 0;
+}
+
+.wb-nb-raw {
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+}
+
+/* Syntax: the terminal ANSI palette (§2.7), matching `monaco.ts`'s theme rules
+   token for token — comment, string, number, keyword, function. */
+.wb-nb-t-comment {
+  color: var(--ansi-bright-black);
+}
+
+.wb-nb-t-string {
+  color: var(--ansi-green);
+}
+
+.wb-nb-t-number {
+  color: var(--ansi-yellow);
+}
+
+.wb-nb-t-keyword {
+  color: var(--ansi-magenta);
+}
+
+.wb-nb-t-builtin {
+  color: var(--ansi-blue);
+}
+
+/* ---- outputs -------------------------------------------------------------- */
+
+.wb-nb-outs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* Indented under the code, so an output reads as belonging to the cell above
+     rather than as the next thing in the notebook. Matches the count column. */
+  margin-left: calc(3.5ch + var(--space-3));
+}
+
+.wb-nb-out {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.wb-nb-out-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+
+.wb-nb-out.is-stderr .wb-nb-out-text {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.wb-nb-out.is-error .wb-nb-out-text {
+  border-color: var(--error);
+  background: var(--error-bg);
+}
+
+.wb-nb-err-head {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-code-size);
+  font-weight: var(--weight-medium);
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+
+/* An image output sits on paper, and here that is not the document doctrine but
+   the plots themselves: matplotlib renders on a transparent or white ground, so
+   a dark surface behind one shows a white figure floating in a grey box with
+   black axis labels no one can read. A white plate under the image is what makes
+   a chart legible in the dark theme. */
+.wb-nb-out.is-image img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  padding: var(--space-3);
+  background: var(--surface-paper);
+  border: 1px solid var(--border-paper-rim);
+  border-radius: var(--radius-sm);
+}
+
+/* The plate for an image the server would not carry. Dashed rather than solid,
+   and on the app surface rather than the paper one above: it is deliberately
+   *not* mistakable for a figure that failed to load — this is a stated absence,
+   and the two lines inside it say which image and how big. Sized so a scrolled
+   cell still reads as "there was a picture here". */
+.wb-nb-out.is-image-cut {
+  gap: var(--space-1);
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 4rem;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-code);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* "HTML output, shown as source", "Empty output" — a label on a block, so a
+   reader is never left deciding what an unexplained box is. */
+.wb-nb-out-label {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+.wb-nb-cut {
+  margin: 0;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+}
+
+/* ---- states: loading, tombstone, degraded --------------------------------- */
+
+.wb-nb-state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  text-align: center;
+  font-size: var(--type-sm-size);
+  color: var(--text-tertiary);
+}
+
+.wb-nb-state-title {
+  margin: 0;
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.wb-nb-state-detail {
+  margin: 0;
+  max-width: 46ch;
+  font-size: var(--type-xs-size);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.wb-nb-state.is-failed .wb-nb-state-detail {
+  font-family: var(--font-mono);
+  color: var(--error);
+}
+
+.wb-nb-state-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
