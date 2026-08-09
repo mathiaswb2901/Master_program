@@ -797,7 +797,10 @@ the command registry", for the reason that makes it necessary — a registry bin
 a DOM listener, and a DOM listener is exactly what is missing. The invariant it exists
 to keep is the first one in this section: the docked panel states the chord in its
 chrome *and* carries a focusable **Return to Workbench** button, so the way out is
-neither only-by-chord nor only-by-mouse.
+neither only-by-chord nor only-by-mouse. A machine-wide chord can be **refused** —
+an RDP session's connection bar already owns this one — so the panel asks the shell
+whether the registration is really its own and names the chord only when it is,
+because a stated way out that does nothing is worse than the button alone.
 
 **User chords** (`shortcuts.md`, `docs/shortcuts.md`) must carry `Alt`. Everywhere but
 xterm and Monaco the app intercepts *any* `Ctrl` chord and preventDefaults it, so a

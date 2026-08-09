@@ -35,6 +35,7 @@ import {
 } from "../officeHost";
 import { parsePaneId } from "../panes";
 import type { WorkbenchTool } from "../registry";
+import { callShell } from "../shell";
 import { useStore, type OpenFile } from "../store";
 import type { HostAppKind, HostReason, OfficeHostInfo, PanelRect } from "../types";
 import { OfficePanel } from "./OfficePanel";
@@ -56,6 +57,45 @@ const APP_NAMES: Record<HostAppKind, string> = {
 const ESCAPE_CHORD = "Ctrl+Alt+Home";
 /** The same chord in ARIA's spelling, which names modifiers in full. */
 const ESCAPE_KEYSHORTCUTS = "Control+Alt+Home";
+
+/**
+ * Whether the shell actually got the chord, and what it is called.
+ *
+ * Mirrors `EscapeState` in `desktop/src-tauri/src/host/commands.rs`. It is a
+ * shell command rather than part of the server's `OfficeCapabilities` because
+ * the fact it reports is the shell's alone: `RegisterHotKey` takes the chord
+ * from the **whole machine**, so it can be refused by an application that
+ * already owns it — inside an RDP session `mstsc` owns exactly this one for its
+ * connection bar. A refused registration is a degrade, not a failed embed (the
+ * document opens, the button below still works), which is precisely why it has
+ * to be *said*: otherwise the panel keeps naming a keystroke that nothing
+ * answers, and the only record of it is a log file the user cannot read.
+ */
+interface EscapeState {
+  armed: boolean;
+  chord: string;
+}
+
+/**
+ * The sentence above the button, for what the shell said — pure, so all three
+ * states are one thing to read.
+ *
+ * `null` is "the shell has not answered yet": the button is claimed, the chord
+ * is not, because a hint that names a chord before knowing it exists is the bug
+ * this function is here to prevent.
+ */
+function escapeMessage(escape: EscapeState | null): string {
+  if (escape === null) {
+    return "This document has the keyboard — the button brings it back to Workbench.";
+  }
+  if (escape.armed) {
+    return `This document has the keyboard — ${escape.chord} brings it back to Workbench.`;
+  }
+  return (
+    `This document has the keyboard — ${escape.chord} is taken by another application in ` +
+    `this session, so the button is the way back.`
+  );
+}
 
 /** States in which a real native window is docked into the pane (or on its way
  * in) and so cannot follow it out of the main window. `detached` is not one of
@@ -292,8 +332,9 @@ function sameRect(a: PanelRect, b: PanelRect): boolean {
  * `Alt` pane chord, `Alt+M` — stops existing the moment the user clicks into it.
  * DESIGN.md §6.8 asks for both halves of the way out, and this line is both: it
  * **names the chord** (the keyboard path, an OS-level hotkey the shell
- * registers) and carries a **focusable button** (the pointer path), so the
- * escape is neither only-by-chord nor only-by-mouse.
+ * registers — when the shell really holds it, see below) and carries a
+ * **focusable button** (the pointer path), so the escape is neither
+ * only-by-chord nor only-by-mouse.
  *
  * It sits in the chrome below the body, next to the identity line, for the
  * reason stated there: a real Word window covers the whole page rectangle, so an
@@ -310,20 +351,62 @@ function sameRect(a: PanelRect, b: PanelRect): boolean {
  * reaches `embedded` with no window behind it, nothing has taken the keyboard,
  * and no chord is registered — so the caller gates this on the backend being the
  * real one rather than saying something untrue about the user's keyboard.
+ *
+ * **And the chord half is asked, never assumed.** `RegisterHotKey` competes for
+ * a machine-wide binding and loses when someone else already holds it, which is
+ * a documented, expected case (an RDP session's connection bar, a second
+ * Workbench). Naming the chord unconditionally would make the one sentence a
+ * trapped user reads the one sentence that is false — so the shell is asked on
+ * every dock, and the hint falls back to the button when the answer is no.
  */
 function KeyboardEscapeLine({ file }: { file: OpenFile }) {
-  const state = useOfficeHostStore((s) => s.hosts[file.path]?.state);
-  if (state !== "embedded") return null;
+  const embedded = useOfficeHostStore((s) => s.hosts[file.path]?.state) === "embedded";
+  // Re-asked whenever *any* document docks or undocks, not only this one:
+  // arming is idempotent and retried by every embed, so a chord that was taken
+  // when this document docked can become the shell's by the time the next one
+  // does — and goes back to the machine with the last one out.
+  const dockedCount = useOfficeHostStore(
+    (s) => Object.values(s.hosts).filter((host) => host.state === "embedded").length,
+  );
+  const [escape, setEscape] = useState<EscapeState | null>(null);
+
+  useEffect(() => {
+    if (!embedded) {
+      setEscape(null);
+      return;
+    }
+    let cancelled = false;
+    void callShell<EscapeState>("host_escape_state")
+      .then((next) => {
+        if (!cancelled) setEscape(next);
+      })
+      .catch(() => {
+        // No shell, or one too old to answer. Either way nothing registered the
+        // chord for this page, and the button is all we can honestly offer.
+        if (!cancelled) setEscape({ armed: false, chord: ESCAPE_CHORD });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [embedded, dockedCount]);
+
+  if (!embedded) return null;
+  const armed = escape?.armed === true;
   return (
     <div className="wb-office-identity">
-      <span className="wb-office-identity-msg u-truncate">
-        This document has the keyboard — {ESCAPE_CHORD} brings it back to Workbench.
-      </span>
+      <span className="wb-office-identity-msg u-truncate">{escapeMessage(escape)}</span>
       <button
         type="button"
         className="wb-office-btn"
-        aria-keyshortcuts={ESCAPE_KEYSHORTCUTS}
-        title={`Take the keyboard out of the document (${ESCAPE_CHORD})`}
+        // Only while it is real: `aria-keyshortcuts` is a promise to assistive
+        // technology, and an unregistered chord announced as one is the same lie
+        // the sentence above stopped telling.
+        aria-keyshortcuts={armed ? ESCAPE_KEYSHORTCUTS : undefined}
+        title={
+          armed
+            ? `Take the keyboard out of the document (${ESCAPE_CHORD})`
+            : "Take the keyboard out of the document"
+        }
         onClick={(event) => {
           event.currentTarget.focus();
         }}

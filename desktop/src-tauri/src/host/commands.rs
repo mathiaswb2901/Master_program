@@ -317,6 +317,43 @@ pub fn host_focus(app: AppHandle, host_id: String) -> Result<(), HostError> {
     })
 }
 
+/// What the panel is allowed to *promise* about the way out of a docked
+/// document.
+///
+/// The chord [`super::escape`] registers is taken from the **whole machine**, so
+/// `RegisterHotKey` can be refused: another application already owns it, which
+/// inside an RDP session `mstsc` really does (it binds `Ctrl+Alt+Home` to the
+/// connection bar). [`arm_escape`] treats that as a degrade rather than a failed
+/// embed — the document still opens and the *Return to Workbench* button still
+/// works — but the panel used to print "`Ctrl+Alt+Home` brings it back" either
+/// way, and the only trace of the refusal was a backend log line the user has no
+/// way to read. This is that answer, in the shape the panel asks for it.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct EscapeState {
+    /// Is the chord ours right now? `false` means the hint must not name it —
+    /// there is no hotkey registered, and the button is the only way back.
+    pub armed: bool,
+    /// The chord as a person reads it, quoted from the registration rather than
+    /// spelled a second time: [`super::escape::CHORD`] is where it is written.
+    pub chord: &'static str,
+}
+
+/// Is there a keyboard way out of a docked document *right now*?
+///
+/// A read of one atomic, so unlike its neighbours it needs neither the registry
+/// nor a hop to the main thread: the question is about a machine-wide
+/// registration, not about a panel. The UI asks it whenever a document docks or
+/// undocks, and that re-ask matters — arming is idempotent and retried by every
+/// embed, so a chord that was taken when the first document docked can become
+/// ours by the time the second one does.
+#[tauri::command]
+pub fn host_escape_state() -> EscapeState {
+    EscapeState {
+        armed: escape::is_armed(),
+        chord: escape::CHORD,
+    }
+}
+
 /// Every panel this window owns. A leak is visible here and nowhere else.
 #[tauri::command]
 pub fn host_list(app: AppHandle) -> Result<Vec<HostSnapshot>, HostError> {
@@ -559,7 +596,10 @@ pub(super) fn reclaim_focus(app: &AppHandle, dead_ends: &[WindowId]) {
 /// A refusal is a log line and not a failed embed. The chord being unavailable
 /// (another application already registered it) makes the keyboard escape worse,
 /// not the document unopenable, and the visible affordance under the panel is
-/// still there.
+/// still there. What a refusal must *not* do is stay invisible: the panel reads
+/// [`host_escape_state`] on every dock and stops naming a chord that is not
+/// ours, so the hint degrades to the button instead of promising a keystroke
+/// nothing would answer.
 fn arm_escape(app: &AppHandle) {
     let Some(fallback) = app_window(app) else {
         // No main window is a build or a moment with nowhere to hand the

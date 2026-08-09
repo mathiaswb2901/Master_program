@@ -110,8 +110,11 @@ static TARGET: AtomicIsize = AtomicIsize::new(0);
 ///
 /// Idempotent: called on every embed, and an escape that is already armed is
 /// only re-aimed. A refusal is returned *and* logged — the chord being taken by
-/// another application is a real thing that happens, and the user's evidence for
-/// it is the log line, since the panel's hint cannot ask.
+/// another application is a real thing that happens (an RDP session's connection
+/// bar owns exactly this chord). The log line is for a bug report; what the
+/// *user* sees is [`is_armed`], which [`super::commands::host_escape_state`]
+/// hands to the panel so the hint under a docked document names the chord only
+/// while there is one to name.
 ///
 /// **Main thread only.**
 pub(super) fn arm(fallback: WindowId) -> Result<(), HostError> {

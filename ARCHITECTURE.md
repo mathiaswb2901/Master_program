@@ -1218,7 +1218,11 @@ by the embed that creates the trap and released with the last docked document,
 because the chord is taken from the *whole machine* while it is held. The handler is
 one call to the existing `focus::focus` seam; measured in the running shell, that
 lands the keyboard on `Chrome_WidgetWin_1` — the WebView2 widget — so the page, and
-therefore the keymap, really is where the keys go next.
+therefore the keymap, really is where the keys go next. Taking a chord from the whole
+machine can also *fail* (an RDP session's connection bar owns this one), which is a
+degrade rather than a failed embed — so `host_escape_state` reports whether the
+registration is really ours and the panel names the chord only when it is, instead of
+promising a keystroke whose refusal existed nowhere but a log file.
 
 **Hang isolation was the open risk. It is now contained, and measured after the
 fix** (`host/mover.rs`). A wedged guest still leaves the host window pumping its

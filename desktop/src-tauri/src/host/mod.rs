@@ -106,8 +106,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 
 pub use commands::{
-    host_close, host_detach, host_embed, host_focus, host_list, host_poll, host_set_bounds,
-    host_set_visible, shutdown, EMBEDDED_EVENT, LOST_EVENT,
+    host_close, host_detach, host_embed, host_escape_state, host_focus, host_list, host_poll,
+    host_set_bounds, host_set_visible, shutdown, EscapeState, EMBEDDED_EVENT, LOST_EVENT,
 };
 #[cfg(debug_assertions)]
 pub use commands::{host_hang_guest, host_open_guest};

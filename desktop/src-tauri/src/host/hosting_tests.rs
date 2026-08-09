@@ -1570,6 +1570,70 @@ fn the_keyboard_escape_takes_the_chord_from_the_machine_and_gives_it_back() {
     class::destroy(WindowId::from_hwnd(target));
 }
 
+/// **The collision the panel used to lie about.**
+///
+/// `RegisterHotKey` competes for a binding owned by the *whole machine*, so it
+/// fails when another application already holds one — and `Ctrl+Alt+Home` has a
+/// known, documented holder: inside an RDP session `mstsc` binds it to the
+/// connection bar. [`commands::arm_escape`] is right to treat that as a degrade
+/// rather than a failed embed; what was wrong is that it was the *only* record.
+/// Nothing crossed to the UI, so `KeyboardEscapeLine` went on printing
+/// "Ctrl+Alt+Home brings it back to Workbench" at a user for whom that chord
+/// does nothing at all — inside the one panel where the rest of the keymap has
+/// already stopped existing.
+///
+/// So the collision is made real here rather than mocked (a rival window takes
+/// the chord first, exactly as `mstsc` would have), and the assertion is on the
+/// seam the panel actually reads. Both directions matter: refused has to report
+/// `armed: false`, and it must not be a permanent verdict — the rival gives the
+/// chord back, the next embed re-arms, and the hint may name it again.
+#[test]
+fn a_chord_another_application_owns_is_reported_to_the_panel_as_unavailable() {
+    let _serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
+    let target = stand_in_window("escape-state-target");
+    let rival = stand_in_window("escape-state-rival");
+    let rival_id = WindowId::from_hwnd(rival);
+    // Whatever ran before this, start from "not armed".
+    escape::disarm();
+    assert!(
+        !commands::host_escape_state().armed,
+        "nothing is docked, so nothing should be claiming a machine-wide chord"
+    );
+
+    // The RDP connection bar, stood in for by a window of ours: the chord is
+    // taken before Workbench ever asks for it.
+    escape::try_take_the_chord(rival_id, 9003)
+        .expect("Ctrl+Alt+Home is owned by another application on this machine");
+    assert!(
+        escape::arm(WindowId::from_hwnd(target)).is_err(),
+        "the chord was registered twice, so this test is not reproducing the collision"
+    );
+
+    let refused = commands::host_escape_state();
+    assert!(
+        !refused.armed,
+        "the panel would print \"{} brings it back to Workbench\" with no hotkey registered — \
+         the one sentence a trapped user reads, and it would be false",
+        refused.chord
+    );
+    // The panel quotes this rather than spelling the chord a second time, so it
+    // is the registration's own name or the hint is drifting.
+    assert_eq!(refused.chord, "Ctrl+Alt+Home");
+
+    // Not a permanent verdict: every embed retries, and the UI re-asks on each
+    // dock precisely so a chord that frees up is named again.
+    escape::release_the_chord(rival_id, 9003);
+    escape::arm(WindowId::from_hwnd(target)).expect("the escape should arm once the chord is free");
+    assert!(
+        commands::host_escape_state().armed,
+        "the chord is registered but the panel is still being told to hide it"
+    );
+
+    escape::disarm();
+    class::destroy(rival_id);
+    class::destroy(WindowId::from_hwnd(target));
+}
+
 /// **The trap, and the message that ends it.**
 ///
 /// The keyboard is put where a user's click puts it — inside the guest, whose own
