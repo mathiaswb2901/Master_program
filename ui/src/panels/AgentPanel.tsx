@@ -67,6 +67,47 @@ function activeFolder(): string {
   return path !== null && path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 }
 
+/**
+ * `session.start{prompt, cwd}` — the parameterised half of "new agent session"
+ * (PR-E), for a CLI, an agent or a voice command.
+ *
+ * **`cwd` is jailed here as well as server-side.** The server's `safe_path` is
+ * still the only thing that turns a wire path into a filesystem path, and it
+ * still refuses anything outside the root — but a caller that typed an absolute
+ * path deserves the sentence that says so rather than a 400 from two layers
+ * down, and the refusal is what makes the argument space *closed* on this side
+ * too. Workspace-relative, forward slashes, no drive letters, no `..`: the same
+ * vocabulary the file tree and the session list already speak.
+ *
+ * The create-and-send is asynchronous and the relay's answer is not: what this
+ * confirms is that the request was accepted and jailed, not that a session slot
+ * was free. A refusal past that point (the concurrency cap, a folder the server
+ * will not take) surfaces as the toast it already does — stated here rather than
+ * dressed up, because a caller reading "ok" for a session that never started
+ * would be the silent green in miniature.
+ */
+function startSessionWithPrompt(prompt: string, cwd: string | undefined): void {
+  const text = prompt.trim();
+  if (text === "") throw new Error("prompt is empty — there would be nothing to say");
+  const folder = (cwd ?? "").trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (folder.startsWith("/") || /^[A-Za-z]:/.test(folder) || folder.startsWith("~")) {
+    throw new Error(`cwd "${cwd ?? ""}" must be relative to the workspace, not an absolute path`);
+  }
+  if (folder.split("/").includes("..")) {
+    throw new Error(`cwd "${cwd ?? ""}" leaves the workspace`);
+  }
+  void (async () => {
+    const id = await useStore.getState().createSessionIn(folder);
+    if (id === null) return; // the store already said why, in a toast
+    // Focused before the message so the send lands on *this* session rather
+    // than on whichever one the window happened to be talking to: `sendChat`
+    // means the focused session, and a script that starts two sessions in a row
+    // would otherwise put the second prompt into the first.
+    useStore.getState().focusSession(id);
+    useStore.getState().sendChat(text);
+  })();
+}
+
 /** Every session, newest first — live ones and resumable transcripts alike. */
 function recentSessions(): SessionInfo[] {
   return useStore
@@ -599,6 +640,44 @@ export const agentTool: WorkbenchTool = {
       title: "New agent session here",
       detail: () => activeFolder() || "workspace root",
       run: () => void useStore.getState().createSessionIn(activeFolder()),
+    },
+    {
+      // The parameterised sibling of `session.new` (PR-E). Two flags, and both
+      // are the same judgement from two directions: starting an agent on a
+      // prompt is *not* something a project's own `.workbench/shortcuts.md` may
+      // bind on a keystroke (`unsafeFromFile`), and it is exactly what a CLI
+      // routine is for — so the relay takes it only *with* its arguments
+      // (`relayRequiresParams`), never as a bare gesture.
+      //
+      // The QuickBar row therefore has no parameterless behaviour to offer, and
+      // says so out loud rather than quietly doing something else: a row that
+      // started an unprompted session would be `session.new` under a second
+      // name, which is how a palette stops being readable. `run(undefined)` is
+      // reachable only from a gesture — the relay refuses the bare form above.
+      id: "session.start",
+      title: "Start an agent session with a prompt",
+      detail: () => "from the CLI or an agent — `workbench-cmd run session.start`",
+      unsafeFromFile: true,
+      params: {
+        fields: [
+          { name: "prompt", detail: "what to ask" },
+          { name: "cwd", required: false, detail: "a folder under the workspace root" },
+        ],
+        relayRequiresParams: true,
+      },
+      run: (params) => {
+        if (params === undefined) {
+          useStore
+            .getState()
+            .pushToast(
+              "info",
+              "session.start carries a prompt, so it comes from a CLI script or an agent. " +
+                "From the window, use “New agent session here”.",
+            );
+          return;
+        }
+        startSessionWithPrompt(params.prompt, params.cwd);
+      },
     },
     {
       // Detach the focused session: it keeps running headless and its pane

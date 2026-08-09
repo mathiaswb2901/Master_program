@@ -44,9 +44,9 @@ from workbench_server.routers import (
 from workbench_server.routers import (
     settings as settings_router,
 )
+from workbench_server.runtime import runtime_token_path
 from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
-from workbench_server.services.app_data import app_data_dir
 from workbench_server.services.commands import CommandRelay
 from workbench_server.services.conversations import ConversationBrowser
 from workbench_server.services.documents import DocumentService
@@ -590,19 +590,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.mount("/", StaticFiles(directory=ui_dist, html=True), name="ui")
 
     return app
-
-
-def runtime_token_path(settings: Settings) -> Path:
-    """Where this instance drops its per-launch token for an attaching shell.
-
-    Keyed by port so two servers on the same machine (different ports) do not
-    clobber or delete each other's file: each writes ``auth-token-<port>`` and
-    an attaching shell reads the one matching the port it is dialling. Without
-    the discriminator, whichever process exited first would unlink the shared
-    file out from under a still-running sibling.
-    """
-    root = settings.app_data_root or app_data_dir()
-    return root / "runtime" / f"auth-token-{settings.port}"
 
 
 def run() -> None:

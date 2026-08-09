@@ -60,7 +60,7 @@ command is one a user would reach for without looking.
 | `panel.instances` | What a *second* pane of a plural tool is bound to: `options()` (the rows the pane picker offers) and `titleFor(key)` (what such a pane calls itself). A row may set `disabled: true` with the reason in `detail` — a cap the tool knows about before the gesture. See **Plural tools**. |
 | `groupActions` | One control at the right end of every pane's tab strip, for a tool that acts on panes rather than living in one. The pane system's split glyphs are the only one (DESIGN.md §6.11); there is room for one. |
 | `documentView` | Renders one `OpenFile` kind inside the editor area (`kind`, `component`, `hostClassName`, `keepMounted`, `surface`). This is how Office panels attach — the editor area asks the registry, not a list of extensions. `surface` says which ground you draw on and therefore whether the editor frame becomes a **mat**: `"paper"` (the default) is for a canvas we cannot theme — the OnlyOffice iframe, a real Word window — and `"app"` is for a document we render ourselves in the window's own theme, which the notebook view is (DESIGN.md §2.8). |
-| `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row; `category` puts it in its own QuickBar section. |
+| `commands` | The `Command` shape from `commands.ts`, minus `keys`. `when` hides a command from the QuickBar and makes its chords inert — this one *is* live, re-read on every keystroke; `detail` is the right-hand text on the row; `category` puts it in its own QuickBar section. `params` declares the arguments a command takes — see **Parameterised commands**. |
 | `dynamicCommands` | `{ key, build }` for commands whose *set* changes while the app runs — one row per saved layout, one per recent workspace. `build` is called only when `key()` changes, because the merged command list is read on every keystroke. **Dynamic commands never carry a chord**: a chord has to be static to be pinned by a test and to lose a `shortcuts.md` collision deterministically. |
 | `shortcuts` | `{ commandId: ["Alt+X", …] }` — the tool's whole keymap in one block. A key that names no command of that tool fails `registry.test.ts` rather than silently binding nothing. Take an `Alt` chord only if the command earns it (see above). |
 | `statusContributions` | `{ region: "left" \| "center" \| "right", component }`. Rendered in registry order inside the region. |
@@ -105,6 +105,55 @@ Agent-facing tools are *not* here — see below.
   against the real registry). You do not register anything for this and you cannot opt
   out: the reference is a rendering of the registry (`ui/src/keyref.ts`, DESIGN.md
   §6.13), which is what stops it going stale the day you move a chord.
+
+## Parameterised commands
+
+A command may take arguments, and three do: `layout.switch{name}`,
+`workspace.open{path}`, `session.start{prompt, cwd}`. They are how a CLI script, an agent
+or (later) a voice command says *which* layout, *which* folder, *what* to ask — instead of
+one registered id per possible answer.
+
+```ts
+{
+  id: "layout.switch",
+  title: "Switch to a named layout",
+  params: { fields: [{ name: "name", detail: "a layout this window has" }] },
+  run: (params) => {
+    if (params === undefined) useLayoutUi.setState({ menu: "list" });  // a gesture
+    else switchToNamedLayout(params.name);                             // a caller
+  },
+}
+```
+
+Four things to know before you add a fourth.
+
+- **The argument space must be a closed set you already own.** A layout this window
+  published, a folder on the recent list, a folder under the workspace root. That is the
+  design rule, not a coincidence: it is what makes it safe for something outside the window
+  to reach in. If your argument is "any string that becomes a path", you are widening the
+  relay's reach and the answer is no.
+- **Two layers check two different things.** The relay checks the *shape* against the
+  schema `buildManifest` published, before the event bus (`services/commands.py`); your
+  `run` checks what the argument *means*, and **throws** if it is not a member — the
+  message becomes the caller's `detail` and stops a CLI script at that op. Toasting and
+  carrying on is right for a `shortcuts.md` entry and wrong for a caller waiting on an
+  answer.
+- **`run(params?)` — `params` is absent for every gesture.** A QuickBar row, a chord and a
+  `shortcuts.md` binding carry no arguments, so give the bare call something honest to do
+  (open the picker) or say out loud that this one is for a script.
+- **Strings only, and the manifest is a budget.** A window's whole manifest is what an
+  agent gets back from one `run_command` discovery call, capped at 2,560 bytes. The three
+  schemas above cost 47 of them because a hint is `{name:str}`; JSON Schema per row would
+  not fit. `ui/src/commandParams.ts` is where the type, the wire mirror and the validation
+  live.
+
+`relayRequiresParams: true` is the one extra flag, and it **narrows**: it publishes a
+command the untrusted-input bar (`isBindableFromFile`) otherwise refuses, on the standing
+condition that the relay may only invoke it *with* its arguments —
+`executeCommandById` refuses the bare gesture. `workspace.open` is the case: no arguments
+opens a folder dialog onto the whole filesystem, `{path}` is refused unless the path is on
+the recent list. A `shortcuts.md` file is unaffected either way; it binds a chord, and a
+chord carries nothing.
 
 ## Tooltips name their chord — and ask the registry for it
 

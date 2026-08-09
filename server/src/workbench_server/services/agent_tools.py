@@ -882,19 +882,27 @@ RUN_COMMAND = AgentToolSpec(
     name="run_command",
     description=(
         "Arrange the Workbench window by invoking one of its registered commands — "
-        "focus or open a panel, split a pane, switch a layout — instead of only "
-        "telling the user what to click. Call with no command_id to list the "
-        "available commands (id :: title); call with a command_id to run one. "
-        "params is reserved for commands that take arguments and is otherwise "
-        "ignored. Only commands the window published are invocable; an unknown id "
-        "is refused. Returns a one-line confirmation of what ran, or why it did "
-        "not (no window connected, or the window did not confirm)."
+        "focus or open a panel, split a pane, switch a layout, start a session — "
+        "instead of only telling the user what to click. Call with no command_id to "
+        "list them (id :: title, plus {arg:str} for the few that take arguments; a "
+        "trailing ? marks an optional one); call with a command_id, and params if it "
+        "takes them, to run one. Only commands the window published are invocable; an "
+        "unknown id, or an argument the command does not take, is refused naming what "
+        "it does. Returns a one-line confirmation of what ran, or why it did not (no "
+        "window connected, or the window did not confirm)."
     ),
     output_format="text",
     # A confirmation is one sentence; the list is the larger case — up to
     # RUN_COMMAND_LIST_MAX lines of `id :: title` (~45 bytes each) plus the
-    # capped-count footer. 2,560 covers that with margin; a longer list is cut to
-    # it and says so.
+    # capped-count footer, which is ~2,250 before anything is added. 2,560 covers
+    # that with margin; a longer list is cut to it and says so.
+    #
+    # The params hints are why that margin is not spent: only a command that
+    # published a schema carries one (three do), and the hint is a compact
+    # `{name:str}` rather than JSON Schema. Measured on a full 50-row listing:
+    # 2,074 bytes without them, 2,121 with — 47 bytes for all three, against the
+    # ~250 one schema object serializes to. Re-pinned in
+    # `test_command_params.py::test_a_realistic_manifest_with_hints_fits`.
     max_result_bytes=2_560,
     # Two small optional properties. Measured near 250 bytes; 420 leaves room to
     # reword a description-in-schema without a third argument slipping in
@@ -909,7 +917,7 @@ RUN_COMMAND = AgentToolSpec(
             },
             "params": {
                 "type": "object",
-                "description": "Reserved: arguments for a command that takes them.",
+                "description": "Arguments, for a command whose listing shows a {…} shape.",
             },
         },
     },
@@ -918,6 +926,13 @@ RUN_COMMAND = AgentToolSpec(
 
 def _format_command_list(manifest: CommandManifest) -> dict[str, Any]:
     """The discovery answer: one `id :: title` per line, capped with a count.
+
+    A command that takes arguments carries its shape after the title —
+    `layout.switch :: Switch to a named layout  {name:str}` — and nothing else
+    does. That asymmetry is the budget: a schema on every row would blow
+    `RUN_COMMAND.max_result_bytes` (see the spec), while a hint on the three
+    that need one costs ~60 bytes in total and saves the round trip an agent
+    would otherwise spend discovering that `params` was expected.
 
     An empty manifest says so and how to fix it (AXI shapes 2 and 3): no window
     has connected, so there is nothing to run and nothing to list yet.
@@ -929,7 +944,11 @@ def _format_command_list(manifest: CommandManifest) -> dict[str, Any]:
             "Open the window, then call run_command again."
         )
     shown = items[:RUN_COMMAND_LIST_MAX]
-    lines = [f"{item.id} :: {item.title}" for item in shown]
+    lines = [
+        f"{item.id} :: {item.title}"
+        + (f"  {item.params_schema.hint()}" if item.params_schema is not None else "")
+        for item in shown
+    ]
     if len(items) > RUN_COMMAND_LIST_MAX:
         withheld = len(items) - RUN_COMMAND_LIST_MAX
         lines.append(f"-- {withheld} more; these are the first {RUN_COMMAND_LIST_MAX}.")

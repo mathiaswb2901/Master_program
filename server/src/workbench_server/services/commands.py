@@ -14,9 +14,19 @@ it *relays* one to a connected window and waits to hear back. Three moving parts
 This is loop-affine: ``invoke`` and ``resolve`` run on the server's event loop,
 so the pending-future map needs no lock. A window that never answers is bounded
 by the invoke timeout, so a closed window cannot wedge a caller forever.
+
+**Two layers validate a parameterised invocation, and they check different
+things.** Here, before the bus: the *shape*, against the ``params_schema`` the
+window published — an unknown field, a missing argument or a value of the wrong
+type is refused immediately, naming the field. In the window, at ``run()``: what
+the argument *means* — whether that layout name exists, whether that folder is
+on the recent list. The relay deliberately holds no opinion on the second: the
+window owns the registry, and a second authority on what a workspace is would be
+one more thing to keep honest with nothing reading it.
 """
 
 import asyncio
+from typing import Any
 from uuid import uuid4
 
 import structlog
@@ -62,14 +72,61 @@ class CommandRelay:
     def is_registered(self, command_id: str) -> bool:
         return any(item.id == command_id for item in self._manifest)
 
+    def item(self, command_id: str) -> CommandManifestItem | None:
+        return next((item for item in self._manifest if item.id == command_id), None)
+
+    # ---- parameter validation (before the bus) ------------------------------
+
+    def params_refusal(self, command_id: str, params: dict[str, Any]) -> str | None:
+        """Why these arguments are not this command's, or ``None`` if they are.
+
+        Every refusal names the offending field *and* what would be accepted —
+        a caller told only "invalid params" spends a round trip discovering
+        which one, and a round trip is the cost this whole seam exists to avoid
+        (AXI shape 3). Checked against the published manifest, so an id nobody
+        published never reaches here (the router 404s first).
+        """
+        item = self.item(command_id)
+        if item is None:  # pragma: no cover - the router refuses first
+            return f"{command_id!r} is not a registered command."
+        schema = item.params_schema
+        if schema is None:
+            if not params:
+                return None
+            named = ", ".join(sorted(params))
+            return f"{command_id} takes no parameters (got {named})."
+        known = {spec.name: spec for spec in schema.params}
+        accepted = ", ".join(known) or "none"
+        for name in sorted(params):
+            if name not in known:
+                return f"{command_id} has no parameter {name!r}. It takes: {accepted}."
+        for spec in schema.params:
+            if spec.name not in params:
+                if spec.required:
+                    hint = f" ({spec.detail})" if spec.detail else ""
+                    return f"{command_id} needs {spec.name!r}{hint}. It takes: {accepted}."
+                continue
+            value = params[spec.name]
+            if not isinstance(value, str):
+                kind = type(value).__name__
+                return f"{command_id}: {spec.name!r} must be a string, got {kind}."
+            if len(value) > spec.limit():
+                return (
+                    f"{command_id}: {spec.name!r} is {len(value)} characters; "
+                    f"the limit is {spec.limit()}."
+                )
+        return None
+
     # ---- invoke / result ----------------------------------------------------
 
-    async def invoke(self, command_id: str, params: dict[str, object]) -> CommandInvokeResult:
+    async def invoke(self, command_id: str, params: dict[str, Any]) -> CommandInvokeResult:
         """Relay one command and wait for the window's verdict.
 
         Refuses before touching the bus when no window has published a manifest:
         with nothing connected there is nothing to run it, and the honest answer
         is "connect a window", not a ten-second wait that times out (AXI shape 2).
+        Arguments that do not match the published schema are refused in the same
+        place and for the same reason.
         """
         invocation_id = uuid4().hex
         if not self._manifest:
@@ -78,6 +135,12 @@ class CommandRelay:
                 dispatched=False,
                 ok=False,
                 detail="No Workbench window is connected to run commands.",
+            )
+        refusal = self.params_refusal(command_id, params)
+        if refusal is not None:
+            log.info("commands.params_refused", command_id=command_id, detail=refusal)
+            return CommandInvokeResult(
+                invocation_id=invocation_id, dispatched=False, ok=False, detail=refusal
             )
         loop = asyncio.get_running_loop()
         future: asyncio.Future[CommandInvokeResult] = loop.create_future()
