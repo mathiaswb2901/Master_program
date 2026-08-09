@@ -70,13 +70,21 @@ const RISK_VISUAL: Record<RiskLevel, StatusVisual> = {
   blocked: { token: "--agent-idle", bg: "--agent-idle-bg", label: "Blocked" },
 };
 
-/** One evidence line's outcome pill. `skipped` shares the neutral grey with
- * `blocked`: neither is a disagreement, both are "did not / could not judge". */
+/** One evidence line's outcome pill. `skipped` and `blocked` share the neutral
+ * grey with the `blocked` *risk*: neither is a disagreement, both are "did not /
+ * could not judge", and DESIGN.md §2.6 gives that state its own grey rather than
+ * a red it would be mistaken for.
+ *
+ * They are still different words, and the difference matters: `skipped` is "this
+ * did not apply", `blocked` is "this could not be judged and here is what would
+ * fix it" — the reconciliation gate's refusal to read a docked workbook's stale
+ * file. A reader who cannot tell those apart cannot act on either. */
 const OUTCOME_VISUAL: Record<CheckOutcome, StatusVisual> = {
   pass: { token: "--success", bg: "--success-bg", label: "Pass" },
   warn: { token: "--warn", bg: "--warn-bg", label: "Warn" },
   fail: { token: "--error", bg: "--error-bg", label: "Fail" },
   skipped: { token: "--agent-idle", bg: "--agent-idle-bg", label: "Skipped" },
+  blocked: { token: "--agent-idle", bg: "--agent-idle-bg", label: "Blocked" },
 };
 
 export const riskVisual = (risk: RiskLevel): StatusVisual => RISK_VISUAL[risk];

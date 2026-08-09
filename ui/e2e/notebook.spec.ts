@@ -35,7 +35,7 @@ import { expect, request, test, type Locator, type Page } from "@playwright/test
 
 import type { LayoutsResponse } from "../src/types";
 import { openApp, treeItem, workspaceReady } from "./app";
-import { workspacePath } from "./workspace";
+import { removeWorkspaceFile, workspacePath } from "./workspace";
 
 const ANALYSIS = "sample-analysis.ipynb";
 const SECOND = "sample-second.ipynb";
@@ -135,7 +135,7 @@ function seed(): void {
 test.beforeAll(seed);
 
 test.afterAll(async () => {
-  for (const name of SEEDED) fs.rmSync(workspacePath(name), { force: true });
+  for (const name of SEEDED) removeWorkspaceFile(name);
   // This journey persists panes, and six specs run after it — a notebook pane
   // left behind would make `panes.spec.ts` count one panel too many. Same
   // reset, and the same reason, as that journey's own `afterAll`.
@@ -327,7 +327,9 @@ test("a notebook that is gone, and one that will not parse", async ({ page }) =>
     const pane = paneByTitle(page, ANALYSIS);
     await expect(pane.locator('.wb-nb-cell[data-cell-type="markdown"] h1')).toBeVisible();
 
-    fs.rmSync(workspacePath(ANALYSIS), { force: true });
+    // The notebook was read moments ago, so the server may still have it open —
+    // a plain unlink is EBUSY on Windows inside that window (`removeWorkspaceFile`).
+    removeWorkspaceFile(ANALYSIS);
 
     // Named — the pane says *which* notebook is missing and where it was —
     // and it offers the one action that recovers it. A file does come back: a
