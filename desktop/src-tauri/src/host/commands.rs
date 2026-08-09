@@ -23,7 +23,6 @@
 //! [`host_open_guest`], which waits for a process to start and would freeze the
 //! window for as long as that took.
 
-#[cfg(debug_assertions)]
 use std::time::Duration;
 
 use serde::Serialize;
@@ -33,7 +32,8 @@ use super::class::{self, PanelState};
 use super::geometry::CssRect;
 use super::guest::{self, GuestProcess};
 use super::layout::{self, Coalescer};
-use super::main_thread::on_main;
+use super::main_thread::{on_main, on_main_within};
+use super::reaper;
 use super::{embed, HostError, HostErrorCode, HostGeometry, HostRegistry, HostSnapshot, WindowId};
 use super::{layout_for, Panel};
 
@@ -214,28 +214,69 @@ pub fn host_detach(app: AppHandle, host_id: String) -> Result<(), HostError> {
 }
 
 /// Close the instance we launched, and be certain it is gone.
+///
+/// **Certain, but not on this thread.** The window work below has to run here —
+/// the panel and its clip child belong to the main thread — while being certain
+/// an instance is gone means *waiting* for a process to die, which used to
+/// happen here too and froze the window for up to two seconds per closed panel.
+/// The kill is issued here (a `CloseHandle`, instant) and the wait is
+/// [`super::reaper`]'s; the keyboard follows the wait, because that is the step
+/// whose correct answer depends on the instance really being gone.
 #[tauri::command]
 pub fn host_close(app: AppHandle, host_id: String) -> Result<(), HostError> {
     let handle = app.clone();
     on_main(&app, move || {
         let registry = handle.state::<HostRegistry>();
-        let mut panel = {
-            let mut panels = lock(&registry)?;
-            panels
-                .remove(&host_id)
-                .ok_or_else(|| HostError::unknown_host(&host_id))?
-        };
-        let dead_ends = [panel.window, panel.clip];
-        release_panel(&mut panel);
-        // Dropping the process closes its job object, which is what actually
-        // kills it. Doing that outside the registry lock keeps a two-second
-        // worst-case wait off every other panel's path.
-        drop(panel.process.take());
-        // The keyboard *after* the instance is gone, not before: until then the
-        // released window is still on the desktop and may legitimately hold it.
-        reclaim_focus(&handle, &dead_ends);
-        Ok(())
+        close_panel(&registry, &host_id, |process, dead_ends| {
+            let Some(process) = process else {
+                // Nothing of ours to wait for: the window we were handed is
+                // already back on the desktop, so the keyboard question is
+                // answerable now.
+                reclaim_focus(&handle, &dead_ends);
+                return;
+            };
+            let after = handle.clone();
+            reaper::reap(process, move || {
+                let inner = after.clone();
+                if let Err(err) = on_main(&after, move || {
+                    reclaim_focus(&inner, &dead_ends);
+                    Ok(())
+                }) {
+                    crate::backend::log(&format!(
+                        "office host: could not hand the keyboard back after closing a panel: {err}"
+                    ));
+                }
+            });
+        })
     })
+}
+
+/// The body of [`host_close`]: take the panel out of the registry, give the
+/// guest window back, destroy ours, and hand whatever we launched to `finish`.
+///
+/// **Main thread only** — every call it makes is a window call.
+///
+/// `finish` is passed in rather than called directly so that the timing claim
+/// this shape exists for ("closing a panel never waits for a process to die")
+/// is measurable in [`super::hosting_tests`], which has real windows and a real
+/// guest but no Tauri app to hang a keyboard reclaim off.
+pub(super) fn close_panel(
+    registry: &HostRegistry,
+    host_id: &str,
+    finish: impl FnOnce(Option<GuestProcess>, [WindowId; 2]),
+) -> Result<(), HostError> {
+    let mut panel = {
+        let mut panels = lock(registry)?;
+        panels
+            .remove(host_id)
+            .ok_or_else(|| HostError::unknown_host(host_id))?
+    };
+    let dead_ends = [panel.window, panel.clip];
+    release_panel(&mut panel);
+    // Outside the registry lock, as it always was: nothing another panel's
+    // command needs is held while an instance is being seen off.
+    finish(panel.process.take(), dead_ends);
+    Ok(())
 }
 
 /// Is this host still alive? Cheap enough to poll.
@@ -484,7 +525,7 @@ fn app_window(app: &AppHandle) -> Option<WindowId> {
 /// on the thread that owns the windows. Cheap and usually a no-op: see
 /// [`super::focus::reclaim_if_stranded`] for what "stranded" means and why this
 /// cannot steal focus from another application.
-fn reclaim_focus(app: &AppHandle, dead_ends: &[WindowId]) {
+pub(super) fn reclaim_focus(app: &AppHandle, dead_ends: &[WindowId]) {
     let Some(window) = app_window(app) else {
         return;
     };
@@ -621,20 +662,97 @@ pub(super) fn on_guest_gone(app: &AppHandle, host_id: String) {
     );
 }
 
-/// Tear every panel down. Runs on the main thread at exit, where it is the last
-/// chance to put windows back and reap what we launched.
-pub fn shutdown(app: &AppHandle) {
-    let Some(registry) = app.try_state::<HostRegistry>() else {
-        return;
-    };
-    let Ok(mut panels) = lock(&registry) else {
+/// How long a teardown asked for from another thread waits for the main one.
+///
+/// **The tradeoff, stated where the bound lives.** [`tear_down_all`] is nothing
+/// but `SetParent`, `SetWindowLongPtrW` and `DestroyWindow` on windows the main
+/// thread created, and Win32 is not flexible about that: a window can only be
+/// destroyed by the thread that created it, and the rest is undefined rather
+/// than merely discouraged. So a teardown that cannot reach the main thread
+/// inside this bound is **abandoned, not performed here**. Three things make
+/// that the safe half of the trade:
+///
+/// * The work is not cancelled. It stays queued for the main thread, ahead of
+///   the window close that follows it, so a thread that was merely busy still
+///   tears the panels down in the right order once it comes back.
+/// * If it never comes back, neither does the close — `Window::close` is a
+///   message to the same event loop — so nothing gets destroyed underneath a
+///   guest either. The worst case is a shell the user ends from Task Manager,
+///   at which point the job objects reap what we launched and a surviving
+///   Office window is one the user can still see, save and close.
+/// * A guest left docked in a window that is going away is recoverable. Win32
+///   calls from a thread that does not own the window are not.
+///
+/// Two seconds is the same number [`super::main_thread::on_main`] gives every
+/// other window call: long enough for a busy event loop, short enough that a
+/// close does not feel stuck.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Tear every hosted panel down, **on the thread that owns their windows**,
+/// from wherever this is called.
+///
+/// Called on three paths that already are the main thread (the close guard's
+/// two, and `RunEvent::Exit`), where the hop below is free — and on one that is
+/// not: the close-ack watchdog in `lib.rs`, a thread spawned to close the window
+/// when the UI never answers. That thread used to run the teardown itself. It
+/// asks for it now, and gives up rather than doing it here; see
+/// [`TEARDOWN_TIMEOUT`] for what "gives up" costs.
+///
+/// Returns whether the teardown ran.
+pub fn shutdown(app: &AppHandle) -> bool {
+    let handle = app.clone();
+    let asked = on_main_within(app, TEARDOWN_TIMEOUT, move || {
+        if let Some(registry) = handle.try_state::<HostRegistry>() {
+            tear_down_all(&registry);
+        }
+        Ok(())
+    });
+    match asked {
+        Ok(()) => true,
+        Err(err) => {
+            crate::backend::log(&format!(
+                "office host: {err}; the teardown stays queued for it and nothing was torn \
+                 down from here — still docked: {}",
+                still_docked(app)
+            ));
+            false
+        }
+    }
+}
+
+/// The teardown itself. **Main thread only** — see [`shutdown`], which is how
+/// every caller reaches it.
+pub(super) fn tear_down_all(registry: &HostRegistry) {
+    let Ok(mut panels) = lock(registry) else {
         return;
     };
     for (host_id, mut panel) in panels.drain() {
         release_panel(&mut panel);
-        if let Some(mut process) = panel.process.take() {
-            process.reap();
+        if let Some(process) = panel.process.take() {
+            // Killed here and waited for elsewhere, for the same reason
+            // `host_close` does it: this is the main thread. At exit the wait
+            // may not outlive the process, and does not need to — the kill has
+            // already been issued, and a job object outlives us anyway.
+            reaper::reap(process, || {});
         }
         crate::backend::log(&format!("office host: {host_id} torn down at exit"));
     }
+}
+
+/// What a teardown that gave up left behind, for the log line that reports it.
+///
+/// `try_lock` rather than `lock`: the case this runs in is a main thread that is
+/// not answering, and one holding the registry while it does so is exactly the
+/// shape that would turn a bounded give-up into an unbounded one.
+fn still_docked(app: &AppHandle) -> String {
+    let Some(registry) = app.try_state::<HostRegistry>() else {
+        return "nothing (no registry)".to_string();
+    };
+    let Ok(panels) = registry.panels.try_lock() else {
+        return "unknown (the registry is busy)".to_string();
+    };
+    if panels.is_empty() {
+        return "nothing".to_string();
+    }
+    panels.keys().cloned().collect::<Vec<_>>().join(", ")
 }

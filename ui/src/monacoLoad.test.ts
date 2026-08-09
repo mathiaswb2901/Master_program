@@ -26,8 +26,13 @@ const { defineTheme } = vi.hoisted(() => ({
   defineTheme: vi.fn<(name: string, theme: unknown) => void>(),
 }));
 
+// The bundle carries two things `loadMonaco` needs: the configured editor API,
+// and the theme builder (the palette rides Monaco's chunk, not the entry one —
+// `./editorTheme`). Both are stubbed; this file is about *when* the theme is
+// read, and `src/monacoTheme.test.ts` is about what it reads.
 vi.mock("./monacoBundle", () => ({
   configureBundle: () => ({ editor: { defineTheme } }),
+  workbenchThemeData: (theme: string) => ({ base: theme }),
 }));
 
 /** `data-theme` on `<html>` — what `documentTheme()` reads. */

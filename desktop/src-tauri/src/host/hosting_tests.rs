@@ -15,8 +15,10 @@
 //! desktop: two of them fighting over focus at the same time would measure each
 //! other.
 
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -33,7 +35,8 @@ use super::embed::{self, EmbeddedGuest};
 use super::geometry::{host_layout, CssRect, HostLayout, PhysicalRect};
 use super::guest::{self, GuestProcess};
 use super::layout::{self, Coalescer};
-use super::{focus, Panel, WindowId};
+use super::{commands, focus, main_thread, reaper};
+use super::{HostError, HostErrorCode, HostRegistry, Panel, WindowId};
 
 /// One desktop, one window test at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -57,7 +60,10 @@ struct Fixture {
     /// guest, not a way of taking focus away from it.
     elsewhere: HWND,
     guest_window: WindowId,
-    guest_process: GuestProcess,
+    /// `Option` because a close test hands the instance to the code under test
+    /// — which is where the disposal now happens — and the fixture must then
+    /// not reap it a second time.
+    guest_process: Option<GuestProcess>,
     embedded: Option<EmbeddedGuest>,
     layout: HostLayout,
     /// What the guest itself said its `HWND` was.
@@ -122,12 +128,40 @@ impl Fixture {
             clip,
             elsewhere,
             guest_window: launched.window,
-            guest_process: launched.process,
+            guest_process: Some(launched.process),
             embedded: None,
             layout: plan,
             handshake,
             _serial: serial,
         }
+    }
+
+    /// The instance the fixture launched, while it still owns it.
+    fn process(&mut self) -> &mut GuestProcess {
+        self.guest_process
+            .as_mut()
+            .expect("the fixture still owns its guest process")
+    }
+
+    /// Hand the instance to the code under test. From here the fixture stops
+    /// reaping it, so whatever takes it is responsible for the kill.
+    fn take_process(&mut self) -> GuestProcess {
+        self.guest_process
+            .take()
+            .expect("the fixture still owns its guest process")
+    }
+
+    /// Give up ownership of our two windows, for a test that hands them to the
+    /// production teardown. Anything the fixture no longer owns it must not
+    /// destroy a second time.
+    fn disown_windows(&mut self) -> (WindowId, WindowId) {
+        let ours = (
+            WindowId::from_hwnd(self.panel),
+            WindowId::from_hwnd(self.clip),
+        );
+        self.panel = HWND(std::ptr::null_mut());
+        self.clip = HWND(std::ptr::null_mut());
+        ours
     }
 
     fn embed(&mut self) {
@@ -158,7 +192,9 @@ impl Drop for Fixture {
         class::destroy(WindowId::from_hwnd(self.clip));
         class::destroy(WindowId::from_hwnd(self.panel));
         class::destroy(WindowId::from_hwnd(self.elsewhere));
-        self.guest_process.reap();
+        if let Some(mut process) = self.guest_process.take() {
+            process.reap();
+        }
     }
 }
 
@@ -281,7 +317,7 @@ fn an_xlmain_frame_docks_the_way_words_opusapp_frame_does() {
     // extending hosting to Excel: the frame class differs, the docking does not.
     let mut fixture = Fixture::with_class((820, 560), 0, "XLMAIN");
     assert_eq!(
-        guest::find_window(fixture.guest_process.pid(), "XLMAIN"),
+        guest::find_window(fixture.process().pid(), "XLMAIN"),
         Some(fixture.guest_window),
         "the XLMAIN frame was not found by its own class and pid",
     );
@@ -592,7 +628,7 @@ fn closing_a_focused_panel_does_not_strand_the_keyboard() {
     class::destroy(WindowId::from_hwnd(fixture.panel));
     fixture.clip = HWND(std::ptr::null_mut());
     fixture.panel = HWND(std::ptr::null_mut());
-    fixture.guest_process.reap();
+    fixture.process().reap();
     assert!(
         wait_until(|| !exists(guest_window)),
         "the guest window outlived its job object"
@@ -761,7 +797,7 @@ fn a_guest_that_is_killed_is_found_only_by_asking() {
     let guest_window = fixture.guest_window;
     fixture.embedded = None;
     watch_parent_notify(fixture.panel);
-    fixture.guest_process.reap();
+    fixture.process().reap();
 
     assert!(
         wait_until(|| !exists(guest_window)),
@@ -900,6 +936,341 @@ unsafe extern "system" fn counting_wnd_proc(
         )
     }
 }
+
+// ---- the close paths, and the thread they run on ------------------------------
+
+/// One registry with one panel in it, holding the fixture's windows and — if
+/// asked — the instance it launched.
+///
+/// The fixture stops owning whatever goes in here: the code under test is what
+/// destroys these windows and ends this process, and a second teardown from
+/// `Fixture::drop` would be destroying handles that already went.
+fn registry_with(
+    fixture: &mut Fixture,
+    host_id: &str,
+    take_process: bool,
+) -> (HostRegistry, WindowId, WindowId) {
+    let (panel_window, clip_window) = fixture.disown_windows();
+    let process = take_process.then(|| fixture.take_process());
+    let registry = HostRegistry::new();
+    registry
+        .panels
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(
+            host_id.to_string(),
+            Panel {
+                window: panel_window,
+                clip: clip_window,
+                guest: fixture.embedded.take(),
+                process,
+                coalescer: Coalescer::default(),
+                caption_inset_css: 0.0,
+            },
+        );
+    (registry, panel_window, clip_window)
+}
+
+/// **The close-ack watchdog's teardown, and which thread its Win32 calls run
+/// on.**
+///
+/// When the UI never acknowledges a close prompt, `lib.rs` closes the window
+/// anyway — from a thread it spawned for the purpose, in exactly the situation
+/// the watchdog exists for. What that thread must not do is tear the hosted
+/// panels down itself: handing a guest back is `SetWindowLongPtrW` + `SetParent`
+/// on another process's window, our two windows go with `DestroyWindow`, and
+/// Win32 does not let a thread destroy a window that another thread created. It
+/// used to do exactly that, in the one scenario where the main thread is most
+/// likely to be busy.
+///
+/// The seam is stood up by hand rather than through a Tauri app: **this** thread
+/// created the windows and drains the queue, another plays the watchdog. What is
+/// asserted is where the teardown's Win32 calls ran — and then that the teardown
+/// really happened, so routing it politely into a no-op cannot pass.
+#[test]
+fn a_teardown_asked_for_off_thread_runs_its_win32_where_the_windows_live() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    let guest_hwnd = fixture.guest_window.hwnd();
+    let original_style = style_of(guest_hwnd);
+    fixture.embed();
+    assert_ne!(
+        style_of(guest_hwnd),
+        original_style,
+        "nothing was embedded, so a teardown would prove nothing"
+    );
+
+    let owner = thread::current().id();
+    // No process: this test is about the window calls, and the fixture keeps
+    // the instance so it is reaped exactly once, at the end.
+    let (registry, panel_window, clip_window) = registry_with(&mut fixture, "watchdog", false);
+    let registry = Arc::new(registry);
+
+    let ran_on: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
+    let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send + 'static>>();
+    let watchdog = {
+        let registry = Arc::clone(&registry);
+        let ran_on = Arc::clone(&ran_on);
+        thread::spawn(move || {
+            let asked_from = thread::current().id();
+            let outcome = main_thread::dispatch_within(
+                move |posted| {
+                    tx.send(posted).map_err(|_| {
+                        HostError::new(HostErrorCode::MainThread, "nobody is draining the queue")
+                    })
+                },
+                SETTLE_TIMEOUT * 3,
+                move || {
+                    *ran_on.lock().unwrap_or_else(|err| err.into_inner()) =
+                        Some(thread::current().id());
+                    commands::tear_down_all(&registry);
+                    Ok(())
+                },
+            );
+            (asked_from, outcome)
+        })
+    };
+
+    // This thread owns the windows, so this thread runs the work — which is
+    // what a message loop servicing `run_on_main_thread` amounts to.
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    let mut serviced = false;
+    while Instant::now() < deadline && !serviced {
+        match rx.try_recv() {
+            Ok(work) => {
+                work();
+                serviced = true;
+            }
+            Err(_) => {
+                pump_once();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+    assert!(
+        serviced,
+        "the teardown was never handed to the thread that owns the windows"
+    );
+
+    let (asked_from, outcome) = watchdog.join().expect("the watchdog thread finished");
+    outcome.expect("the teardown completed");
+    assert_ne!(
+        asked_from, owner,
+        "the stand-in watchdog ran on the owning thread, so this proves nothing"
+    );
+    assert_eq!(
+        *ran_on.lock().unwrap_or_else(|err| err.into_inner()),
+        Some(owner),
+        "the teardown's Win32 calls ran on {asked_from:?}, not on the thread that owns \
+         the windows"
+    );
+
+    // And it was a real teardown, not a routed no-op.
+    settle();
+    assert!(
+        !exists(panel_window),
+        "the panel window survived the teardown"
+    );
+    assert!(!exists(clip_window), "the clip child survived the teardown");
+    assert_eq!(
+        parent_of(guest_hwnd),
+        None,
+        "the guest was not handed back to the desktop"
+    );
+    assert_eq!(
+        style_of(guest_hwnd),
+        original_style,
+        "the guest was left wearing the child styles it was hosted with"
+    );
+}
+
+/// **Closing a panel must not wait for the instance to die.**
+///
+/// `host_close` runs on the main thread — the windows are the main thread's —
+/// and it used to drop the guest process there. That `Drop` reaped, and reaping
+/// is a kill followed by a poll until the process is really gone, bounded at two
+/// seconds. So closing one docked document froze the whole window for as long as
+/// the instance took to go: nothing at all for the synthetic guest, and the far
+/// end of that bound for a real Office instance in the middle of a save.
+///
+/// Made deterministic by taking the guest's **job object** away. Closing the job
+/// is what kills it, so a guest without one survives its own reap and the wait
+/// runs to the full bound — a slow-dying instance, without having to find an
+/// Office that is genuinely slow to die. The guard puts the job back at the end,
+/// so nothing is left on the desktop.
+#[test]
+fn closing_a_panel_does_not_wait_for_a_slow_dying_guest() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let job = fixture.process().detach_job_for_test();
+
+    // **The control**, taken first and on the same instance: the wait this used
+    // to do inline is real. Without it, a fast close below would be
+    // indistinguishable from a guest that simply died at once.
+    let started = Instant::now();
+    fixture.process().reap_within(Duration::from_millis(400));
+    let inline = started.elapsed();
+    println!("close: the disposal `host_close` used to do inline cost {inline:?}");
+    assert!(
+        inline >= Duration::from_millis(350),
+        "the control returned in {inline:?}, so this guest is dying after all and the \
+         measurement below would prove nothing"
+    );
+
+    let (registry, panel_window, clip_window) = registry_with(&mut fixture, "slow", true);
+
+    // The production body of `host_close`, disposing of the instance exactly as
+    // the command does.
+    let started = Instant::now();
+    commands::close_panel(&registry, "slow", |process, _dead_ends| {
+        if let Some(process) = process {
+            reaper::reap(process, || {});
+        }
+    })
+    .expect("the panel closes");
+    let elapsed = started.elapsed();
+    println!(
+        "close: `host_close`'s body returned in {elapsed:?} with a guest that cannot be killed"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "closing a panel held its thread for {elapsed:?} while an instance died — the \
+         control says that wait is worth {inline:?}"
+    );
+    assert!(!exists(panel_window), "the panel window survived the close");
+    assert!(!exists(clip_window), "the clip child survived the close");
+
+    // Nothing leaked: the instance is still ours to end, and ending it works.
+    drop(job);
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the slow-dying guest outlived the test"
+    );
+}
+
+/// The other half of moving the wait off the main thread: the **kill** did not
+/// move with it.
+///
+/// A normal guest, with its job object where it belongs. Closing the panel must
+/// still end the instance we launched — that is the whole difference between
+/// `close` and `detach` — and it must still empty the registry.
+#[test]
+fn closing_a_panel_still_ends_the_instance_it_launched() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let (registry, panel_window, clip_window) = registry_with(&mut fixture, "owned", true);
+
+    commands::close_panel(&registry, "owned", |process, _dead_ends| {
+        if let Some(process) = process {
+            reaper::reap(process, || {});
+        }
+    })
+    .expect("the panel closes");
+
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the guest outlived a close that was supposed to end it"
+    );
+    assert!(!exists(panel_window), "the panel window survived the close");
+    assert!(!exists(clip_window), "the clip child survived the close");
+    assert!(
+        registry
+            .panels
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty(),
+        "the registry still holds the panel that was closed"
+    );
+}
+
+/// **A reaper thread that never starts must not take the keyboard with it.**
+///
+/// `reap` moves the wait off the main thread, and the step that depends on the
+/// wait — handing the keyboard back to the webview — goes with it. Thread and
+/// handle exhaustion is real pressure for a shell juggling several hosted Office
+/// instances, and `thread::Builder::spawn` drops the closure it could not run:
+/// the shape this guards against is a failed spawn quietly swallowing the
+/// continuation, leaving a user with a closed panel and a keyboard that never
+/// came back, and nothing but a log line to say so.
+///
+/// The refusal is injected rather than provoked — starving the test runner of
+/// threads to observe this would be a worse test than naming the case.
+#[test]
+fn a_reaper_thread_that_never_starts_still_hands_the_keyboard_back() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    let guest_window = fixture.guest_window;
+    let process = fixture.take_process();
+
+    let reclaimed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&reclaimed);
+    reaper::reap_with(
+        process,
+        Box::new(move || flag.store(true, Ordering::SeqCst)),
+        |_body| Err(io::Error::other("no thread for you")),
+    );
+
+    assert!(
+        reclaimed.load(Ordering::SeqCst),
+        "the continuation was dropped with the thread that could not start — for `host_close` \
+         that is the keyboard reclaim, so the caret would be stranded with no way back"
+    );
+    // And the instance still ends: the kill never depended on the thread.
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the guest outlived a close whose reaper thread failed to start"
+    );
+}
+
+/// The other half of that fallback: **it is bounded, and it is short.**
+///
+/// The inline wait runs on the caller, which for `host_close` is the main
+/// thread — the thread this whole module exists to keep out of a two-second
+/// poll. So the fallback answers to its own much shorter number. Made
+/// deterministic the same way the timing test above is: a guest with its job
+/// object taken away cannot be killed, so the wait runs to the full bound
+/// instead of ending the moment the instance does.
+#[test]
+fn the_fallback_wait_is_bounded_far_below_the_reapers_own() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    let guest_window = fixture.guest_window;
+    let job = fixture.process().detach_job_for_test();
+    let process = fixture.take_process();
+
+    let reclaimed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&reclaimed);
+    let started = Instant::now();
+    reaper::reap_with(
+        process,
+        Box::new(move || flag.store(true, Ordering::SeqCst)),
+        |_body| Err(io::Error::other("no thread for you")),
+    );
+    let elapsed = started.elapsed();
+    println!("reaper: the inline fallback held its caller for {elapsed:?}");
+
+    assert!(
+        reclaimed.load(Ordering::SeqCst),
+        "the continuation did not run after the fallback gave up on the instance"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "the fallback returned in {elapsed:?} without waiting for an instance that cannot die, \
+         so it would hand the keyboard back while the window is still on the desktop"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the fallback held its caller for {elapsed:?} — that is the reaper's own two-second \
+         bound leaking back onto the main thread, which is the freeze this module removed"
+    );
+
+    // Nothing leaked: the instance is still ours to end, and ending it works.
+    drop(job);
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the slow-dying guest outlived the test"
+    );
+}
+
 #[test]
 fn teardown_gives_the_window_back_and_leaves_nothing_behind() {
     let mut fixture = Fixture::new((720, 540), 0);
@@ -939,9 +1310,9 @@ fn teardown_gives_the_window_back_and_leaves_nothing_behind() {
 
     // And the process really is reapable, which is the job object's whole job.
     let guest_window = fixture.guest_window;
-    fixture.guest_process.reap();
+    fixture.process().reap();
     assert!(
-        !fixture.guest_process.is_running(),
+        !fixture.process().is_running(),
         "the guest survived its job"
     );
     assert!(!guest::window_exists(guest_window));
