@@ -123,6 +123,7 @@ export type WorkspaceEvent =
   | SessionPermissionEvent
   | OrchestratorEvent
   | ValidationEvent
+  | SpecEvent
   | WorkspaceChangedEvent
   | CommandInvokeEvent;
 
@@ -1655,6 +1656,112 @@ export interface ValidationResults {
 export interface ValidationEvent {
   type: "validation";
   result: ValidationResult;
+}
+
+// ---- reconcile_spec.py (productivity loops, PR-B) ---------------------------
+// **Ambient CI for workbooks.** A checked-in `.workbench/reconcile/<name>.toml`
+// maps workbook cells and ranges to callables in the *workspace's own* code; a
+// save of the workbook re-runs the reconciliation gate with the values they
+// produce. Nothing runs without a one-time content-hash approval that covers the
+// spec **and the code it names**, and that approval is re-verified before every
+// run.
+//
+// Only the shapes the UI reads are mirrored. `ReconcileSpecFile`, `SpecCheck`
+// and the subprocess envelope are server-side reading and bookkeeping types no
+// browser ever sees, and a mirror of a type nothing reads is a second authority
+// to keep honest with nothing checking it.
+
+/** How a covered file entered an approval. `spec` is the `.toml` itself,
+ * `callable` a module a `callable` entry resolved to, and `imported` a
+ * workspace-local module a previous run *actually* used. */
+export type CoveredOrigin = "spec" | "callable" | "imported";
+
+/** One file an approval stands for, and the bytes it stood for. Rendered
+ * verbatim, so what an approval covers is a list a person can read rather than
+ * a claim they have to take on faith. */
+export interface CoveredSource {
+  /** Workspace-relative, POSIX separators. */
+  path: string;
+  /** `absent` when the file is not there — a state that has to be tellable
+   * apart from "nothing changed". */
+  digest: string;
+  origin: CoveredOrigin;
+}
+
+/** The one-time trust decision, recorded under the machine's app-data dir and
+ * never inside the folder it authorises. */
+export interface SpecApproval {
+  name: string;
+  digest: string;
+  approver: string;
+  approved_at: string;
+  covered: CoveredSource[];
+}
+
+/** A spec's own verdict. `blocked` is the digest-mismatch state — the code
+ * changed and nobody re-approved it — and it is deliberately not a `skipped`. */
+export type SpecOutcome = "pass" | "warn" | "fail" | "blocked" | "skipped";
+
+/** Whether a spec may run right now, and why not when it may not. */
+export type SpecStatus = "unapproved" | "approved" | "stale" | "invalid";
+
+/** One whole run of one spec. `trigger` is the loop's whole claim: `watcher`
+ * means nobody clicked anything. */
+export interface SpecRunReport {
+  name: string;
+  outcome: SpecOutcome;
+  /** The `ValidationResult` this run produced, or null for a run that never
+   * reached the gate (unapproved, stale, invalid). */
+  validation_id: string | null;
+  trigger: "watcher" | "manual";
+  ran_at: string;
+  duration_ms: number;
+  values: number;
+  detail: string;
+}
+
+/** One row of the Specs panel. */
+export interface SpecState {
+  name: string;
+  path: string;
+  workbook: string;
+  status: SpecStatus;
+  /** The digest a fresh approval would record — echoed back on approve, so a
+   * spec that changed between the render and the click is refused rather than
+   * approved on the strength of what was on screen. */
+  digest: string;
+  checks: number;
+  approval: SpecApproval | null;
+  /** What clicking **Approve** would cover, for a spec that is not approved yet
+   * (or whose code moved). Empty once `approval` carries the same receipt — the
+   * decision is taken *before* the approval exists, so the file list has to
+   * reach the panel before the click or "this spec, running exactly this code"
+   * is a sentence with nothing behind it. */
+  pending_covered: CoveredSource[];
+  /** In memory server-side: a restart forgets the run and keeps the approval. */
+  last_run: SpecRunReport | null;
+  detail: string;
+}
+
+/** GET /api/reconcile/specs. An empty `specs` is a real and common answer, and
+ * `detail` says so rather than leaving blankness to interpret. */
+export interface SpecStates {
+  specs: SpecState[];
+  detail: string;
+}
+
+/** POST /api/reconcile/specs/{name}/approve — the caller echoes the digest it
+ * was shown; a digest that no longer matches is 409. */
+export interface SpecApprovalRequest {
+  approver: string;
+  digest: string;
+}
+
+/** Broadcast on /ws/events whenever a spec's state changes. Carries the whole
+ * state; the client replaces its entry keyed by `name`. */
+export interface SpecEvent {
+  type: "reconcile_spec";
+  state: SpecState;
 }
 
 // ---- gates.py / evidence.py -------------------------------------------------
