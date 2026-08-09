@@ -43,7 +43,18 @@ const ASK_AGAIN = "ask permission once more, please";
 /** The prompt the third test answers from a *second window* — the one path
  * where a card is closed without this window ever learning the verdict. */
 const ASK_ELSEWHERE = "ask permission from the other window";
+/** The prompt whose first board answer is refused by the server. */
+const ASK_STALE = "ask permission, and lose the first answer";
+/** The conversation two panes watch at once, and the prompt they both see.
+ * Deliberately shares no prefix with any other journey's session title — two
+ * matching picker rows is a strict-mode failure, not a bug. */
+const SHARED = "one conversation, two panes watching it";
+const ASK_BOTH = "ask permission where both panes can see it";
 const COMMAND = "echo scripted-permission";
+
+/** The board's REST door onto a prompt (`POST …/sessions/<id>/permission`) —
+ * the request the stale-click journey intercepts. */
+const ANSWER_ROUTE = "**/api/agents/sessions/*/permission";
 
 /** A trigger that keeps a call in flight for three seconds, which is the window
  * a turn has to end *in* for the second test: the marker only exists for a
@@ -168,6 +179,146 @@ test("a prompt answered in another window stops asking here, and invents nothing
     await expect(card.getByRole("button", { name: "Allow" })).toHaveCount(0);
   });
   await other.close();
+});
+
+/**
+ * The click the server refuses, and the verdict that must not survive it.
+ *
+ * Answering from the board is a POST, so unlike the chat pane's own socket it is
+ * *told* whether the click landed — and a stale click is told `404` by design
+ * (`resolve_permission`): the prompt had already timed out, or been answered
+ * somewhere else, before this one arrived. The shared record has no undo
+ * (`settlePermission` keeps the first verdict), so a verdict written on the way
+ * *into* that POST could never be taken back, and every card for the request sat
+ * there reading "Allowed" for a decision the agent never received.
+ *
+ * The 404 is injected rather than raced: the real one needs a prompt to close in
+ * the gap between two clicks, which is a coin toss, and a journey that only
+ * sometimes reproduces the bug is not a regression test. Everything after the
+ * intercept is the real server again — including the second answer, which proves
+ * the honest "No longer waiting" is not a dead end.
+ */
+test("a board answer the server refuses claims nothing, and the real one still lands", async ({
+  page,
+}) => {
+  await openApp(page);
+  await newSession(page);
+  const card = browser(page).locator(".wb-perm-card");
+
+  await sendChat(page, ASK_STALE);
+  await expect(card).toContainText(COMMAND);
+  await openBoard(page);
+  await expect(boardPrompts(page, ASK_STALE)).toHaveCount(1);
+
+  await test.step("the answer comes home a 404 — that prompt is not open any more", async () => {
+    await page.route(ANSWER_ROUTE, (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "that request is no longer awaiting a decision" }),
+      }),
+    );
+    await boardPrompts(page, ASK_STALE).getByRole("button", { name: "Allow" }).click();
+  });
+
+  await test.step("so the card says what this window knows, and not a word more", async () => {
+    // The regression, exactly. The verdict used to be recorded before the POST,
+    // and nothing could take it back afterwards.
+    await expect(card).toHaveClass(/is-decided/);
+    await expect(card.locator(".wb-perm-decision")).toHaveText("No longer waiting");
+    await expect(card.getByRole("button", { name: "Allow" })).toHaveCount(0);
+  });
+
+  await test.step("and the board stops pretending the click landed", async () => {
+    // The chip went optimistically; `refresh()` re-reads the server's own open
+    // set, which still holds this prompt because the POST never reached it.
+    await expect(boardPrompts(page, ASK_STALE)).toHaveCount(1);
+  });
+
+  await test.step("answered for real, the verdict fills the blank in", async () => {
+    // "No longer waiting" is an absence of knowledge, not an answer, so the
+    // window that goes on to *obtain* the verdict may still record it — without
+    // this the one surface that made the decision is the one reading "closed,
+    // and I was not told". It also leaves the fake agent unblocked, which the
+    // journeys after this one depend on.
+    await page.unroute(ANSWER_ROUTE);
+    await boardPrompts(page, ASK_STALE).getByRole("button", { name: "Allow" }).click();
+    await expect(card.locator(".wb-perm-decision")).toHaveText("Allowed");
+    await expect(boardPrompts(page, ASK_STALE)).toHaveCount(0);
+  });
+});
+
+/**
+ * Two panes, one session — the plural shape this file was otherwise missing.
+ *
+ * The journeys above prove two *kinds* of surface agree (a card and the board)
+ * and two *windows* agree. Neither is the case CLAUDE.md's panes clause actually
+ * names: two instances of the same tool, mounted at once, pointed at one
+ * resource. `revealPane`'s picker offers exactly that — the default `agent`
+ * panel plus a dedicated `agent#<id>` pane on a live session — and "it works
+ * with one is not evidence", so the complement of the independence test (state
+ * that is genuinely shared stays shared) is asserted rather than reasoned about
+ * from `permissions` being a global map.
+ */
+test("two panes on one session answer with one voice", async ({ page }) => {
+  await openApp(page);
+  await newSession(page);
+  const panel = browser(page);
+
+  await test.step("the conversation earns a name the split picker can offer", async () => {
+    await sendChat(page, SHARED);
+    // The picker builds its rows once, when it opens, from the same `folders`
+    // slice this row renders — so waiting for the row here is what stops the
+    // dialog opening a beat before the title refresh lands.
+    await expect(panel.locator(".wb-session-row", { hasText: SHARED })).toBeVisible();
+  });
+
+  await test.step("and a second pane is bound to that same session", async () => {
+    await page.keyboard.press("Alt+S");
+    const dialog = page.getByRole("dialog", { name: "Split this pane to the right" });
+    await expect(dialog).toBeVisible();
+    // Not "New agent session" — an *existing live session* row, which is the
+    // arrangement nothing else opens: one conversation, two panes.
+    await dialog.locator(".wb-qb-row", { hasText: SHARED }).first().click();
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(".wb-chat")).toHaveCount(2);
+  });
+
+  const own = page.locator(".dv-groupview", {
+    has: page.locator(".wb-panel-tab", { hasText: SHARED }),
+  });
+  const here = own.locator(".wb-perm-card");
+  const there = panel.locator(".wb-perm-card");
+
+  await test.step("one prompt, and both panes are asking it", async () => {
+    const input = own.locator(".wb-chat-input textarea");
+    await input.fill(ASK_BOTH);
+    await input.press("Enter");
+    await expect(here).toContainText(COMMAND);
+    await expect(there).toContainText(COMMAND);
+    await expect(there.getByRole("button", { name: "Deny" })).toBeVisible();
+  });
+
+  await test.step("answering in one settles the other, with the same verdict", async () => {
+    await here.getByRole("button", { name: "Deny" }).click();
+    await expect(here.locator(".wb-perm-decision")).toHaveText("Denied");
+    // "Denied", not "No longer waiting": this window *made* the decision, and
+    // both panes read the one record rather than each remembering its own click.
+    await expect(there).toHaveClass(/is-decided/);
+    await expect(there.locator(".wb-perm-decision")).toHaveText("Denied");
+    await expect(there.getByRole("button", { name: "Deny" })).toHaveCount(0);
+  });
+
+  await test.step("and the window goes back the way the next journey expects it", async () => {
+    // Closed here rather than left to `afterEach`. That hook resets the *saved*
+    // layout, but the dock's autosave is debounced and can land after the PUT
+    // and put this pane straight back — which the next journey meets as two
+    // chat boxes under one unscoped locator, several steps from the cause. A
+    // pane this journey opened is a pane this journey closes.
+    await page.locator(".wb-panel-tab", { hasText: SHARED }).click();
+    await page.keyboard.press("Alt+X");
+    await expect(page.locator(".wb-chat")).toHaveCount(1);
+  });
 });
 
 test("a session watched only through its own pane lets go of its Done dot", async ({ page }) => {

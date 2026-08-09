@@ -30,6 +30,9 @@
  * the question is closed and nothing more. Rendering "Allowed" there would be
  * inventing a decision the agent may never have received — the same lie the plan
  * card refuses to tell when it settles from `plan_resolved`.
+ *
+ * It is therefore an **absence of knowledge, not an answer**, and `settlePermission`
+ * treats it as one: a verdict may replace it, it may never replace a verdict.
  */
 export type PermissionOutcome = "allow" | "deny" | "settled";
 
@@ -73,10 +76,21 @@ export function notePermission(
 /**
  * Settle one prompt.
  *
- * Never overwrites a decision already recorded: the first answer is the one the
- * agent received, and the retraction frame that follows it carries no verdict of
- * its own (see `PermissionOutcome`). Returns the map unchanged — by reference,
- * so a subscriber does not re-render — when there is nothing to move.
+ * Never overwrites a **verdict**: the first answer is the one the agent
+ * received, and the retraction frame that follows it carries no verdict of its
+ * own (see `PermissionOutcome`).
+ *
+ * `settled` is not an answer, though — it is this window saying it was not told
+ * which way the prompt went — so learning the verdict afterwards *fills that in*
+ * rather than overwriting a decision. That case is real and it is a race, not a
+ * corner: answering from Mission Control is a POST, and the server publishes the
+ * retraction frame the moment the future resolves, so the frame can reach this
+ * window before its own `answer()` has the response that tells it what it
+ * asked for. Without this, the surface that made the decision would be the one
+ * surface that ends up reading "No longer waiting".
+ *
+ * Returns the map unchanged — by reference, so a subscriber does not
+ * re-render — when there is nothing to move.
  */
 export function settlePermission(
   records: PermissionRecords,
@@ -84,7 +98,13 @@ export function settlePermission(
   outcome: PermissionOutcome,
 ): Record<string, PermissionRecord> {
   const record = records[requestId];
-  if (record === undefined || record.decision !== null) {
+  if (record === undefined) return records as Record<string, PermissionRecord>;
+  // Answered: nothing may move it, including a later `settled`.
+  if (record.decision === "allow" || record.decision === "deny") {
+    return records as Record<string, PermissionRecord>;
+  }
+  // Already "closed, verdict unknown", and this says no more than that.
+  if (record.decision === "settled" && outcome === "settled") {
     return records as Record<string, PermissionRecord>;
   }
   return { ...records, [requestId]: { ...record, decision: outcome } };

@@ -342,10 +342,11 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
   },
 
   answer: async (sessionId, requestId, allow) => {
-    // Optimistic: the card goes the moment it is clicked, because the round trip
-    // is local and a chip that lingers reads as a click that did not land. The
-    // server's own frame is what makes it true, and a refusal (the prompt was
-    // already settled elsewhere) is corrected by the refresh below.
+    // Optimistic, but only this board's own chip: it goes the moment it is
+    // clicked, because the round trip is local and a chip that lingers reads as
+    // a click that did not land. This copy is disposable — `refresh()` below
+    // re-reads the whole open set from the server and puts it back if the click
+    // changed nothing.
     set((state) => ({
       permissions: state.permissions
         .map((row) =>
@@ -355,16 +356,34 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
         )
         .filter((row) => row.pending.length > 0),
     }));
-    // The same prompt may be on screen as a *card* in a chat pane, and that card
-    // renders one shared record (`store.permissions`). Settling it here is what
-    // makes the two surfaces one decision: without it the card kept its Allow
-    // and Deny buttons under a question this click had already answered, and
-    // pressing one of them hit a settled prompt (404). Recorded before the POST
-    // for the same reason the chip goes first — this is the click landing.
-    useStore.getState().settlePermission(requestId, allow ? "allow" : "deny");
     try {
       await api.answerPermission(sessionId, { request_id: requestId, allow });
-    } catch {
+      // Only now, and this ordering is the whole point. The same prompt is on
+      // screen as a *card* in every chat pane showing this session, and those
+      // cards render one shared record (`store.permissions`) — so writing the
+      // verdict here is what makes a board click and a card one decision.
+      //
+      // It is written **after** the POST because the shared record has no undo:
+      // `settlePermission` keeps the first verdict, so a verdict written on the
+      // way in cannot be taken back when the POST comes home a 404 — and a 404
+      // is the designed answer to a stale click (`resolve_permission`: the
+      // prompt had already timed out, or was answered in another window or from
+      // the chat pane itself, before this landed). Recording "Allowed" for one
+      // of those would leave every card for the request claiming an approval the
+      // agent never received, which is exactly the lie the `settled` outcome
+      // exists to refuse.
+      useStore.getState().settlePermission(requestId, allow ? "allow" : "deny");
+    } catch (error) {
+      // A 404 *is* information: the prompt is closed, this window simply did not
+      // learn which way it went. That is `settled` — no verdict — and saying it
+      // here is what heals a card whose retraction frame this window missed.
+      //
+      // Anything else (offline, 500, a token rejected) says nothing about the
+      // prompt, which is very likely still open and still the user's to answer,
+      // so the record is left asking and the buttons stay live for a retry.
+      if (error instanceof api.ApiError && error.status === 404) {
+        useStore.getState().settlePermission(requestId, "settled");
+      }
       await get().refresh();
     }
   },

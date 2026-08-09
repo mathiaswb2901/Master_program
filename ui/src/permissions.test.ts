@@ -53,6 +53,26 @@ describe("settling one", () => {
     const records = asking();
     expect(settlePermission(records, "req-unknown", "deny")).toBe(records);
   });
+
+  it("fills in a verdict the window learns after it said it did not know", () => {
+    // `settled` is an absence, not an answer (see `PermissionOutcome`), and this
+    // race is the ordinary path for the surface that made the decision:
+    // answering from Mission Control is a POST, the server publishes the
+    // retraction frame as soon as the future resolves, and that frame can beat
+    // the response. Refusing the upgrade would leave the one window that *does*
+    // know the verdict reading "No longer waiting".
+    const vanished = settlePermission(asking(), ASK.requestId, "settled");
+    expect(vanished[ASK.requestId]?.decision).toBe("settled");
+    expect(settlePermission(vanished, ASK.requestId, "allow")[ASK.requestId]?.decision).toBe(
+      "allow",
+    );
+  });
+
+  it("does not re-settle what is already settled", () => {
+    // Two frames retracting the same prompt must not re-render every card.
+    const vanished = settlePermission(asking(), ASK.requestId, "settled");
+    expect(settlePermission(vanished, ASK.requestId, "settled")).toBe(vanished);
+  });
 });
 
 describe("the fleet frame's whole open set", () => {

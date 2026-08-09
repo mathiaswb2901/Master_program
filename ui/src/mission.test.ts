@@ -7,16 +7,37 @@
  * two that can disagree).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Answering a prompt from the board settles the *shared* record every surface
 // renders (`store.permissions`), so this module reaches the app store — which
 // reads `document` at import, and the suite is node-only. None of the pure
-// folds below touch it.
-vi.mock("./store", () => ({
-  useStore: { getState: () => ({ settlePermission: () => undefined }) },
+// folds below touch it. A spy rather than a stub because *what this writes to
+// the shared record, and when* is itself under test below.
+const shared = vi.hoisted(() => ({
+  settlePermission: vi.fn<(requestId: string, outcome: string) => void>(),
+  answerPermission: vi.fn(),
+  getOrchestrators: vi.fn(),
+  getPendingPermissions: vi.fn(),
+  getWorktrees: vi.fn(),
 }));
 
+vi.mock("./store", () => ({
+  useStore: { getState: () => ({ settlePermission: shared.settlePermission }) },
+}));
+
+// Only the four calls `answer` and `refresh` make; `ApiError` stays the real
+// class, because telling a 404 from a dropped connection is the decision under
+// test and a hand-rolled stand-in would prove nothing about the real one.
+vi.mock("./api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api")>()),
+  answerPermission: shared.answerPermission,
+  getOrchestrators: shared.getOrchestrators,
+  getPendingPermissions: shared.getPendingPermissions,
+  getWorktrees: shared.getWorktrees,
+}));
+
+import { ApiError } from "./api";
 import {
   buildCards,
   crewOf,
@@ -28,6 +49,7 @@ import {
   refusalHint,
   refusalRatio,
   slotFor,
+  useMissionStore,
   waitingFor,
   workersById,
   type MissionCard,
@@ -302,6 +324,67 @@ describe("the permission channel", () => {
       pending: [...blocked("a").pending, ...blocked("a", "r2").pending],
     };
     expect(pendingCount(cards({ sessions: [activity("a")], permissions: [two] }))).toBe(2);
+  });
+});
+
+// ---- answering from the board -------------------------------------------------
+
+/**
+ * What a click writes to the record every *other* surface renders.
+ *
+ * The board answers over REST for a session it holds no socket for, so unlike
+ * the chat pane's own path it gets told whether the click landed — and a stale
+ * click is told `404` by design (`resolve_permission`): the prompt had already
+ * timed out, or been answered in another window or in the chat pane itself.
+ * The shared record has no undo (`settlePermission` keeps the first verdict), so
+ * a verdict written on the way *in* survives that refusal and leaves every card
+ * for the request claiming an approval the agent never received. Hence: nothing
+ * is written until the response says what happened.
+ *
+ * The integrated claim — the card in the chat pane reading "No longer waiting"
+ * rather than a fabricated "Allowed" — is `e2e/agent-surfaces.spec.ts`.
+ */
+describe("answering a prompt from the board", () => {
+  beforeEach(() => {
+    shared.settlePermission.mockClear();
+    shared.answerPermission.mockReset();
+    // `refresh()` runs on every failure path; give it a fleet that has moved on.
+    shared.getOrchestrators.mockResolvedValue(roster([]));
+    shared.getPendingPermissions.mockResolvedValue({ sessions: [] });
+    shared.getWorktrees.mockResolvedValue({ slots: [] });
+    useMissionStore.setState({ permissions: [blocked("a")], orchestrators: null, slots: [] });
+  });
+
+  it("records the verdict once the POST has landed, and drops the chip at once", async () => {
+    shared.answerPermission.mockResolvedValue({});
+    await useMissionStore.getState().answer("a", "r1", true);
+    expect(shared.answerPermission).toHaveBeenCalledWith("a", { request_id: "r1", allow: true });
+    expect(shared.settlePermission).toHaveBeenCalledWith("r1", "allow");
+    // The board's own copy went optimistically; the shared record did not.
+    expect(useMissionStore.getState().permissions).toEqual([]);
+  });
+
+  it("invents no verdict when the prompt was already closed", async () => {
+    // The regression. Before the fix this wrote "allow" *before* the POST, so a
+    // 404 left every card for the request reading "Allowed" — a decision the
+    // agent may never have received, and one no later frame could correct
+    // (`settlePermission` refuses to overwrite a verdict).
+    shared.answerPermission.mockRejectedValue(new ApiError(404, "no longer awaiting a decision"));
+    await useMissionStore.getState().answer("a", "r1", true);
+    expect(shared.settlePermission).not.toHaveBeenCalledWith("r1", "allow");
+    // Closed, and this window was not told which way: the honest third outcome.
+    expect(shared.settlePermission).toHaveBeenCalledWith("r1", "settled");
+    expect(shared.settlePermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the card asking when the failure says nothing about the prompt", async () => {
+    // Offline, a 500, a rejected token — the prompt is very likely still open
+    // and still the user's to answer, so "No longer waiting" would be its own
+    // small lie. The buttons stay live and `refresh()` re-reads the board.
+    shared.answerPermission.mockRejectedValue(new TypeError("Failed to fetch"));
+    await useMissionStore.getState().answer("a", "r1", false);
+    expect(shared.settlePermission).not.toHaveBeenCalled();
+    expect(shared.getPendingPermissions).toHaveBeenCalled();
   });
 });
 
