@@ -207,6 +207,7 @@ describe("EvidenceGallery", () => {
             kind: "gate",
             ref: "gate_abc",
             reconciliation: null,
+            review: null,
             gate_log: {
               gate: "pytest",
               argv: ["uv", "run", "pytest", "-q"],
@@ -232,6 +233,7 @@ describe("EvidenceGallery", () => {
             kind: "numeric",
             ref: "numeric_1",
             gate_log: null,
+            review: null,
             reconciliation: {
               workbook: "revenue.xlsx",
               matched: 39,
@@ -265,6 +267,96 @@ describe("EvidenceGallery", () => {
     expect(evicted).toContain("evicted");
     expect(html(<EvidencePayloadView state={{ phase: "loading" }} />)).toContain("Loading");
     expect(html(<EvidencePayloadView state={{ phase: "idle" }} />)).toBe("");
+  });
+
+
+  it("the redeemed payload renders review findings, refutation and all", () => {
+    // M6 staged review PR2. The refutation is shown rather than hidden: a
+    // finding a reader cannot check is one they have to go and disprove, which
+    // is the opposite of what the evidence gallery is for.
+    const markup = html(
+      <EvidencePayloadView
+        state={{
+          phase: "ready",
+          payload: {
+            kind: "diff",
+            ref: "diff_1",
+            gate_log: null,
+            reconciliation: null,
+            review: {
+              base: "b".repeat(40),
+              head: "h".repeat(40),
+              files_reviewed: 12,
+              diff_bytes: 41_984,
+              reviewer_session_id: "rev_1",
+              turns: 4,
+              cost_usd: 0.42,
+              truncated: null,
+              findings: [
+                {
+                  severity: "must_fix",
+                  file: "se3/bid.py",
+                  line: 118,
+                  claim: "Gate closure is compared in local time.",
+                  refutation: "At 02:30 on the spring-forward date the bid misses the window.",
+                  confidence: "likely",
+                },
+                {
+                  severity: "nit",
+                  file: null,
+                  line: null,
+                  claim: "No units in the docstring.",
+                  refutation: "A reader must open the caller to learn it is MWh.",
+                  confidence: "certain",
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    expect(markup).toContain("12 file(s)");
+    expect(markup).toContain("se3/bid.py:118");
+    expect(markup).toContain("Gate closure is compared in local time.");
+    // The refutation, which is the reason to believe the claim.
+    expect(markup).toContain("Breaks when:");
+    expect(markup).toContain("spring-forward");
+    // Colour is never the only signal (DESIGN.md §7): the severity word leads
+    // the row, and the tint only speeds up scanning.
+    expect(markup).toContain("must fix");
+    expect(markup).toContain('data-outcome="fail"');
+    expect(markup).toContain('data-outcome="pass"');
+  });
+
+  it("a review that found nothing says so rather than rendering blankness", () => {
+    // AXI shape 2, on the surface a human reads. A clean review and a review
+    // that never ran must never look alike.
+    const markup = html(
+      <EvidencePayloadView
+        state={{
+          phase: "ready",
+          payload: {
+            kind: "diff",
+            ref: "diff_2",
+            gate_log: null,
+            reconciliation: null,
+            review: {
+              base: "b".repeat(40),
+              head: "h".repeat(40),
+              files_reviewed: 3,
+              diff_bytes: 900,
+              reviewer_session_id: "rev_2",
+              turns: 2,
+              cost_usd: 0.1,
+              truncated: null,
+              findings: [],
+            },
+          },
+        }}
+      />,
+    );
+    expect(markup).toContain("No findings");
+    expect(markup).toContain("could not break it");
   });
 
   it("an empty gallery says so — never blankness (AXI shape 2)", () => {

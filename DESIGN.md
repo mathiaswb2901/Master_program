@@ -711,6 +711,17 @@ through the token file and fails the build if a colour-only one lands on a sprin
   place in its section: a row that vanishes answers "where did *New agent session* go?"
   with silence, and a row that is offered and then refused spends the whole gesture
   before saying so. Never a dead button (CLAUDE.md, panes).
+- **It is a real modal, and a real combobox** (§7). `role="dialog"` + `aria-modal`, a
+  Tab ring that cycles inside the overlay and never lands on a control behind the scrim,
+  `Esc` on a window-level capture listener — the same one `Modal.tsx` uses, so it beats
+  Monaco and xterm wherever the keyboard is — and focus handed back to whatever opened it
+  when the gesture is *cancelled* (a row that runs leaves focus to the command it ran).
+  The input is a `combobox` over a `listbox` of `option` rows, and the selected row is
+  named by `aria-activedescendant`: the amber wash and the 2px edge are what *seeing*
+  the selection looks like, and this is the same fact said to a screen reader. Section
+  headers are the label of a `group`, because a listbox may own only options and groups.
+  The result count is announced in a polite, debounced, screen-reader-only region — one
+  announcement per pause, never one per keystroke.
 - Keycap hints: 11px mono on `--surface-elevated`, 1px `--border-default`,
   `--radius-xs`, padding 1px 5px.
 - Motion (§5.4): fade + scale `--motion-scale-in`→1 on `--motion-enter`; exit is a
@@ -1024,3 +1035,14 @@ nothing new appears on a panel tab: §6.1 stands.
   default theme; user override persists via `data-theme` on `<html>`.
 - All icon-only buttons carry `aria-label`; QuickBar and menus fully keyboard-operable
   with visible selection.
+- **One Escape answers one dialog — the one on top.** Every overlay (the QuickBar, the
+  confirm modals, the file-tree context menu) listens for its keys on `window` in the
+  capture phase, because that is the only place a key beats Monaco and xterm. That puts
+  them all on one target, where `stopPropagation` decides nothing: it stops the event
+  walking the tree, not the other listeners on the element it was called from. So an
+  overlay registers through `useOverlayKeys` (`ui/src/overlays.ts`) and only the
+  most-recently-opened layer acts — never `stopImmediatePropagation`, which fires in
+  registration order and would hand the key to the dialog *underneath*. Two can be open
+  at once (`Alt+W` over the palette; the shell's own window close, which arrives from
+  outside the DOM and no backdrop can block), and answering both with one key silently
+  cancels the question the user had not read yet.

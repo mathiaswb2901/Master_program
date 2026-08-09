@@ -1678,6 +1678,55 @@ export interface ReconciliationReport {
   truncated: EvidenceTruncation | null;
 }
 
+// ---- review.py --------------------------------------------------------------
+// M6 staged review PR2: the adversarial review. A fresh-context, read-only agent
+// session reads the subject session's diff and files findings. As with the gate
+// above, only what the *UI* reads is mirrored — `ReviewSpec` and
+// `ReportFindingsRequest` are a server-side spec and an agent tool's arguments,
+// and a mirror of a type nothing reads is a second authority to keep honest.
+
+/** How wrong a finding says the change is. `nit` is the floor rather than an
+ * absence: a reviewer that found only style has still reviewed. */
+export type ReviewSeverity = "must_fix" | "should_fix" | "nit";
+
+/** How sure the reviewer is — independent of severity, because a `possible`
+ * `must_fix` is worth a minute and a `certain` nit is not. */
+export type ReviewConfidence = "certain" | "likely" | "possible";
+
+/** One thing the reviewer claims is wrong, and why it believes it.
+ *
+ * `refutation` is required and non-empty server-side: it is the input or state
+ * under which the change misbehaves, and it is what makes a claim checkable
+ * rather than an opinion. A finding with no concrete failure path is a `nit`. */
+export interface ReviewFinding {
+  severity: ReviewSeverity;
+  /** Repository-relative path, or null for a claim about the change as a whole. */
+  file: string | null;
+  line: number | null;
+  claim: string;
+  refutation: string;
+  confidence: ReviewConfidence;
+}
+
+/** The payload behind a `diff` EvidenceItem: one whole review.
+ *
+ * Grouped, unlike the gate's one-line-per-gate: a review is one question with
+ * supporting detail, so the detail lives here and the gallery's expander
+ * redeems it. */
+export interface ReviewReport {
+  base: string;
+  head: string;
+  files_reviewed: number;
+  diff_bytes: number;
+  findings: ReviewFinding[];
+  /** Set when the diff was capped (AXI shape 1) — and the same sentence was put
+   * in the reviewer's own prompt, so it knew it was shown a slice. */
+  truncated: EvidenceTruncation | null;
+  reviewer_session_id: string;
+  turns: number;
+  cost_usd: number;
+}
+
 /** GET /api/validation/payload/{kind}/{ref} — what an `EvidenceItem.payload_ref`
  * resolves to. Exactly one payload field is set, chosen by `kind`. **404 once
  * the bounded LRU has dropped it**, which the expander renders as "evicted"
@@ -1689,6 +1738,8 @@ export interface EvidencePayload {
   reconciliation: ReconciliationReport | null;
   /** `kind === "gate"`. */
   gate_log: GateLog | null;
+  /** `kind === "diff"`. */
+  review: ReviewReport | null;
 }
 
 // ---- search.py --------------------------------------------------------------
