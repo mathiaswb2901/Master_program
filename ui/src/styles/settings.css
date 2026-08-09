@@ -1,0 +1,249 @@
+/**
+ * The Settings panel (M7 V8).
+ *
+ * Loaded on the panel's own dynamic chunk (imported from `panels/Settings.tsx`),
+ * so nothing here is on the launch path. Every value is a DESIGN.md token — no
+ * raw hex (`ui/e2e/palette.test.ts`), and every `var()` is defined in
+ * `tokens.css` (`ui/e2e/tokenRefs.test.ts`). It reads as the sibling of the
+ * welcome card and the Setup walkthrough (`styles/setup.css`): one centred
+ * column, quiet neutrals, generous rows.
+ *
+ * **No amber anywhere but the focus ring.** A chosen segment is a *standing*
+ * property of a setting — true for as long as the panel is open — and DESIGN.md
+ * §2.4 keeps the amber for "where I am" and "changing right now". So selection
+ * is carried by surface + border + weight, and the one amber is `:focus-visible`,
+ * which really is where you are.
+ */
+
+/* The panel *is* the scroller (the `.wb-keys` pattern): a pane can be any
+   height a user drags it to, and the settings are longer than a short one — so
+   without this the telemetry statement and the footer are simply unreachable.
+   Found by running it, not by reading it: the pane above a terminal cut the
+   voice row in half and nothing scrolled. */
+.wb-settings {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: var(--space-7) var(--space-6);
+  color: var(--text-secondary);
+}
+
+.wb-settings-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-settings-title {
+  margin: 0;
+  font-size: var(--type-2xl-size);
+  line-height: var(--type-2xl-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.wb-settings-lede {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--type-md-size);
+  line-height: var(--type-md-line);
+  color: var(--text-secondary);
+}
+
+/* ---- rows ----------------------------------------------------------------- */
+
+.wb-settings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-settings-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: var(--space-5);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.wb-settings-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.wb-settings-row-title {
+  font-size: var(--type-md-size);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.wb-settings-row-detail {
+  margin: 0;
+  max-width: 46ch;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-secondary);
+}
+
+/* The honest caveat: an override, a pending restart, a capability not installed
+   yet. Tertiary and unmarked — it is information, not a warning, and a standing
+   amber or a standing orange would spend a colour that has to mean something
+   else (DESIGN.md §2.4/§2.5). */
+.wb-settings-note {
+  margin: 0;
+  max-width: 46ch;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-tertiary);
+}
+
+.wb-settings-row-control {
+  flex: none;
+}
+
+/* ---- the segmented control ------------------------------------------------ */
+
+.wb-settings-segmented {
+  display: inline-flex;
+  padding: var(--space-1);
+  gap: var(--space-1);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+.wb-settings-segment {
+  height: calc(var(--control-height) - var(--space-4));
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-xs);
+  font-size: var(--type-sm-size);
+  font-weight: var(--weight-medium);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  /* Tint only — a segmented control never moves (DESIGN.md §5.1.3). */
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
+}
+
+/* Instant in, eased out: the pointer arriving is answered on the frame it
+   arrives (DESIGN.md §5, and `ui/e2e/perf/motion.spec.ts` fails a hover that
+   eases its way in). */
+.wb-settings-segment:hover:not(:disabled),
+.wb-settings-segment:active:not(:disabled) {
+  transition-duration: 0s;
+}
+
+.wb-settings-segment:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.wb-settings-segment.is-selected {
+  background: var(--surface-active);
+  color: var(--text-primary);
+}
+
+.wb-settings-segment:disabled {
+  cursor: default;
+  color: var(--text-disabled);
+}
+
+.wb-settings-segment:disabled.is-selected {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+/* No `:focus-visible` rule here on purpose: the global one in `tokens.css` is
+   the ring these buttons should have, and a local copy is a second number to
+   keep honest (`styles/keyboard.css` says the same, DESIGN.md §7). Nothing
+   clips it — the strip sets no `overflow` — so the 2px offset lands cleanly on
+   the container's own border. Checked by tabbing into it. */
+
+/* ---- privacy: a statement, not a control ---------------------------------- */
+
+.wb-settings-privacy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.wb-settings-privacy-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+/* Green because it is a *good, settled* fact — the same reason the "this really
+   is Word" dot is green rather than amber (DESIGN.md §2.4): true for as long as
+   you are looking, and true again tomorrow. */
+.wb-settings-stance {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--success-bg);
+  color: var(--success);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+/* ---- footer, loading, errors ---------------------------------------------- */
+
+.wb-settings-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* The label stays on one line and the path takes the squeeze — a wrapped
+   three-word label beside an ellipsised path reads as a broken row, and the
+   path is the part with a tooltip carrying the whole of it. */
+.wb-settings-footer .wb-settings-note {
+  flex: none;
+  white-space: nowrap;
+}
+
+.wb-settings-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-sm-size);
+  color: var(--text-secondary);
+}
+
+.wb-settings-loading {
+  color: var(--text-tertiary);
+}
+
+.wb-settings-error {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  background: var(--error-bg);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-primary);
+}

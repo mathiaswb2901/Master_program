@@ -39,6 +39,9 @@ from workbench_server.routers import (
     workspaces,
     worktrees,
 )
+from workbench_server.routers import (
+    settings as settings_router,
+)
 from workbench_server.services.activity import ActivityService
 from workbench_server.services.agent_sessions import ClientFactory, SessionManager
 from workbench_server.services.app_data import app_data_dir
@@ -71,6 +74,7 @@ from workbench_server.services.sdk_factory import UiStateStore, sdk_client_facto
 from workbench_server.services.search import SearchService
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.sessions import SessionsStore
+from workbench_server.services.settings import ProcessConfig, SettingsService
 from workbench_server.services.setup import SetupService, detect_claude_login
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
@@ -151,6 +155,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         extra_roots=[("", worktree_service.root)],
     )
     ui_state_store = UiStateStore()
+    # The in-app settings (M7 V8): the knobs that were environment variables, in
+    # one small document under the machine's app data dir. GLOBAL on purpose,
+    # like the named-session store: a theme is about the person at the keyboard,
+    # not about a project — so it copies no workspace root, owns no
+    # `set_workspace_root` and is deliberately NOT in the rootables below.
+    # Nothing is ever written to `~/.claude` (services/settings.py).
+    #
+    # Built *before* the Office host because it decides what that host is: an
+    # `office_native` this process was *explicitly* configured with — which is
+    # exactly what `model_fields_set` names, and in practice means
+    # WORKBENCH_OFFICE_NATIVE — outranks the stored choice, and with nothing
+    # configured the user's own setting is what the backend is built from. Read
+    # once, at launch, which is why the endpoint reports a change to it as
+    # pending a restart rather than implying it took effect.
+    settings_service = SettingsService(
+        settings.app_data_root,
+        config=ProcessConfig(
+            office_native=(
+                settings.office_native if "office_native" in settings.model_fields_set else None
+            ),
+        ),
+    )
+    office_native = settings_service.effective().office_native
+    # …and *which* of the two decided it, because the host has to explain itself.
+    # "Off" now has two ways to be true — an operator's variable and the user's
+    # own answer in the panel — and `capabilities.detail` is echoed verbatim by
+    # the Setup panel's Office row, so a host that assumed the variable would
+    # send someone hunting one they never exported. The service maps this to the
+    # sentence (`office_host/service.py::_OFF_DETAIL`); nothing about which knob
+    # is user-facing copy belongs here.
+    office_native_source = settings_service.source_of("office_native")
     # Native Office hosting, constructed before the session manager because a
     # session reads the live docked document through it (narrowed to
     # OfficeDocumentReader in the SDK factory). The backend is None on any
@@ -163,8 +198,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # reader lands in a later PR; hosting the window is shipped, reading its live
     # document is not.
     host_channel = ShellChannel()
-    host_backend = build_backend(settings.office_native, settings.office_fake, host_channel)
-    host_bridge = build_bridge(settings.office_native, settings.office_fake, host_backend)
+    host_backend = build_backend(office_native, settings.office_fake, host_channel)
+    host_bridge = build_bridge(office_native, settings.office_fake, host_backend)
     if settings.office_fake and host_backend is not None:
         log.warning(
             "office_host.fake_mode_enabled",
@@ -177,7 +212,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event_bus,
         host_backend,
         bridge=host_bridge,
-        mode=settings.office_native,
+        mode=office_native,
+        mode_source=office_native_source,
         fake=settings.office_fake,
         channel=host_channel,
     )
@@ -418,6 +454,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.documents = document_service
     app.state.sessions = sessions_store
     app.state.setup = setup_service
+    # `settings` is already the process configuration on app.state; the service
+    # that owns the *user's* stored choices is a different thing and says so.
+    app.state.settings_service = settings_service
     # Order matters, and Starlette inverts it: add_middleware inserts at the head
     # of the list, so the LAST middleware added is the OUTERMOST layer. We add
     # LocalAuth *first* and CORS *second* so CORS ends up outer — a request the
@@ -468,6 +507,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workspaces.router)
     app.include_router(sessions.router)
     app.include_router(setup.router)
+    app.include_router(settings_router.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
