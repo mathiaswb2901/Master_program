@@ -183,7 +183,14 @@ function ConflictBar({ file }: { file: OpenFile }) {
  */
 export function EditorAreaPanel(props: IDockviewPanelProps) {
   const path = paneInstance(props.api.id);
-  return path === null ? <EditorTabs /> : <FilePane path={path} api={props.api} />;
+  // The pane id goes to whichever branch renders, and on to `<CodeEditor>`:
+  // scroll and cursor are the *view's* state, so two panes on one file each
+  // keep their own (`panels/CodeEditor.tsx`).
+  return path === null ? (
+    <EditorTabs pane={props.api.id} />
+  ) : (
+    <FilePane path={path} api={props.api} />
+  );
 }
 
 /** One file, filling its pane. */
@@ -271,7 +278,7 @@ function FilePane({ path, api }: { path: string; api: DockviewPanelApi }) {
               pane split onto a file is often the *first* editor in the window,
               so it has to be able to wait for the chunk too. */}
           <Suspense fallback={<div className="wb-editor-message">Loading editor…</div>}>
-            <CodeEditor file={file} />
+            <CodeEditor pane={api.id} file={file} />
           </Suspense>
         </div>
       )}
@@ -279,7 +286,7 @@ function FilePane({ path, api }: { path: string; api: DockviewPanelApi }) {
   );
 }
 
-function EditorTabs() {
+function EditorTabs({ pane }: { pane: string }) {
   const openFiles = useStore((s) => s.openFiles);
   const activePath = useStore((s) => s.activePath);
   const active = openFiles.find((f) => f.path === activePath) ?? null;
@@ -385,7 +392,7 @@ function EditorTabs() {
           // waits a first open can involve — fetching the chunk, then creating
           // the editor — read as one.
           <Suspense fallback={<div className="wb-editor-message">Loading editor…</div>}>
-            <CodeEditor file={active} />
+            <CodeEditor pane={pane} file={active} />
           </Suspense>
         )}
       </div>
@@ -440,6 +447,15 @@ export const editorTool: WorkbenchTool = {
     defaultLocation: { area: "center" },
     // Plural: two files side by side is the oldest reason anyone splits a
     // window. The instance key is the workspace-relative path.
+    //
+    // **Closing a pane does not close what it was looking at.** The resource is
+    // the Monaco text model — the buffer, its undo stack, its markers — and it
+    // is owned by the registry in `../monaco`, not by any pane: two panes can be
+    // on one file, and the file stays open in the tab strip when either goes.
+    // The model dies when the *file* is closed (`store.closeFile`), and even
+    // then only once the last view has let go, so it is never pulled out from
+    // under a live editor. Scroll and cursor go the other way — they are the
+    // view's own state, kept per pane (`e2e/editorPanes.spec.ts`).
     singleton: false,
     instances: {
       // Open files only. "Every file in the workspace" is what the QuickBar's
