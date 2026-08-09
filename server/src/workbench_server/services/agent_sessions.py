@@ -916,10 +916,35 @@ class SessionManager:
         session whose folder is no longer inside the root is relabelled with its
         own absolute path, which cannot collide with any relative folder and
         reads, in the session list, as the other project it belongs to.
+
+        The fleet view is then told, with the labels this method has just
+        derived. It forgot every row a moment ago — each one was jailed against
+        the workspace being left (``ActivityService.set_workspace_root``) — so
+        without this a session that is still running would drop out of Mission
+        Control until its next tool call, while the session list went on listing
+        it. Same calls :meth:`create` makes, one per surviving session.
+
+        Guarded for the reason ``AgentSession.close`` guards its own notification:
+        the observer is a Protocol this class does not own, and this runs inside
+        ``WorkspaceService.switch``, *after* the jail has moved and *before* the
+        watcher has been restarted. An exception escaping a notification would
+        abandon the switch there — a server whose jail and whose watch point at
+        different projects — over a panel that failed to update.
         """
         self._root = root.resolve()
         for session in self._sessions.values():
             session.folder_relative = self._label_for(session.folder)
+        if self._activity_observer is not None:
+            for session in self._sessions.values():
+                try:
+                    self._activity_observer.note_session(
+                        session_id=session.local_id,
+                        title=session.title or FALLBACK_TITLE,
+                        folder=session.folder_relative,
+                        kind=session.kind,
+                    )
+                except Exception:
+                    log.exception("agent.activity_switch_note_failed", session=session.local_id)
 
     def _label_for(self, folder: Path) -> str:
         """``folder`` as ``SessionInfo.folder``: workspace-relative when it is

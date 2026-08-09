@@ -86,7 +86,9 @@ async function openFile(page: Page, name: string): Promise<void> {
   await page.keyboard.press("Control+P");
   const quickbar = page.getByRole("dialog", { name: "Quick open" });
   await expect(quickbar).toBeVisible();
-  await quickbar.getByRole("textbox").fill(name);
+  // `combobox`, not `textbox`: the palette implements the ARIA combobox
+  // pattern, so the explicit role replaces the input's implicit one.
+  await quickbar.getByRole("combobox").fill(name);
   await quickbar.locator(".wb-qb-row", { hasText: name }).first().click();
   await expect(quickbar).toBeHidden();
 }
