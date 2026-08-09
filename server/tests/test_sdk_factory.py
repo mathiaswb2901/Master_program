@@ -353,6 +353,22 @@ class TestTheBuiltinToolsAreGatedBothWays:
             "Skill(workbench:plan-visual)",
             "Skill(workbench:remember)",
         ]
+        # …and so do the other two attended kinds. The gate is ``not
+        # is_unattended(kind)``, which withholds the skills from the *reviewer
+        # alone*; a later refactor that folds ``worker`` into an unattended set for
+        # an unrelated reason, or swaps the gate for a bare ``kind == "chat"``,
+        # would silently strip these pre-approved skills from worker and
+        # orchestrator sessions and reopen the permission-dialog regression the
+        # auto-allow exists to prevent. Nothing else in the suite checks skills for
+        # these two, so it is asserted here rather than assumed.
+        for attended in ("worker", "orchestrator"):
+            attended_skills = [
+                t for t in _options(attended).allowed_tools if t.startswith("Skill(")
+            ]
+            assert attended_skills == [
+                "Skill(workbench:plan-visual)",
+                "Skill(workbench:remember)",
+            ], attended
 
     def test_the_reviewer_gets_its_ceilings(self) -> None:
         """``max_turns`` and ``max_budget_usd`` — both unused in this codebase

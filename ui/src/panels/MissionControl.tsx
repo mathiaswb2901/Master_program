@@ -214,8 +214,15 @@ const KIND_LABELS: Record<SessionKind, string | null> = {
 };
 
 function KindBadge({ card }: { card: MissionCard }) {
-  const label = KIND_LABELS[card.kind];
-  if (label === null) return null;
+  // `card.kind` is a wire value — `mission.ts` fills it from server JSON with no
+  // runtime validation — so a kind outside the compiled-in `SessionKind` union can
+  // reach here when a rolling deploy leaves a UI bundle behind the server. The
+  // index type says it can't (the map is exhaustive at compile time), so widen the
+  // lookup: an unknown kind reads as `undefined`, and both it and `chat` (`null`)
+  // fail safe to no badge — the alternative is a garbled `title="…a undefined"`
+  // half-badge on an `is-<unknown>` class no stylesheet defines.
+  const label: string | null | undefined = KIND_LABELS[card.kind];
+  if (label === null || label === undefined) return null;
   return (
     <span className={`wb-mission-kind is-${card.kind}`} title={`This session is a ${label}`}>
       {label}
