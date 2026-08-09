@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DispatchMessageW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect,
     IsHungAppWindow, IsWindow, PeekMessageW, PostMessageW, SendMessageTimeoutW, SetWindowLongPtrW,
     TranslateMessage, GWLP_WNDPROC, GWL_STYLE, MSG, PM_REMOVE, SMTO_ABORTIFHUNG, WM_APP, WM_CLOSE,
-    WM_NULL, WM_PAINT, WM_PARENTNOTIFY, WS_CAPTION, WS_CHILD, WS_POPUP, WS_THICKFRAME,
+    WM_HOTKEY, WM_NULL, WM_PAINT, WM_PARENTNOTIFY, WS_CAPTION, WS_CHILD, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::class::{self, PanelState};
@@ -35,7 +35,7 @@ use super::embed::{self, EmbeddedGuest};
 use super::geometry::{host_layout, CssRect, HostLayout, PhysicalRect};
 use super::guest::{self, GuestProcess};
 use super::layout::{self, Coalescer};
-use super::{commands, focus, main_thread, reaper};
+use super::{commands, escape, focus, main_thread, reaper};
 use super::{HostError, HostErrorCode, HostRegistry, Panel, WindowId};
 
 /// One desktop, one window test at a time.
@@ -1538,6 +1538,378 @@ fn wait_until_hung(window: HWND) -> bool {
     }
     false
 }
+// ---- the keyboard escape ------------------------------------------------------
+//
+// The trap these answer: a guest owns its own window procedure, so once the
+// keyboard is inside it, nothing the webview listens for is ever delivered. The
+// escape is a system-level hotkey, and "system-level" is a claim about the whole
+// machine — so it is asked of the machine here rather than inferred from a
+// `RegisterHotKey` that returned `Ok`.
+
+/// A window to aim an escape at, with no guest process behind it — the whole of
+/// what the target has to be is a live `HWND` that can hold focus.
+fn stand_in_window(name: &str) -> HWND {
+    class::create_panel(
+        None,
+        PhysicalRect {
+            x: 60,
+            y: 60,
+            width: 240,
+            height: 160,
+        },
+        PanelState::new(name.to_string()),
+    )
+    .expect("the stand-in window should be created")
+}
+
+/// **The registration, asked of the system rather than of our own return value.**
+///
+/// `RegisterHotKey` returning `Ok` says our call was well-formed. What matters is
+/// that the chord is now *ours machine-wide* — that is the whole reason this
+/// mechanism was chosen over a keyboard hook — and the only way to ask is to try
+/// to take it a second time and be refused. The same question after `disarm`
+/// proves the other half: a chord we no longer need does not stay taken from
+/// every other application on the machine.
+#[test]
+fn the_keyboard_escape_takes_the_chord_from_the_machine_and_gives_it_back() {
+    let _serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
+    let target = stand_in_window("escape-target");
+    let rival = stand_in_window("escape-rival");
+    let rival_id = WindowId::from_hwnd(rival);
+    // Whatever ran before this, start from "not armed".
+    escape::disarm();
+
+    // The chord has to be free before the test can mean anything. If some other
+    // application on this machine owns Ctrl+Alt+Home, say so rather than
+    // failing three assertions down.
+    escape::try_take_the_chord(rival_id, 9001)
+        .expect("Ctrl+Alt+Home is owned by another application on this machine");
+    escape::release_the_chord(rival_id, 9001);
+
+    escape::arm(WindowId::from_hwnd(target)).expect("the escape should arm");
+    assert!(
+        escape::is_armed(),
+        "arming reported success and did nothing"
+    );
+    assert_eq!(escape::target(), Some(WindowId::from_hwnd(target)));
+    assert!(
+        escape::try_take_the_chord(rival_id, 9001).is_err(),
+        "the chord is still available to another window, so a keystroke inside a docked \
+         document would never reach us"
+    );
+
+    escape::disarm();
+    assert!(!escape::is_armed());
+    assert!(
+        escape::window().is_none(),
+        "the escape window outlived the registration it existed for"
+    );
+    escape::try_take_the_chord(rival_id, 9001)
+        .expect("the chord was not given back to the machine");
+    escape::release_the_chord(rival_id, 9001);
+
+    class::destroy(rival_id);
+    class::destroy(WindowId::from_hwnd(target));
+}
+
+/// **The collision the panel used to lie about.**
+///
+/// `RegisterHotKey` competes for a binding owned by the *whole machine*, so it
+/// fails when another application already holds one — and `Ctrl+Alt+Home` has a
+/// known, documented holder: inside an RDP session `mstsc` binds it to the
+/// connection bar. [`commands::arm_escape`] is right to treat that as a degrade
+/// rather than a failed embed; what was wrong is that it was the *only* record.
+/// Nothing crossed to the UI, so `KeyboardEscapeLine` went on printing
+/// "Ctrl+Alt+Home brings it back to Workbench" at a user for whom that chord
+/// does nothing at all — inside the one panel where the rest of the keymap has
+/// already stopped existing.
+///
+/// So the collision is made real here rather than mocked (a rival window takes
+/// the chord first, exactly as `mstsc` would have), and the assertion is on the
+/// seam the panel actually reads. Both directions matter: refused has to report
+/// `armed: false`, and it must not be a permanent verdict — the rival gives the
+/// chord back, the next embed re-arms, and the hint may name it again.
+#[test]
+fn a_chord_another_application_owns_is_reported_to_the_panel_as_unavailable() {
+    let _serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
+    let target = stand_in_window("escape-state-target");
+    let rival = stand_in_window("escape-state-rival");
+    let rival_id = WindowId::from_hwnd(rival);
+    // Whatever ran before this, start from "not armed".
+    escape::disarm();
+    assert!(
+        !commands::host_escape_state().armed,
+        "nothing is docked, so nothing should be claiming a machine-wide chord"
+    );
+
+    // The RDP connection bar, stood in for by a window of ours: the chord is
+    // taken before Workbench ever asks for it.
+    escape::try_take_the_chord(rival_id, 9003)
+        .expect("Ctrl+Alt+Home is owned by another application on this machine");
+    assert!(
+        escape::arm(WindowId::from_hwnd(target)).is_err(),
+        "the chord was registered twice, so this test is not reproducing the collision"
+    );
+
+    let refused = commands::host_escape_state();
+    assert!(
+        !refused.armed,
+        "the panel would print \"{} brings it back to Workbench\" with no hotkey registered — \
+         the one sentence a trapped user reads, and it would be false",
+        refused.chord
+    );
+    // The panel quotes this rather than spelling the chord a second time, so it
+    // is the registration's own name or the hint is drifting.
+    assert_eq!(refused.chord, "Ctrl+Alt+Home");
+
+    // Not a permanent verdict: every embed retries, and the UI re-asks on each
+    // dock precisely so a chord that frees up is named again.
+    escape::release_the_chord(rival_id, 9003);
+    escape::arm(WindowId::from_hwnd(target)).expect("the escape should arm once the chord is free");
+    assert!(
+        commands::host_escape_state().armed,
+        "the chord is registered but the panel is still being told to hide it"
+    );
+
+    escape::disarm();
+    class::destroy(rival_id);
+    class::destroy(WindowId::from_hwnd(target));
+}
+
+/// **The trap, and the message that ends it.**
+///
+/// The keyboard is put where a user's click puts it — inside the guest, whose own
+/// thread reports the focus — and then the exact `WM_HOTKEY` the system posts
+/// when the chord is pressed is delivered to the escape window. What that has to
+/// produce is the keyboard back on one of ours.
+///
+/// The message is posted rather than typed so this runs anywhere `cargo test`
+/// does, including CI with no foreground application; the keystrokes themselves
+/// are driven in [`a_real_ctrl_alt_home_escapes_a_docked_document`].
+#[test]
+fn a_hotkey_message_takes_the_keyboard_out_of_a_docked_document() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let guest_thread = focus::owning_thread(guest_window);
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+
+    // The trap: this is where a click into the document leaves the keyboard, and
+    // from here every keystroke belongs to the guest's window procedure.
+    focus::focus(guest_window).expect("focusing the guest is accepted");
+    assert!(
+        wait_until(|| focus::focused_window_of(guest_thread) == Some(guest_window)),
+        "the keyboard never reached the guest, so this test would prove nothing"
+    );
+
+    escape::disarm();
+    escape::arm(elsewhere).expect("the escape should arm");
+    let escape_window = escape::window().expect("an armed escape owns a window");
+
+    // Exactly what the system posts when the chord is pressed.
+    // SAFETY: a plain post to a window this process created.
+    unsafe {
+        PostMessageW(
+            Some(escape_window.hwnd()),
+            WM_HOTKEY,
+            WPARAM(escape::HOTKEY_ID as usize),
+            LPARAM(0),
+        )
+    }
+    .expect("the hotkey message should be accepted");
+
+    assert!(
+        wait_until(|| focus::focused_here() == Some(elsewhere)),
+        "the keyboard is still on {:?} — WM_HOTKEY did not reach focus::focus, so a user \
+         inside a docked document has no way out but the mouse",
+        focus::focused_here()
+    );
+    escape::disarm();
+}
+
+/// The chord is taken from **every application on the machine**, so it is armed
+/// only while there is something to escape from. Closing the last docked
+/// document gives it back — asserted through `close_panel`, the body the command
+/// runs, rather than through the sync helper on its own.
+#[test]
+fn closing_the_last_docked_document_gives_the_chord_back() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+    let (registry, _panel, _clip) = registry_with(&mut fixture, "docked", true);
+
+    escape::disarm();
+    escape::arm(elsewhere).expect("the escape should arm");
+    assert!(
+        escape::is_armed(),
+        "a docked document left the keyboard with no way out"
+    );
+
+    commands::close_panel(&registry, "docked", |process, _dead_ends| {
+        if let Some(process) = process {
+            reaper::reap(process, || {});
+        }
+    })
+    .expect("the panel closes");
+
+    assert!(
+        !escape::is_armed(),
+        "the chord stayed taken from the machine after the last document closed"
+    );
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the guest outlived the close"
+    );
+}
+
+/// **Unregistered when the window goes.** `tear_down_all` is what every path
+/// that ends the shell's window calls — the close guard's two, the close-ack
+/// watchdog's, and `RunEvent::Exit` — so it is where a machine-wide registration
+/// must not survive. A hotkey outliving the window it was registered on is not
+/// merely untidy: the registration belongs to a thread that is about to stop
+/// pumping, and the chord would be dead for every other application until the
+/// process really exits.
+#[test]
+fn a_teardown_gives_the_chord_back_before_the_window_goes() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    fixture.embed();
+    let guest_hwnd = fixture.guest_window.hwnd();
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+    let (registry, panel_window, _clip) = registry_with(&mut fixture, "at-exit", true);
+
+    escape::disarm();
+    escape::arm(elsewhere).expect("the escape should arm");
+    assert!(
+        escape::is_armed(),
+        "nothing was armed, so this proves nothing"
+    );
+
+    commands::tear_down_all(&registry);
+
+    assert!(
+        !escape::is_armed(),
+        "the shell's window went away with a machine-wide hotkey still registered to it"
+    );
+    escape::try_take_the_chord(elsewhere, 9002).expect("the chord was not given back at teardown");
+    escape::release_the_chord(elsewhere, 9002);
+    // And it really was the teardown, not a routed no-op.
+    settle();
+    assert!(!exists(panel_window), "the panel survived the teardown");
+    assert_eq!(
+        parent_of(guest_hwnd),
+        None,
+        "the guest was not handed back to the desktop"
+    );
+}
+
+/// **The bug and the fix, with the keys actually pressed.**
+///
+/// Everything above posts the message the system would have posted. This one
+/// asks the system for it: the keyboard is put inside the guest exactly where a
+/// click into a document leaves it, `Ctrl+Alt+Home` is typed with `SendInput`,
+/// and nothing in the chain between the two is faked.
+///
+/// **It carries its own control, and the control is the bug.** The chord is
+/// pressed once with nothing registered — which is the whole of `master`'s
+/// behaviour — and the keyboard has to stay in the guest, because that keystroke
+/// is delivered to the document's own window procedure like every other one and
+/// no part of Workbench ever hears it. Then the escape is armed and the same
+/// keys are sent again. Without the first half, the second would only be saying
+/// that something moved the focus.
+///
+/// `#[ignore]`: it injects real keystrokes into the session. The chord itself is
+/// swallowed by our own registration, but the bare `Ctrl` and `Alt` transitions
+/// around it are delivered to whatever is in the foreground, and a test suite has
+/// no business doing that unasked. Run it with
+/// `cargo test -- --ignored --nocapture`.
+#[test]
+#[ignore = "injects real keystrokes into the session; run with --ignored"]
+fn a_real_ctrl_alt_home_escapes_a_docked_document() {
+    let mut fixture = Fixture::new((700, 500), 0);
+    fixture.embed();
+    let guest_window = fixture.guest_window;
+    let guest_thread = focus::owning_thread(guest_window);
+    let elsewhere = WindowId::from_hwnd(fixture.elsewhere);
+
+    let put_the_keyboard_in_the_document = || {
+        focus::focus(guest_window).expect("focusing the guest is accepted");
+        assert!(
+            wait_until(|| focus::focused_window_of(guest_thread) == Some(guest_window)),
+            "the keyboard never reached the guest, so this test would prove nothing"
+        );
+    };
+
+    // 1. The trap, as it is on `master`: no registration, so the chord is just
+    //    another keystroke for the document to eat.
+    escape::disarm();
+    put_the_keyboard_in_the_document();
+    press_ctrl_alt_home();
+    pump_for(Duration::from_millis(500));
+    let trapped = focus::focused_here();
+    println!("escape: with nothing registered, the chord left the keyboard on {trapped:?}");
+    assert_ne!(
+        trapped,
+        Some(elsewhere),
+        "something moved the keyboard without a hotkey being registered — the control \
+         is measuring the wrong thing"
+    );
+
+    // 2. The fix: the same keys, with the escape armed.
+    escape::arm(elsewhere).expect("the escape should arm");
+    put_the_keyboard_in_the_document();
+    press_ctrl_alt_home();
+
+    let escaped = wait_until(|| focus::focused_here() == Some(elsewhere));
+    println!(
+        "escape: with the chord registered the keyboard is on {:?} (the target is \
+         {elsewhere:?}); the guest thread reports {:?}",
+        focus::focused_here(),
+        focus::focused_window_of(guest_thread)
+    );
+    assert!(
+        escaped,
+        "a real Ctrl+Alt+Home did not take the keyboard out of the docked document"
+    );
+    escape::disarm();
+}
+
+/// Type the escape chord, as a keyboard would.
+fn press_ctrl_alt_home() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_CONTROL, VK_HOME, VK_MENU,
+    };
+
+    let key = |vk: VIRTUAL_KEY, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let strokes = [
+        key(VK_CONTROL, false),
+        key(VK_MENU, false),
+        key(VK_HOME, false),
+        key(VK_HOME, true),
+        key(VK_MENU, true),
+        key(VK_CONTROL, true),
+    ];
+    // SAFETY: `strokes` is a live array of correctly sized `INPUT` values.
+    let sent = unsafe { SendInput(&strokes, std::mem::size_of::<INPUT>() as i32) };
+    println!("escape: SendInput sent {sent}/6 events for Ctrl+Alt+Home");
+}
+
 /// Two pieces of folklore about `DeferWindowPos`, both measured here because
 /// getting either wrong is a silent failure: the batch simply refuses, and a
 /// panel stops following its splitter.

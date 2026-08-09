@@ -29,6 +29,10 @@ const HANG_AFTER: Duration = Duration::from_secs(6);
 /// Long enough to be unmistakably a hang, short enough that the machine is not
 /// left in it.
 const HANG_FOR: Duration = Duration::from_secs(20);
+/// Long enough for the page to have finished loading before the keyboard is put
+/// in the guest. A webview that is still coming up takes the focus back, and
+/// then the demo would be showing the opposite of what it is for.
+const FOCUS_AFTER: Duration = Duration::from_secs(4);
 
 /// Start the demo if the environment asks for it. Called once, when the window
 /// is up.
@@ -83,6 +87,23 @@ fn run(app: &AppHandle, hang: bool) {
         );
     }
     let _ = commands::host_set_bounds(app.clone(), window.clone(), DEMO_HOST_ID.to_string(), rect);
+
+    // **The keyboard trap, in the running shell.** Put the keyboard where a
+    // click into a real Word puts it — inside the guest, whose window procedure
+    // then receives every keystroke and hands the webview none of them. This is
+    // the same call the UI makes when a document panel is focused, and it is
+    // what makes the escape chord something to actually try rather than read
+    // about.
+    thread::sleep(FOCUS_AFTER);
+    match commands::host_focus(app.clone(), DEMO_HOST_ID.to_string()) {
+        Ok(()) => crate::backend::log(
+            "office host demo: the keyboard is in the guest — every keystroke is its own now; \
+             press Ctrl+Alt+Home to get it back",
+        ),
+        Err(err) => crate::backend::log(&format!(
+            "office host demo: could not focus the guest: {err}"
+        )),
+    }
 
     if hang {
         thread::sleep(HANG_AFTER);
