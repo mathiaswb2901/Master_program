@@ -1159,6 +1159,27 @@ measured not to be enough. Because a guest is a *child* of the Tauri window and
 children die with their parent, every path that closes the window releases the
 guests first — otherwise closing Workbench would take a real Word down with it.
 
+**The close paths obey the same thread rule as everything else, and two of them
+used not to.** Releasing a guest is `SetWindowLongPtrW` + `SetParent` on another
+process's window and `DestroyWindow` on ours, and Win32 only lets the creating
+thread destroy a window — so the teardown is *asked for* through
+`host/main_thread.rs` rather than performed by whoever noticed. The caller that
+made this real is the close-ack watchdog in `lib.rs`, a thread spawned precisely
+because the UI has stopped answering, which used to run the whole teardown
+itself. It now marshals it with a two-second bound and, if the main thread does
+not service it, closes without touching a guest: the work stays queued rather
+than being cancelled, and a guest left docked is recoverable where a Win32 call
+from the wrong thread is undefined. Symmetrically, the part of closing a panel
+that is *not* a window call went the other way — killing a guest is a job handle
+closing (instant, stays on the main thread), but *waiting* for the process to
+actually die is bounded at two seconds and used to run inside `host_close`, so
+closing one docked document froze the window for as long as the instance took to
+go. `host/reaper.rs` takes the wait, and hands the one step that depends on its
+answer — reclaiming a stranded keyboard — back to the main thread when it knows.
+Measured on the synthetic guest with its job object detached so it cannot die:
+the close body went from **2.02 s to 19 ms**, against a control that still spends
+its full 400 ms bound waiting.
+
 CSS pixels become physical pixels through **one** DPI authority, the window's own
 `scale_factor()`; edges are rounded and sizes derived from the rounded edges, so
 two adjacent panels cannot leave a one-pixel seam. Nothing scaled is ever cached —
@@ -1396,11 +1417,36 @@ them at once and none can be left behind by not being told.
 
 **Everything that copied the root owes a `set_workspace_root`, and the list of
 them lives in exactly one place.** `create_app` hands `WorkspaceService` the
-services that kept their own copy — shortcuts, layouts, provenance, the session
-manager (sync), then the watcher and the worktree pool (async, because they
-restart something). A service added later that copies the root and is not on
-that list is one that keeps serving the project the user left, and the symptom
-is data from the wrong workspace rather than a crash.
+services that kept their own copy — shortcuts, layouts, provenance, validation,
+the fleet feed, the session manager, the conversation browser (sync), then the
+watcher and the worktree pool (async, because they restart something). A service
+added later that copies the root and is not on that list is one that keeps
+serving the project the user left, and the symptom is data from the wrong
+workspace rather than a crash. That is not hypothetical: the activity feed
+shipped without either half and answered `(outside the workspace)` for every tool
+call made after a switch, for the rest of the process. The claim is now asserted
+rather than reviewed — `test_no_service_the_app_built_still_holds_the_root_the_user_left`
+walks what the factory actually built and fails on any service still holding the
+previous root.
+
+**Two of those entries are ordered, and the order is written down where it is
+enforced.** The fleet feed is re-rooted *before* the session manager: it forgets
+a fleet whose every row was jailed against the workspace being left, and the
+manager's own re-rooting then re-announces the sessions that are still running
+with the labels it just derived. Reversed, the announcements land in a service
+about to drop them and Mission Control goes blank until the next tool call.
+
+**A root borrowed from another service is asked for, not copied.** The sync
+rootables all run before the first async one, so a sync service that re-derives
+its state from an *async* service inside its own `set_workspace_root` reads that
+service's **old** root — it has not moved yet. The fleet feed is the live case:
+it names the worktree pool root so a Mission Control worker's row reads
+`slot-01/…` instead of `(outside the workspace)`, and that root is keyed on the
+workspace, so it moves on every switch. It holds a provider (`extra_roots`,
+`main.py`) that it asks per call rather than a copy it would have to remember to
+refresh — no ordering to get wrong, and nothing for the next switch to forget.
+The same shape is the right answer for any root one service owns and another
+merely reads.
 
 **And that whole sequence is held under one lock.** `WorkspaceService.switch`
 writes the jail synchronously and then *awaits* the watcher and the pool, so
