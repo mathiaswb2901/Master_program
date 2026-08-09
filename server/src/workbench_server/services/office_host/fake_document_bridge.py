@@ -17,8 +17,19 @@ Content is minted from the *name* of the document, so every read branch is
 reachable in CI and, later, drivable from a test that just opens the right file
 name (the ``FAILURE_TRIGGERS`` precedent):
 
-* Word, ordinary -> a short multi-paragraph memo.
-* ``…empty…`` (Word) -> no paragraphs, so a read says "none".
+* Word, ordinary -> a short multi-paragraph memo whose first paragraph is a
+  ``Heading 1``, so an insert after it has a heading to *not* inherit.
+* ``…empty…`` (Word) -> no paragraphs, so a read says "none" — and so an insert
+  into a document with nothing in it is exercised, which is where drafting
+  starts.
+* ``…table…`` (Word) -> the memo plus a table cell holding *two* paragraphs: a
+  mid-cell one (a safe insert anchor), the cell's terminal one (the anchor an
+  insert must refuse rather than write across), and the ordinary caption
+  paragraph Word always keeps after a table. Measured on real Word
+  (``scripts/dev/probe_word_insert.py``): a cell holding a single paragraph
+  gives *that* paragraph the ``\x07`` marker, so a table of one-line cells has
+  no legal anchor inside it at all — a two-paragraph cell is the only place a
+  mid-cell insert exists to be tested.
 * Excel, ordinary -> a small ``Budget`` sheet that fits in one window and a
   2000-row ``Forecast`` sheet that does not, so the same document exercises both
   the whole-range read and the windowed one.
@@ -58,6 +69,7 @@ did.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +84,7 @@ from workbench_server.models.office_bridge import (
     SheetDim,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
 )
 from workbench_server.models.office_host import HostAppKind
@@ -83,11 +96,18 @@ from workbench_server.services.office_host.document_bridge import (
     RangeInvalidError,
 )
 from workbench_server.services.office_host.document_window import (
+    BUILTIN_STYLE_NAMES,
+    CELL_MARK,
+    PARAGRAPH_MARK,
     Grid,
     SlideContent,
+    cell_anchor_error,
+    check_insert_text,
     check_paragraph,
+    following_style,
     no_sheet_error,
     parse_write_cell,
+    resolve_insert_index,
     slide_dims,
     used_dims,
     window_cells,
@@ -104,23 +124,76 @@ def _titleize(stem: str) -> str:
     return " ".join(word.capitalize() for word in words) or "Untitled"
 
 
-def word_paragraphs(name: str) -> list[str]:
-    """The body a Word document of this name would have."""
+@dataclass
+class WordParagraph:
+    """One paragraph of the fake's live Word body.
+
+    A ``list[str]`` was enough while the only write was a replace. An insert has
+    to answer two more questions before it touches anything — *what style does
+    the new paragraph get* and *is this anchor a table cell's terminal
+    paragraph* — and both are properties of the paragraph it is anchored to. So
+    the fake carries what a real ``Document.Paragraphs(i)`` carries: its text,
+    its style name, and the mark its range ends with.
+    """
+
+    text: str
+    #: As the document names it, matching what ``Style.NameLocal`` returns over
+    #: COM (``document_window.BUILTIN_STYLE_NAMES`` for the built-ins).
+    style: str = "Normal"
+    #: The terminal marker of this paragraph's range: ``\r`` for an ordinary
+    #: paragraph, ``\x07`` for the last paragraph in a table cell — the
+    #: structural marker an insert must never write across (#92's fidelity bug,
+    #: in the insert path).
+    mark: str = PARAGRAPH_MARK
+    #: Whether the paragraph sits inside a table at all. Distinct from ``mark``:
+    #: a paragraph in the *middle* of a cell ends with an ordinary ``\r`` and is
+    #: a perfectly safe anchor; this is what the top-of-document insert asks,
+    #: which has no mark of its own to inspect.
+    in_table: bool = False
+
+
+def word_body(name: str) -> list[WordParagraph]:
+    """The body a Word document of this name would have.
+
+    ``…empty…`` has no paragraphs at all, and ``…table…`` ends in a table cell
+    holding two paragraphs — a mid-cell one (a safe anchor) followed by the
+    cell's terminal one (the anchor an insert must refuse) — plus the caption
+    paragraph after the table, so the fidelity refusal is reachable in CI with no
+    Word anywhere.
+    """
     if "empty" in name.lower():
         return []
     stem = Path(name).stem
-    return [
-        _titleize(stem),
-        f"This memo, {stem}, is the live document docked in a Workbench panel; "
-        "reading it here returns exactly what is on screen, including edits the "
-        "user has not yet saved to disk.",
-        "The first finding concerns delivery-hour normalisation across the autumn "
-        "DST boundary, where the 25-hour day must not be folded into 24.",
-        "The second finding is unit consistency: figures quoted in MWh sat beside "
-        "a table in MW, and the two have now been reconciled.",
-        "In closing, the recommended change is small, reversible, and covered by "
-        "the regression that the reproduction became.",
+    body = [
+        WordParagraph(_titleize(stem), style="Heading 1"),
+        WordParagraph(
+            f"This memo, {stem}, is the live document docked in a Workbench panel; "
+            "reading it here returns exactly what is on screen, including edits the "
+            "user has not yet saved to disk."
+        ),
+        WordParagraph(
+            "The first finding concerns delivery-hour normalisation across the autumn "
+            "DST boundary, where the 25-hour day must not be folded into 24."
+        ),
+        WordParagraph(
+            "The second finding is unit consistency: figures quoted in MWh sat beside "
+            "a table in MW, and the two have now been reconciled."
+        ),
+        WordParagraph(
+            "In closing, the recommended change is small, reversible, and covered by "
+            "the regression that the reproduction became."
+        ),
     ]
+    if "table" in name.lower():
+        body += [
+            WordParagraph("Hour", in_table=True),
+            WordParagraph("SE3 price", mark=CELL_MARK, in_table=True),
+            # Word always keeps an ordinary paragraph after a table, and so does
+            # this: without it "append at the end" would anchor on the cell
+            # marker, which is a refusal the real thing never produces.
+            WordParagraph("Table 1: hourly SE3 prices."),
+        ]
+    return body
 
 
 #: One worksheet as the *typed* values a live instance really holds: numbers as
@@ -266,7 +339,7 @@ class FakeDocumentBridge:
         #: The mutable in-memory copy a write edits, materialised lazily from the
         #: name-derived mint on first access and keyed by pid, so a read after a
         #: write sees the edit — the fake stand-in for the live COM instance.
-        self._word_docs: dict[int, list[str]] = {}
+        self._word_docs: dict[int, list[WordParagraph]] = {}
         self._excel_docs: dict[int, dict[str, ValueGrid]] = {}
         #: PowerPoint decks are read-only (there is no ``write_powerpoint``), so
         #: this overlay never mutates — it is kept for the same reason as the
@@ -291,11 +364,11 @@ class FakeDocumentBridge:
             raise DocGoneError(f"no document is open for pid {handle.pid}")
         return name
 
-    def _word_body(self, handle: HostHandle) -> list[str]:
+    def _word_body(self, handle: HostHandle) -> list[WordParagraph]:
         """The live paragraph list for this pid — minted once, mutated thereafter."""
         name = self._name(handle)
         if handle.pid not in self._word_docs:
-            self._word_docs[handle.pid] = word_paragraphs(name)
+            self._word_docs[handle.pid] = word_body(name)
         return self._word_docs[handle.pid]
 
     def _excel_book(self, handle: HostHandle) -> dict[str, ValueGrid]:
@@ -331,7 +404,9 @@ class FakeDocumentBridge:
         return DocStructure(kind="powerpoint", slides=slide_dims(self._slide_deck(handle)))
 
     async def read_word(self, handle: HostHandle, start_paragraph: int, max_chars: int) -> WordText:
-        return window_word(self._word_body(handle), start_paragraph, max_chars)
+        return window_word(
+            [paragraph.text for paragraph in self._word_body(handle)], start_paragraph, max_chars
+        )
 
     async def read_powerpoint(
         self, handle: HostHandle, start_slide: int, max_chars: int
@@ -351,10 +426,68 @@ class FakeDocumentBridge:
         check_paragraph(paragraph, len(paragraphs))
         # Replace exactly the one addressed paragraph; every other paragraph, and
         # the document's shape, is left untouched — the fidelity the seam owes.
-        paragraphs[paragraph] = text
+        # Its style and its terminal mark are the paragraph's, not the text's, so
+        # they survive the rewrite exactly as they do over COM.
+        paragraphs[paragraph].text = text
         return WordEdit(
             paragraph=paragraph, written_chars=len(text), total_paragraphs=len(paragraphs)
         )
+
+    async def insert_word(
+        self,
+        handle: HostHandle,
+        after_paragraph: int | None,
+        text: str,
+        style: WordParagraphStyle | None,
+    ) -> WordEdit:
+        """Insert one paragraph, walking the same state machine the COM path does.
+
+        The order matters and is the real bridge's order: resolve the destination,
+        refuse a line break, refuse a structural anchor, *then* mutate. A fake
+        that validated after mutating would pass the same assertions while
+        leaving a corrupted document behind on the refusal paths.
+        """
+        paragraphs = self._word_body(handle)
+        index = resolve_insert_index(after_paragraph, len(paragraphs))
+        check_insert_text(text)
+        anchor = self._insert_anchor(paragraphs, index)
+        if style is not None:
+            new_style = BUILTIN_STYLE_NAMES[style]
+        elif anchor is None:
+            new_style = BUILTIN_STYLE_NAMES["body"]
+        elif index == 0:
+            # The top insert splits the first paragraph and keeps its style —
+            # what Enter at the very start of the document gives you.
+            new_style = anchor.style
+        else:
+            new_style = following_style(anchor.style)
+        paragraphs.insert(index, WordParagraph(text, style=new_style))
+        return WordEdit(
+            paragraph=index,
+            written_chars=len(text),
+            total_paragraphs=len(paragraphs),
+            op="insert",
+            style=new_style,
+        )
+
+    def _insert_anchor(self, paragraphs: list[WordParagraph], index: int) -> WordParagraph | None:
+        """The paragraph an insert at ``index`` hangs off, once it is proven safe.
+
+        ``None`` only for an empty document. The two refusals mirror the COM
+        primitive exactly: the top insert asks whether the first paragraph is in
+        a table (it has no mark of its own to read), every other insert reads the
+        anchor's terminal mark and refuses an end-of-cell marker.
+        """
+        if not paragraphs:
+            return None
+        if index == 0:
+            if paragraphs[0].in_table:
+                raise cell_anchor_error(0)
+            return paragraphs[0]
+        anchor = paragraphs[index - 1]
+        if anchor.mark != PARAGRAPH_MARK:
+            raise cell_anchor_error(index - 1)
+        return anchor
 
     async def write_excel(self, handle: HostHandle, sheet: str, cell: str, value: str) -> CellEdit:
         sheets = self._excel_book(handle)

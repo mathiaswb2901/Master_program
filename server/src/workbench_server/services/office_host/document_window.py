@@ -16,7 +16,13 @@ Nothing here touches COM or mints anything; it is pure and runs in CI.
 
 from dataclasses import dataclass, field
 
-from workbench_server.models.office_bridge import CellWindow, SlideDim, SlideText, WordText
+from workbench_server.models.office_bridge import (
+    CellWindow,
+    SlideDim,
+    SlideText,
+    WordParagraphStyle,
+    WordText,
+)
 from workbench_server.services.office_host.a1 import cell_ref, parse_cell, parse_range
 from workbench_server.services.office_host.document_bridge import RangeInvalidError
 
@@ -84,6 +90,119 @@ def check_paragraph(paragraph: int, total: int) -> None:
         raise RangeInvalidError("the document is empty; there is no paragraph to replace")
     if paragraph < 0 or paragraph >= total:
         raise RangeInvalidError(f"paragraph {paragraph} is past the last paragraph ({total - 1})")
+
+
+#: The anchor that means "before the first paragraph" — the one insert position
+#: no existing paragraph can name, since ``insert after`` always lands *below*
+#: its anchor. A document whose first paragraph should be a new title has no
+#: other way to be addressed.
+TOP_OF_DOCUMENT = -1
+
+#: The mark an ordinary Word paragraph's range ends with.
+PARAGRAPH_MARK = "\r"
+
+#: Word's end-of-cell (and end-of-row) marker, which the last paragraph inside a
+#: table cell ends with instead. It is *structure*: a write that puts text across
+#: it moves the cell boundary. #92 found this in the replace path; it is the same
+#: hazard an insert has to refuse.
+CELL_MARK = "\x07"
+
+#: What each style intent is called in an English Word. The *fake* uses these as
+#: its style names and the probe reads them back; the real bridge addresses the
+#: same styles by their built-in enum ids (``office_com.WORD_BUILTIN_STYLES``)
+#: precisely so it never has to know this table — a Norwegian Word calls
+#: ``Heading 1`` "Overskrift 1", and a write that sent the English string would
+#: fail on the user's own machine.
+BUILTIN_STYLE_NAMES: dict[WordParagraphStyle, str] = {
+    "body": "Normal",
+    "heading1": "Heading 1",
+    "heading2": "Heading 2",
+    "heading3": "Heading 3",
+}
+
+
+def following_style(style: str) -> str:
+    """The style Word gives the paragraph you get by pressing Enter at the end of
+    one styled ``style`` — the fake's stand-in for ``Style.NextParagraphStyle``.
+
+    This is the rule an insert with **no** named style follows, and it is not the
+    same as defaulting to body: continuing after a body paragraph must keep the
+    template's own body style (a thesis whose body is ``Body Text`` would
+    otherwise sprout ``Normal`` paragraphs among its real ones), while continuing
+    after a heading must *not* produce a second heading — which is exactly what
+    inheriting would give, because Word's insert copies the anchor's formatting
+    where its Enter key does not.
+    """
+    return "Normal" if style.lower().startswith("heading") else style
+
+
+def resolve_insert_index(after_paragraph: int | None, total: int) -> int:
+    """Where a new paragraph lands, or the refusal both bridges share.
+
+    ``after_paragraph`` is the zero-based paragraph to insert *after*; ``None``
+    appends at the end of the document and :data:`TOP_OF_DOCUMENT` (-1) inserts
+    before the first paragraph. The answer is the zero-based index the new
+    paragraph will occupy — which is also the index every later paragraph shifts
+    up from.
+
+    Unlike :func:`check_paragraph`, an empty document is **not** an error here:
+    a document with nothing in it is precisely where drafting starts.
+    """
+    if after_paragraph is None:
+        return total
+    if after_paragraph == TOP_OF_DOCUMENT:
+        return 0
+    if after_paragraph < TOP_OF_DOCUMENT:
+        raise RangeInvalidError(
+            f"{after_paragraph} is not a paragraph to insert after; use -1 for the top of "
+            "the document, or omit after_paragraph to append at the end"
+        )
+    if total == 0:
+        raise RangeInvalidError(
+            "the document is empty; omit after_paragraph to insert the first paragraph"
+        )
+    if after_paragraph >= total:
+        raise RangeInvalidError(
+            f"paragraph {after_paragraph} is past the last paragraph ({total - 1}); "
+            "omit after_paragraph to append at the end"
+        )
+    return after_paragraph + 1
+
+
+def check_insert_text(text: str) -> None:
+    """One insert writes one paragraph — so a line break in ``content`` is refused.
+
+    Not pedantry: a ``\\r`` or ``\\n`` handed to Word's ``Range.Text`` becomes a
+    *paragraph mark*, so the document would gain several paragraphs while the
+    result reported one index and one new total. Every address the agent computes
+    from that answer would then be wrong, which is the exact failure the shift
+    reporting exists to prevent. Refusing costs one extra call per paragraph and
+    the refusal says so.
+    """
+    if "\r" in text or "\n" in text:
+        raise RangeInvalidError(
+            "an insert writes one paragraph, and this content contains a line break. "
+            "Insert paragraphs one at a time: each result names the index to insert after "
+            "for the next one."
+        )
+
+
+def cell_anchor_error(paragraph: int) -> RangeInvalidError:
+    """The refusal both bridges raise for an insert anchored on a table cell's
+    last paragraph.
+
+    That paragraph does not end with a paragraph mark: it ends with Word's
+    end-of-cell marker, which is *structure*, not text (the ``\\x07`` fidelity
+    bug #92 found in the replace path). Inserting across it moves the boundary
+    and can merge cells or strand a row, so the anchor is refused by name rather
+    than repaired by guesswork — a corrupted table is not something the user can
+    undo their way out of by reading a confirmation that claimed success.
+    """
+    return RangeInvalidError(
+        f"paragraph {paragraph} is the last paragraph of a table cell; inserting there would "
+        "rewrite the cell boundary. Address a paragraph outside the table, or edit the "
+        "table in the panel."
+    )
 
 
 def window_word(paragraphs: list[str], start_paragraph: int, max_chars: int) -> WordText:

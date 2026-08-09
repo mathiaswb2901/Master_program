@@ -28,7 +28,9 @@ from workbench_server.models.office_bridge import (
     SheetDim,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
+    WordWriteOp,
 )
 from workbench_server.models.plans import (
     AnnotationAnchor,
@@ -59,6 +61,7 @@ from workbench_server.services.agent_tools import (
     REPORT_FINDINGS,
     REVIEWER_TOOLS,
     RUN_GATES,
+    WORD_STYLE_INTENTS,
     allowed_tool_names,
     clamp_result,
     handle_office_read,
@@ -160,7 +163,10 @@ class _Reader:
         path: str,
         *,
         content: str,
+        op: WordWriteOp = "replace",
         paragraph: int | None = None,
+        after_paragraph: int | None = None,
+        style: WordParagraphStyle | None = None,
         sheet: str | None = None,
         cell: str | None = None,
     ) -> WordEdit | CellEdit:
@@ -564,7 +570,54 @@ class TestOfficeWriteBudget:
 
     def test_the_office_write_schema_fits_its_ceiling(self) -> None:
         assert OFFICE_WRITE.schema_bytes <= OFFICE_WRITE.max_schema_bytes
+        assert len(OFFICE_WRITE.description) <= MAX_DESCRIPTION_CHARS
         assert OFFICE_WRITE.input_schema["required"] == ["path", "content"]
+
+    def test_the_insert_arguments_are_the_smallest_that_work(self) -> None:
+        """Three properties for the insert, and the enum on ``style`` comes from
+        the model's own Literal — a fourth list to keep honest is how the schema
+        the agent reads drifts away from the type the bridge applies."""
+        properties = OFFICE_WRITE.input_schema["properties"]
+        assert set(properties) == {
+            "path",
+            "content",
+            "op",
+            "paragraph",
+            "after_paragraph",
+            "style",
+            "sheet",
+            "cell",
+        }
+        assert properties["op"]["enum"] == ["replace", "insert"]
+        assert properties["style"]["enum"] == list(WORD_STYLE_INTENTS)
+        # -1 is the top of the document and has to be expressible; a `minimum: 0`
+        # here would make the one position no paragraph can name unreachable.
+        assert properties["after_paragraph"]["minimum"] == -1
+
+    async def test_an_insert_confirmation_stays_within_budget(self) -> None:
+        # The widest confirmation in this tool: the address, the new total, the
+        # shift clause, the style, the read-back and the next anchor — plus an
+        # echo of content the model may have sent by the kilobyte.
+        body = "Para. " * 1000
+        reader = _Reader(
+            DocStructure(kind="word", paragraph_count=12),
+            edit=WordEdit(
+                paragraph=7,
+                written_chars=len(body),
+                total_paragraphs=12,
+                op="insert",
+                style="Heading 2",
+            ),
+        )
+        result = await handle_office_write(
+            reader,
+            {"path": "chapter.docx", "op": "insert", "after_paragraph": 6, "content": body},
+        )
+        text = result_text(result)
+        assert len(text.encode()) <= OFFICE_WRITE.max_result_bytes
+        # AXI shape 3: it ends with what to do next, for both next steps.
+        assert "start_paragraph=7" in text
+        assert "after_paragraph=7" in text
 
     async def test_a_huge_content_write_confirms_within_budget(self) -> None:
         # The content the model sends can be a whole 32k-char Excel cell; the
