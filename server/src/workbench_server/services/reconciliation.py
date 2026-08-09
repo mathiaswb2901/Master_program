@@ -18,7 +18,7 @@ Three domain failure modes are first-class here, not comments:
 * **Time-indexed rows are aligned by local wall-clock time** (:func:`_align_time_rows`),
   telling the repeated 02:00 of a fall-back DST day apart from an ordinary row that was
   pasted twice by asking the *zone* whether that wall clock is genuinely ambiguous
-  (:func:`_is_ambiguous`) — never by order of appearance alone. A naive positional join
+  (:func:`is_ambiguous_local`) — never by order of appearance alone. A naive positional join
   that drops or invents the duplicated hour is refused, and so is a duplicate row
   masquerading as a fold.
 * **No look-ahead in the pairing.** Rows are matched by their own timestamp value, never
@@ -75,22 +75,29 @@ MAX_DUPLICATE_LINES = 20
 _OUTCOME_SEVERITY: dict[CheckOutcome, int] = {"pass": 0, "skipped": 1, "warn": 2, "fail": 3}
 
 
-class _Unit(NamedTuple):
+class Unit(NamedTuple):
     """One known unit: what it measures, how it scales to that dimension's base
-    unit, and — for monetary units only — which currency it is denominated in."""
+    unit, and — for monetary units only — which currency it is denominated in.
+
+    Public, with :data:`UNIT_TO_BASE`, because the unit table is a *domain*
+    primitive rather than this gate's private business: the market-rules check
+    (``services/market_check.py``) asks the same table whether a bid file's volume
+    header is power or energy. Two tables would be two chances to disagree about
+    what ``MWh`` means.
+    """
 
     dimension: str
     factor: float
     currency: str | None = None
 
 
-def _currency_units(code: str) -> dict[str, _Unit]:
+def _currency_units(code: str) -> dict[str, Unit]:
     """The three monetary units of one currency: the bare amount and the two
     per-energy denominations an analyst actually types."""
     return {
-        f"{code}/MWH": _Unit("price_energy", 1.0, code),
-        f"{code}/KWH": _Unit("price_energy", 1e3, code),
-        code: _Unit("money", 1.0, code),
+        f"{code}/MWH": Unit("price_energy", 1.0, code),
+        f"{code}/KWH": Unit("price_energy", 1e3, code),
+        code: Unit("money", 1.0, code),
     }
 
 
@@ -108,21 +115,27 @@ def _currency_units(code: str) -> dict[str, _Unit]:
 #: Deliberately hand-rolled rather than pulled from a units library: the whole value
 #: here is the *refusal* rules (dimension, currency), which a general converter would
 #: happily paper over.
-_UNIT_TO_BASE: dict[str, _Unit] = {
-    "MWH": _Unit("energy", 1.0),
-    "KWH": _Unit("energy", 1e-3),
-    "GWH": _Unit("energy", 1e3),
-    "WH": _Unit("energy", 1e-6),
-    "MW": _Unit("power", 1.0),
-    "KW": _Unit("power", 1e-3),
-    "GW": _Unit("power", 1e3),
-    "W": _Unit("power", 1e-6),
-    "%": _Unit("ratio", 1.0),
-    "": _Unit("dimensionless", 1.0),
+#:
+#: GBP joined the list with the GB day-ahead market in the rules catalog
+#: (``models/market.py``): a currency a catalog entry settles in must never reach an
+#: analyst as "unknown unit" — the honest answer to a GBP column on a EUR market is
+#: the same principled cross-currency refusal the Nordic currencies already get.
+UNIT_TO_BASE: dict[str, Unit] = {
+    "MWH": Unit("energy", 1.0),
+    "KWH": Unit("energy", 1e-3),
+    "GWH": Unit("energy", 1e3),
+    "WH": Unit("energy", 1e-6),
+    "MW": Unit("power", 1.0),
+    "KW": Unit("power", 1e-3),
+    "GW": Unit("power", 1e3),
+    "W": Unit("power", 1e-6),
+    "%": Unit("ratio", 1.0),
+    "": Unit("dimensionless", 1.0),
     **_currency_units("EUR"),
     **_currency_units("NOK"),
     **_currency_units("SEK"),
     **_currency_units("DKK"),
+    **_currency_units("GBP"),
 }
 
 
@@ -158,8 +171,8 @@ def convert(value: float, from_unit: str, to_unit: str) -> tuple[float, str | No
     b = to_unit.strip().upper()
     if a == b:
         return value, None
-    known_a = _UNIT_TO_BASE.get(a)
-    known_b = _UNIT_TO_BASE.get(b)
+    known_a = UNIT_TO_BASE.get(a)
+    known_b = UNIT_TO_BASE.get(b)
     if known_a is None or known_b is None:
         raise UnitMismatch(f"unknown unit in {from_unit!r} vs {to_unit!r}")
     if known_a.dimension != known_b.dimension:
@@ -364,7 +377,7 @@ def _as_local_datetime(value: object) -> datetime | None:
     return None
 
 
-def _is_ambiguous(local: datetime, zone: ZoneInfo) -> bool:
+def is_ambiguous_local(local: datetime, zone: ZoneInfo) -> bool:
     """Is this naive local wall-clock time one the zone genuinely writes **twice**?
 
     True only on a fall-back transition — 2024-10-27 02:30 in ``Europe/Oslo`` is both
@@ -373,6 +386,10 @@ def _is_ambiguous(local: datetime, zone: ZoneInfo) -> bool:
     spring-forward gap also disagree on offset, so they are excluded first by the
     round-trip — a wall time that does not survive local → UTC → local never happened,
     and a row carrying it is not a second occurrence of anything.
+
+    Public because the market-rules check (``services/market_check.py``) asks exactly
+    the same question of a bid file's delivery periods. One implementation, so the two
+    gates can never disagree about whether an hour repeated.
     """
     fold0 = local.replace(tzinfo=zone, fold=0)
     if fold0.astimezone(UTC).astimezone(zone).replace(tzinfo=None) != local:
@@ -418,7 +435,7 @@ def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _Ali
         if occurrence == 0:
             values[(local, 0)] = value
             continue
-        if occurrence == 1 and _is_ambiguous(local, zone):
+        if occurrence == 1 and is_ambiguous_local(local, zone):
             values[(local, 1)] = value  # the genuine second pass of a fall-back hour
             continue
         duplicates[local] = seen[local]
@@ -579,7 +596,7 @@ class ReconciliationCheck:
                     )
                 )
                 continue
-            if exp.fold and not _is_ambiguous(local, zone):
+            if exp.fold and not is_ambiguous_local(local, zone):
                 # A fold only exists where the zone repeats an hour. Asking for one
                 # anywhere else is a spec error, and saying "alignment gap" here would
                 # send the analyst hunting for a missing workbook row that was never
@@ -658,7 +675,7 @@ class ReconciliationCheck:
                 count=count,
                 timezone=spec.timezone,
             )
-            if _is_ambiguous(local, zone):
+            if is_ambiguous_local(local, zone):
                 # A genuine fall-back hour, but repeated *more* than the two times the
                 # zone writes it. Saying "not ambiguous" here would be a false statement
                 # in the evidence, and would send the analyst to the wrong fix.

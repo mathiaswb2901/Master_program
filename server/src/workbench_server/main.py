@@ -49,6 +49,7 @@ from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
 from workbench_server.services.layouts import LayoutsService
 from workbench_server.services.local_auth import LocalAuthMiddleware, is_local_origin
+from workbench_server.services.market_check import MarketRulesCheck
 from workbench_server.services.office import OfficeService
 from workbench_server.services.office_host import (
     OfficeHostService,
@@ -109,6 +110,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # against the workbook unit- and DST-aware. Additive registration — the frame
     # dispatches to it when a spec names its id ("reconciliation").
     validation_service.register(ReconciliationCheck())
+    # M6: the second *domain* check, and the one with no prior art to copy — does a
+    # bid/schedule artifact respect the market's own rules? Gate closure in local
+    # wall-clock (a UTC-naive comparison is the bug it exists to catch), delivery
+    # periods on the market time unit, 23-/25-hour DST days, and MW-vs-MWh unit
+    # headers. Its rules come from the server-owned catalog in `models/market.py`,
+    # selected by id; the artifact never states its own deadline. Additive
+    # registration, same as reconciliation — the frame dispatches on "market_rules".
+    validation_service.register(MarketRulesCheck())
     # Workspace-wide content search (M7 V7b). Holds the live `Workspace`, so a
     # switch re-roots it with everything else and it owes no `set_workspace_root`.
     # Reuses the file tree's ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so search
