@@ -18,6 +18,22 @@
  * options and the mount handler live here for that reason — two panes have to
  * render the *same* editor, and a component is a stronger way to say so than a
  * shared options object either caller could stop passing.
+ *
+ * **This component owns a view, not a buffer.** Two of these can be looking at
+ * one file, so the two props are `pane` (which view am I) and `file` (what am I
+ * looking at), and everything below follows from the split:
+ *
+ *  - the *model* — the buffer, its undo stack, its markers — belongs to the
+ *    registry in `../monaco`, which is why `keepCurrentModel` is set: without
+ *    it `@monaco-editor/react` disposes the model on unmount, and Monaco reacts
+ *    to a disposed model by detaching it from every editor showing it and
+ *    removing their DOM nodes. Closing one pane blanked the other
+ *    (`e2e/editorPanes.spec.ts`);
+ *  - the *view state* — scroll and cursor — belongs to this pane, so it is
+ *    saved and restored under `pane`. `saveViewState` on `<Editor>` is turned
+ *    off for exactly that reason: the library's own memory is keyed by path
+ *    alone, which is the same "there is only one editor per file" assumption in
+ *    miniature.
  */
 
 import Editor, { type OnMount } from "@monaco-editor/react";
@@ -27,45 +43,119 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 // behind `loadMonaco`, so importing it here costs the entry chunk nothing.
 import { editorFontOptions } from "../editorTheme";
 import {
-  clearActiveEditor,
+  acquireModel,
   editorPathProp,
   languageForPath,
   monacoThemeName,
-  setActiveEditor,
+  recallViewState,
+  releaseModel,
+  rememberViewState,
 } from "../monaco";
 import { useStore, type OpenFile } from "../store";
 import { useEffect, useRef } from "react";
 
-/** The editor this instance created, so its unmount can withdraw it. */
+/** The editor this instance created, so its own effects can reach it. */
 type CodeEditorHandle = Parameters<OnMount>[0];
 
-export default function CodeEditor({ file }: { file: OpenFile }) {
+export default function CodeEditor({ pane, file }: { pane: string; file: OpenFile }) {
   const theme = useStore((s) => s.theme);
 
-  /**
-   * The active editor is what `setModelContent` restores cursor and scroll
-   * through, and *which* editor that is follows the caret rather than the last
-   * mount: with a file pane beside the tab strip there can be several, and an
-   * on-disk change must not restore some other pane's cursor (`monaco.ts`).
-   *
-   * The registration is withdrawn here rather than in the panel because the
-   * panel outlives every editor in it — closing the last tab unmounts only
-   * this — and it is withdrawn *by identity*: an editor going away says nothing
-   * about the one in the pane next to it, which is still on screen and may well
-   * be the one holding the caret.
-   */
   const mounted = useRef<CodeEditorHandle | null>(null);
+  /**
+   * The path this editor is *currently displaying*, which is not always the
+   * `file.path` of the render in flight.
+   *
+   * `<Editor>` swaps the model in its own effect, and a child's effects run
+   * before its parent's — so during a tab switch there is a moment when the
+   * editor already shows the new file while this ref still names the old one.
+   * That is precisely what makes it the right thing to file the outgoing view
+   * state under (see `onWillChangeModel` below), and it is why the ref is
+   * advanced in an effect rather than during render.
+   */
+  const shown = useRef(file.path);
+  /** Read inside Monaco listeners registered once, at mount — and
+   * `@monaco-editor/react` keeps the `onMount` from the *first* render, so a
+   * prop read through a closure there would be pinned to it. A pane's id is
+   * fixed for its lifetime; this is what says so out loud. */
+  const paneRef = useRef(pane);
+  useEffect(() => {
+    paneRef.current = pane;
+  }, [pane]);
+
+  /**
+   * Remember where this pane was looking when it goes away, so reopening the
+   * same pane on the same file lands where it left off
+   * (`e2e/editorPanes.spec.ts`, "a closed pane reopens where it was looking").
+   *
+   * **Declared before the claim below on purpose.** React runs an unmount's
+   * cleanups in declaration order, and releasing the last view of a file the
+   * store has already closed disposes the model — after which there is no view
+   * state left to read. Saving first makes this independent of that; the
+   * `getModel()` guard is what catches it if the order ever changes.
+   *
+   * **Why reading the editor here is sound at all**, since the reasoning
+   * inverts the one two comments above and has been got backwards in review.
+   * `<Editor>` is a *child* of this component, and its own unmount cleanup
+   * disposes the editor widget **unconditionally** — `keepCurrentModel` spares
+   * the model, never the widget (`@monaco-editor/react/dist/index.mjs`:
+   * `keepCurrentModel ? … : editor.getModel()?.dispose(), editor.dispose()`).
+   * Monaco's `CodeEditorWidget.dispose()` detaches synchronously and nulls
+   * `_modelData`, so after it `getModel()` is null and there is nothing to save.
+   * That would make this a silent no-op — *if* children were cleaned up first.
+   * They are not: mount effects run child-before-parent, but React reverses it
+   * for a deleted subtree, in so many words
+   * (`commitPassiveUnmountEffectsInsideOfDeletedTree_begin`, react-dom: "Deletion
+   * effects fire in parent -> child order"). This cleanup therefore reads a live
+   * editor and the child disposes it afterwards. It is a React guarantee rather
+   * than ours, which is exactly why the guard stays and why the E2E step above
+   * exists to fail by name if a future React changes its mind.
+   */
   useEffect(
     () => () => {
-      if (mounted.current !== null) clearActiveEditor(mounted.current);
+      const editor = mounted.current;
+      if (editor !== null && editor.getModel() !== null) {
+        rememberViewState(paneRef.current, shown.current, editor.saveViewState());
+      }
     },
     [],
   );
 
+  /**
+   * One view's claim on the model, taken for as long as this editor displays
+   * that path.
+   *
+   * Releasing does **not** dispose it: the file is still open in the tab strip,
+   * with its undo history and its markers, and a pane closing is a view closing
+   * (`../monaco`). Disposal happens when the store closes the *file*.
+   */
+  useEffect(() => {
+    acquireModel(file.path);
+    return () => releaseModel(file.path);
+  }, [file.path]);
+
+  /**
+   * Put this pane back where it was looking, after `<Editor>` has swapped the
+   * model in. A parent effect runs after the child's, which is the ordering
+   * this needs — and the mount case is handled in `onMount` instead, because
+   * the editor does not exist yet the first time this runs.
+   */
+  useEffect(() => {
+    const editor = mounted.current;
+    if (editor !== null && shown.current !== file.path) {
+      editor.restoreViewState(recallViewState(paneRef.current, file.path));
+    }
+    shown.current = file.path;
+  }, [file.path]);
+
   const onMount: OnMount = (editor, monaco) => {
     mounted.current = editor;
-    setActiveEditor(editor);
-    editor.onDidFocusEditorText(() => setActiveEditor(editor));
+    editor.restoreViewState(recallViewState(paneRef.current, shown.current));
+    // The outgoing half of the tab-strip switch: fired *before* the model is
+    // swapped, while the live view state still describes the file named by
+    // `shown`. The incoming half is the effect above.
+    editor.onWillChangeModel(() => {
+      rememberViewState(paneRef.current, shown.current, editor.saveViewState());
+    });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       const s = useStore.getState();
       if (s.activePath) void s.saveFile(s.activePath);
@@ -79,6 +169,10 @@ export default function CodeEditor({ file }: { file: OpenFile }) {
       defaultLanguage={languageForPath(file.path)}
       theme={monacoThemeName(theme)}
       onMount={onMount}
+      // The model outlives this view — the registry decides when it does not.
+      keepCurrentModel
+      // …and so does the view state, per pane rather than per path (see above).
+      saveViewState={false}
       onChange={(value) => {
         if (value !== undefined) useStore.getState().updateBuffer(file.path, value);
       }}

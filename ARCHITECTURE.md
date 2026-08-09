@@ -195,6 +195,22 @@ main.tsx ──► App ──► EditorArea (panel: tabs, empty state, provenanc
   helpers the store calls (`setModelContent`, `disposeModel`) no-op until the
   editor exists, which is the same answer as "no model for that path" and is what
   the store already handled.
+- **A text model belongs to the file, not to the pane showing it.** More than one
+  editor can be looking at one file — the tab strip's, plus every
+  `editors#<path>` pane — so `monaco.ts` keeps a module-level registry
+  (`acquireModel` / `releaseModel`, the `terminalInput.ts` pattern) and every
+  `<Editor>` is mounted with `keepCurrentModel`. Without it `@monaco-editor/react`
+  disposes the model on unmount, and Monaco answers a disposed model by detaching
+  it from *every* editor showing it and removing their DOM nodes
+  (`codeEditorWidget.js`: `model.onWillDispose(() => this.setModel(null))`) — so
+  closing one pane blanked the other, tab strip and unsaved dot still on screen
+  above nothing. Disposal is the store's call and only the store's:
+  `disposeModel` (from `closeFile`/`adoptWorkspace`) retires the model, and the
+  last view to let go finishes it, so it is never pulled out from under a live
+  editor either. Scroll and cursor go the other way — they are the *view's* state,
+  kept per pane rather than per path, which is why the library's own
+  `saveViewState` is off. Reproduced in `ui/e2e/editorPanes.spec.ts`, pinned in
+  `ui/src/monacoModels.test.ts`.
 - **Anything read from a CSS token is read when the bundle lands, never when the
   load is armed.** Loading late puts a window between "the prefetch is scheduled"
   and "Monaco exists" in which `defineWorkbenchTheme` can do nothing — so a theme
