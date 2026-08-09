@@ -1,11 +1,33 @@
 """The workbook↔code numeric reconciliation gate — M6's first *domain*
 :class:`~workbench_server.services.validation.ValidationCheck`.
 
-It reads the addressed ``.xlsx`` cells **directly with openpyxl**, deterministically,
-on the machine that runs CI — it does *not* go through the live-Office COM bridge, so
-the whole gate is testable with no Office installed. The COM path (reconciling against
-a workbook a user has open and unsaved, with live formula results) is an optional later
-PR that slots in behind the same :class:`WorkbookReader` protocol.
+It reads the addressed cells through the :class:`WorkbookReader` seam, which has two
+implementations. :class:`DiskWorkbookReader` opens the ``.xlsx`` **directly with
+openpyxl**, deterministically, on a machine with no Office — the CI path.
+:class:`LiveComWorkbookReader` reads the *running* Excel that has the workbook docked,
+through the #92 COM bridge, on the shell backend's single apartment thread.
+
+**Which one runs is not a preference; it is a gate.** A workbook docked in a panel with
+an hour of unsaved edits in it makes the file on disk a different workbook — measured
+against a real Excel: live ``B1`` 9999.0 while disk ``B1`` is still 1234.5, and a
+formula cell Excel never calculated has *no* cached value on disk at all. A check that
+read the file there would report **pass** about numbers it did not read, which is the
+silent green the whole milestone exists to refuse. So before a single cell is opened the
+check asks the office host whether the workbook is docked and, if it is, whether it is
+saved:
+
+===========  ==================  ==================  =====================================
+Docked?      ``Workbook.Saved``  Live read?          Verdict
+===========  ==================  ==================  =====================================
+no           —                   —                   read disk, sourced ``file @mtime``
+yes          ``True``            either              read live if available, else disk
+yes          ``False``           yes                 read **live**, sourced ``live @…``
+yes          ``False``           **no**              **blocked**, naming the remedy
+===========  ==================  ==================  =====================================
+
+The fourth row is the whole point, and it is why ``CheckOutcome`` grew a ``blocked``
+member: refusing *with a sentence* is worth something, and refusing by returning no
+evidence at all (the only way to reach ``blocked`` before) throws that sentence away.
 
 Three domain failure modes are first-class here, not comments:
 
@@ -36,6 +58,7 @@ via :meth:`ValidationContext.store_payload` — the table never rides the result
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -45,9 +68,11 @@ import openpyxl
 import structlog
 from pydantic import ValidationError
 
+from workbench_server.models.office_bridge import LiveWorkbookStatus
 from workbench_server.models.reconciliation import (
     CellComparison,
     ExpectedValue,
+    ReadSource,
     ReconciliationReport,
     ReconciliationSpec,
     TimeExpectation,
@@ -59,6 +84,13 @@ from workbench_server.models.validation import (
     EvidenceItem,
     EvidenceTruncation,
 )
+
+# A *value* helper, not the office host. `naive_local` is the one implementation
+# of "drop the offset COM attaches, keep the wall clock", and the live reader
+# applies it again at its own seam so the invariant — nothing tz-aware ever
+# crosses `WorkbookReader` — holds for any bridge, not only the COM one. Two
+# copies of that rule would be two places for it to drift.
+from workbench_server.services.office_host.office_com import naive_local
 from workbench_server.services.validation import ValidationContext
 
 log = structlog.get_logger()
@@ -78,8 +110,24 @@ MAX_DUPLICATE_LINES = 20
 #: cell content is the workbook's, so it is bounded before it reaches the evidence.
 _OFFSET_SAMPLE_CLIP = 40
 
-#: Least-to-most severe, for rolling per-cell outcomes up into one grouped verdict.
-_OUTCOME_SEVERITY: dict[CheckOutcome, int] = {"pass": 0, "skipped": 1, "warn": 2, "fail": 3}
+#: Hard ceiling on the rows one live column read pulls over COM. A year of
+#: quarter-hours is 35,040 rows, so this clears the realistic worst case with
+#: room; a taller column is cut there. Truncation can only ever *lose* a row,
+#: which surfaces as an unmatched expectation ("alignment gap") — it can never
+#: manufacture agreement, which is the property that makes the cap safe.
+MAX_LIVE_ROWS = 50_000
+
+#: Least-to-most severe, for rolling per-cell outcomes up into one grouped
+#: verdict. ``blocked`` sorts above ``fail`` for the same reason the risk ramp
+#: does: a check that could not judge is worse than one that judged and
+#: disagreed.
+_OUTCOME_SEVERITY: dict[CheckOutcome, int] = {
+    "pass": 0,
+    "skipped": 1,
+    "warn": 2,
+    "fail": 3,
+    "blocked": 4,
+}
 
 
 class _Unit(NamedTuple):
@@ -192,34 +240,104 @@ def within_tolerance(expected: float, actual: float, tol: Tolerance) -> bool:
     return tol.rel is not None and delta <= tol.rel * abs(expected)
 
 
+def column_data_rows(rows: Iterable[tuple[object, object]]) -> list[tuple[object, object]]:
+    """Where a time-index column's data ends: every row before the first one whose
+    **both** cells are empty.
+
+    **The single statement of that rule**, and it is called by both
+    implementations of :class:`WorkbookReader` — the disk reader over a lazy row
+    generator (so it still stops reading rather than scanning a sheet it would
+    throw away) and the live reader over the window a bridge handed back. One
+    function rather than one rule per reader, because two copies is exactly what
+    drifted: the live path used to keep the whole used range and trim only the
+    *tail*, so a workbook with a blank row 3 and more hours at row 4 reconciled
+    three rows live and one row from disk. Same file, same spec, two comparison
+    sets — decided by whether the workbook happened to be docked when the check
+    ran. That hollows out the provenance this module exists to print: naming
+    ``live`` or ``file`` is only worth something when the two read the same rows.
+
+    The rule kept is the disk reader's, unchanged, and the choice is not
+    arbitrary. Cutting at the gap can only ever *lose* rows, and a lost row
+    surfaces as an unmatched expectation ("alignment gap") — the same property
+    that makes :data:`MAX_LIVE_ROWS` safe. It can never manufacture agreement,
+    which is the one thing a validation gate must not do.
+    """
+    out: list[tuple[object, object]] = []
+    for pair in rows:
+        if pair == (None, None):
+            break
+        out.append(pair)
+    return out
+
+
 class WorkbookReader(Protocol):
-    """The seam the openpyxl reader satisfies now and a COM reader satisfies later.
+    """The seam the disk reader and the live COM reader both satisfy.
 
-    A cell value is a number when numeric, ``None`` when empty, or a ``str`` when the
-    cell holds text (which the gate treats as unreadable-for-numbers)."""
+    A cell value is a number when numeric, a ``datetime`` when the cell holds a
+    timestamp, ``None`` when empty, or a ``str`` when the cell holds text (which the
+    gate treats as unreadable-for-numbers).
 
-    def cell_value(self, sheet: str | None, cell: str) -> float | int | str | None: ...
+    **Every implementation says where it read.** :meth:`provenance` is not
+    bookkeeping — with two readers in the tree, a comparison table that cannot name
+    its source is a table nobody can act on, and the report carries the answer so a
+    reader of the *evidence* never has to ask.
+
+    **And no implementation hands a tz-aware value across.** The disk reader yields
+    naive local wall clock because that is what openpyxl stores; the live reader
+    normalises at its own boundary. That is what keeps
+    :class:`OffsetNotAllowed` protecting the case it was written for — an
+    offset-bearing *string* in the workbook — instead of firing on every row of a
+    live read.
+
+    **And both end a column in the same place.** :meth:`column_pairs` returns the
+    rows :func:`column_data_rows` keeps, never a per-reader notion of where the
+    data stops — a reader that decided that for itself would make the same
+    workbook reconcile differently docked and undocked.
+    """
+
+    def cell_value(self, sheet: str | None, cell: str) -> object: ...
 
     def column_pairs(
         self, sheet: str | None, ts_column: str, value_column: str, start_row: int
     ) -> list[tuple[object, object]]: ...
 
+    def provenance(self) -> ReadSource: ...
 
-class OpenpyxlReader:
+    def close(self) -> None: ...
+
+
+class DiskWorkbookReader:
     """Reads cached, computed values from an ``.xlsx`` with no Office installed.
 
     ``data_only=True`` reads the values Excel last cached — the correct source for
     reconciling *numbers* rather than formula strings. ``read_only=True`` keeps a large
     workbook cheap. A workbook that was never opened in Excel has no cached values; the
-    check turns the resulting all-``None`` into a **blocked-style fail that names the
-    fix** rather than a silent green.
+    check turns the resulting all-``None`` into a **fail that names the fix** rather
+    than a silent green, and :attr:`ReadSource.cached_values` records it so the
+    evidence can tell "a workbook of zeros" from "a workbook nobody has opened".
+
+    Formerly ``OpenpyxlReader``; renamed when the second implementation arrived, so
+    the two read like the pair they are rather than one named after its library and
+    one after its transport.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, read_at: datetime) -> None:
         self._wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        self._read_at = read_at
+        # Naive local, like every other timestamp in this module.
+        self._mtime = datetime.fromtimestamp(path.stat().st_mtime)
+        self._saw_value = False
 
     def close(self) -> None:
         self._wb.close()
+
+    def provenance(self) -> ReadSource:
+        return ReadSource(
+            kind="file",
+            read_at=self._read_at,
+            mtime=self._mtime,
+            cached_values=self._saw_value,
+        )
 
     def _sheet(self, sheet: str | None) -> object:
         if sheet is None:
@@ -228,10 +346,12 @@ class OpenpyxlReader:
             raise KeyError(sheet)
         return self._wb[sheet]
 
-    def cell_value(self, sheet: str | None, cell: str) -> float | int | str | None:
+    def cell_value(self, sheet: str | None, cell: str) -> object:
         ws = self._sheet(sheet)
         value = ws[cell].value  # type: ignore[index]
-        if value is None or isinstance(value, int | float | str):
+        if value is not None:
+            self._saw_value = True
+        if value is None or isinstance(value, int | float | str | datetime):
             return value
         return str(value)
 
@@ -239,16 +359,165 @@ class OpenpyxlReader:
         self, sheet: str | None, ts_column: str, value_column: str, start_row: int
     ) -> list[tuple[object, object]]:
         ws = self._sheet(sheet)
-        pairs: list[tuple[object, object]] = []
-        row = start_row
-        while True:
-            ts = ws[f"{ts_column}{row}"].value  # type: ignore[index]
-            val = ws[f"{value_column}{row}"].value  # type: ignore[index]
-            if ts is None and val is None:
-                break
-            pairs.append((ts, val))
-            row += 1
+
+        def rows() -> Iterator[tuple[object, object]]:
+            """Rows from ``start_row`` down, one at a time and for ever.
+
+            Lazy on purpose: :func:`column_data_rows` stops pulling at the first
+            blank row, so this reads exactly the cells the old inline loop read —
+            the shared rule costs nothing, and a sheet whose data ends at row 40
+            is still not scanned to row 1,048,576.
+            """
+            row = start_row
+            while True:
+                yield (
+                    ws[f"{ts_column}{row}"].value,  # type: ignore[index]
+                    ws[f"{value_column}{row}"].value,  # type: ignore[index]
+                )
+                row += 1
+
+        pairs = column_data_rows(rows())
+        if pairs:
+            self._saw_value = True
         return pairs
+
+
+class LiveWorkbookHost(Protocol):
+    """The narrow view of the Office host the front gate needs, and nothing more.
+
+    Declared here and satisfied by
+    :class:`~workbench_server.services.office_host.service.OfficeHostService`, so
+    this module never imports the host — the same posture ``services/gates.py``
+    takes with its ``SlotLocator``. It also means the whole four-row table is
+    drivable in a unit test from a twenty-line stub.
+    """
+
+    def docked_workbook(self, path: str) -> str | None: ...
+
+    async def workbook_status(self, path: str) -> LiveWorkbookStatus: ...
+
+    async def read_workbook_cells(
+        self, path: str, sheet: str | None, cells: Sequence[str]
+    ) -> list[object]: ...
+
+    async def read_workbook_columns(
+        self,
+        path: str,
+        sheet: str | None,
+        ts_column: str,
+        value_column: str,
+        start_row: int,
+        max_rows: int,
+    ) -> list[tuple[object, object]]: ...
+
+
+class LiveComWorkbookReader:
+    """Reads the *running* Excel that has the workbook docked, over the COM bridge.
+
+    **A snapshot, not a live cursor.** Everything the spec addresses is fetched in
+    one pass before any comparison runs, and the synchronous
+    :class:`WorkbookReader` methods then serve from that snapshot. Three reasons,
+    all of them load-bearing: COM calls are ``await``ed on the shell backend's one
+    apartment thread and the protocol is sync; a table compared cell-by-cell against
+    a workbook the user is *still typing into* would be internally inconsistent, row
+    3 read a second after row 2; and one round trip per run is what keeps the gate
+    from being slower than the edit it is checking.
+
+    **Normalised at this seam.** Every snapshot value goes through
+    :func:`~workbench_server.services.office_host.office_com.naive_local`, so a
+    tz-aware datetime — which real COM returns, with an offset that is *not* this
+    machine's zone — becomes the naive local wall clock the rest of the module is
+    written in, and never reaches ``_as_local_datetime``'s offset refusal.
+
+    **And cut at this seam.** A bridge returns the window it was asked for and
+    decides nothing about it; :func:`column_data_rows` — the disk reader's own
+    rule, called here — says where the column's data ends. Putting it here rather
+    than in each bridge is what makes it structurally impossible for a *future*
+    bridge to reconcile a different set of rows than the file would.
+    """
+
+    def __init__(
+        self,
+        cells: dict[tuple[str | None, str], object],
+        columns: dict[tuple[str | None, str, str, int], list[tuple[object, object]]],
+        source: ReadSource,
+    ) -> None:
+        self._cells = cells
+        self._columns = columns
+        self._source = source
+
+    @classmethod
+    async def load(
+        cls,
+        host: LiveWorkbookHost,
+        host_path: str,
+        spec: ReconciliationSpec,
+        status: LiveWorkbookStatus,
+        read_at: datetime,
+    ) -> LiveComWorkbookReader:
+        """Take the snapshot. Anything the bridge refuses propagates — the caller
+        decides whether that is a fall back to disk or a refusal, and on a dirty
+        workbook it is always the latter."""
+        addresses: dict[str | None, list[str]] = {}
+        for exp in spec.expectations:
+            sheet, addr = _split_cell(exp.cell)
+            addresses.setdefault(sheet, []).append(addr)
+        cells: dict[tuple[str | None, str], object] = {}
+        for sheet, wanted in addresses.items():
+            values = await host.read_workbook_cells(host_path, sheet, wanted)
+            for addr, value in zip(wanted, values, strict=False):
+                cells[(sheet, addr)] = naive_local(value)
+
+        columns: dict[tuple[str | None, str, str, int], list[tuple[object, object]]] = {}
+        ti = spec.time_index
+        if ti is not None and ti.expectations:
+            pairs = await host.read_workbook_columns(
+                host_path,
+                ti.sheet,
+                ti.timestamp_column,
+                ti.value_column,
+                ti.start_row,
+                MAX_LIVE_ROWS,
+            )
+            # The bridge hands back the window it was asked for, verbatim; where
+            # the *data* ends is this seam's decision and the disk reader's rule.
+            columns[(ti.sheet, ti.timestamp_column, ti.value_column, ti.start_row)] = (
+                column_data_rows((naive_local(ts), naive_local(value)) for ts, value in pairs)
+            )
+        return cls(
+            cells,
+            columns,
+            ReadSource(
+                kind="live",
+                read_at=read_at,
+                calculation=status.calculation,
+                saved=status.saved,
+            ),
+        )
+
+    def close(self) -> None:
+        """Nothing to release: the instance belongs to the host, and the snapshot
+        is a dict. Here so the two readers are interchangeable at the call site."""
+
+    def provenance(self) -> ReadSource:
+        return self._source
+
+    def cell_value(self, sheet: str | None, cell: str) -> object:
+        key = (sheet, cell)
+        if key not in self._cells:
+            # The snapshot is taken from the spec, so a miss means the spec and the
+            # read disagree about what was addressed. Raised rather than returned as
+            # an empty cell, because "empty" is a verdict and this is a bug.
+            raise KeyError(f"{cell} was not in the live snapshot")
+        return self._cells[key]
+
+    def column_pairs(
+        self, sheet: str | None, ts_column: str, value_column: str, start_row: int
+    ) -> list[tuple[object, object]]:
+        key = (sheet, ts_column, value_column, start_row)
+        if key not in self._columns:
+            raise KeyError(f"{ts_column}/{value_column} was not in the live snapshot")
+        return self._columns[key]
 
 
 def _split_cell(cell: str) -> tuple[str | None, str]:
@@ -509,9 +778,17 @@ def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _Ali
 
 class ReconciliationCheck:
     """The registered gate. ``id`` is the handle a
-    :class:`~workbench_server.models.validation.ValidationSpec` names to run it."""
+    :class:`~workbench_server.models.validation.ValidationSpec` names to run it.
+
+    ``host`` is the live-workbook seam. ``None`` — a server with no Office host,
+    which is every CI runner — means the gate reads disk, exactly as it always
+    did; nothing about the no-Office path changes.
+    """
 
     id = "reconciliation"
+
+    def __init__(self, host: LiveWorkbookHost | None = None) -> None:
+        self._host = host
 
     async def run(self, ctx: ValidationContext) -> list[EvidenceItem]:
         try:
@@ -528,11 +805,15 @@ class ReconciliationCheck:
         if not spec.expectations and not (spec.time_index and spec.time_index.expectations):
             return [self._spec_error("spec has no expectations to reconcile")]
 
+        # Naive local wall clock, minted here — the module's contract for every
+        # timestamp, and deliberately not read off a COM object.
+        read_at = datetime.now().replace(microsecond=0)
         try:
-            reader = OpenpyxlReader(workbook)
-        except Exception as exc:  # a corrupt/locked workbook is a fail that names why
-            log.warning("reconciliation.unreadable", workbook=spec.workbook, error=str(exc))
-            return [self._spec_error(f"workbook could not be opened: {exc}")]
+            reader, gate_evidence = await self._acquire(spec, workbook, read_at)
+        except _LiveReadBlocked as refusal:
+            return [self._blocked(spec, refusal.reason)]
+        except _CheckBlocked as unopenable:
+            return [self._spec_error(unopenable.reason)]
 
         try:
             comparisons = self._compare_cells(spec, reader)
@@ -546,7 +827,93 @@ class ReconciliationCheck:
         # The grouped comparison line first (it is what a reader looks at), then any
         # structural findings about the rows themselves. Both feed `derive_risk`, so a
         # duplicated-row fail cannot be outvoted by comparisons that happened to match.
-        return [self._grouped(spec, comparisons, ctx), *structural]
+        return [self._grouped(spec, comparisons, ctx, reader), *gate_evidence, *structural]
+
+    # ---- the front gate -----------------------------------------------------
+
+    async def _acquire(
+        self, spec: ReconciliationSpec, workbook: Path, read_at: datetime
+    ) -> tuple[WorkbookReader, list[EvidenceItem]]:
+        """Decide *what to read* before reading anything, and hand back the reader.
+
+        The order here is the gate. The host is consulted first, always: once the
+        ``.xlsx`` has been opened the decision has already been made, and a later
+        edit that reordered these two lines would turn the whole thing back into a
+        read-then-check that reports about the file. Raises
+        :class:`_LiveReadBlocked` for the one case with no honest answer — docked,
+        dirty, and no live read.
+        """
+        host_path = None if self._host is None else self._host.docked_workbook(spec.workbook)
+        if host_path is None or self._host is None:
+            # Not docked: the file *is* the workbook, and disk is the whole truth.
+            return self._disk(spec, workbook, read_at), []
+
+        try:
+            status = await self._host.workbook_status(host_path)
+        except Exception as exc:
+            # Docked, and we could not find out whether it is clean. There is no
+            # conservative disk fallback here: the question this failed to answer
+            # is precisely "would reading the file be wrong?".
+            log.warning("reconciliation.status_unreadable", workbook=spec.workbook, error=str(exc))
+            raise _LiveReadBlocked(
+                f"{spec.workbook} is open in Workbench, but its live state could not be read "
+                f"({exc}). Workbench cannot tell whether it has unsaved changes, and "
+                "reconciling the file on disk would judge numbers you may already have "
+                "changed. Close it in Excel, or re-run from the desktop shell."
+            ) from exc
+
+        gate_evidence: list[EvidenceItem] = []
+        if status.calculation != "done":
+            # A third state, and not a pass: the formula cells hold numbers Excel
+            # has not finished revising. The comparisons still run — they are
+            # informative — but this line keeps the result off green.
+            gate_evidence.append(
+                EvidenceItem(
+                    kind="numeric",
+                    label=f"live workbook still calculating ({spec.workbook})",
+                    outcome="skipped",
+                    detail=(
+                        f"Excel has not finished calculating {spec.workbook} (state: "
+                        f"{status.calculation}), so its formula results are still moving. "
+                        "Re-run in a moment for a verdict these numbers can carry."
+                    ),
+                )
+            )
+
+        try:
+            reader = await LiveComWorkbookReader.load(self._host, host_path, spec, status, read_at)
+        except Exception as exc:
+            if not status.saved:
+                log.warning(
+                    "reconciliation.live_read_unavailable",
+                    workbook=spec.workbook,
+                    error=str(exc),
+                )
+                raise _LiveReadBlocked(
+                    f"{spec.workbook} is open in Excel with unsaved changes and the live "
+                    f"reader is not available here ({exc}). Save the workbook, or run this "
+                    "from the desktop shell, and re-run — reconciling the file on disk "
+                    "would judge numbers you have already changed."
+                ) from exc
+            # Clean and docked: the file and the instance agree, so disk is a
+            # correct answer rather than a convenient one. Named as `file` in the
+            # evidence either way.
+            log.info(
+                "reconciliation.live_read_declined",
+                workbook=spec.workbook,
+                error=str(exc),
+            )
+            return self._disk(spec, workbook, read_at), gate_evidence
+        return reader, gate_evidence
+
+    def _disk(
+        self, spec: ReconciliationSpec, workbook: Path, read_at: datetime
+    ) -> DiskWorkbookReader:
+        try:
+            return DiskWorkbookReader(workbook, read_at)
+        except Exception as exc:  # a corrupt/locked workbook is a fail that names why
+            log.warning("reconciliation.unreadable", workbook=spec.workbook, error=str(exc))
+            raise _CheckBlocked(f"workbook could not be opened: {exc}") from exc
 
     def _resolve(self, root: Path, relative: str) -> Path | None:
         """Jail the workbook path against the workspace root (the ``safe_path``
@@ -861,9 +1228,14 @@ class ReconciliationCheck:
         spec: ReconciliationSpec,
         comparisons: list[CellComparison],
         ctx: ValidationContext,
+        reader: WorkbookReader,
     ) -> EvidenceItem:
         """One grouped ``numeric`` evidence line; the full table goes to the payload
-        store and is named by ``payload_ref``."""
+        store and is named by ``payload_ref``.
+
+        ``reader`` is here for one field: the report has to say which of the two
+        it came from, and asking the reader that produced the values is the only
+        way that answer cannot drift from the values."""
         total = len(comparisons)
         matched = sum(1 for c in comparisons if c.outcome == "pass")
         mismatched = sum(1 for c in comparisons if c.outcome == "fail")
@@ -887,11 +1259,13 @@ class ReconciliationCheck:
                     "reconcile fewer cells per run to see the rest"
                 ),
             )
+        source = reader.provenance()
         report = ReconciliationReport(
             workbook=spec.workbook,
             matched=matched,
             mismatched=mismatched,
             total=total,
+            source=source,
             comparisons=window,
             truncated=truncated,
         )
@@ -905,11 +1279,14 @@ class ReconciliationCheck:
                 f"{mismatched} of {total} cells mismatch beyond tolerance. "
                 f"First: {first_bad.cell} in {spec.workbook}."
             )
+        # The provenance rides the headline, not only the payload: a reader who
+        # has to expand a table to find out which of two workbooks a green badge
+        # is about does not have proof, they have a colour.
         return EvidenceItem(
             kind="numeric",
             label=f"workbook↔code reconciliation ({spec.workbook})",
             outcome=worst,
-            detail=detail,
+            detail=f"{detail} {describe_source(source)}",
             payload_ref=ref,
         )
 
@@ -934,9 +1311,63 @@ class ReconciliationCheck:
             detail=reason,
         )
 
+    def _blocked(self, spec: ReconciliationSpec, reason: str) -> EvidenceItem:
+        """The front gate's refusal: **no numbers were read, and none will be**.
+
+        Distinct from ``_spec_error``'s ``fail`` because it is a different verdict
+        with a different fix. A ``fail`` says the workbook and the code disagree;
+        this says nobody can honestly say whether they do, and names the two
+        things that would change that. It carries no ``payload_ref`` — there is no
+        comparison table, and inventing an empty one would suggest a read happened.
+        """
+        log.warning("reconciliation.blocked", workbook=spec.workbook, detail=reason)
+        return EvidenceItem(
+            kind="numeric",
+            label=f"workbook↔code reconciliation blocked ({spec.workbook})",
+            outcome="blocked",
+            detail=reason,
+        )
+
+
+def describe_source(source: ReadSource) -> str:
+    """One sentence naming where a report's numbers came from.
+
+    Written for the *evidence line*, which is the one place a reader always sees
+    — "read live at 14:02:11, calculation done, workbook unsaved" or "read from
+    the file on disk, modified 13:41:08". The panel renders the same fields from
+    the payload; this is the version that survives a collapsed expander.
+    """
+    if source.kind == "live":
+        clean = "workbook saved" if source.saved else "workbook unsaved"
+        return (
+            f"Read live from the docked workbook at {source.read_at:%H:%M:%S}, "
+            f"calculation {source.calculation}, {clean}."
+        )
+    when = "unknown time" if source.mtime is None else f"{source.mtime:%Y-%m-%d %H:%M:%S}"
+    empty = "" if source.cached_values is not False else " — the file cached no values"
+    return f"Read from the file on disk, modified {when}{empty}."
+
 
 class _CheckBlocked(Exception):
-    """Internal: a condition that stops the whole reconciliation with one reason."""
+    """Internal: a condition that stops the whole reconciliation with one reason.
+
+    Reported as a ``fail``: the workbook *was* reached and could not be made to
+    yield the numbers the spec named. Its sibling below is the other thing.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _LiveReadBlocked(Exception):
+    """Internal: the front gate refused before a single cell was read.
+
+    A different verdict from :class:`_CheckBlocked` and rendered as ``blocked``
+    rather than ``fail`` — nothing here disagrees with anything. Workbench is
+    holding a workbook open whose live numbers it cannot read, and the file on
+    disk is known not to be those numbers.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)

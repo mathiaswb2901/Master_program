@@ -95,6 +95,11 @@ describe("outcomeVisual", () => {
     expect(outcomeVisual("warn")).toMatchObject({ token: "--warn", label: "Warn" });
     expect(outcomeVisual("fail")).toMatchObject({ token: "--error", label: "Fail" });
     expect(outcomeVisual("skipped")).toMatchObject({ token: "--agent-idle", label: "Skipped" });
+    // The fourth table `blocked` had to be added to. It shares `skipped`'s grey
+    // — neither is a disagreement — but not its word: "Skipped" reads as "did
+    // not apply", and this one means "could not be judged, and here is the fix".
+    expect(outcomeVisual("blocked")).toMatchObject({ token: "--agent-idle", label: "Blocked" });
+    expect(outcomeVisual("blocked").label).not.toBe(outcomeVisual("skipped").label);
   });
 });
 

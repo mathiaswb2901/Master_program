@@ -36,6 +36,7 @@ import type {
   CheckOutcome,
   EvidenceItem,
   EvidencePayload,
+  ReadSource,
   ReviewSeverity,
   RiskLevel,
   ValidationResult,
@@ -119,6 +120,33 @@ const SEVERITY_LABEL: Record<ReviewSeverity, string> = {
   should_fix: "should fix",
   nit: "nit",
 };
+
+/** Where a reconciliation's numbers came from, in one line a person reads.
+ *
+ * There are two readers now — the live Excel that has the workbook docked, and
+ * the `.xlsx` on disk — and a green badge that does not say which is a colour
+ * rather than proof. The server sends fields, not prose, so this is the one place
+ * they become a sentence; `services/reconciliation.py::describe_source` writes
+ * the same sentence into the evidence line for a reader who never expands the
+ * table.
+ *
+ * Timestamps are naive local wall clock already (no offset, no zone), so they are
+ * sliced rather than run through `Date`, which would attach one.
+ */
+export function sourceLine(source: ReadSource): string {
+  if (source.kind === "live") {
+    const clean = source.saved === true ? "workbook saved" : "workbook unsaved";
+    return `Read live from the docked workbook at ${clockOf(source.read_at)}, calculation ${
+      source.calculation ?? "unknown"
+    }, ${clean}.`;
+  }
+  const when = source.mtime === null ? "unknown time" : source.mtime.replace("T", " ").slice(0, 19);
+  const empty = source.cached_values === false ? " — the file cached no values" : "";
+  return `Read from the file on disk, modified ${when}${empty}.`;
+}
+
+/** `2026-08-09T14:02:11` → `14:02:11`. */
+const clockOf = (stamp: string): string => stamp.slice(11, 19) || stamp;
 
 /** What the expander is showing right now. `evicted` is its own state, not an
  * error: the payload store is a bounded LRU and being dropped from it is the
@@ -233,6 +261,7 @@ export function EvidencePayloadView({ state }: { state: PayloadState }) {
           {report.matched} matched, {report.mismatched} mismatched of {report.total} —{" "}
           {report.workbook}
         </p>
+        <p className="wb-evidence-source u-tabular">{sourceLine(report.source)}</p>
         <ul className="wb-evidence-rows">
           {report.comparisons.map((row) => (
             <li key={row.cell} className="u-tabular" data-outcome={row.outcome}>
