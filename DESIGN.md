@@ -1033,3 +1033,14 @@ nothing new appears on a panel tab: §6.1 stands.
   default theme; user override persists via `data-theme` on `<html>`.
 - All icon-only buttons carry `aria-label`; QuickBar and menus fully keyboard-operable
   with visible selection.
+- **One Escape answers one dialog — the one on top.** Every overlay (the QuickBar, the
+  confirm modals, the file-tree context menu) listens for its keys on `window` in the
+  capture phase, because that is the only place a key beats Monaco and xterm. That puts
+  them all on one target, where `stopPropagation` decides nothing: it stops the event
+  walking the tree, not the other listeners on the element it was called from. So an
+  overlay registers through `useOverlayKeys` (`ui/src/overlays.ts`) and only the
+  most-recently-opened layer acts — never `stopImmediatePropagation`, which fires in
+  registration order and would hand the key to the dialog *underneath*. Two can be open
+  at once (`Alt+W` over the palette; the shell's own window close, which arrives from
+  outside the DOM and no backdrop can block), and answering both with one key silently
+  cancels the question the user had not read yet.

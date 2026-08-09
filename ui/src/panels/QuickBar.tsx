@@ -11,6 +11,7 @@ import {
 import { useVisibleCommands } from "../commands";
 import { chordKeycaps } from "../keys";
 import { usePresence } from "../motion";
+import { useOverlayKeys } from "../overlays";
 import { useStore } from "../store";
 import type { TreeNode } from "../types";
 
@@ -296,33 +297,34 @@ export function QuickBar() {
    * written as a ring rather than as "swallow Tab" so a control added to this
    * overlay later is reachable without anyone remembering this function.
    *
+   * Registered through `useOverlayKeys` rather than directly at the window,
+   * which is what keeps it from answering a key aimed at a dialog *above* it:
+   * `Alt+W` on a dirty buffer opens the close confirmation over an open palette,
+   * and the native window close does the same with no click at all. Only the
+   * top layer acts (`overlays.ts`).
+   *
    * Only while `open`: during the exit window the overlay is still mounted, and
    * an Escape aimed at whatever is underneath must reach it.
    */
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        dismiss();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (dialog === null) return;
+  useOverlayKeys(open, (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
       event.preventDefault();
-      const stops = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)];
-      if (stops.length === 0) return;
-      const at = stops.indexOf(document.activeElement as HTMLElement);
-      // Focus that is already outside comes back to the near end rather than
-      // stepping from a position in a ring it is not in.
-      const next = at < 0 ? 0 : (at + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
-      stops[next]?.focus();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, dismiss]);
+      event.stopPropagation();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    event.preventDefault();
+    const stops = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)];
+    if (stops.length === 0) return;
+    const at = stops.indexOf(document.activeElement as HTMLElement);
+    // Focus that is already outside comes back to the near end rather than
+    // stepping from a position in a ring it is not in.
+    const next = at < 0 ? 0 : (at + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
+    stops[next]?.focus();
+  });
 
   useEffect(() => {
     selRef.current?.scrollIntoView({ block: "nearest" });

@@ -24,7 +24,8 @@
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
-import { openApp, treeItem } from "./app";
+import { openApp, treeItem, typeInEditor } from "./app";
+import { NOTES_FILE } from "./workspace";
 
 const palette = (page: Page): Locator => page.getByRole("dialog", { name: "Quick open" });
 
@@ -161,4 +162,85 @@ test("the palette traps focus, answers Escape anywhere, and speaks its results",
     await expect(palette(page)).toBeHidden();
     await expect(invoker).toBeFocused();
   });
+});
+
+/**
+ * One Escape answers one dialog — the one on top.
+ *
+ * The palette's Escape and `Modal.tsx`'s are both `keydown` listeners on
+ * `window` in the capture phase, which is the only place a key beats Monaco and
+ * xterm. But `stopPropagation()` stops an event walking the *tree*; it does
+ * nothing about other listeners on the element it was called from. Two overlays
+ * open at once therefore both ran, and a single Escape closed the palette *and*
+ * silently answered "cancel" to a confirmation the user had not read — the one
+ * on top, dismissed as a side effect of dismissing the one underneath it.
+ *
+ * `App.tsx` mounts the palette and the confirm modals as unconditional
+ * siblings and nothing in the store makes them exclusive, so a user reaches
+ * this with one keystroke. Both orders are here, because they fail differently:
+ * the listeners fire in *registration* order, so the naive fix
+ * (`stopImmediatePropagation`) would hand the key to whichever overlay opened
+ * first — the one underneath — and pass the second step below while failing the
+ * first. `overlays.ts` keeps an ordered stack instead and only the top layer
+ * acts.
+ */
+test("with two overlays open, Escape closes only the topmost", async ({ page }) => {
+  await openApp(page);
+
+  const confirmClose = page.getByRole("dialog", { name: `Close ${NOTES_FILE}?` });
+
+  // A dirty buffer: the confirmation only exists because there is something to
+  // lose, which is also what makes cancelling it by accident expensive.
+  await treeItem(page, NOTES_FILE).click();
+  await typeInEditor(page, "unsaved edit\n");
+  await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(1);
+
+  await test.step("palette first, confirmation on top — Escape answers the confirmation", async () => {
+    // The repro, in the order the audit found it. `Alt+W` is `editor.close`,
+    // and a chord reaches the command registry from anywhere the palette's
+    // backdrop cannot block — which is the whole point: the native window close
+    // arrives the same way, from outside the DOM entirely.
+    await page.keyboard.press("Control+P");
+    await expect(palette(page)).toBeVisible();
+    await page.keyboard.press("Alt+W");
+    await expect(confirmClose).toBeVisible();
+    await expect(palette(page)).toBeVisible(); // both open, stacked
+
+    await page.keyboard.press("Escape");
+    // On master both listeners ran: the confirmation was cancelled *and* the
+    // palette closed. The dialog on top owns the key; the palette stays.
+    await expect(confirmClose).toBeHidden();
+    await expect(palette(page)).toBeVisible();
+
+    // …and the next Escape is the palette's, now that it is on top again.
+    await page.keyboard.press("Escape");
+    await expect(palette(page)).toBeHidden();
+  });
+
+  // Nothing was decided by accident: the buffer is still open and still dirty,
+  // which is what "cancel" means and what the silent double-dismiss destroyed.
+  await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(1);
+
+  await test.step("confirmation first, palette on top — Escape answers the palette", async () => {
+    // The other order, reached with a mouse: the tab's × is clickable because
+    // no scrim is over it yet.
+    await page.getByRole("button", { name: `Close ${NOTES_FILE}`, exact: true }).click();
+    await expect(confirmClose).toBeVisible();
+
+    await page.keyboard.press("Control+P");
+    await expect(palette(page)).toBeVisible();
+    await expect(confirmClose).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(palette(page)).toBeHidden();
+    // The question is still on screen, still unanswered.
+    await expect(confirmClose).toBeVisible();
+    await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(1);
+
+    await page.keyboard.press("Escape");
+    await expect(confirmClose).toBeHidden();
+  });
+
+  // Cancelled, both times: the tab is still here with its edit in it.
+  await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(1);
 });
