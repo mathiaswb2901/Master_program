@@ -13,8 +13,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The backend gate on all three desktop platforms. This is the lane that keeps
+  # the PTY seam (`services/pty_manager.py` -> `pty_posix.py`) honest: the ubuntu
+  # and macos legs are the only place the stdlib `pty.fork()` backend ever runs
+  # for real. Windows-only pieces (pywinpty, pywin32/COM, winreg) are platform
+  # markers in `pyproject.toml` and `skipif`s with honest reasons in the tests —
+  # never a silently-narrowed assertion.
+  #
+  # `fail-fast: false` on purpose: when one OS breaks, the other two legs' results
+  # are the diagnosis (is it POSIX, or is it macos-only?), so cancelling them
+  # costs the information the matrix exists to produce.
   server:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -29,10 +43,23 @@ jobs:
       - name: Type check
         run: uv run mypy
       - name: Tests
-        run: uv run pytest
+        # `-rs` prints every skip *with its reason*. On a 3-OS matrix that is
+        # the difference between "green" and "green, and here is exactly what
+        # this platform did not run" — the honest scoping §C2 asks for, in the
+        # log rather than in a PR description that will go stale.
+        run: uv run pytest -rs
 
+  # The UI gate on all three platforms too. Nothing in `ui/` is platform code,
+  # which is exactly why it is worth matrixing: the things that break here are
+  # case-sensitive imports (an `import './Foo'` that is really `foo.tsx` passes
+  # on Windows and macOS and fails on linux) and path separators leaking into
+  # build config — both invisible on a single-OS runner.
   ui:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     defaults:
       run:
         working-directory: ui
@@ -56,7 +83,14 @@ jobs:
 
   # The built UI against the real backend, with the scripted fake agent
   # (WORKBENCH_FAKE_AGENT=1) so chat, tool rows, permission prompts and plan
-  # cards are exercised without a Claude login. Windows because the PTY is.
+  # cards are exercised without a Claude login.
+  #
+  # **windows-latest only, and that is the honest scope** (M7 §C2). The suite
+  # drives the native Office-host lifecycle through `WORKBENCH_OFFICE_FAKE=1`,
+  # and the thing that fake stands in for — a real Word/Excel frame window
+  # reparented into the Tauri shell — exists on no other OS. Matrixing this job
+  # would buy a green tick for a feature the other two runners cannot have; a
+  # tick like that is worse than no tick, because it reads as coverage.
   e2e:
     runs-on: windows-latest
     steps:
@@ -114,6 +148,11 @@ jobs:
   # set per step rather than on the job, because the `runner` context is not
   # available in a job-level `env:` — GitHub rejects the whole workflow file for
   # it, with no job ever starting.
+  #
+  # **One pinned OS, deliberately** (M7 §C2, `CLAUDE.md`): a fixture number is
+  # only meaningful against the same runner that produced the last one. Three
+  # runners would give three incomparable baselines and no trend, which is the
+  # opposite of what a perf lane is for.
   perf:
     runs-on: windows-latest
     steps:
@@ -190,6 +229,10 @@ jobs:
             echo "desktop=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # windows-latest only: the shell's whole job is native Windows window hosting
+  # (`SetParent` on a Word/Excel frame HWND, job objects, the close guard), and
+  # `cargo test` includes the Office-host window tests that create real windows.
+  # There is no cross-platform half worth a runner (M7 §C2).
   desktop:
     runs-on: windows-latest
     needs: changes
@@ -213,6 +256,13 @@ jobs:
         run: cargo test --locked
 
   # The single check the master ruleset requires: green only when every job is green.
+  #
+  # `server` and `ui` are matrices now, and that changes nothing here: a matrix
+  # job contributes **one** result to `needs`, the aggregate over its legs, and
+  # that aggregate is `failure` if any leg failed — so one red ubuntu leg fails
+  # the gate exactly like a red single-runner job used to. (`fail-fast: false`
+  # only stops the *other* legs from being cancelled; it does not launder the
+  # failure into a success.) `server/tests/test_ci_matrix.py` pins that shape.
   quality-gate:
     runs-on: ubuntu-latest
     needs: [changes, server, ui, e2e, perf, desktop]
@@ -225,7 +275,9 @@ jobs:
           for r in $results; do
             # `skipped` is allowed for exactly one reason: `desktop` is
             # path-filtered. server/ui/e2e/perf/changes carry no `if:` and no
-            # `needs:`, so they can never be skipped — unreachable there.
+            # `needs:`, so they can never be skipped — unreachable there, and
+            # `test_only_the_path_filtered_job_can_ever_be_skipped` fails the
+            # build if a future edit hands one of them a condition.
             if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
               echo "a required job did not succeed"; exit 1
             fi

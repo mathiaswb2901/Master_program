@@ -1,5 +1,6 @@
 """Files API: jail safety, round-trips, conflict detection, tree shape."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,15 @@ class TestJail:
             ws.safe_path("../outside.txt")
 
     def test_escape_via_absolute_path_is_blocked(self, tmp_path: Path) -> None:
+        # The path has to be absolute *on the platform running the test*:
+        # "C:/Windows/…" is a perfectly ordinary relative path on linux and
+        # macOS, so asserting the jail with it there would assert nothing.
+        outside = (
+            "C:/Windows/system32/drivers/etc/hosts" if sys.platform == "win32" else "/etc/hosts"
+        )
         ws = Workspace(tmp_path)
         with pytest.raises(PathOutsideWorkspaceError):
-            ws.safe_path("C:/Windows/system32/drivers/etc/hosts")
+            ws.safe_path(outside)
 
     def test_workspace_root_itself_is_allowed(self, tmp_path: Path) -> None:
         ws = Workspace(tmp_path)
