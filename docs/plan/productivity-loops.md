@@ -468,8 +468,8 @@ adds) naming *which* file changed and offering re-approval — the same posture 
 dirty-and-unreadable row, for the same reason. A gate that runs code nobody re-approved is
 the silent green again, wearing a different hat.
 
-**The transitive-import boundary, admitted rather than glossed.** Hashing the two files above
-does not cover a helper the callable imports — `se3/reporting.py` can keep its bytes and pull
+**The transitive-import boundary, admitted rather than glossed.** Hashing the spec and its
+entry modules (1 and 2) does not cover a helper the callable imports — `se3/reporting.py` can keep its bytes and pull
 its arithmetic from `se3/_helpers.py`. Static import analysis would be a guess (the imports
 can be conditional, or `importlib`). So `spec_entry` closes it with a fact instead of a guess:
 after the callable returns, it walks `sys.modules`, keeps every module whose `__file__`
