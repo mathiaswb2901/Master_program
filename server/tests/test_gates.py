@@ -29,8 +29,10 @@ import asyncio
 import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -274,6 +276,38 @@ def python_gate(code: str, *, timeout_s: float = 30.0, gate_id: str = "probe") -
     )
 
 
+#: A launcher that spawns the "real tool" as a grandchild — the shape *every*
+#: catalog entry actually has (``uv run pytest`` is uv spawning pytest; ``npm.cmd``
+#: is cmd spawning node), and the shape a bare ``python -c`` leaf never exercises.
+#: The grandchild sleeps far longer than the test needs, inherits the launcher's
+#: stdout (the runner's PIPE — finding 2's shape), and writes its own pid so the
+#: test can prove *it* was killed, not merely the wrapper the runner holds.
+_TREE_GATE_WRAPPER = "\n".join(
+    (
+        "import subprocess, sys, pathlib",
+        "pidfile = pathlib.Path(sys.argv[1])",
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])",
+        "tmp = pidfile.with_suffix('.tmp')",
+        "tmp.write_text(str(child.pid))",
+        "tmp.replace(pidfile)",  # atomic, so the test never reads a half-written pid
+        "child.wait()",
+    )
+)
+
+
+def tree_gate(pidfile: Path, *, gate_id: str = "pytest") -> GateCommand:
+    """A gate one process deep, like the catalog's: the pid the runner holds is a
+    launcher, and the tool is its grandchild. The grandchild's pid lands in
+    ``pidfile`` so a test can assert on the operating system that the *tool* died,
+    not just the wrapper a single-pid kill would reach."""
+    return GateCommand(
+        id=gate_id,
+        argv=(sys.executable, "-c", _TREE_GATE_WRAPPER, str(pidfile)),
+        label="pytest -q",
+        timeout_s=60.0,
+    )
+
+
 def pid_alive(pid: int) -> bool:
     """Whether an OS process with ``pid`` is currently running.
 
@@ -296,6 +330,23 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def kill_pid(pid: int) -> None:
+    """Best-effort OS kill of a raw pid, for teardown that must never leak a 30 s
+    sleeper — least of all on the *red* run where the tree kill under test did not
+    happen. ``/t`` fells the pid's own descendants too, the taskkill mirror of the
+    Job Object the runner uses (``sys.platform``, not ``os.name``: the POSIX
+    branch's ``SIGKILL`` is a symbol win32's typeshed does not carry)."""
+    if sys.platform == "win32":
+        subprocess.run(  # noqa: S603 - the arguments are this file's own literals
+            ["taskkill", "/f", "/t", "/pid", str(pid)],  # noqa: S607 - a system utility on PATH
+            capture_output=True,
+            check=False,
+        )
+    else:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(pid, signal.SIGKILL)
 
 
 # --------------------------------------------------------------------------- judgement
@@ -720,6 +771,79 @@ class TestRealSubprocess:
                     leftover.kill()
                 with contextlib.suppress(Exception):
                     await leftover.wait()
+
+    async def test_a_cancelled_run_kills_the_whole_tree_not_just_the_launcher(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bug finding 1 names, driven through the shape the catalog *actually*
+        runs — not the bare leaf the test above uses.
+
+        Every gate is a launcher: ``uv run pytest`` is uv.exe spawning pytest as a
+        child, ``npm.cmd`` is cmd.exe spawning node, and Windows has no ``exec()``
+        to collapse the two into one process. So the pid the runner holds is the
+        wrapper, and the process actually holding the file locks and the stdout
+        pipe — the one a cancelled gate must free — is a *grandchild*. ``master``
+        (and any single-pid ``proc.kill()`` fix) ends only the wrapper; the
+        grandchild runs its full 30 s. This drives a wrapper that spawns a 30 s
+        grandchild, cancels the awaiting task the way a dropped connection does,
+        and asserts on the operating system that the *grandchild* is gone. That is
+        the false-confidence gap a leaf-process test cannot close: a leaf has no
+        grandchild, so it passes whether or not the tree is killed.
+
+        It is finding 2's proof in the same breath. The grandchild inherits the
+        launcher's stdout PIPE, so a single-pid kill followed by an *unbounded*
+        ``proc.wait()`` blocks on that handle until the grandchild exits on its own
+        — ~30 s, measured. The elapsed-time assertion fails on exactly that hang;
+        killing the tree closes the pipe at once and the wait returns immediately.
+        """
+        pidfile = tmp_path / "grandchild.pid"
+        command = tree_gate(pidfile)
+
+        started: list[asyncio.subprocess.Process] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def record(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            proc: asyncio.subprocess.Process = await real_exec(*args, **kwargs)
+            started.append(proc)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", record)
+
+        task = asyncio.create_task(
+            SubprocessGateRunner().run(command, tmp_path, MAX_GATE_LOG_BYTES)
+        )
+        grandchild: int | None = None
+        try:
+            for _ in range(1_000):  # ~10 s ceiling; the tree comes up in a tick or two
+                if pidfile.is_file() and (text := pidfile.read_text().strip()):
+                    grandchild = int(text)
+                    break
+                await asyncio.sleep(0.01)
+            assert grandchild is not None, "the gate never launched its grandchild"
+            assert started, "the runner never spawned the launcher"
+            launcher = started[0]
+            assert pid_alive(launcher.pid)  # sanity: the wrapper is up
+            assert pid_alive(grandchild)  # sanity: the real tool is up, mid-gate
+
+            began = time.monotonic()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            elapsed = time.monotonic() - began
+
+            # finding 1: the grandchild — the process actually holding the resource
+            # — is gone, not merely the launcher a single-pid kill would reach.
+            assert not pid_alive(grandchild), "the grandchild outlived the cancelled gate"
+            assert not pid_alive(launcher.pid)
+            assert launcher.returncode is not None  # reaped, not orphaned
+            # finding 2: reaping did not hang on the grandchild's inherited stdout
+            # pipe. A single-pid kill + unbounded wait blocks here the grandchild's
+            # whole 30 s lifetime; killing the tree frees it at once.
+            assert elapsed < 15.0, f"the reap hung {elapsed:.1f}s on the inherited pipe"
+        finally:
+            for pid in (grandchild, *(proc.pid for proc in started)):
+                if pid is not None:
+                    kill_pid(pid)
 
 
 # --------------------------------------------------------------------------- the catalog
