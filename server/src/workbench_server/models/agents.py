@@ -16,7 +16,17 @@ SessionState = Literal["idle", "working", "needs_attention"]
 #: mission-control toolset (``services/orchestrator.py``). ``worker`` is one an
 #: orchestrator spawned — it carries no toolset of its own, which is what stops
 #: an orchestrator building a tree of orchestrators out of one budget.
-SessionKind = Literal["chat", "orchestrator", "worker"]
+#:
+#: ``reviewer`` is M6 staged review PR 2's: a **fresh-context, read-only** session
+#: the ``review`` check puts in front of another session's diff
+#: (``services/review.py``). This word is cheap and buys almost nothing on its
+#: own — a reviewer row in the activity feed and Mission Control, and a place in
+#: the concurrent-session cap. The isolation it *reads* like is built explicitly
+#: in ``services/sdk_factory.py``: a toolset selected by kind, a kind-gated
+#: auto-allow list, ``disallowed_tools``, and a deny-and-log answer to every
+#: permission on both escalation paths. A branch that adds the word and stops
+#: ships a reviewer that can still call ``office_write`` and ``Bash``.
+SessionKind = Literal["chat", "orchestrator", "worker", "reviewer"]
 
 
 class SessionInfo(BaseModel):
