@@ -11,6 +11,7 @@ the full table), and the tool's own token budget (description and serialized res
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -184,6 +185,54 @@ async def test_the_worst_list_is_capped_and_states_what_it_withheld(tmp_path: Pa
     assert len(summary.worst) == RECONCILE_WORST_N
     assert summary.withheld == n - RECONCILE_WORST_N
     assert f"{summary.withheld} more" in summary.next_step
+
+
+async def test_an_offset_bearing_expectation_comes_back_as_a_teaching_fail(tmp_path: Path) -> None:
+    """The DST-fold defeat, through the tool an agent actually calls.
+
+    An agent whose numbers came out of pandas writes the fall-back hour the idiomatic
+    way — ``2024-10-27T02:00:00+02:00`` and ``+01:00``, the only thing that tells the
+    two occurrences apart. The gate used to strip the offset, collapsing both to one
+    lookup key, so the second was scored against the first one's row and the tool
+    answered ``pass``. It must be an honest fail, and the reason the agent reads has to
+    survive the tool's own reason clip with the fix still in it — a lesson cut off at
+    140 bytes is not a lesson.
+    """
+    make_workbook(tmp_path / "prices.xlsx", {"A1": "timestamp", "B1": "price"})
+    wb = openpyxl.load_workbook(tmp_path / "prices.xlsx")
+    ws = wb["Sheet1"]
+    ws["A2"], ws["B2"] = datetime(2024, 10, 27, 2), 20.0  # the CEST 02:00
+    ws["A3"], ws["B3"] = datetime(2024, 10, 27, 2), 21.0  # the CET 02:00
+    wb.save(tmp_path / "prices.xlsx")
+    runner = runner_for(tmp_path)
+    args = {
+        "workbook": "prices.xlsx",
+        "timezone": "Europe/Oslo",
+        "default_tolerance": {"abs": 0.001},
+        "time_index": {
+            "timestamp_column": "A",
+            "value_column": "B",
+            "value_unit": "EUR/MWh",
+            "sheet": "Sheet1",
+            "expectations": [
+                {"timestamp": "2024-10-27T02:00:00+02:00", "expected": 20.0, "unit": "EUR/MWh"},
+                {"timestamp": "2024-10-27T02:00:00+01:00", "expected": 20.0, "unit": "EUR/MWh"},
+            ],
+        },
+    }
+    result = await handle_office_reconcile(runner, args)
+    summary = summary_of(result)
+    assert summary.risk == "high", summary.summary
+    assert summary.failed == 2
+    assert summary.passed == 0
+    assert len(summary.worst) == 2
+    for mismatch in summary.worst:
+        assert mismatch.actual is None  # never scored against the row it did not address
+        reason = mismatch.reason or ""
+        assert "UTC offset" in reason
+        # The clip did not eat the instruction that fixes it.
+        assert "fold" in reason
+    assert len(result_text(result).encode()) <= OFFICE_RECONCILE.max_result_bytes
 
 
 async def test_a_non_finite_expected_stays_valid_json(tmp_path: Path) -> None:
