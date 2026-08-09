@@ -65,10 +65,10 @@ the moat.
 | M1 | IDE-lite shell | pywinpty terminals, jail-safe files API, Monaco tabs, watcher/sync engine, multi-session agent core, QuickBar | **done** |
 | M2 | Word | OnlyOffice native install, signed editor config + save callback, Doc panel, reopen-on-agent-edit, degraded mode | **done** |
 | M3 | Excel + PowerPoint | Sheet/Slides panels (same pattern), `.bak` safety, keep-alive editors, content-hash keys | **done** |
-| M4 | **Instrument** | See below | **in progress** |
-| M5 | **Parallel** | See below | pending |
-| M6 | **Proof** | See below | pending |
-| M7 | **Premium & Public** | See below | pending |
+| M4 | **Instrument** | See below | **in progress** — Word (#38) and Excel (#83) dock for real, the COM bridge reads and writes the live document (#65/#78/#92), the app packages (#87), the notebook view landed (#117); PowerPoint hosting is armed (#107) and the side-by-side proof is the last piece |
+| M5 | **Parallel** | See below | **in progress** — items 1–8 and 10–17 are done; item 9 (panes) has its first PR and item 6 its pool, and both carry named remainders |
+| M6 | **Proof** | See below | **in progress** — the plan's five PRs landed (#82/#85/#86/#89/#90, defects #102) and staged review's two checks with them (plan #105, gates #115, adversarial reviewer #126); the gate-closure market check is armed (#114) |
+| M7 | **Premium & Public** | See below | **in progress** — waves A–D landed (V1–V5, V7a/V7b, V8, Setup, C1–C3, the unsigned release half of C4, the voice seam); V6 and the owner-gated finish (V9, signing, the name, the launch decision, the real voice backend) remain |
 
 ### M4 — Instrument (finish the tool, land the first primitives)
 
@@ -112,11 +112,19 @@ the moat.
   elsewhere, a launch that failed, an embed that was refused all end in a working
   OnlyOffice editor or the degraded card, never a broken panel. **Hang isolation is
   proven and `auto` is on**: a wedged guest costs a resize frame ~19 µs instead of
-  ~1 s (see the decisions log for the full table and the control). Still open here:
-  the COM bridge (agents reading and writing the *live* document, and with it the
-  Office skills), Excel beyond the launch path, and packaging — the shell runs from
-  source (`cd desktop && npm run tauri dev`); a bundled installer that carries its own
-  Python needs `tauri build` work not done yet.
+  ~1 s (see the decisions log for the full table and the control). **Everything that
+  paragraph listed as still open has since landed** (verified against master
+  2026-08-09): the **COM bridge** in three PRs — the read seam (#65), the write path
+  (#78) and the real `ShellDocumentBridge` that does both against the live docked
+  document (#92), with `office_read`/`office_write` as agent tools; **Excel** docked
+  the same way as Word (#83, `XLMAIN`); the **Office account identity** read over COM
+  (#75) and surfaced as *signed in as* / *sign in to edit* in the panel (#77); and
+  **packaging** (#87: bundled backend, the backend-URL fix and the installer plumbing),
+  with the unsigned release workflow building an installer on a tag (#96). What is
+  genuinely still open here: **PowerPoint hosting** (#107 — armed, merging; until it
+  lands the service still refuses `powerpoint` with `powerpoint_preview_only`), the
+  **side-by-side proof** below, the **multi-account switching spike** logged
+  2026-08-07, and **signed** installers, which are owner-gated in M7.
   **Composition is now part of this sequence's definition of done** (owner, 2026-08-05:
   "a tab where I work on Word and Excel side by side in full screen"). Under product
   principle 4 this needs no second Office registration and no new panel: Word already
@@ -204,9 +212,11 @@ the moat.
   what; persisting it (and attributing writes made through the shell) is future work.
 - Committed carryover: pptx E2E fidelity pass and bundled skills —
   `plan-visual`, `remember` and `workbench-dev` ship as the session-scoped `workbench`
-  plugin; `validate`, `loop-objective` and Workbench-authored Word/Excel/PowerPoint
-  skills remain, the office ones following the COM bridge rather than wrapping a
-  third-party CLI (see the decisions log). Every bundled skill passes a **vetting bar**
+  plugin (still the whole bundle as of 2026-08-09); `validate`, `loop-objective` and
+  Workbench-authored Word/Excel/PowerPoint skills remain, the office ones following the
+  COM bridge rather than wrapping a third-party CLI (see the decisions log) — that
+  bridge **has now landed** (#65/#78/#92), so the office skills are unblocked and
+  unwritten rather than blocked. Every bundled skill passes a **vetting bar**
   — read in full (a skill can execute anything on the user's machine) and shown to help
   before it ships; popularity is not evidence.
 - UI quality tooling starts here: eslint + vitest **done** (`npm run lint` / `npm run
@@ -223,7 +233,9 @@ the moat.
   agent's: a failed write, the user's own saves). Agent journeys run against **fake-agent
   mode** (`WORKBENCH_FAKE_AGENT=1`, `services/fake_agent.py`): scripted replies, tool
   calls, permission prompts and plan artifacts through the real factory/bridge seams —
-  no Claude login, no tokens, deterministic frames.
+  no Claude login, no tokens, deterministic frames. Nine was the count at the time; the
+  suite grew with every milestone after it and `ui/e2e/` holds **40 journey specs**
+  today (2026-08-09), beside the perf lane's own config.
 
 ## Three tracks from here (2026-08-05)
 
@@ -234,11 +246,12 @@ watcher protocol and the motion layer), so they run at once. The milestone table
 the record of scope; the tracks are how it gets built.
 
 - **Moat track** — the Office host sequence (M4): ~~domain layer with a fake backend~~
-  → ~~Rust window hosting~~ (both **landed**) → Word docked (*in flight*, PR #38) →
-  hang containment (the window-less mover thread, WIP on the same branch — it is what
-  flips `WORKBENCH_OFFICE_NATIVE=auto` on, and a hard prerequisite once two guests are
-  docked) → COM bridge + agent tools → Excel → **the side-by-side proof**: Word and
-  Excel docked in two panes at once. What no competitor can copy quickly.
+  → ~~Rust window hosting~~ → ~~Word docked (#38)~~ → ~~hang containment (the
+  window-less mover thread — what flipped `WORKBENCH_OFFICE_NATIVE=auto` on, and a hard
+  prerequisite once two guests are docked)~~ → ~~COM bridge + agent tools
+  (#65/#78/#92)~~ → ~~Excel (#83)~~ (all **landed**) → PowerPoint (#107, armed) →
+  **the side-by-side proof**: Word and Excel docked in two panes at once — the one step
+  of this sequence still unbuilt. What no competitor can copy quickly.
 - **Modular track** — M5 below, reordered so the *seam* comes first. What the product
   feels like every day.
 - **Feel track** — performance and motion. What the product feels like every *second*.
@@ -275,9 +288,9 @@ mounted-row count and a long-task ceiling for the expand. Convergence with disk 
 rules, not trust: expanding re-lists, reconnect re-lists, and a `tree_invalidated` frame
 covers the one change no file event can describe (see ARCHITECTURE.md, *The file tree*).
 
-**Queued**: Monaco off the entry chunk (the entry bundle is still 4.1 MB raw / 1.06 MB
-gzip, ~88% Monaco — the largest single number left in the launch path), and the motion
-vocabulary below.
+**Queued at the time — both landed, and are written up below**: Monaco off the entry
+chunk (the entry bundle was then 4.1 MB raw / 1.06 MB gzip, ~88% Monaco — the largest
+single number left in the launch path), and the motion vocabulary.
 
 **Monaco off the entry chunk** (landed, PR 2 of this track): the eager entry chunk was
 **88% Monaco**, reached through the `monaco-editor` barrel that `main.tsx` imported
@@ -298,14 +311,18 @@ TypeScript service removed 10 false "cannot find module" squiggles from this rep
 `store.ts`. The line is held by `ui/e2e/perf/bundle.spec.ts`, which reads rollup's module
 attribution and fails if any `node_modules/monaco-editor` module is back in the entry chunk.
 
-**Queued**: the watcher protocol (twenty file changes cost twenty full walks and 9.4 MB of
-JSON today — the xfail budget in `ui/e2e/perf/watcher.spec.ts` is its acceptance
-criterion), the terminal's renderer and frame coalescing, and a virtualised file tree —
-the last two now the largest things left in the entry chunk (xterm 285 kB, dockview-core
-alone 597 kB attributed since the dockview 7 upgrade — 7 publishes one pre-bundled ESM
-module where 4 published 66 shakeable ones; `ui/e2e/perf/bundle.spec.ts` quotes 666 kB
-for the same build because it sums all three dockview packages) as well as the reason a
-*row* still costs ~900 ms.
+**Queued, as of 2026-08-09.** The three items this paragraph used to list — the watcher
+protocol, the terminal's renderer and frame coalescing, and a virtualised file tree —
+all landed (#36, #42), and `ui/e2e/perf/watcher.spec.ts` stopped being an xfail. What is
+left is the **exit criterion below, not yet met**: the last cold-launch figure this
+document records is **903 ms** to the first tree rows against an 800 ms ceiling, and no
+`@wallclock` ceiling has been ratcheted from its starting ~2.5x. The one named layout-shift
+violation — the file tree's centred "Loading workspace…" swapping for a toolbar 322 px
+higher — is also still open (see the picker paragraph above). One new weight to note: the
+dockview 7 upgrade makes dockview-core alone **597 kB** attributed in the entry chunk — 7
+publishes one pre-bundled ESM module where 4 published 66 shakeable ones, and
+`ui/e2e/perf/bundle.spec.ts` quotes 666 kB for the same build because it sums all three
+dockview packages.
 
 **The picker that moved the pane** (landed): the launch layout-shift budget existed to
 catch a webfont swap and caught something better. Measured 2026-08-06 on the pinned
@@ -492,7 +509,8 @@ because other sections and five running lanes reference these numbers.
    a raised `max_concurrent_sessions`, and preset switching that reconciles against the
    panes that already exist rather than rebuilding the dock over them.
 3. **Visual artifacts — a typed scene graph agents can draw with** — *in progress*
-   (PRs 1–3 landed: the schema, its renderer, and annotation anchors). Asked for after watching an
+   (PRs 1–4 landed: the schema and its renderer (#37), annotation anchors (#47), and
+   expansion into a dockview panel (#66)). Asked for after watching an
    agentic-workflow video where the agent renders an interactive artifact instead of
    a wall of text. The third-party tool that does it (lavish-axi) **failed vetting**
    — undisclosed on-by-default telemetry, a skill that `npx`'s an unpinned package
@@ -538,10 +556,13 @@ because other sections and five running lanes reference these numbers.
    cannot validate), and a text range is picked as a sentence of the **source**
    string rather than by drag-selection (the rendered DOM is not the source, so
    a selection offset would slice the wrong characters).
-   Still open: expanding an artifact into a dockview panel (PR 4), live
-   refinement and note batches — the "send notes without deciding" half — (PR 5),
-   persistence (later), and component/design-system specimens (M7-gated, alongside
-   the "design-system-faithful visual mockups" gap logged in M4).
+   **PR 4 — expanding an artifact into its own dockview panel — landed** (#66):
+   `ui/src/panels/VisualPanel.tsx` plus one line in `tools.ts`, one pane per drawn
+   artifact, rendering the same scene graph the card does.
+   Still open: live refinement and note batches — the "send notes without
+   deciding" half — (PR 5), persistence (later), and component/design-system
+   specimens (M7-gated, alongside the "design-system-faithful visual mockups" gap
+   logged in M4).
 4. **Deeper shortcuts** — `shortcuts.md` grows beyond snippets and prompts: ~~bind a
    layout~~ (**done** with item 2: `type: layout`), a registered tool, a workspace jump,
    or a saved agent objective to a chord. The file becomes the user's own control
@@ -562,6 +583,18 @@ because other sections and five running lanes reference these numbers.
    jail. Whatever this item builds needs a way for a command to say it is not bindable
    from an untrusted file — the bar above, expressed on the descriptor rather than in
    a parser case.
+   **Done** (#64): a `command` shortcut kind whose body is a registered command id,
+   resolved through the registry at run time, so a command registered today is bindable
+   tomorrow **with no parser change** — the exit criterion, met. The safety bar is on
+   the descriptor as required (`unsafeFromFile` + `isBindableFromFile` in
+   `registry.ts`), with a denylist covering the already-registered unsafe families
+   (`workspace.open`/`workspace.switch`, the dynamic `workspace.open.<path>` recents and
+   `layout.delete.<name>`), and `registry.test.ts` classifies **every** dynamic-command
+   family so a future side-effectful one fails CI instead of shipping bindable.
+   One loose end, disclosed by that PR rather than found later: the flag's intended home
+   is each unsafe command's own descriptor, but `Workspaces.tsx` and `Layouts.tsx`
+   belonged to other lanes that day, so those two still rely on the denylist. Setting
+   `unsafeFromFile: true` at the source lets the denylist shrink with no contract change.
 5. ~~**Workspace switcher** — the workspace is currently whatever directory the server
    was launched from. Switch projects from inside the app (recent list, QuickBar,
    `shortcuts.md`), with per-workspace layout and session history.~~ **done** —
@@ -609,8 +642,11 @@ because other sections and five running lanes reference these numbers.
    early and out of sequence because item 7 needs it). Still open in this item, and
    deliberately: multi-root file/terminal access through a root registry (path jail
    preserved per root), worktree-bound agent sessions, and per-slot watchers — the
-   pool stands alone without them and its endpoints are usable today. No UI yet
-   either: four UI lanes were live when it landed, so it shipped backend-only.
+   pool stands alone without them and its endpoints are usable today. ~~No UI yet
+   either: four UI lanes were live when it landed, so it shipped backend-only.~~ Mission
+   Control has since made the pool **readable** (#63): a card names the slot its session
+   holds and the board reports the worktree capacity. Acquiring, releasing, renewing and
+   reviewing a `needs_review` slot are still API-only.
    **Four design decisions, taken from `kunchenguid/treehouse` (MIT, read 2026-08-05,
    not adopted as a dependency — a pool bound to agent sessions and inside our path
    jail has to be ours) and each of which we would otherwise have rediscovered the hard
@@ -724,15 +760,33 @@ because other sections and five running lanes reference these numbers.
    is usually the most interesting thing on the machine. And there is no per-worker
    "resume after the budget was raised" — raising the ceiling and spawning again is the
    whole recovery path today.
-8. **Security hardening pulled forward** (OSS bar item 1): per-launch auth token
+8. ~~**Security hardening pulled forward** (OSS bar item 1): per-launch auth token
    injected into the UI + strict WS Origin checks — agent-spawned workers, multi-root
    access and a workspace switcher all widen the unauthenticated localhost surface
-   unacceptably.
+   unacceptably.~~ **done**, in four staged PRs so the flip could never be the thing
+   that broke a running window: the token + WS-Origin middleware with enforcement
+   **off** (#69, `services/local_auth.py`), the client presenting it (#72,
+   `ui/src/token.ts` → `api.ts`/`ws.ts`), the desktop shell being told it out of band
+   through a Rust command (#76), and **the flip** (#80) — `enforce_auth` now defaults
+   to `True` in `config.py`, so the shipped default is enforcement on and both test
+   harnesses present the token. **Plus one finding that arrived after the flip and
+   belongs here** (#104): `acceptEdits` silently auto-approved shell filesystem
+   commands *underneath* the permission broker, so the broker is now bound with a
+   `PreToolUse` hook (`services/permission_broker.py`) rather than trusting the SDK's
+   own permission mode. An auth token on the socket does not help if the agent inside
+   it approves its own `rm`.
 9. **Panes — split anything, and the principle it carries** — *first PR landed*
    (`m5/split-anything`, item 2b): splitting, the pane id, the plural seam, the picker
-   and the keyboard are in. Still open here: hibernation, idle session reaping,
-   `adopt(params)` tombstones, the raised cap, preset reconciliation, and the
-   instance-count perf budget — the exit criterion below is not met yet.
+   and the keyboard are in. Two more of its remainders have landed since: the
+   **instance-count perf budget** shipped with that same PR (`ui/e2e/perf/panes.spec.ts`
+   builds four agent panes, two terminals and four Monaco editors on the 5,005-file
+   fixture and samples frames across a split and a run of directional moves), and
+   **tombstones** arrived tool by tool as each plural tool needed one — the Resume
+   tombstone for a detached or dead session (#81), the conversation browser's (#53),
+   the Review pane's (#86). Still open here: **hibernation**, **idle session reaping**,
+   the **raised cap** (`max_concurrent_sessions` is still 4 in `config.py`), and
+   **preset switching that reconciles against existing panes** rather than rebuilding
+   the dock over them — the exit criterion below is not met yet.
    This is the owner's "super modular like TMUX" ask and the
    implementation of product principle 4: `paneId := toolId | toolId#instanceKey`, so
    `agent#<session_id>`, `editors#<path>` and `terminal#<n>` are panes that survive a
@@ -750,8 +804,10 @@ because other sections and five running lanes reference these numbers.
    `activeTerminalId` and `activePath` as app-global singletons that no longer have a
    justification; `AgentPanel` is simultaneously the session list and the chat, so ten
    agents in a grid cannot be expressed; `Terminal` and `EditorArea` each own a tab strip
-   that should be panes; `monaco.disposeModel(path)` pulls a model out from under a
-   second pane on the same file; `registry.test.ts` pins the singleton as truth and gets
+   that should be panes; ~~`monaco.disposeModel(path)` pulls a model out from under a
+   second pane on the same file~~ (**done** — `monaco.ts` owns model lifetime through a
+   refcounted registry and every `<Editor>` keeps its model; `ui/e2e/editorPanes.spec.ts`);
+   `registry.test.ts` pins the singleton as truth and gets
    rewritten, not deleted; and the E2E helpers use unscoped selectors that would pass
    against a broken plural app. `docs/tools.md` and `ARCHITECTURE.md` write the singleton
    down as a *rule* ("exactly Editor / Files / Agent / Terminal", "`id` equal to
@@ -881,24 +937,45 @@ because other sections and five running lanes reference these numbers.
     with: it is **read-only** (a test watches every byte and mtime under the store across a
     browse; there is no delete path), and it is **honest about what it withheld** — a store
     bigger than the page says how many were not read and offers the wider window.
-    **Carried to half B, and only this**: *opening* a conversation whose folder is outside
-    the workspace jail. It is listed, searchable and visibly refused with its reason today
-    — hiding it would be the worse answer — and it becomes openable when item 5's
-    workspace switcher (or item 6's multi-root roots) lands. The AgentPanel's folder list
+    ~~**Carried to half B, and only this**: *opening* a conversation whose folder is
+    outside the workspace jail. It is listed, searchable and visibly refused with its
+    reason today — hiding it would be the worse answer — and it becomes openable when
+    item 5's workspace switcher (or item 6's multi-root roots) lands.~~ **Half B landed**
+    (#67), on the switcher rather than on multi-root: a resolved outside folder is no
+    longer a blocked row but a **switch & open** — it re-roots the running server through
+    the existing `POST /api/workspace/switch` (every guard intact: the dirty-close
+    confirm, and a resume that runs only in the switch's success continuation) and then
+    resumes the conversation into an agent pane. A folder matching no directory at all
+    stays refused, because there is nothing to switch *to*. It also caught a live
+    instance of this repo's own re-rooting rule: `ConversationBrowser` had copied the
+    launch root and had to gain `set_workspace_root` plus its line in `create_app`.
+    The AgentPanel's folder list
     is deliberately still there: it is the compact form for the folders *this* workspace
     contains, and merging the two is a presentation change worth doing on top of a landed
     browser rather than inside it.
-13. **Pop-out — panes on a second monitor** (was item 2's deferral note and M7's
-    "unclaimed" line; the owner's "full screen sharing mode" and "no limits" claims it).
-    dockview supports floating groups and popped-out windows; with panes in place this is
-    an arrangement rather than a feature. It carries one engineering fact nobody had
-    written down: **a popped-out panel is a separate WebView2 window with no HWND in the
-    main window's parent chain**, so a native Office pane cannot simply pop out — it needs
-    a second native host window or an explicit, reasoned refusal. Decide that before
-    shipping, or the first user who pops out a docked Word gets an orphaned invisible
-    window, which is exactly the class of bug the host ownership rules were written to
-    prevent. Exit criterion: any pane pops out to a second monitor and restores to its
-    group, and a native Office pane either follows or refuses with a reason on screen.
+13. ~~**Pop-out — panes on a second monitor**~~ **done** (#73) (was item 2's deferral note
+    and M7's "unclaimed" line; the owner's "full screen sharing mode" and "no limits"
+    claims it). dockview supports floating groups and popped-out windows; with panes in
+    place this was an arrangement rather than a feature. It carried one engineering fact
+    nobody had written down: **a popped-out panel is a separate WebView2 window with no
+    HWND in the main window's parent chain**, so a native Office pane cannot simply pop
+    out — it needs a second native host window or an explicit, reasoned refusal.
+    **The refusal is what shipped**, and it is the half of the exit criterion that
+    mattered: a new `popoutGuard` contribution on the descriptor (the
+    `workspaceSwitchGuard` precedent), implemented by the office-host tool, so
+    `pane.popout` asks the **registry** rather than the office store, vetoes only the
+    pane a native window can actually be docked in, and only while it is docked or
+    docking — and the toast names `office.detachHost` as the way out. The rest:
+    `ui/popout.html` as a second Rollup input carrying the theme bootstrap (dockview
+    copies stylesheets, not the `data-theme` attribute), `pane.popout` on `Alt+P` with
+    `pane.popin` chordless, persistence through `onDidPopoutGroup*` into the same
+    debounced save, and a `pruneLayout` pass that drops a `popoutGroups` entry whose
+    `gridReferenceGroup` did not survive pruning — there would be nowhere to re-grid it.
+    Monaco and xterm survive the trip because dockview *moves* the node it attached to.
+    **Still open, and deliberately**: the native follow — a real Word window tracking a
+    popped-out pane needs a second native host window in the child WebView2, which is its
+    own spike. Until it exists the refusal is the answer, which is what the exit criterion
+    allows.
 14. **Commands the window does not own** (owner, 2026-08-06, from tmux). In tmux a key
     binding is *only* a binding: every action is a named command, and the same command
     can be fired from a shell (`tmux split-window`), from a script, or from another
@@ -913,6 +990,16 @@ because other sections and five running lanes reference these numbers.
     it is sequenced after hardening, not before. Exit: a command registered today is
     invocable from a shell and from an agent tomorrow with no per-command wiring, and a
     request without the token is refused.
+    **Done** (#84): `workbench-cmd` (`cli/commands_cli.py`, a console script) and the
+    `run_command` agent tool both reach the same relay — the window publishes its
+    invocable-command manifest on connect (`ui/src/commandRelay.ts`, a registered tool
+    contributing no panel), a `command_invoke` event runs it, and an unauthenticated
+    request is refused. **Two honest gaps as shipped**, both named rather than
+    discovered later: a command still runs **parameterless** — `takes_params` is `False`
+    for every row and `executeCommandById` calls `command.run()` with no arguments, so
+    "open *this* file beside the terminal" is not yet expressible — and one invocation
+    costs seconds of Python startup rather than milliseconds. Both are PR-E of the
+    productivity-loops plan (#124), which is in flight; nothing here claims them.
 15. **Detachable working sessions** (owner, 2026-08-06, from tmux). tmux's real magic is
     not panes — it is that the *session* outlives the client: you detach, the work keeps
     running, and you re-attach later, or from somewhere else entirely. Workbench already
@@ -926,6 +1013,18 @@ because other sections and five running lanes reference these numbers.
     re-attached session should show what happened while you were away, not an empty pane.
     Sequenced after the workspace switcher (item 5), whose recents list is the same
     surface a session list wants to be.
+    **Done in three PRs.** *PR1* (#68) closed the #43 gap: a live session's transcript is
+    replayed on reattach, so a reload no longer lands you in an empty chat. *PR2* (#70)
+    is the store — a `NamedSession` is a thin **manifest** (a workspace, an arrangement
+    stored verbatim as dockview's own `toJSON()`, and *references* to the live agents,
+    terminals and leases), version-stamped under the machine's app data dir beside the
+    recents list, never a copy of live state. *PR3* (#81) is the flow the two add up to:
+    detaching closes a **view** while the session keeps running server-side, the Detached
+    list brings it back, and the E2E journey proves the plural case — two detached
+    sessions return independently through a detach/reload/reattach round trip, with a
+    message typed in one landing only in one. **Still open**: reaching a detached session
+    from a *second machine*, which is the reason this item was written the way it was and
+    needs more than a localhost token.
 16. **New documents, not just new files** (owner, 2026-08-06; reopens the scope freeze
     on the one ground it allows — an owner decision). The tree can create a *file*; it
     cannot create a *document*. Wanted: `.docx`, `.xlsx`, `.pptx`, `.py`, `.txt`, `.md`,
@@ -1042,13 +1141,18 @@ to live under `docs/plan/` rather than inline here, because M6 breaks into a fiv
 sequence with explicit disjoint file ownership and that is more than a milestone bullet can
 carry. The frame ships **fake-first / fully CI-verifiable** (the reconciliation gate reads
 `.xlsx` with openpyxl, no Office), and the pieces that need real Office or a second pass are
-named as deferred rather than blocking. Summary of the sequence:
+named as deferred rather than blocking.
+
+**Status (2026-08-09): the whole sequence has landed**, plus the two staged-review checks
+the plan deferred and one defect pass. PR numbers are on each bullet below; the one piece
+of the plan still unbuilt is the provenance-bar half of PR 4. Summary of the sequence:
 
 - **PR 1 — the validation frame** (`models/validation.py`, `services/validation.py`,
   `routers/validation.py`): a `ValidationResult` with typed `EvidenceItem`s and a derived
   `RiskLevel`, a `ValidationCheck` protocol (a registry of checks, not a hardwired
   pipeline), a `ValidationEvent` on the shared bus with `GET /api/validation` replay, a
   bounded result map, and the **one mandatory human approval** endpoint. Foundation for 2–5.
+  **Landed (#82).**
 - **PR 2 — the first domain gate** (`services/reconciliation.py`, `models/reconciliation.py`,
   an `office_reconcile` `AgentToolSpec`): workbook↔code **numeric reconciliation** as proof
   of the moat. Inputs are a `cell → expected` mapping with **units** (never executed user
@@ -1058,6 +1162,10 @@ named as deferred rather than blocking. Summary of the sequence:
   the xlsx with **openpyxl** — the one justified new runtime dep, chosen so the gate is
   green with **no Office**; the live-COM reader is a deferred later PR. The agent tool
   honours the byte budget + the AXI three shapes.
+  **Landed (#85)**, with the `office_reconcile` agent tool following as its own PR
+  (#89) rather than riding along, and **two defects found and fixed afterwards** (#102):
+  an unvalidated DST fold and Nordic currencies. Not cosmetic — a fold the code did not
+  validate is exactly the 25-hour-day case this gate exists to catch.
 - **PR 3 — the Review panel + risk badge** (`ui/src/panels/ReviewPanel.tsx`,
   `ui/src/validation.ts`, one line in `tools.ts`): the evidence gallery and the risk badge,
   a §6.4 status pill mapped onto the **existing** semantic/agent-status tokens (no new
@@ -1066,14 +1174,21 @@ named as deferred rather than blocking. Summary of the sequence:
   sibling risk badge on the provenance bar (#26). Evidence attaches at provenance's own two
   anchors — a session's output and a file — so validation composes with #26 and #63 rather
   than duplicating them.
+  **Landed (#86)** — the panel *and* PR 4's Mission Control join arrived together, which
+  is why there is no separate PR number for the first half of PR 4. **PR 4's second half
+  did not land**: there is still no sibling risk badge on the provenance bar (nothing in
+  `ui/src/provenance.ts` or the editor's bar reads a `RiskLevel`). It is the one piece of
+  the M6 plan still outstanding, and it is small.
 - **PR 5 — objective sessions** (`models/objectives.py`, `services/objectives.py`,
   `ui/src/panels/ObjectivePanel.tsx`): a session bound to a validated goal with
   **server-enforced** iteration/token/wall-clock caps and an unattended **deny-and-log**
   permission policy; pass/fail evidence (a `ValidationResult` reaching `pass`) closes it. It
   **reuses the named-session store (#70)** — an `Objective` references a `session_id` and
   adds only a goal, a spec and caps; no second session store, no `store.activeObjective`.
-- **Staged review** (`docs/plan/staged-review.md`) — the deferred checks, scoped as two
-  PRs that add no mechanism: both are `ValidationCheck` implementations, so everything
+  **Landed (#90).**
+- **Staged review** (`docs/plan/staged-review.md`, plan merged as #105) — the deferred
+  checks, scoped as two PRs that add no mechanism: both are `ValidationCheck`
+  implementations, so everything
   downstream (risk, gallery, bus event, replay, the one human approval) is the #82 frame's.
   **PR 1 — the toolchain gate** (`models/gates.py`, `models/evidence.py`,
   `services/gates.py`): a check with id `gates` that runs a **server-owned** catalog of
@@ -1086,9 +1201,23 @@ named as deferred rather than blocking. Summary of the sequence:
   gap — `GET /api/validation/payload/{kind}/{ref}`, which makes the Review panel's expander
   work — and ships the `run_gates` agent tool (the `office_reconcile` precedent: a session
   proves its own work). `WORKBENCH_GATES` / `WORKBENCH_GATE_TIMEOUT_S` configure it;
-  `WORKBENCH_GATE_FAKE=1` is the CI posture.
+  `WORKBENCH_GATE_FAKE=1` is the CI posture. **Landed (#115).**
   **PR 2 — the adversarial review**: a fresh-context reviewer session over the subject's
   diff, delivering typed findings through `report_findings`. Never approves anything.
+  **Landed (#126)**, and two decisions in it are worth carrying: the reviewer is spawned
+  through `SessionManager.create_at` rather than the SDK's `fork_session` — a fork starts
+  from the implementer's transcript, so the reviewer would inherit the very
+  self-justifications it is meant to check, and it is invisible to `WORKBENCH_FAKE_AGENT`
+  so CI could not drive it — and the check ships **no agent-facing tool that starts a
+  review**, because a session that could commission its own reviewer could also loop on
+  it, on the user's money.
+- **A third domain check is armed, not landed**: the **gate-closure / bid-window**
+  `ValidationCheck` (#114) — *is this a legal bid at all?*, asked before reconciliation's
+  *do the numbers agree?*. A server-owned `MARKETS` catalog (the `GateCommand` posture:
+  rules are data the server owns, selected by id, because a rule the subject supplies is
+  a rule the subject can define away) carrying gate closure as **local wall-clock**,
+  the market time unit, and the resolution schedule. Counted here as armed and merging;
+  it is not in master as this line is written.
 - **Deferred past M6's first cut** (named, not forgotten): the intent-directed E2E check
   (it plugs into `ValidationCheck` later), the push/PR babysitter with bounded retries, the
   live-COM reconciliation reader (needs the owner's Office box), per-workspace gate
@@ -1118,20 +1247,48 @@ certs, versioning policy, the real voice model + mic, and the public-launch deci
 all **OWNER-GATED** and marked as such. The visual overhaul uses the `ui-ux-pro-max` skill
 as a design source (principles applied, nothing installed, no dependency).
 
+**Status (2026-08-09) — waves A through D are in master.** Verified PR by PR:
+**A** — V1 the dock/tab/pane chrome (#95), C1 the cross-platform PTY seam (#99, with the
+`pty_posix` double-close race the matrix immediately made live fixed in #110).
+**B** — V2 empty states and the first-paint surface (#98), V3 the QuickBar (#100), V4 the
+status bar and toasts (#103), V5 the agent + chat surface (#106); the first-run **Setup**
+capability (#91) with the branded loading state that keeps the app from looking stuck
+while the backend boots (#94); C2 the 3-OS matrix (#101 — `server` and `ui` now run on
+windows/ubuntu/macos, desktop and Office stay Windows), C3 CONTRIBUTING + issue/PR
+templates + the zero-telemetry README (#109).
+**C** — V7a Monaco themed to ANVIL (#108), V7b workspace content search with its
+`workspace_search` agent tool (#97), V8 the Settings surface (#111).
+**D** — the voice seam (#113): `VoiceBackend`, `FakeVoiceBackend` behind
+`WORKBENCH_VOICE_FAKE=1`, push-to-talk in the composer on `Alt+V`, and
+`GET /api/voice/capabilities` to say why the microphone is not offered.
+**Not landed: V6** — the document mat and Office surfaces. Its *tokens* shipped with the
+ANVIL palette and `office.css` already draws `--surface-paper-surround` /
+`--border-paper-rim`, but the PR itself (the degraded-mode card, the loading state on
+paper colours, its own chrome test) has not been done, and it is the only wave-B item
+outstanding.
+**The owner-gated finish is the rest**: V9 (the fully custom title bar), C4's *signing*
+half (the unsigned pipeline that builds an installer on a tag and attaches it to a
+Release landed as #96), the real voice backend and microphone, the product **name**, and
+the public-launch decision. Nothing on that list is blocked on engineering.
+
 - The logged "frontend is too plain" change request executed in full. **Its colour half
   landed early, on 2026-08-06**: six directions were drafted against a measured
   crispness bar and the owner chose **ANVIL** — true black, achromatic neutrals, one
   hot amber, an inverted surface ramp (chrome lighter than the wells it frames) and a
   document mat that makes a docked Word page read as paper. `DESIGN.md` §2 is rewritten
-  to it and `ui/e2e/palette.test.ts` gates every published figure. **It stops at the
+  to it and `ui/e2e/palette.test.ts` gates every published figure. ~~**It stops at the
   webview edge**: the native window frame is still Tauri's default decoration, which
-  follows the OS-wide light/dark setting rather than these tokens. What remains
-  here is everything the palette does not decide — aggressive
-  ui-ux-pro-max design overhaul on top of the now-complete structural layer —
+  follows the OS-wide light/dark setting rather than these tokens.~~ — **that gap closed
+  in the Feel track** (#54: the caption is tinted from `--surface-app` / `--text-secondary`
+  / `--border-strong` through the `shell.ts` seam and follows the theme toggle). What
+  remained here — the aggressive ui-ux-pro-max overhaul on top of the structural layer:
   distinctive welcome surface, branded empty states, micro-interactions, Monaco
-  enrichment, content search (Ctrl+Shift+F), settings UI, and the one piece of ANVIL
-  that lives outside `ui/`: tinting the native chrome from the current tokens, which
-  carries `desktop/src-tauri/src/host/class.rs`'s `PANEL_SURFACE` with it.
+  enrichment, content search (Ctrl+Shift+F), settings UI — **has landed** as V1–V5,
+  V7a/V7b and V8 (see the status paragraph above). Two pieces of it are still out: **V6**
+  (the document mat PR) and the last piece of ANVIL living outside `ui/` —
+  `desktop/src-tauri/src/host/class.rs`'s `PANEL_SURFACE`, still the retired graphite
+  `#1A1D22` and now *more* visible, since the launch flash shows against the paper mat's
+  pale surround rather than against dark chrome.
   (Layout persistence and
   dockview maximize moved to M5 item 2 and **landed** there; ~~floating and popped-out
   panels are still unclaimed — dockview supports both and nothing has asked yet~~ —
@@ -1149,19 +1306,83 @@ as a design source (principles applied, nothing installed, no dependency).
   chosen in this milestone (the tape belongs in it under one direction, pane identifiers
   under another). Built before that choice, it gets built twice.
 - Voice input as an optional extra (local faster-whisper, push-to-talk, domain
-  vocabulary initial prompt).
+  vocabulary initial prompt). **The seam landed** (#113) and everything above the backend
+  is real: the lifecycle, the bounds, push-to-talk in the composer, the capabilities
+  report, and a fake backend that walks the whole thing with no microphone so the journey
+  is a headless CI test. The **local model, the real microphone capture and the domain
+  vocabulary are owner-gated** and not in the tree; `services/voice.py`'s
+  `register_backend` is the one named place a transcriber plugs into, and there is no
+  cloud path and no setting that would add one.
 - Remaining OSS product bar: first-run experience — the find-what-exists half (a welcome
-  surface and a complete keyboard reference) landed as M5 item 17, and the **workspace
-  picker half is done** too (M5 item 5: the app says which folder it is showing and whether
-  anybody chose it, and every way to open another is in the app), leaving only the
-  Claude-login and Office/OnlyOffice detection walkthroughs; cross-platform PTY + 3-OS CI
-  matrix,
-  CONTRIBUTING/templates, versioned Tauri releases with signed installers,
-  zero-telemetry README stance, and the real product name.
+  surface and a complete keyboard reference) landed as M5 item 17, the **workspace
+  picker half is done** (M5 item 5: the app says which folder it is showing and whether
+  anybody chose it, and every way to open another is in the app), and the
+  **Claude-login and Office/OnlyOffice detection walkthroughs landed too** (#91, the
+  Setup capability reading `office/capabilities`) — so this line is now empty of
+  first-run work. Also done: cross-platform PTY + the 3-OS CI matrix (#99/#110/#101),
+  CONTRIBUTING/templates/zero-telemetry README (#109), and an unsigned versioned release
+  that builds an installer on a tag (#96). **Left: signed** installers and the real
+  product **name** — both owner-gated.
 - Exit criterion: a stranger on a fresh Windows machine reaches a working, secured,
   distinctive product in under ten minutes.
 
 ## Decisions log
+
+- 2026-08-09 — **A nineteen-PR day, a ratified product direction, and a roadmap that had
+  stopped being true.** Counted rather than estimated, from `gh pr list` and `git log` on
+  `origin/master`: **19 PRs merged on 2026-08-09**, with **8 more armed on auto-merge**
+  behind them. The merged set breaks into three groups. **Milestone work (11):** the 3-OS
+  CI matrix (#101); the ANVIL
+  surfaces V3 QuickBar (#100), V5 agent/chat (#106) and V7a the Monaco theme (#108) —
+  V4 status bar/toasts (#103) having landed the evening before; V8 Settings (#111); C3
+  CONTRIBUTING + templates + the zero-telemetry README (#109); the voice **seam** (#113);
+  the notebook view (#117), which closed the last clause of M5 item 16; and M6's staged
+  review **complete** — its plan (#105), the toolchain-gate check (#115) and the
+  adversarial reviewer (#126). **Confirmed-bug fixes (7):** the `pty_posix` double-close
+  race the new matrix immediately made live (#110), a PTY that signalled the pid
+  instead of the process group (#112), offset-bearing timestamps silently stripped to
+  naive so DST-fold expectations collided (#120), shell close paths violating the
+  main-thread invariant (#121), `ActivityService` still serving the workspace the user
+  had left (#122) — a live violation of this repo's own re-rooting rule — a closed editor
+  pane disposing the Monaco model under its sibling (#123), and a QuickBar that was not a
+  real modal (#125). **Test hardening (1):** the three E2E flakes today's pipelines
+  actually hit (#129). Armed and merging as this is written, and therefore **not counted
+  as done anywhere above**: PowerPoint hosting (#107), the gate-closure market check
+  (#114), dockview 4.13 → 7.0.4 (#118), four more fixes (#116, #119, #127, #128) and the
+  plan below. Counting both sides of the merge queue, **eleven** of the day's PRs are
+  fixes to defects found in shipped work — which is the shape of a day spent proving
+  what was built rather than adding to it.
+  **The rule this entry establishes, because it is the failure mode of a document like
+  this one:** an item is *done* only when its code is in `master`. Armed-but-unmerged is
+  written as "armed, merging" and counted as open. Everything marked done in this pass
+  was checked against the tree or the merge log, and where the two disagreed the tree
+  won — which is how `max_concurrent_sessions` (still 4), `PANEL_SURFACE` (still the
+  retired graphite) and the missing provenance risk badge stayed on the open lists.
+  **The product direction was ratified the same day** (owner, confirmed twice, all five):
+  *close the loops, don't add features; the wedge is the proof engine.* Its build plan is
+  `docs/plan/productivity-loops.md` (#124 — **armed, in flight**), five PRs each joining
+  two ends this repo already built and never connected: **A** live-reconcile trust (no
+  false PASS from a docked-and-dirty workbook), **B** spec-from-code (`.workbench/reconcile/*.toml`
+  re-fired by the watcher behind a content-hash approval), **C** evidence persistence and
+  a one-page export, **D** an agent-activity surface over the feed that already exists,
+  **E** CLI composability (parameterised commands and a `--script` batch mode). None of
+  the five is built; nothing in this document claims otherwise. Two measurements from
+  that plan are worth carrying here because they change decisions rather than describe
+  them: a **live COM read hands back tz-aware datetimes whose offset does not match the
+  machine's zone**, so the plausible-looking `.astimezone()` normalisation would move
+  every hourly row by an hour on exactly the Nordic fall-back date the DST gate exists
+  for — the offset is dropped at the COM seam, never honoured; and `workbench-cmd` costs
+  **~4.6 s** per invocation, of which **1.62 s** is `commands_cli.py` importing
+  `workbench_server.main` for one function and dragging the whole app behind it.
+  **What is left is mostly not engineering.** The owner-gated remainder, in one place:
+  **V9** (the fully custom title bar, waiting on the ratified visual direction),
+  **signing** (C4's second half — the unsigned pipeline already builds and attaches an
+  installer on a tag), the product **NAME** (OSS-bar item 7, the only one of the seven
+  still open), the **public-launch decision**, and the **real voice backend** (the local
+  model, the microphone, the domain vocabulary — the seam and its fake are shipped and
+  green in CI). Also still engineering, and named so it is not lost: M4's side-by-side
+  Office proof, M5 item 9's hibernation/reaping/raised cap/preset reconciliation, M6's
+  provenance risk badge, and M7's V6 document-mat PR.
 
 - 2026-08-05 — **Two more `kunchenguid` repos read against the vetting bar; both
   learn-and-build, neither adopted** (owner asked; the third, `lavish-axi`, was
@@ -1400,21 +1621,35 @@ as a design source (principles applied, nothing installed, no dependency).
 
 Build for real external users, not just the author. Consequences, tracked as work:
 
+Six of the seven are **done** as of 2026-08-09; the seventh is owner-gated.
+
 1. **Local-API security hardening** — per-launch auth token + strict WS Origin checks
-   (DNS-rebinding defense). Scheduled: **M5** (pulled forward; see above).
+   (DNS-rebinding defense). Scheduled: **M5** (pulled forward; see above). **Done** —
+   M5 item 8 (#69/#72/#76/#80), enforcement on by default, plus the permission-broker
+   hook (#104).
 2. **Cross-platform**: ptyprocess-based POSIX PTY + CI matrix (windows/ubuntu/macos).
    Scheduled: M7. No Windows-only assumptions outside `pty_manager.py`; the Office host
-   is Windows-only by nature and degrades to OnlyOffice elsewhere.
+   is Windows-only by nature and degrades to OnlyOffice elsewhere. **Done** — the PTY
+   seam and its stdlib POSIX backend (#99, race fixed in #110, process-group terminate
+   in #112), the matrix in #101; `server/tests/test_ci_matrix.py` pins the workflow's
+   shape so a matrix cannot silently collapse to one OS.
 3. **First-run experience**: workspace picker, "Claude login not found" guidance,
-   Office/OnlyOffice detected-or-degraded. Scheduled: M7.
+   Office/OnlyOffice detected-or-degraded. Scheduled: M7. **Done** in three parts — the
+   find-what-exists half (M5 item 17), the picker (M5 item 5), and the Setup capability
+   that detects a Claude login (*detected, never performed*) and reports Office/OnlyOffice
+   through `office/capabilities` (#91), with the branded boot state in front of it (#94).
 4. **Contributor experience**: CONTRIBUTING.md, ARCHITECTURE.md, issue/PR templates,
-   good-first-issue labels. Scheduled: M7.
+   good-first-issue labels. Scheduled: M7. **Done** (#109 + the labels on the repo).
 5. **Release engineering**: versioned GitHub releases with Tauri installers, changelog,
-   signed artifacts if feasible. Scheduled: M7.
+   signed artifacts if feasible. Scheduled: M7. **Half done** — a tag builds the
+   installer and attaches it to a Release (#96); **signing is owner-gated** (certificate).
 6. **Privacy stance**: zero telemetry, stated in README. Files never leave the machine
-   except through the user's own Anthropic account.
+   except through the user's own Anthropic account. **Done** — README *Zero telemetry*
+   (#109); the voice seam was built to the same stance (#113), and the usage meters keep
+   utilization out of `shell.log` at `debug` level rather than only out of `.workbench/`.
 7. **Naming**: "workbench" is a placeholder — pick a unique, searchable name (check
-   GitHub/PyPI/npm availability) before publishing. Scheduled: M7.
+   GitHub/PyPI/npm availability) before publishing. Scheduled: M7. **Open, OWNER-GATED** —
+   the only one of the seven still outstanding.
 
 ## Change requests
 
@@ -1600,13 +1835,40 @@ Build for real external users, not just the author. Consequences, tracked as wor
 Recorded, not scheduled. Nothing here is worked on until M7 ships — see the scope
 freeze above.
 
-- Voice input (local faster-whisper push-to-talk with a domain vocabulary) — was M7
-  item; deferred out with the freeze since it is additive rather than shipping work.
+- ~~Voice input (local faster-whisper push-to-talk with a domain vocabulary) — was M7
+  item; deferred out with the freeze since it is additive rather than shipping work.~~
+  **Off this list**: the seam shipped as M7 wave D (#113) and the remainder — the local
+  model, the microphone, the domain vocabulary — is owner-gated M7 work, tracked there
+  rather than as an unscheduled idea.
 - TOON output format for agent-facing tools, if a list-heavy tool ever ships (rejected
-  with a measurement in the axi entry; the measurement is what would change).
+  with a measurement in the axi entry; the measurement is what would change). *Note
+  2026-08-09: the trigger has fired* — `workspace_search` (#97) is exactly the
+  list-shaped payload the entry had in mind. The rejection stands until somebody
+  re-measures it on that tool's real output; the entry stays here for that reason.
 - A sanitized OfficeCLI fork, only if the COM bridge leaves real fidelity gaps.
 - Folder-level rollup for provenance markers, and provenance surviving a restart.
 - Plan artifacts persisted to `.workbench/` and re-rendered when resuming a transcript.
+
+- 2026-08-09 — **Known defect, not an idea: the watcher's hash read blocks a delete for
+  ~100–500 ms after every change** (Windows). `services/watcher.py::_hash_of` reads each
+  changed file with `Path.read_bytes()` to put a `hash` on its `FileChangedEvent`, and
+  CPython opens **without `FILE_SHARE_DELETE`** — so for as long as that read is open,
+  Windows refuses to unlink the file. A user who deletes a file through the tree inside
+  that window gets a sharing violation out of `DELETE /api/files/content`
+  (`routers/files.py`), which has no handler for it, so it surfaces as a raw 500 rather
+  than as anything the UI can explain. Measured rather than assumed: with the read
+  artificially widened to 400 ms, an unlink lands `EBUSY` across exactly the predicted
+  band and succeeds on either side of it; at the real sub-millisecond read it bites on a
+  loaded box and never on an idle one, which is why it showed up on CI first.
+  **What is fixed and what is not.** PR #129 hardened only the E2E harness against it
+  (`removeWorkspaceFile` in `ui/e2e/workspace.ts`, retrying the way `fs.rmSync` is
+  designed to) — the harness *should* tolerate a transient OS condition regardless. The
+  production path is untouched and this entry is the reason it is not forgotten: the real
+  fix is opening the watcher's read with `FILE_SHARE_DELETE`, which needs
+  `ctypes`/`CreateFileW` since CPython's `open()` cannot ask for it — a real change to a
+  hot path, worth doing deliberately rather than inside a test-hardening PR. A cheaper
+  half, if the read is not worth touching: make the delete endpoint retry the sharing
+  violation briefly and return a named error instead of a 500 when it persists.
 
 - 2026-08-06 — **The scope freeze is reopened once, on its own terms** (owner: new
   document types). The freeze entry above allows exactly two grounds for reopening — a
