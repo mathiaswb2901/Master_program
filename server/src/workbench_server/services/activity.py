@@ -45,6 +45,12 @@ Four rules make that affordable and honest:
 State is in memory only. This is live state about processes, not workspace data:
 a restart reports an empty fleet, which is the truth, and nothing is ever written
 to ``.workbench/`` (the usage meters set that precedent).
+
+It is, however, **workspace-scoped** state: the root is copied into a field here
+(the jail), and every string a window holds was derived from it. So this service
+owes a ``set_workspace_root`` and a line in ``create_app``'s rootables, and it has
+both — see :meth:`ActivityService.set_workspace_root` for what a switch keeps and
+what it must forget.
 """
 
 import asyncio
@@ -284,10 +290,16 @@ class ActivityService:
             self._windows[session_id] = _Window(
                 session_id=session_id, folder=folder, title=title, kind=kind, active_at=at
             )
-        elif window.title == title:
+        elif window.title == title and window.folder == folder:
             return  # nothing a client would render differently
         else:
             window.title = title
+            # The label follows too. A workspace switch relabels a session that
+            # survived it (``SessionManager.set_workspace_root``) and announces
+            # it again with the label it derived; a row that kept the old one
+            # would file a still-running agent under a folder of the project it
+            # has nothing to do with.
+            window.folder = folder
         self._touch(session_id)
 
     def note_tool_started(
@@ -363,10 +375,63 @@ class ActivityService:
         self._removed.add(session_id)
         self._schedule()
 
+    # ---- following a workspace switch ---------------------------------------
+
+    def set_workspace_root(self, root: Path) -> None:
+        """Re-jail against ``root``, and **forget the fleet it left**.
+
+        Two things here are derived from the workspace root, and neither can
+        survive a switch.
+
+        *The jail.* Every summary is normalized against ``self._root``
+        (:func:`describe`), so keeping the old one answers
+        ``(outside the workspace)`` for every call made in the project the user
+        has just opened — the feed's entire content, wrong for the rest of the
+        process. That is the bug this method exists for.
+
+        *The window.* Each entry's ``summary`` and ``target`` were jailed
+        against the root that is gone, and they cannot be re-derived: the raw
+        argument is dropped at the door precisely so no later code path can leak
+        it. A ``target`` is what the panel *opens*, so carrying one across would
+        point a click at a same-named file in a different project — the wrongness
+        ``ProvenanceService`` and ``ValidationService`` clear their maps to
+        avoid, one moment earlier in the same signal.
+
+        **Published, not left for the client to re-read**, which is where this
+        differs from those two. They are read back over REST as part of adopting
+        a new workspace; this feed is adopted through the frames on
+        ``/ws/events`` and re-reads nothing on a workspace change, so a picture
+        nobody corrected would sit stale in every open window.
+
+        A session that is still *running* comes straight back:
+        ``SessionManager.set_workspace_root`` re-announces the live fleet with
+        the labels the switch just gave it, and :meth:`_touch` takes each one
+        back out of ``removed``. That is why this service is re-rooted **before**
+        the session manager in ``create_app`` — the other order announces rows
+        into a service that is about to drop them.
+        """
+        self._root = root.resolve()
+        # Every id, so a client holding its own copy of this map drops the rows
+        # it cannot be told about any other way.
+        self._removed.update(self._windows)
+        self._windows.clear()
+        self._dirty.clear()
+        # What *this* view had to leave out. The view is the next workspace's
+        # now, and carrying the number over would report the project the user
+        # left in the one they opened.
+        self._dropped_sessions = 0
+        self._schedule()
+
     # ---- the fleet cap ------------------------------------------------------
 
     def _touch(self, session_id: str) -> None:
         self._windows.move_to_end(session_id)
+        # Here again, so not gone. A row and its own id in ``removed`` in one
+        # frame is a contradiction the client resolves by dropping the row (the
+        # merge applies removals last), which would eat the re-announcement a
+        # workspace switch ends with — and, outside a switch, a session evicted
+        # by the cap that goes on working.
+        self._removed.discard(session_id)
         while len(self._windows) > self._max_sessions:
             evicted, _ = self._windows.popitem(last=False)
             self._dirty.discard(evicted)

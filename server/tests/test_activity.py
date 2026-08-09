@@ -17,6 +17,7 @@ Three families of test, and the split is the design:
   forty-call burst is a handful of frames, not forty.
 """
 
+import asyncio
 import json
 import sys
 from collections.abc import Callable
@@ -31,6 +32,7 @@ from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.activity import SessionActivityEvent
 from workbench_server.services.activity import (
+    ACTIVITY_WINDOW_S,
     MAX_ENTRIES_PER_SESSION,
     MAX_SESSIONS,
     OUTSIDE_WORKSPACE,
@@ -502,3 +504,238 @@ def test_every_path_key_provenance_knows_is_jailed_here_too(tmp_path: Path, path
     """The two views must not disagree about which file an agent is on."""
     _, target = describe(tmp_path, tmp_path, "Edit", {path_key: "src/model.py"})
     assert target == "src/model.py"
+
+
+# ---- the switch --------------------------------------------------------------
+#
+# The workspace is not fixed at launch (M5 item 5): the status-bar chip and the
+# QuickBar's *Switch workspace…* re-root the running server. This service copies
+# `workspace.root` into a field of its own, so it owes a `set_workspace_root` and
+# a line in `create_app`'s rootables — and until it had them, a switch left the
+# feed jailed against the folder the user walked away from.
+
+
+def _two_projects(tmp_path: Path) -> tuple[Path, Path]:
+    """Two workspaces whose files cannot be confused for each other, and which
+    are not inside one another — so a path from one is genuinely outside the
+    other's jail rather than merely relative to a different prefix."""
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    (alpha / "only-in-alpha.md").write_text("a\n", encoding="utf-8")
+    (beta / "only-in-beta.md").write_text("b\n", encoding="utf-8")
+    return alpha, beta
+
+
+def _switching_app(root: Path, tmp_path: Path) -> Any:
+    return create_app(
+        Settings(
+            workspace_root=root,
+            claude_projects_dir=tmp_path / "projects",
+            fake_agent=True,
+        )
+    )
+
+
+def _new_session(client: TestClient) -> str:
+    session_id: str = client.post("/api/agents/sessions", json={"folder": ""}).json()["session_id"]
+    return session_id
+
+
+def _run_a_tool(client: TestClient, session_id: str) -> None:
+    """One real turn on a real session socket: the fake reads the alphabetically
+    first file in the session's folder, which is a file this workspace owns."""
+    with client.websocket_connect(f"/ws/agent/{session_id}") as agent:
+        agent.send_text(json.dumps({"type": "user_message", "text": "use tool"}))
+        while json.loads(agent.receive_text())["type"] != "turn_done":
+            pass
+
+
+def _rows(client: TestClient) -> dict[str, dict[str, Any]]:
+    payload = client.get("/api/activity").json()
+    return {row["session_id"]: row for row in payload["sessions"]}
+
+
+def test_a_window_nobody_re_announces_is_reported_gone(tmp_path: Path) -> None:
+    """The service contract under that wiring: a row dropped by a switch is
+    *announced*, because every client holds its own copy of this map."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    svc, bus = service(tmp_path)
+    svc.note_session(session_id="s1", title="a session", folder="")
+    svc.note_session(session_id="s2", title="another", folder="src")
+    svc.set_workspace_root(elsewhere)
+    assert svc.snapshot().sessions == []
+    assert bus.frames()[-1].removed == ["s1", "s2"]
+
+
+def test_a_switch_resets_the_count_of_what_the_fleet_view_dropped(tmp_path: Path) -> None:
+    """``dropped_sessions`` is what this view has had to leave out. The view is
+    the next workspace's now, and carrying the number over would report the
+    project the user left in the one they opened."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    svc, _ = service(tmp_path, max_sessions=1)
+    svc.note_session(session_id="s1", title="a session", folder="")
+    svc.note_session(session_id="s2", title="another", folder="")
+    assert svc.snapshot().dropped_sessions == 1
+    svc.set_workspace_root(elsewhere)
+    assert svc.snapshot().dropped_sessions == 0
+
+
+def test_a_session_relabelled_by_a_switch_is_relabelled_in_the_feed(tmp_path: Path) -> None:
+    """``note_session`` fires again after a switch carrying the label the session
+    manager has just derived. A row that kept the old one would file a
+    still-running agent under a folder of the project it has nothing to do
+    with — the reason ``SessionInfo.folder`` is relabelled in the first place."""
+    svc, bus = service(tmp_path)
+    svc.note_session(session_id="s1", title="a session", folder="")
+    before = len(bus.frames())
+    svc.note_session(session_id="s1", title="a session", folder="/other/project")
+    assert svc.snapshot().sessions[0].folder == "/other/project"
+    assert len(bus.frames()) == before + 1, "a relabelled session was not news"
+
+
+async def test_a_session_re_announced_after_a_switch_is_not_also_reported_gone(
+    tmp_path: Path,
+) -> None:
+    """A row and its own id in ``removed``, in one frame, is a contradiction the
+    client resolves by dropping the row (``ui/src/activity.ts`` applies removals
+    last) — and it would eat the re-announcement every switch ends with.
+
+    Asserted with a real loop because the collision only exists inside the
+    coalescing window: without one, every change is its own frame.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    bus = RecordingBus()
+    svc = ActivityService(tmp_path, bus)
+    svc.start()
+    try:
+        svc.note_session(session_id="s1", title="a session", folder="")
+        assert len(bus.frames()) == 1  # a quiet fleet's first change goes out at once
+        # Both of these land inside the window that frame opened, so they arrive
+        # as one — which is exactly the arrangement a real switch produces.
+        svc.set_workspace_root(elsewhere)
+        svc.note_session(session_id="s1", title="a session", folder="src")
+        await asyncio.sleep(ACTIVITY_WINDOW_S * 4)
+        frame = bus.frames()[-1]
+        assert frame.removed == [], "the row the switch re-announced was also reported gone"
+        assert [row.session_id for row in frame.sessions] == ["s1"]
+    finally:
+        await svc.stop()
+
+
+def test_a_switch_re_jails_the_feed_against_the_new_workspace(tmp_path: Path) -> None:
+    """The bug, at the level a user meets it: open a folder, work in it, and the
+    fleet feed must name the files of the folder you are *in*.
+
+    Before the fix the service kept the root it was constructed with, so every
+    call made after a switch was normalized against a workspace the session's
+    folder is not inside — and the panel's whole content became
+    ``Read: (outside the workspace)`` with nothing left to click.
+    """
+    alpha, beta = _two_projects(tmp_path)
+    with TestClient(_switching_app(alpha, tmp_path)) as client:
+        before = _new_session(client)
+        _run_a_tool(client, before)
+        assert _rows(client)[before]["entries"][0]["target"] == "only-in-alpha.md"
+
+        assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+
+        after = _new_session(client)
+        _run_a_tool(client, after)
+        entry = _rows(client)[after]["entries"][0]
+        assert entry["summary"] == "Read: only-in-beta.md"
+        assert entry["target"] == "only-in-beta.md", "the feed is still jailed against alpha"
+
+
+def test_a_switch_does_not_leave_the_old_workspaces_activity_in_the_new_feed(
+    tmp_path: Path,
+) -> None:
+    """The other half: what a surviving session's row says afterwards.
+
+    A running agent is not killed by the user opening another folder
+    (``SessionManager.set_workspace_root``), so its row stays — but every string
+    in it was derived from the workspace being left. The entries go, because a
+    ``target`` is what the panel *opens* and ``only-in-alpha.md`` in beta is a
+    different file (or no file); the label follows the session manager's
+    relabelling, which files a session outside the root under its own absolute
+    path instead of under a same-named folder of the new project.
+    """
+    alpha, beta = _two_projects(tmp_path)
+    with TestClient(_switching_app(alpha, tmp_path)) as client:
+        survivor = _new_session(client)
+        _run_a_tool(client, survivor)
+        assert _rows(client)[survivor]["entries"] != []
+
+        assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+
+        row = _rows(client)[survivor]
+        assert row["entries"] == [], "alpha's tool calls are still in beta's feed"
+        assert row["dropped"] == 0
+        # Relabelled, not vanished: still listed, under the folder it is really
+        # working in. This is also the ordering assertion — the service is
+        # re-rooted *before* the session manager re-announces the live fleet, so
+        # a wrong order in `create_app` loses the row entirely.
+        assert row["folder"] == alpha.as_posix()
+        assert client.get("/api/activity").json()["dropped_sessions"] == 0
+
+
+def test_a_broken_activity_observer_cannot_abandon_a_workspace_switch(tmp_path: Path) -> None:
+    """The other end of ``test_a_broken_activity_observer_cannot_wedge_the_shutdown``.
+
+    Re-announcing the live fleet happens inside ``WorkspaceService.switch``,
+    after the jail has moved and before the watcher has been restarted. An
+    exception escaping it would leave the switch half-applied — a server whose
+    jail and whose watch point at different projects — over a panel that failed
+    to update. Here that failure would surface as a 500 from the switch.
+    """
+    alpha, beta = _two_projects(tmp_path)
+    app = _switching_app(alpha, tmp_path)
+    with TestClient(app) as client:
+        session_id = _new_session(client)
+
+        def boom(**_: Any) -> None:
+            raise RuntimeError("the activity service is broken")
+
+        app.state.activity.note_session = boom
+        assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+        # And the rest of the switch still happened: the jail moved, so beta's
+        # file reads and alpha's — the one the server was serving a moment ago —
+        # does not.
+        beta_file = client.get("/api/files/content", params={"path": "only-in-beta.md"})
+        alpha_file = client.get("/api/files/content", params={"path": "only-in-alpha.md"})
+        assert beta_file.status_code == 200
+        assert alpha_file.status_code != 200
+        assert app.state.session_manager.get(session_id) is not None
+
+
+@pytest.mark.timeout(60)
+def test_a_switch_is_published_to_windows_that_only_listen(tmp_path: Path) -> None:
+    """The reset has to go out on the bus, which is where this differs from
+    provenance and validation: ``ui/src/activity.ts`` adopts a switch through the
+    frames on ``/ws/events`` and re-reads nothing on a workspace change, so a
+    picture nobody corrected stays on screen in every open window.
+    """
+    alpha, beta = _two_projects(tmp_path)
+    with (
+        TestClient(_switching_app(alpha, tmp_path)) as client,
+        client.websocket_connect("/ws/events") as events,
+    ):
+        live = _new_session(client)
+        _run_a_tool(client, live)
+        assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+        # Only the post-switch frame can match: before it, this session's row is
+        # labelled "" (the old root) and holds the call it just ran.
+        _drain(
+            events,
+            lambda seen: any(
+                row["session_id"] == live
+                and row["folder"] == alpha.as_posix()
+                and row["entries"] == []
+                for frame in seen
+                for row in frame["sessions"]
+            ),
+        )

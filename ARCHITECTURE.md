@@ -1394,11 +1394,24 @@ them at once and none can be left behind by not being told.
 
 **Everything that copied the root owes a `set_workspace_root`, and the list of
 them lives in exactly one place.** `create_app` hands `WorkspaceService` the
-services that kept their own copy — shortcuts, layouts, provenance, the session
-manager (sync), then the watcher and the worktree pool (async, because they
-restart something). A service added later that copies the root and is not on
-that list is one that keeps serving the project the user left, and the symptom
-is data from the wrong workspace rather than a crash.
+services that kept their own copy — shortcuts, layouts, provenance, validation,
+the fleet feed, the session manager, the conversation browser (sync), then the
+watcher and the worktree pool (async, because they restart something). A service
+added later that copies the root and is not on that list is one that keeps
+serving the project the user left, and the symptom is data from the wrong
+workspace rather than a crash. That is not hypothetical: the activity feed
+shipped without either half and answered `(outside the workspace)` for every tool
+call made after a switch, for the rest of the process. The claim is now asserted
+rather than reviewed — `test_no_service_the_app_built_still_holds_the_root_the_user_left`
+walks what the factory actually built and fails on any service still holding the
+previous root.
+
+**Two of those entries are ordered, and the order is written down where it is
+enforced.** The fleet feed is re-rooted *before* the session manager: it forgets
+a fleet whose every row was jailed against the workspace being left, and the
+manager's own re-rooting then re-announces the sessions that are still running
+with the labels it just derived. Reversed, the announcements land in a service
+about to drop them and Mission Control goes blank until the next tool call.
 
 **And that whole sequence is held under one lock.** `WorkspaceService.switch`
 writes the jail synchronously and then *awaits* the watcher and the pool, so

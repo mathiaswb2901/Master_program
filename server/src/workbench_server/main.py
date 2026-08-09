@@ -340,6 +340,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # forget them, or a verdict about a file in the project just left
             # would attach to a same-named file in the one opened.
             validation_service,
+            # Before the session manager, and that order is load-bearing: this
+            # forgets a fleet whose every row was jailed against the workspace
+            # being left, and the manager's own re-rooting then re-announces the
+            # sessions that are still running with the labels it just derived.
+            # Reversed, those announcements would land in a service about to
+            # drop them and Mission Control would go blank until the next tool
+            # call (services/activity.py::set_workspace_root).
+            activity_service,
             session_manager,
             # Half B of the session browser (M5 item 12): after a switch the
             # browser must judge each folder against the workspace the user just

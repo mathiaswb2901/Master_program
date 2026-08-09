@@ -474,6 +474,44 @@ async def test_a_live_session_outside_the_new_root_is_relabelled_not_killed(
         assert rows[session_id] == (alpha / "src").as_posix()
 
 
+def test_no_service_the_app_built_still_holds_the_root_the_user_left(tmp_path: Path) -> None:
+    """The sweep, made executable.
+
+    The rule is that a service copying ``workspace.root`` into a field of its own
+    owes a ``set_workspace_root`` **and** a line in ``create_app``'s rootables.
+    Forgetting one crashes nothing — it produces a service quietly serving the
+    folder the user left, which is how the activity feed came to answer
+    ``(outside the workspace)`` for every call made after a switch. So rather
+    than trusting a reading of ``main.py``, this walks what the factory actually
+    built and asserts that after a real switch nothing still holds the previous
+    root.
+
+    Deliberately narrow: equality with the *old root* is the whole test, because
+    that is the one shape the rule is about. A path merely derived from it (a
+    ``.workbench`` file under it) is not caught here, and a service that stores
+    no path at all is not accused of anything.
+    """
+    alpha, beta = _two_projects(tmp_path)
+    app = create_app(Settings(workspace_root=alpha, app_data_root=tmp_path / "appdata"))
+    with TestClient(app) as client:
+        assert client.post("/api/workspace/switch", json={"path": str(beta)}).status_code == 200
+
+    # Starlette keeps `app.state`'s contents in a plain dict, and reading it is
+    # the point: a sweep over a list of services someone remembered to name here
+    # would go stale exactly when a new service is added — the moment it exists
+    # to cover.
+    stale = sorted(
+        f"{name}.{field}"
+        for name, service in app.state._state.items()
+        # The launch configuration, not live state: `Settings.workspace_root` is
+        # a record of how this process was started and is meant to keep saying so.
+        if name != "settings" and hasattr(service, "__dict__")
+        for field, value in vars(service).items()
+        if isinstance(value, Path) and value == alpha
+    )
+    assert stale == [], f"still rooted in the workspace the user left: {stale}"
+
+
 def test_the_jail_still_refuses_a_traversal_after_a_switch(tmp_path: Path) -> None:
     """The rule itself did not move — only the root it is asked about."""
     alpha, beta = _two_projects(tmp_path)
