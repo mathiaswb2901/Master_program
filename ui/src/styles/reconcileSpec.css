@@ -1,0 +1,168 @@
+/**
+ * The Specs panel — reconciliation specs and their one-time approvals
+ * (productivity loops, PR-B).
+ *
+ * Every colour is a DESIGN.md token; there is no raw hex here and no invented
+ * colour. The status pill reuses `.wb-pill` from `review.css` and is coloured by
+ * the same semantic mapping (`reconcileSpec.ts`, `--pill-color` / `--pill-bg`),
+ * so a "pass" here and a "pass" on a Review pane are the same green by
+ * construction rather than by coincidence. This sheet only lays out around it.
+ *
+ * No animation anywhere: DESIGN §5.4 says the working dot is the only looping
+ * one in the app, and a list of specs has nothing that moves. A run arriving on
+ * the socket simply replaces a row.
+ */
+
+.wb-specs {
+  height: 100%;
+  overflow: auto;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  padding: var(--space-4);
+}
+
+.wb-specs-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wb-specs-intro,
+.wb-specs-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.wb-specs-error {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  background: var(--error-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* ---- one spec ------------------------------------------------------------- */
+
+.wb-spec-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+}
+
+.wb-spec-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.wb-spec-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.wb-spec-workbook {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.wb-spec-detail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.wb-spec-run {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+/* ---- what an approval covers ---------------------------------------------- */
+
+/* The receipt behind the sentence "this spec, running exactly this code". A
+ * claim about coverage that a reader cannot check is not a claim. */
+.wb-spec-covered {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  list-style: none;
+}
+
+.wb-spec-covered li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.wb-spec-covered-origin {
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+.wb-spec-covered-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- actions -------------------------------------------------------------- */
+
+.wb-spec-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.wb-spec-action {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wb-spec-action:hover {
+  background: var(--surface-hover);
+}
+
+.wb-spec-action:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.wb-spec-action.is-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.wb-spec-loading {
+  padding: var(--space-4);
+  color: var(--text-secondary);
+}

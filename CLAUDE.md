@@ -173,6 +173,23 @@ ruling it out.
   `.workbench/gates.json` is deliberately refused. `WORKBENCH_GATE_FAKE=1`
   scripts the exit codes and the output, the `WORKBENCH_OFFICE_FAKE` posture, and
   is what the E2E suite drives.
+  **Reconciliation specs** (productivity loops PR-B — *ambient CI for
+  workbooks*): a checked-in `.workbench/reconcile/<name>.toml` maps workbook
+  cells and ranges to callables in the **workspace's own code**, and a save of
+  the workbook re-runs the reconciliation gate with the values they produce.
+  `GET /api/reconcile/specs` lists them and runs nothing; approving one is a
+  **one-time content-hash decision** covering the spec *and* the code it names
+  (the entry modules, plus the `sys.modules` closure a previous run actually
+  used) — re-verified before every run, and revoked the moment any of it changes.
+  The trust record lives under the machine's app-data dir, never in `.workbench/`.
+  The argv is fixed and server-owned (`uv run python -m
+  workbench_server.spec_entry`); the spec travels on stdin.
+  `WORKBENCH_RECONCILE_TIMEOUT_S` bounds one run, `WORKBENCH_RECONCILE_DEBOUNCE_S`
+  the save debounce, and `WORKBENCH_RECONCILE_FAKE=1` scripts the values with no
+  user code executed anywhere (the `WORKBENCH_GATE_FAKE` posture).
+  This is the "explicit one-time trust prompt" `services/gates.py` names as the
+  price of admission for reading a config file out of a folder — spent on
+  reconciliation specs only. `.workbench/gates.json` stays refused.
   OnlyOffice stays the preview/diff/fallback path and needs env:
   `WORKBENCH_ONLYOFFICE_URL=http://localhost:8880` and
   `WORKBENCH_ONLYOFFICE_JWT_SECRET` = `services.CoAuthoring.secret.session.string` from
