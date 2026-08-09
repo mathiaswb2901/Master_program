@@ -58,6 +58,16 @@ What one user message produces, in order:
   test for the four original node kinds, and growing it would quietly change
   what that journey proves.
 
+A ``reviewer`` session is the one kind that ignores all of the above and follows
+its own script (:meth:`FakeAgentClient._review`): it answers the review brief by
+calling ``report_findings`` with canned findings, through the **real**
+:class:`~workbench_server.services.agent_tools.FindingsReceiver`. That is the
+``_spawn_workers`` posture exactly — the fake drives the production service and
+reports what it said — and it is what lets CI prove spawn → diff → findings →
+grouped evidence → risk → *still awaiting approval* with no Claude login and no
+tokens. It is a **script, not a special path**: the check, the receiver, the
+session manager, the bus and the evidence are all the shipped ones.
+
 Never enabled by default (``Settings.fake_agent``), and ``main.py`` logs a
 warning on startup when it is: a workbench that quietly answers with canned
 text instead of an agent is worse than one that fails loudly.
@@ -104,7 +114,11 @@ from workbench_server.models.visuals import (
     VisualBlock,
 )
 from workbench_server.services.agent_sessions import ClientFactory, SdkClient, SessionBridge
-from workbench_server.services.agent_tools import OrchestratorHandle
+from workbench_server.services.agent_tools import (
+    FindingsReceiver,
+    OrchestratorHandle,
+    handle_report_findings,
+)
 
 log = structlog.get_logger()
 
@@ -140,6 +154,53 @@ SPAWN_WORKER_COUNT = 2
 #: Mission Control exists to make visible and answerable. One spawn therefore
 #: exercises both halves of the board.
 WORKER_TASK = "worker {index}: use tool, then ask permission before touching anything"
+
+#: What a scripted reviewer reports. One of each severity, so the grouped
+#: evidence line exercises the *worst-severity* rule rather than the only one it
+#: was given, and every finding carries a refutation because the model requires
+#: one — a fake that could file a bare claim would be proving a shape the real
+#: schema refuses.
+#:
+#: ``must_fix`` first, so the shipped script produces a ``fail`` line and a
+#: ``high`` risk: the E2E journey's whole assertion is that a result carrying a
+#: must_fix finding is **still awaiting approval**, and a fake that only ever
+#: came back clean would leave that half unproven in the browser.
+FAKE_FINDINGS: list[dict[str, Any]] = [
+    {
+        "severity": "must_fix",
+        "file": "server/src/workbench_server/services/dispatch.py",
+        "line": 118,
+        "claim": "The gate-closure check uses the local clock, so a bid built during the "
+        "DST spring-forward hour is timestamped an hour early.",
+        "refutation": "On 2026-03-29 at 02:30 Europe/Oslo the local hour does not exist; "
+        "the naive timestamp resolves to 01:30 UTC and the bid is submitted after "
+        "gate closure while the code believes it is 30 minutes early.",
+        "confidence": "likely",
+    },
+    {
+        "severity": "should_fix",
+        "file": "server/src/workbench_server/services/dispatch.py",
+        "line": 64,
+        "claim": "A partial write leaves the schedule table holding half a day.",
+        "refutation": "If the connection drops between hour 12 and hour 13 the rows "
+        "already committed are kept, and the retry inserts them again — the unique "
+        "constraint is on (asset, hour) only, not on the run id.",
+        "confidence": "possible",
+    },
+    {
+        "severity": "nit",
+        "file": None,
+        "line": None,
+        "claim": "The new module has no docstring naming its units.",
+        "refutation": "Nothing breaks; a reader has to open the caller to learn the "
+        "figures are MWh rather than MW, which is the ambiguity this project's "
+        "conventions single out.",
+        "confidence": "certain",
+    },
+]
+
+#: The one sentence a scripted reviewer adds about its own coverage.
+FAKE_REVIEW_NOTE = "The generated migration was truncated out of the diff and not read."
 
 #: How long ``stay busy`` holds the turn open (before the reply, or after the
 #: tool result when ``use tool`` is asked for too). Long enough for a UI test to
@@ -570,11 +631,13 @@ class FakeAgentClient:
         bridge: SessionBridge,
         kind: SessionKind = "chat",
         orchestrator: OrchestratorHandle | None = None,
+        findings: FindingsReceiver | None = None,
     ) -> None:
         self._folder = folder
         self._bridge = bridge
         self._kind = kind
         self._orchestrator = orchestrator
+        self._findings = findings
         self._session_id = f"fake-{uuid.uuid4().hex[:8]}"
         self._prompt = ""
         self._writes = 0
@@ -592,6 +655,17 @@ class FakeAgentClient:
     async def receive_response(self) -> AsyncIterator[Any]:
         prompt = self._prompt
         lowered = prompt.lower()
+        if self._kind == "reviewer":
+            # A reviewer answers the review brief and nothing else. Returning
+            # early rather than falling through the trigger list is the honest
+            # shape: the brief is a long prompt full of words like "write" and
+            # "read", and a reviewer that tripped ``write file`` would put bytes
+            # on disk from the one session kind that is supposed to be incapable
+            # of it — proving the opposite of what this branch exists to prove.
+            for message in self._review():
+                yield message
+            yield ResultMessage(self._session_id)
+            return
         busy = BUSY_TRIGGER in lowered
         uses_tool = TOOL_TRIGGER in lowered
         # Where the hold goes is the whole point of combining the two triggers:
@@ -676,6 +750,32 @@ class FakeAgentClient:
                 lines.append(f"spawned {outcome.worker_id} in {outcome.slot or 'the workspace'}")
         return "\n\n" + "\n".join(lines) + "\n"
 
+    def _review(self) -> list[Any]:
+        """Call the *real* ``report_findings`` handler, and report what it said.
+
+        The ``_spawn_workers`` posture: the fake drives the production receiver
+        rather than papering over it, so what CI proves is the shipped path —
+        the tool body validates :class:`ReportFindingsRequest`, the review check
+        takes the report, and the grouped evidence is assembled by the real
+        service. A fake that fabricated a ``ReviewReport`` would prove nothing
+        about any of that.
+
+        Announced and settled as two frames, exactly as a real tool call is, so
+        the reviewer's row in the fleet activity feed looks like every other
+        tool call rather than like a fourth kind of frame.
+        """
+        call_id = f"fake-tool-{uuid.uuid4().hex[:8]}"
+        args = {"findings": FAKE_FINDINGS, "note": FAKE_REVIEW_NOTE}
+        result = handle_report_findings(self._findings, self._bridge.session_id, args)
+        blocks = result.get("content") or [{}]
+        text = str(blocks[0].get("text", "")) if isinstance(blocks[0], dict) else ""
+        return [
+            AssistantMessage(
+                [ToolUseBlock("report_findings", {"findings": len(FAKE_FINDINGS)}, call_id)]
+            ),
+            UserMessage([ToolResultBlock(call_id, text, is_error=bool(result.get("is_error")))]),
+        ]
+
     async def _reap_workers(self) -> str:
         if self._kind != "orchestrator" or self._orchestrator is None:
             return "\n\nreap: this session is not an orchestrator\n"
@@ -743,12 +843,16 @@ class FakeAgentClient:
         self.disconnected = True
 
 
-def fake_client_factory(orchestrator: OrchestratorHandle | None = None) -> ClientFactory:
+def fake_client_factory(
+    orchestrator: OrchestratorHandle | None = None,
+    findings: FindingsReceiver | None = None,
+) -> ClientFactory:
     """The factory ``main.py`` wires in instead of ``sdk_client_factory``.
 
-    ``orchestrator`` is handed through unchanged so a fake *orchestrator*
-    session drives the real service — same seam, same production code, a
-    scripted client on the far side of it.
+    ``orchestrator`` and ``findings`` are handed through unchanged so a fake
+    *orchestrator* session drives the real Mission Control service and a fake
+    *reviewer* drives the real adversarial-review check — same seam, same
+    production code, a scripted client on the far side of it.
     """
 
     def factory(
@@ -758,6 +862,6 @@ def fake_client_factory(orchestrator: OrchestratorHandle | None = None) -> Clien
         kind: SessionKind = "chat",
     ) -> SdkClient:
         log.info("agent.fake_client", folder=str(folder), resume=resume_session_id, kind=kind)
-        return FakeAgentClient(folder, bridge, kind, orchestrator)
+        return FakeAgentClient(folder, bridge, kind, orchestrator, findings)
 
     return factory
