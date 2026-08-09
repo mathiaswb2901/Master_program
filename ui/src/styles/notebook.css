@@ -241,6 +241,22 @@
   border-radius: var(--radius-sm);
 }
 
+/* The plate for an image the server would not carry. Dashed rather than solid,
+   and on the app surface rather than the paper one above: it is deliberately
+   *not* mistakable for a figure that failed to load — this is a stated absence,
+   and the two lines inside it say which image and how big. Sized so a scrolled
+   cell still reads as "there was a picture here". */
+.wb-nb-out.is-image-cut {
+  gap: var(--space-1);
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 4rem;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-code);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
 /* "HTML output, shown as source", "Empty output" — a label on a block, so a
    reader is never left deciding what an unexplained box is. */
 .wb-nb-out-label {

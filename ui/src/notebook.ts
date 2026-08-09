@@ -275,3 +275,20 @@ export function executionLabel(count: number | null): string {
 export function countPhrase(n: number, noun: string): string {
   return `${n.toLocaleString("en-US")} ${noun}${n === 1 ? "" : "s"}`;
 }
+
+/** Powers of 1024, named the way the user's own file manager names them — this
+ * number appears in one sentence ("the figure you are not being shown is 35.2
+ * MB"), and a reader comparing it to what Explorer says about the notebook
+ * should not have to know which of the two conventions each side picked. One
+ * decimal above a kilobyte; none below, where a fraction of a byte is noise. */
+export function byteSize(bytes: number): string {
+  const units = ["bytes", "KB", "MB", "GB"];
+  let value = Math.max(bytes, 0);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const digits = unit === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}

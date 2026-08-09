@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 import nbformat
@@ -40,6 +41,8 @@ from nbformat.validator import ValidationError
 from workbench_server.models.notebook import (
     MAX_CELL_SOURCE_CHARS,
     MAX_CELLS,
+    MAX_IMAGE_BASE64_CHARS,
+    MAX_IMAGE_BASE64_TOTAL_CHARS,
     MAX_NOTEBOOK_BYTES,
     MAX_OUTPUT_TEXT_CHARS,
     NotebookCell,
@@ -79,6 +82,31 @@ _CELL_TYPES: frozenset[str] = frozenset({"code", "markdown", "raw"})
 #: Likewise for outputs: an unrecognised ``output_type`` is rendered as display
 #: data, which is the branch that shows whatever representation it can find.
 _OUTPUT_TYPES: frozenset[str] = frozenset({"stream", "execute_result", "display_data", "error"})
+
+
+@dataclass
+class _ImageBudget:
+    """What one response may still spend on base64 image payloads.
+
+    Threaded down to :func:`_bundle` rather than applied per output, because the
+    limit worth having is the **response's**: a per-image cap on its own would
+    call four hundred cells of just-under-the-cap figures a fine reply. One of
+    these per :func:`read_notebook` call, so nothing is carried between reads.
+    """
+
+    remaining: int = MAX_IMAGE_BASE64_TOTAL_CHARS
+
+    def take(self, chars: int) -> bool:
+        """Spend ``chars`` on one image, or refuse and leave the budget alone.
+
+        Refusing outright — rather than handing back a smaller allowance — is
+        the whole shape of this cap: a truncated base64 string decodes to a
+        corrupt image, which is a worse answer than a stated absence.
+        """
+        if chars > MAX_IMAGE_BASE64_CHARS or chars > self.remaining:
+            return False
+        self.remaining -= chars
+        return True
 
 
 class NotANotebookError(ValueError):
@@ -147,13 +175,16 @@ def read_notebook(workspace: Workspace, relative: str) -> NotebookDocument:
 
     raw_cells = _as_list(_get(notebook, "cells"))
     kept = raw_cells[:MAX_CELLS]
+    # Spent down the document in reading order, so the figures a reader reaches
+    # first are the ones that arrive whole.
+    budget = _ImageBudget()
     return NotebookDocument(
         path=relative,
         nbformat=_as_int(_get(notebook, "nbformat")) or 4,
         nbformat_minor=_as_int(_get(notebook, "nbformat_minor")) or 0,
         language=_language(notebook),
         kernel=_kernel(notebook),
-        cells=[_cell(index, cell) for index, cell in enumerate(kept)],
+        cells=[_cell(index, cell, budget) for index, cell in enumerate(kept)],
         cell_count=len(raw_cells),
         truncated=len(raw_cells) > len(kept),
         valid=validation_message is None,
@@ -164,7 +195,7 @@ def read_notebook(workspace: Workspace, relative: str) -> NotebookDocument:
 # ---- cells -------------------------------------------------------------------
 
 
-def _cell(index: int, raw: Any) -> NotebookCell:
+def _cell(index: int, raw: Any, budget: _ImageBudget) -> NotebookCell:
     kind = _as_str(_get(raw, "cell_type"))
     cell_type: NotebookCellType = (
         "code" if kind == "code" else "markdown" if kind == "markdown" else "raw"
@@ -173,7 +204,7 @@ def _cell(index: int, raw: Any) -> NotebookCell:
         log.info("notebook.unknown_cell_type", cell_type=kind, index=index)
     source, source_cut = _cap(_joined(_get(raw, "source")), MAX_CELL_SOURCE_CHARS)
     outputs = (
-        [_output(output) for output in _as_list(_get(raw, "outputs"))]
+        [_output(output, budget) for output in _as_list(_get(raw, "outputs"))]
         if cell_type == "code"
         else []
     )
@@ -190,7 +221,7 @@ def _cell(index: int, raw: Any) -> NotebookCell:
 # ---- outputs -----------------------------------------------------------------
 
 
-def _output(raw: Any) -> NotebookOutput:
+def _output(raw: Any, budget: _ImageBudget) -> NotebookOutput:
     kind = _as_str(_get(raw, "output_type"))
     if kind == "stream":
         text, cut = _cap(_joined(_get(raw, "text")), MAX_OUTPUT_TEXT_CHARS)
@@ -219,10 +250,10 @@ def _output(raw: Any) -> NotebookOutput:
     )
     if kind not in _OUTPUT_TYPES:
         log.info("notebook.unknown_output_type", output_type=kind)
-    return _bundle(output_type, _get(raw, "data"))
+    return _bundle(output_type, _get(raw, "data"), budget)
 
 
-def _bundle(output_type: NotebookOutputType, data: Any) -> NotebookOutput:
+def _bundle(output_type: NotebookOutputType, data: Any, budget: _ImageBudget) -> NotebookOutput:
     """Pick the one representation to paint out of a MIME bundle.
 
     Order: **image, then plain text, then HTML source.** An image is the whole
@@ -236,10 +267,31 @@ def _bundle(output_type: NotebookOutputType, data: Any) -> NotebookOutput:
     Carrying HTML we are not going to show would put a DataFrame's ~50 KB of
     ``<table>`` on the wire for every result in the notebook, so it is left on
     disk. Nothing is lost that the user cannot get from the file itself.
+
+    An image is the one representation that can be **too big to carry**, and it
+    is the one that is dropped whole rather than cut: see :class:`_ImageBudget`
+    and :data:`MAX_IMAGE_BASE64_CHARS`. When that happens the output still
+    arrives — same ``output_type``, same ``mime`` naming what kind of picture it
+    was, ``image_omitted_bytes`` saying how big, ``truncated`` set. It does
+    *not* fall through to the ``text/plain`` beside it: ``<Figure size 640x480
+    with 1 Axes>`` in place of a stated omission is how a viewer ends up looking
+    like it lost the figure.
     """
     for mime in _IMAGE_MIMES:
         raw = _get(data, mime)
         if isinstance(raw, str) and raw.strip() != "":
+            # Whitespace out: notebooks store base64 wrapped at 76 columns, and
+            # a `data:` URI wants it in one piece. Also the length the budget is
+            # charged in, so what is measured is what would go on the wire.
+            payload = _unwrap(raw)
+            if not budget.take(len(payload)):
+                log.info("notebook.image_omitted", mime=mime, base64_chars=len(payload))
+                return NotebookOutput(
+                    output_type=output_type,
+                    mime=mime,
+                    image_omitted_bytes=_base64_bytes(payload),
+                    truncated=True,
+                )
             return NotebookOutput(
                 output_type=output_type,
                 mime=mime,
@@ -248,9 +300,7 @@ def _bundle(output_type: NotebookOutputType, data: Any) -> NotebookOutput:
                     # model's Literal — the cast records that rather than
                     # re-deriving it at runtime.
                     mime=cast(NotebookImageMime, mime),
-                    # Whitespace out: notebooks store base64 wrapped at 76
-                    # columns, and a `data:` URI wants it in one piece.
-                    base64=_unwrap(raw),
+                    base64=payload,
                 ),
             )
     plain = _get(data, "text/plain")
@@ -354,6 +404,18 @@ def _cap(text: str, limit: int) -> tuple[str, bool]:
 
 def _unwrap(base64_text: str) -> str:
     return "".join(base64_text.split())
+
+
+def _base64_bytes(text: str) -> int:
+    """What ``text`` would decode to, without decoding it.
+
+    The number is for a sentence a human reads ("2.4 MB"), and decoding a
+    payload we have just decided is too big to carry — only to throw the bytes
+    away and keep their length — is the one thing this branch exists to avoid.
+    Exact for the padded, well-formed base64 a notebook holds.
+    """
+    padding = len(text) - len(text.rstrip("="))
+    return max(len(text) // 4 * 3 - padding, 0)
 
 
 def _first_line(message: str) -> str:

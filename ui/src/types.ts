@@ -161,9 +161,15 @@ export interface NotebookOutput {
   text: string | null;
   html_source: string | null;
   image: NotebookImage | null;
+  /** The decoded size of an image that is *not* here — past the server's
+   * per-image cap, or past what was left of the document's image budget. Set
+   * means "there is a figure and you do not have it", which the panel states
+   * with this size; `null` means the image (if any) was carried whole. */
+  image_omitted_bytes: number | null;
   ename: string | null;
   evalue: string | null;
-  /** `text`/`html_source` was cut at the server's cap, and the panel says so. */
+  /** A payload was held back — `text`/`html_source` cut at the server's cap, or
+   * the image named by `image_omitted_bytes` — and the panel says so. */
   truncated: boolean;
 }
 

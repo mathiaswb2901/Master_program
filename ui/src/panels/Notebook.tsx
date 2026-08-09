@@ -49,6 +49,16 @@
  * field called `html_source` for exactly this reason. Images are `data:` URIs
  * built from base64 the server already had, so no output can turn into a
  * network request. Grep this file for `dangerouslySetInnerHTML`: there is none.
+ *
+ * ## And nothing arrives unbounded
+ *
+ * Every payload here is capped server-side, images included: an `<img src>` on
+ * this page is a `data:` URI the server agreed to carry, never whatever the
+ * file happened to hold. A figure past that cap arrives as its own kind of
+ * output — `image_omitted_bytes`, with the mime and the size — and is rendered
+ * as a stated absence. That is the difference between a cell that says what it
+ * is not showing and a tab that stops responding while the main thread decodes
+ * 35 MB of base64 somebody pasted into a report notebook.
  */
 
 import type { DockviewPanelApi, IDockviewPanelProps } from "dockview";
@@ -56,6 +66,7 @@ import { useEffect } from "react";
 
 import { Markdown } from "../markdown";
 import {
+  byteSize,
   countPhrase,
   executionLabel,
   isNotebookPath,
@@ -118,11 +129,14 @@ function CodeSource({ source, language }: { source: string; language: string }) 
   );
 }
 
-/** One truncation notice, in the one phrasing every cap uses. */
-function CutNotice({ what }: { what: string }) {
+/** One truncation notice, in the one phrasing every cap uses: what was held
+ * back, then where it still is. `rest` is a parameter for the single payload
+ * that is dropped whole rather than trimmed — "the rest" would be a lie about
+ * an image, none of which was shown. */
+function CutNotice({ what, rest = "the rest is in the file" }: { what: string; rest?: string }) {
   return (
     <p className="wb-nb-cut" role="note">
-      {what} — the rest is in the file.
+      {what} — {rest}.
     </p>
   );
 }
@@ -149,8 +163,27 @@ function Output({ output }: { output: NotebookOutput }) {
     return (
       <div className="wb-nb-out is-image">
         {/* A `data:` URI built from base64 the server already held: the bytes
-            never become a URL anything could be asked to fetch. */}
+            never become a URL anything could be asked to fetch. Bounded, too —
+            the server refuses to carry an image past its cap, so no `src` here
+            is ever the tens of megabytes the main thread would have to decode
+            before it could paint this cell. */}
         <img src={`data:${image.mime};base64,${image.base64}`} alt="Cell output" />
+      </div>
+    );
+  }
+
+  if (output.image_omitted_bytes !== null) {
+    // The other side of that cap. A plate the size of a small figure, so a
+    // scrolled cell still reads as "there was a picture here" — and it names
+    // the picture and its size rather than leaving a reader to wonder whether
+    // the notebook or the viewer lost it.
+    return (
+      <div className="wb-nb-out is-image-cut">
+        <p className="wb-nb-out-label">Image not shown</p>
+        <CutNotice
+          what={`${output.mime}, ${byteSize(output.image_omitted_bytes)}, too large to show here`}
+          rest="it is in the file"
+        />
       </div>
     );
   }
@@ -222,7 +255,10 @@ function Cell({ cell, language }: { cell: NotebookCell; language: string }) {
 
 // ---- the document -------------------------------------------------------------
 
-function NotebookBody({ doc, path }: { doc: NotebookDocument; path: string }) {
+/** The document itself, once it is read. Exported for `Notebook.test.tsx`,
+ * which asserts over the rendering of an output and wants the document rather
+ * than the four states around it. */
+export function NotebookBody({ doc, path }: { doc: NotebookDocument; path: string }) {
   return (
     <>
       <header className="wb-nb-head">

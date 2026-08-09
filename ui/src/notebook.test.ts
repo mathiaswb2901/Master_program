@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  byteSize,
   countPhrase,
   executionLabel,
   isNotebookPath,
@@ -141,5 +142,27 @@ describe("countPhrase", () => {
     expect(countPhrase(1, "cell")).toBe("1 cell");
     expect(countPhrase(0, "cell")).toBe("0 cells");
     expect(countPhrase(12_345, "character")).toBe("12,345 characters");
+  });
+});
+
+describe("byteSize", () => {
+  it.each([
+    [0, "0 bytes"],
+    [512, "512 bytes"],
+    [1024, "1.0 KB"],
+    [1536, "1.5 KB"],
+    [1_048_576, "1.0 MB"],
+    // The size an omitted-image notice actually reports: a screenshot pasted
+    // into a report notebook, which the server refuses to put on the wire.
+    [36_909_875, "35.2 MB"],
+    [3 * 1024 ** 3, "3.0 GB"],
+  ])("%s bytes reads as %s", (bytes, expected) => {
+    expect(byteSize(bytes)).toBe(expected);
+  });
+
+  it("never reports a negative size, whatever it is handed", () => {
+    // The number comes off the wire. A notice saying "-1.0 KB" would be a
+    // viewer volunteering that it does not understand its own server.
+    expect(byteSize(-1)).toBe("0 bytes");
   });
 });

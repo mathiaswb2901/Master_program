@@ -21,6 +21,8 @@ from httpx import AsyncClient
 from workbench_server.models.notebook import (
     MAX_CELL_SOURCE_CHARS,
     MAX_CELLS,
+    MAX_IMAGE_BASE64_CHARS,
+    MAX_IMAGE_BASE64_TOTAL_CHARS,
     MAX_NOTEBOOK_BYTES,
     MAX_OUTPUT_TEXT_CHARS,
     NotebookDocument,
@@ -55,6 +57,24 @@ def _code(
 
 def _markdown(source: str) -> dict[str, Any]:
     return {"cell_type": "markdown", "metadata": {}, "source": source}
+
+
+def _image_output(base64_text: str, mime: str = "image/png") -> dict[str, Any]:
+    return {
+        "output_type": "display_data",
+        "data": {mime: base64_text, "text/plain": "<Figure size 640x480 with 1 Axes>"},
+        "metadata": {},
+    }
+
+
+def _fake_base64(chars: int) -> str:
+    """``chars`` of syntactically valid base64 that nothing decodes.
+
+    The caps are counted, never decoded — that is the point of `_base64_bytes`
+    — so a real 3 MB PNG would only make these fixtures slower to build and no
+    more truthful about the branch under test.
+    """
+    return "A" * (chars - 2) + "=="
 
 
 def _notebook(cells: list[dict[str, Any]], **metadata: object) -> dict[str, Any]:
@@ -425,6 +445,101 @@ class TestCaps:
         path.write_bytes(b"{" + b" " * MAX_NOTEBOOK_BYTES)
         with pytest.raises(NotebookTooLargeError):
             read_notebook(workspace, "huge.ipynb")
+
+
+class TestImageCaps:
+    """The one payload that is dropped whole instead of trimmed.
+
+    A screenshot pasted into a report notebook, or a 300-dpi figure nobody meant
+    to save, is a base64 string the file ceiling happily admits — 35 MB is well
+    inside `MAX_NOTEBOOK_BYTES` — and it reaches the browser as a `data:` URI
+    the main thread has to decode before it can paint the cell. Every other cap
+    in this reader trims and says so; this one cannot (half a PNG is not a
+    smaller PNG), so it omits and says so instead.
+    """
+
+    def test_an_oversized_image_is_left_on_disk_and_says_how_big(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        payload = _fake_base64(MAX_IMAGE_BASE64_CHARS + 4)
+        _write(tmp_path, "nb.ipynb", _notebook([_code("df.plot()", 1, [_image_output(payload)])]))
+        output = read_notebook(workspace, "nb.ipynb").cells[0].outputs[0]
+
+        assert output.image is None
+        assert output.truncated
+        # The three things a stated omission owes a reader: which kind of
+        # picture, how big, and — by `mime` surviving — that there *was* one.
+        assert output.mime == "image/png"
+        # Against a real decode, not against the arithmetic that produced it:
+        # the size is counted rather than decoded precisely because the payload
+        # is too big to want in memory twice, so the counting needs an oracle.
+        assert output.image_omitted_bytes == len(base64.b64decode(payload))
+
+    def test_an_omitted_image_does_not_fall_back_to_the_figure_repr(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        # `<Figure size 640x480 with 1 Axes>` in place of a stated omission is
+        # how a viewer ends up looking like it silently lost the figure.
+        _write(
+            tmp_path,
+            "nb.ipynb",
+            _notebook(
+                [_code("df.plot()", 1, [_image_output(_fake_base64(MAX_IMAGE_BASE64_CHARS + 4))])]
+            ),
+        )
+        output = read_notebook(workspace, "nb.ipynb").cells[0].outputs[0]
+        assert output.text is None
+        assert output.html_source is None
+
+    def test_an_image_at_the_cap_still_arrives_whole(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        # The boundary, in the direction that matters: a cap that quietly ate
+        # the largest *allowed* figure would be indistinguishable from a bug.
+        payload = _fake_base64(MAX_IMAGE_BASE64_CHARS)
+        _write(tmp_path, "nb.ipynb", _notebook([_code("df.plot()", 1, [_image_output(payload)])]))
+        output = read_notebook(workspace, "nb.ipynb").cells[0].outputs[0]
+
+        assert output.image is not None and output.image.base64 == payload
+        assert output.image_omitted_bytes is None
+        assert not output.truncated
+
+    def test_the_document_budget_bounds_the_whole_response(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        # The per-image cap on its own bounds nothing worth bounding: `MAX_CELLS`
+        # cells of just-under-the-cap figures is a gigabyte, and the file ceiling
+        # only ever promised "under 40 MB in one GET". Four figures, each legal
+        # on its own, are over the document's budget between them.
+        each = (MAX_IMAGE_BASE64_TOTAL_CHARS // 4) + 1024
+        assert each <= MAX_IMAGE_BASE64_CHARS, "each figure must be legal on its own"
+        _write(
+            tmp_path,
+            "nb.ipynb",
+            _notebook(
+                [
+                    _code(f"fig{i}.plot()", i + 1, [_image_output(_fake_base64(each))])
+                    for i in range(4)
+                ]
+            ),
+        )
+        doc = read_notebook(workspace, "nb.ipynb")
+        outputs = [output for cell in doc.cells for output in cell.outputs]
+
+        carried = [o.image.base64 for o in outputs if o.image is not None]
+        omitted = [o for o in outputs if o.image_omitted_bytes is not None]
+        assert carried, "the figures a reader reaches first arrive whole"
+        assert omitted, "the budget has to actually bite, or this proves nothing"
+        assert sum(len(b) for b in carried) <= MAX_IMAGE_BASE64_TOTAL_CHARS
+        # Spent in reading order: the omissions are at the end of the document,
+        # never a hole in the middle of one.
+        assert [o.image is None for o in outputs] == sorted(o.image is None for o in outputs)
+        assert all(o.truncated and o.mime == "image/png" for o in omitted)
+        # And the number this whole class exists for: what one GET produces.
+        # Images dominate a notebook response by orders of magnitude, so with
+        # them bounded the payload is too — a quarter-megabyte covers every
+        # other field in a four-cell document many times over.
+        assert len(doc.model_dump_json()) < MAX_IMAGE_BASE64_TOTAL_CHARS + 256 * 1024
 
 
 # ---- refusals and degradation -------------------------------------------------

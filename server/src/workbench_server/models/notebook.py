@@ -56,6 +56,29 @@ MAX_CELLS = 400
 #: parse that would hold the event loop.
 MAX_NOTEBOOK_BYTES = 40 * 1024 * 1024
 
+#: Per-image cap, in base64 characters. ~2.7 MB of base64 is ~2 MB of image:
+#: past any 300-dpi figure a plotting library produces, and firmly into
+#: "somebody pasted a screenshot into a report notebook" territory.
+#:
+#: The one cap that **omits rather than cuts**, because half a PNG is not a
+#: smaller PNG — the size that was left behind is stated instead
+#: (:attr:`NotebookOutput.image_omitted_bytes`). It matters because a single
+#: image is the one field that goes to the browser as a ``data:`` URI the main
+#: thread has to decode before it can paint the cell: a 35 MB one — comfortably
+#: inside :data:`MAX_NOTEBOOK_BYTES`, so nothing above would catch it — is a
+#: hung tab rather than a slow one.
+MAX_IMAGE_BASE64_CHARS = 2_800_000
+
+#: And the whole document's image budget, in the same units. The per-image cap
+#: alone bounds nothing worth bounding: :data:`MAX_CELLS` cells each holding an
+#: image just under it is a gigabyte, and even the file ceiling only promises
+#: "under 40 MB in one GET". This is what turns the response size into a number
+#: this module can state — ~8 MB of base64, ~6 MB of images, which is already
+#: more than anyone scrolls past in a read-only view. Images past it are omitted
+#: with their size exactly like one that was individually too big, so a reader is
+#: told either way rather than shown a cell that quietly lost its figure.
+MAX_IMAGE_BASE64_TOTAL_CHARS = 8 * 1024 * 1024
+
 
 class NotebookImage(BaseModel):
     """A raster output, base64 exactly as the notebook stores it.
@@ -90,10 +113,20 @@ class NotebookOutput(BaseModel):
     #: ``text/html`` as *source*. Never markup — see the module docstring.
     html_source: str | None = None
     image: NotebookImage | None = None
+    #: The decoded size of an image that is **not** here, because it was past
+    #: :data:`MAX_IMAGE_BASE64_CHARS` or past what was left of the document's
+    #: :data:`MAX_IMAGE_BASE64_TOTAL_CHARS`. ``None`` whenever the image was
+    #: carried — so "there is a figure and you do not have it" is a field being
+    #: set, never an absence a client would have to infer from :attr:`mime`
+    #: naming an image while :attr:`image` is null. :attr:`mime` still says
+    #: *which* kind, so the notice can name the thing it is not showing.
+    image_omitted_bytes: int | None = None
     #: Error name and value, for the two lines a traceback buries the point in.
     ename: str | None = None
     evalue: str | None = None
-    #: True when :attr:`text` or :attr:`html_source` was cut at the cap above.
+    #: True when a payload on this output was held back: :attr:`text` or
+    #: :attr:`html_source` cut at the cap above, or the image named by
+    #: :attr:`image_omitted_bytes` left on disk.
     truncated: bool = False
 
 
