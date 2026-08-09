@@ -1159,6 +1159,27 @@ measured not to be enough. Because a guest is a *child* of the Tauri window and
 children die with their parent, every path that closes the window releases the
 guests first — otherwise closing Workbench would take a real Word down with it.
 
+**The close paths obey the same thread rule as everything else, and two of them
+used not to.** Releasing a guest is `SetWindowLongPtrW` + `SetParent` on another
+process's window and `DestroyWindow` on ours, and Win32 only lets the creating
+thread destroy a window — so the teardown is *asked for* through
+`host/main_thread.rs` rather than performed by whoever noticed. The caller that
+made this real is the close-ack watchdog in `lib.rs`, a thread spawned precisely
+because the UI has stopped answering, which used to run the whole teardown
+itself. It now marshals it with a two-second bound and, if the main thread does
+not service it, closes without touching a guest: the work stays queued rather
+than being cancelled, and a guest left docked is recoverable where a Win32 call
+from the wrong thread is undefined. Symmetrically, the part of closing a panel
+that is *not* a window call went the other way — killing a guest is a job handle
+closing (instant, stays on the main thread), but *waiting* for the process to
+actually die is bounded at two seconds and used to run inside `host_close`, so
+closing one docked document froze the window for as long as the instance took to
+go. `host/reaper.rs` takes the wait, and hands the one step that depends on its
+answer — reclaiming a stranded keyboard — back to the main thread when it knows.
+Measured on the synthetic guest with its job object detached so it cannot die:
+the close body went from **2.02 s to 19 ms**, against a control that still spends
+its full 400 ms bound waiting.
+
 CSS pixels become physical pixels through **one** DPI authority, the window's own
 `scale_factor()`; edges are rounded and sizes derived from the rounded edges, so
 two adjacent panels cannot leave a one-pixel seam. Nothing scaled is ever cached —
