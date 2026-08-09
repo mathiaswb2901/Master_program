@@ -148,9 +148,12 @@ class SetupService:
         # Office. Reported honestly as unavailable (never blocks all_ok), with a
         # pointer only when it names the real cause. "Open the desktop app" is a
         # no-op — and so misleading — when the shell is already attached (the
-        # user is in the desktop app) or when native hosting is off by explicit
-        # operator override (WORKBENCH_OFFICE_NATIVE=off); neither is fixed by
-        # launching an app that is already running or was deliberately disabled.
+        # user is in the desktop app) or when native hosting was deliberately
+        # turned off, whether in the Settings panel or by WORKBENCH_OFFICE_NATIVE
+        # (`caps.office_native` is the resolved answer and does not say which);
+        # neither is fixed by launching an app that is already running or was
+        # switched off on purpose. Which one switched it off is `caps.detail`'s
+        # job to say, and it does.
         action = (
             SetupAction(
                 kind="instruction",

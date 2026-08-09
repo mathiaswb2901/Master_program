@@ -572,7 +572,10 @@ describe("the registered tools", () => {
    */
   it("resolves each open-file kind to exactly one view", () => {
     const kinds = documentViews(TOOLS).map((view) => view.kind);
-    expect(kinds).toEqual(["office"]);
+    // `notebook` before `office`, because the Notebook tool is registered
+    // before the two Office ones — a `.ipynb` opens in the notebook view rather
+    // than as raw JSON (ROADMAP item 16's exit line).
+    expect(kinds).toEqual(["notebook", "office"]);
     // Two tools offer a view for `office` and that is the seam working: the
     // native host claims the kind by registering first and renders OnlyOffice
     // itself wherever it cannot dock a real window. Mounting both would give
@@ -640,6 +643,10 @@ describe("the registered tools", () => {
       "Alt+K": "keys.open",
       // The universal find-in-files chord (`panels/Search.tsx`).
       "Ctrl+Shift+F": "search.open",
+      // The universal settings chord (`settings.ts`). Not an `Alt` chord, so
+      // unlike the ones above it takes nothing out of a user's `shortcuts.md`,
+      // which may bind `Alt` and nothing else.
+      "Ctrl+,": "settings.open",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",
       "Ctrl+3": "panel.agent",
@@ -661,6 +668,7 @@ describe("the registered tools", () => {
       .map((registered) => registered.id);
     expect(closable).toEqual([
       "search",
+      "notebook",
       "conversations",
       "scratchpad",
       "usage",
@@ -670,6 +678,7 @@ describe("the registered tools", () => {
       "objective",
       "visual",
       "setup",
+      "settings",
       "keys",
     ]);
   });

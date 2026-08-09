@@ -126,6 +126,80 @@ export type WorkspaceEvent =
   | WorkspaceChangedEvent
   | CommandInvokeEvent;
 
+// ---- notebook.py ------------------------------------------------------------
+// A `.ipynb`, read and never run. There is no execution in this feature — no
+// kernel, no run endpoint, and nothing below that could describe one — so a
+// cell's `execution_count` is history, not state.
+
+export type NotebookCellType = "code" | "markdown" | "raw";
+
+export type NotebookOutputType = "stream" | "execute_result" | "display_data" | "error";
+
+export type NotebookImageMime = "image/png" | "image/jpeg" | "image/gif";
+
+/** Base64 exactly as the notebook stores it — the panel builds a `data:` URI,
+ * so the bytes never become a URL anything could be asked to fetch. */
+export interface NotebookImage {
+  mime: NotebookImageMime;
+  base64: string;
+}
+
+/**
+ * One output, already reduced server-side to the single representation worth
+ * painting; `mime` names which one was chosen out of the file's MIME bundle.
+ *
+ * `html_source` is HTML **as source text**, never markup. Notebook HTML is
+ * arbitrary author-controlled markup and this app renders none of it (the same
+ * call `markdown.tsx` makes for chat); the field name is what stops a renderer
+ * quietly changing its mind.
+ */
+export interface NotebookOutput {
+  output_type: NotebookOutputType;
+  mime: string;
+  /** "stdout" | "stderr" for a stream output; null otherwise. */
+  stream: string | null;
+  text: string | null;
+  html_source: string | null;
+  image: NotebookImage | null;
+  /** The decoded size of an image that is *not* here — past the server's
+   * per-image cap, or past what was left of the document's image budget. Set
+   * means "there is a figure and you do not have it", which the panel states
+   * with this size; `null` means the image (if any) was carried whole. */
+  image_omitted_bytes: number | null;
+  ename: string | null;
+  evalue: string | null;
+  /** A payload was held back — `text`/`html_source` cut at the server's cap, or
+   * the image named by `image_omitted_bytes` — and the panel says so. */
+  truncated: boolean;
+}
+
+export interface NotebookCell {
+  /** Positional (`c0`, `c1`, …) and unique within one response — a list key,
+   * not a link target. */
+  id: string;
+  cell_type: NotebookCellType;
+  source: string;
+  execution_count: number | null;
+  outputs: NotebookOutput[];
+  truncated: boolean;
+}
+
+export interface NotebookDocument {
+  path: string;
+  nbformat: number;
+  nbformat_minor: number;
+  /** Lowercased highlighting language. A default (`python`), never a claim. */
+  language: string;
+  kernel: string | null;
+  cells: NotebookCell[];
+  /** The file's cell count, which is not `cells.length` when `truncated`. */
+  cell_count: number;
+  truncated: boolean;
+  /** Schema validity. False still renders — see `validation_message`. */
+  valid: boolean;
+  validation_message: string | null;
+}
+
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
 // never a guess at the most recent session.
@@ -1560,6 +1634,63 @@ export interface ValidationEvent {
   result: ValidationResult;
 }
 
+// ---- gates.py / evidence.py -------------------------------------------------
+// M6 staged review PR1: the toolchain gate, and the payload route the #82 frame
+// left open. Only the two shapes the *UI* reads are mirrored here — `GateCommand`,
+// `GateSpec`, `GateRunReport` and `SlotRef` are server-side selection and
+// bookkeeping types no browser ever sees, and a mirror of a type nothing reads is
+// a second authority to keep honest with nothing checking it.
+
+/** The payload behind a `gate` EvidenceItem: one gate's bounded head+tail log.
+ * `exit_code` is null when the gate timed out or could not start — distinct from
+ * a non-zero code, and the evidence line says which. */
+export interface GateLog {
+  gate: string;
+  argv: string[];
+  exit_code: number | null;
+  duration_ms: number;
+  text: string;
+  /** Set when the capture window bit (AXI shape 1); null means the log is whole. */
+  truncated: EvidenceTruncation | null;
+}
+
+/** One expected-vs-actual verdict — a row of the reconciliation table.
+ * `actual`/`delta` are null when the cell was empty, non-numeric or unreadable. */
+export interface CellComparison {
+  cell: string;
+  label: string | null;
+  expected: number;
+  actual: number | null;
+  unit: string;
+  delta: number | null;
+  outcome: CheckOutcome;
+  reason: string | null;
+}
+
+/** The payload behind a `numeric` EvidenceItem: the workbook↔code table,
+ * bounded worst-first with `truncated` stating the cut (AXI shape 1). */
+export interface ReconciliationReport {
+  workbook: string;
+  matched: number;
+  mismatched: number;
+  total: number;
+  comparisons: CellComparison[];
+  truncated: EvidenceTruncation | null;
+}
+
+/** GET /api/validation/payload/{kind}/{ref} — what an `EvidenceItem.payload_ref`
+ * resolves to. Exactly one payload field is set, chosen by `kind`. **404 once
+ * the bounded LRU has dropped it**, which the expander renders as "evicted"
+ * rather than a spinner that never resolves. */
+export interface EvidencePayload {
+  kind: EvidenceKind;
+  ref: string;
+  /** `kind === "numeric"`. */
+  reconciliation: ReconciliationReport | null;
+  /** `kind === "gate"`. */
+  gate_log: GateLog | null;
+}
+
 // ---- search.py --------------------------------------------------------------
 // Workspace content search (M7 V7b). `POST /api/search` finds literal text across
 // the workspace's files, respecting the file tree's ignore rules (IGNORED_DIRS +
@@ -1691,4 +1822,58 @@ export interface SetupStatus {
   /** Derived: nothing is `action_needed`. The walkthrough (and its status-bar
    * reading) gets out of the way when true. */
   all_ok: boolean;
+}
+
+// ---- settings (M7 V8) -------------------------------------------------------
+// Mirrors server/models/settings.py. The knobs that used to be environment
+// variables, in one small document under the machine's app-data dir — never in
+// the workspace and never in `~/.claude`. The stored choices are what the
+// controls show; `effective` is what the server is using; the two differ only
+// where an override or a pending restart says so.
+
+/** How the window picks its palette. `system` follows the OS preference. */
+export type ThemeChoice = "system" | "dark" | "light";
+
+/** The settings a client can address — and the only keys an override names. */
+export type SettingKey = "theme" | "office_native" | "voice_input";
+
+/** A user's stored choices, and the PUT body (the same shape). */
+export interface WorkbenchSettings {
+  theme: ThemeChoice;
+  /** Whether documents open in the real installed Word/Excel, docked. Read at
+   * launch, so a change is reported in `pending_restart` until a restart. */
+  office_native: OfficeCapabilities["office_native"];
+  /** Push-to-talk voice input. Remembered even on a machine where the local
+   * transcriber is not installed yet (M7 §3). */
+  voice_input: boolean;
+}
+
+/** A setting this process was configured with from outside the app — an
+ * environment variable or `workbench.toml`. The control shows the value and is
+ * disabled with `detail` as the reason; the stored choice is left untouched. */
+export interface SettingOverride {
+  key: SettingKey;
+  value: string;
+  detail: string;
+}
+
+/** Not a setting: the zero-telemetry position, stated by the server. `enabled`
+ * is `false` in every shape of this model — there is nothing to turn on. */
+export interface TelemetryStance {
+  enabled: false;
+  detail: string;
+}
+
+/** GET/PUT /api/settings — stored choices, what is in force, and why. */
+export interface SettingsState {
+  stored: WorkbenchSettings;
+  effective: WorkbenchSettings;
+  overrides: SettingOverride[];
+  /** Stored values this running process has not picked up: read at launch only. */
+  pending_restart: SettingKey[];
+  /** Where the document lives — machine-local state, shown so it is not a mystery. */
+  path: string;
+  telemetry: TelemetryStance;
+  /** Why the stored document was ignored, if it could not be read. */
+  problem: string | null;
 }

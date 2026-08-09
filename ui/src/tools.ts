@@ -14,6 +14,7 @@
 import type { WorkbenchTool } from "./registry";
 
 import { commandRelayTool } from "./commandRelay";
+import { settingsTool } from "./settings";
 import { setupTool } from "./setup";
 import { activityTool } from "./panels/ActivityPanel";
 import { agentTool } from "./panels/AgentPanel";
@@ -23,6 +24,7 @@ import { filesTool } from "./panels/FileTree";
 import { keyboardTool } from "./panels/Keyboard";
 import { layoutsTool } from "./panels/Layouts";
 import { missionTool } from "./panels/MissionControl";
+import { notebookTool } from "./panels/Notebook";
 import { objectiveTool } from "./panels/ObjectivePanel";
 import { officeHostTool } from "./panels/OfficeHostPanel";
 import { officeTool } from "./panels/OfficePanel";
@@ -46,6 +48,11 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // panel is singular and points at no resource — see `panels/Search.tsx`.
   searchTool,
   editorTool,
+  // Straight after the Editor, because it is the other way of reading a file in
+  // the centre of the window: `.ipynb` is its own document kind, so a notebook
+  // opens *here* rather than as raw JSON in Monaco, and its panes sit beside
+  // the editor's. Opened on demand — a workspace with no notebooks shows no tab.
+  notebookTool,
   agentTool,
   // After the Agent, because it is a way *into* one: a row here opens an agent
   // pane, and the two read as one capability seen from two distances.
@@ -83,6 +90,11 @@ export const TOOLS: readonly WorkbenchTool[] = [
   // the welcome card teaches the window, Setup teaches the connections — and its
   // status chip is the Keys chip's neighbour, hidden the moment all is well.
   setupTool,
+  // Beside Setup, because the two are the same idea at two moments: Setup says
+  // what this machine can do, Settings decides what to do with it. Opened on
+  // demand (`Ctrl+,`), singular, and it contributes no status item — a settings
+  // panel has nothing to report to a quiet bar.
+  settingsTool,
   // After every capability it describes, and before the two that arrange them:
   // its reference is a rendering of everything above, and its status chip sits
   // just inside the layout chip at the bar's outer edge.

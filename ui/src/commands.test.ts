@@ -163,6 +163,9 @@ describe("command registry", () => {
       "editor.nextTab",
       "editor.prevTab",
       "editor.close",
+      // The Notebook tool's, straight after the Editor's: the other way of
+      // reading a file in the centre of the window (ROADMAP M4 tail).
+      "notebook.open",
       "session.new",
       "session.detach",
       "session.jump.1",
@@ -195,6 +198,9 @@ describe("command registry", () => {
       // First run's connect half sits beside the Keyboard tool (its welcome
       // half), just before it in `tools.ts`.
       "setup.open",
+      // Settings beside it, and for the same reason: Setup says what this
+      // machine can do, Settings decides what to do with it (M7 V8).
+      "settings.open",
       "keys.open",
       "keys.welcome",
       // The two tools that arrange panels rather than being one, in the order

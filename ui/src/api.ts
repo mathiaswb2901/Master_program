@@ -17,6 +17,8 @@ import type {
   CreateSessionRequest,
   DirListing,
   DocEditorConfig,
+  EvidenceKind,
+  EvidencePayload,
   FileContent,
   FolderSessions,
   LayoutsResponse,
@@ -34,6 +36,7 @@ import type {
   PermissionAnswer,
   PermissionsSnapshot,
   NamedSession,
+  NotebookDocument,
   ObjectiveView,
   ProvenanceMap,
   RenameRequest,
@@ -42,6 +45,7 @@ import type {
   SessionInfo,
   SessionLimits,
   SessionsResponse,
+  SettingsState,
   SetupStatus,
   SetObjectiveRequest,
   ShortcutsState,
@@ -54,6 +58,7 @@ import type {
   ValidationResult,
   ValidationResults,
   ValidationSpec,
+  WorkbenchSettings,
   WorkspaceState,
   WorktreePool,
   WriteRequest,
@@ -131,6 +136,11 @@ export const getFileContent = (path: string): Promise<FileContent> =>
 export const putFileContent = (body: WriteRequest): Promise<WriteResponse> =>
   request("/api/files/content", jsonInit("PUT", body));
 
+/** One `.ipynb`, parsed server-side by nbformat. Read-only: there is no run
+ * endpoint to pair this with, by design (ROADMAP M4). */
+export const getNotebook = (path: string): Promise<NotebookDocument> =>
+  request(`/api/notebook?path=${encodeURIComponent(path)}`);
+
 export const createEntry = (body: CreateRequest): Promise<OkResponse> =>
   request("/api/files/create", jsonInit("POST", body));
 
@@ -169,6 +179,15 @@ export const approveValidation = (
   body: ApproveRequest,
 ): Promise<ValidationResult> =>
   request(`/api/validation/${encodeURIComponent(validationId)}/approve`, jsonInit("POST", body));
+
+/** Redeem an `EvidenceItem.payload_ref` — the bounded detail behind one evidence
+ * line (a captured gate log, a reconciliation table). **404 once the per-kind LRU
+ * has dropped it** (`ApiError.status`), which the Review expander renders as
+ * "evicted" rather than a spinner that never resolves. */
+export const getEvidencePayload = (kind: EvidenceKind, ref: string): Promise<EvidencePayload> =>
+  request(
+    `/api/validation/payload/${encodeURIComponent(kind)}/${encodeURIComponent(ref)}`,
+  );
 
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 
@@ -306,6 +325,15 @@ export const getOfficeIdentity = (): Promise<OfficeIdentity> =>
  * readiness echoed from the capabilities), and whether this is a fresh workspace.
  * The Setup walkthrough degrades from this, never from a guess. */
 export const getSetupStatus = (): Promise<SetupStatus> => request("/api/setup/status");
+
+/** The stored settings, what is in force, and why they differ (M7 V8). */
+export const getSettings = (): Promise<SettingsState> => request("/api/settings");
+
+/** Replace the stored settings. The client holds the whole document and writes
+ * it whole (the layouts precedent), and the answer is the new state — so a save
+ * surfaces an override or a pending restart without a second call. */
+export const putSettings = (body: WorkbenchSettings): Promise<SettingsState> =>
+  request("/api/settings", jsonInit("PUT", body));
 
 export const openOfficeHost = (body: OpenHostRequest): Promise<OfficeHostInfo> =>
   request("/api/office/host", jsonInit("POST", body));

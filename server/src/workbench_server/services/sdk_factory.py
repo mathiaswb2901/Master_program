@@ -20,6 +20,7 @@ from workbench_server.services.agent_tools import (
     PRESENT_PLAN,
     READ_WORKER,
     RUN_COMMAND,
+    RUN_GATES,
     SEND_TO_WORKER,
     SPAWN_WORKER,
     STOP_WORKER,
@@ -37,6 +38,7 @@ from workbench_server.services.agent_tools import (
     handle_present_plan,
     handle_read_worker,
     handle_run_command,
+    handle_run_gates,
     handle_send_to_worker,
     handle_spawn_worker,
     handle_stop_worker,
@@ -131,6 +133,14 @@ def build_context_bridge(
     async def workspace_search(args: dict[str, Any]) -> dict[str, Any]:
         return handle_workspace_search(searcher, args)
 
+    @tool(RUN_GATES.name, RUN_GATES.description, RUN_GATES.input_schema)
+    async def run_gates(args: dict[str, Any]) -> dict[str, Any]:
+        # ``bridge.session_id`` and nothing from ``args``: the checkout the gates
+        # run in is resolved from *this* session's id — the shipped
+        # ``handle_spawn_worker(orchestrator, bridge.session_id, args)`` shape —
+        # so the tool cannot be pointed at another session's slot.
+        return await handle_run_gates(reconciler, bridge.session_id, args)
+
     tools: list[Any] = [
         get_workspace_state,
         present_plan,
@@ -139,6 +149,7 @@ def build_context_bridge(
         office_reconcile,
         run_command,
         workspace_search,
+        run_gates,
     ]
     if kind == "orchestrator" and orchestrator is not None:
         cost = session_cost or (lambda _worker_id: 0.0)
