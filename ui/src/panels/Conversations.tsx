@@ -204,9 +204,11 @@ function Row({ group, conversation }: { group: ProjectGroup; conversation: Conve
               : `${conversation.title} — ${relativeTimePhrase(conversation.updated_at)}`
       }
     >
+      {/* The §2.6 vocabulary, by name (`agent.css` owns the colours): a
+          conversation already open is a session with nothing running — idle —
+          and one on disk is the hollow ring that means "not a session at all". */}
       <span
-        className={"wb-dot" + (live ? "" : " wb-dot-disk")}
-        style={live ? { background: "var(--agent-idle)" } : undefined}
+        className={"wb-dot " + (live ? "is-idle" : "wb-dot-disk")}
         role="img"
         aria-label={live ? "Already open" : "On disk"}
       />
