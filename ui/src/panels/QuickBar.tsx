@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,8 +11,72 @@ import {
 import { useVisibleCommands } from "../commands";
 import { chordKeycaps } from "../keys";
 import { usePresence } from "../motion";
+import { useOverlayKeys } from "../overlays";
 import { useStore } from "../store";
 import type { TreeNode } from "../types";
+
+/**
+ * The palette's popup, named once.
+ *
+ * A fixed id rather than a generated one because there is exactly one QuickBar
+ * in a window — `App.tsx` mounts it beside the dock, not inside a pane, so the
+ * "panes are instances" rule does not reach it (CLAUDE.md). If it ever becomes
+ * per-pane this constant is where that breaks, loudly, as duplicate ids.
+ */
+const LISTBOX_ID = "wb-qb-listbox";
+
+/** The id `aria-activedescendant` points at. Index-based, like the selection. */
+const optionId = (index: number): string => `wb-qb-option-${String(index)}`;
+
+/**
+ * Everything inside the dialog the Tab ring may land on.
+ *
+ * `:not([tabindex="-1"])` is applied to *every* clause rather than only to
+ * `[tabindex]`: the result rows are real `<button>`s (they must be, for click,
+ * for `:disabled` and for the chrome the stylesheet hangs off them) and would
+ * otherwise be matched by the `button` clause and dragged back into the ring —
+ * which is the tab order this fix exists to get rid of.
+ */
+const FOCUSABLE = ["a[href]", "button", "input", "select", "textarea", "[tabindex]"]
+  .map((tag) => `${tag}:not([disabled]):not([tabindex="-1"])`)
+  .join(",");
+
+/**
+ * How long a keystroke has to be the last one before the count is spoken.
+ *
+ * A live region that fires on every character turns a five-letter query into
+ * five interruptions, and a screen reader queues them: the user hears the
+ * result of "t", "te", "ter"… long after they have moved on. One announcement
+ * per pause is the whole point of the region.
+ */
+const ANNOUNCE_DEBOUNCE_MS = 250;
+
+/**
+ * The result count, spoken politely once the typing stops.
+ *
+ * Its own component for a plain mechanical reason: the row list is computed
+ * *after* `QuickBar`'s early return, so a hook that depends on how many rows
+ * there are cannot live in that component. It is also the right seam — this is
+ * the only part of the overlay that exists for a reader who cannot see the
+ * list, and it renders nothing a sighted user can perceive (`u-sr-only`,
+ * `position: absolute`, so it takes no part in the flex column above it).
+ */
+function ResultCount({ count }: { count: number }) {
+  const [text, setText] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setText(count === 0 ? "No results" : `${String(count)} result${count === 1 ? "" : "s"}`);
+    }, ANNOUNCE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [count]);
+  // Mounted empty and filled a beat later, on purpose: assistive tech announces
+  // a live region's *changes*, not the text it found there when it arrived.
+  return (
+    <div className="u-sr-only" role="status" aria-live="polite">
+      {text}
+    </div>
+  );
+}
 
 /**
  * Subsequence match with bonuses for adjacency and segment starts.
@@ -140,6 +205,10 @@ export function QuickBar() {
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const selRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Where the keyboard was when the palette took it. Restored on a *cancel*
+  // only — see `dismiss` and `choose` below.
+  const invokerRef = useRef<HTMLElement | null>(null);
   // Held on screen for `--motion-exit-ms` after it closes, so dismissing it is
   // a movement rather than a disappearance (DESIGN.md §5).
   const [present, leaving] = usePresence(open);
@@ -179,6 +248,84 @@ export function QuickBar() {
     if (open) inputRef.current?.focus();
   }, [open, prefill, present]);
 
+  /**
+   * Who to give the keyboard back to, remembered at the moment it is taken.
+   *
+   * Read on the same three triggers as the focus effect above, and for the same
+   * reason — a chord pressed *at* an open palette is a fresh open. An open that
+   * happens inside the exit window finds focus already inside the overlay (the
+   * row a click just ran); that is not an invoker, so the one already recorded
+   * stands and the palette does not learn to hand focus back to a button it is
+   * about to unmount.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && dialogRef.current?.contains(active) !== true) {
+      invokerRef.current = active;
+    }
+  }, [open, prefill, present]);
+
+  /** Cancel: close, and put the keyboard back where it was. */
+  const dismiss = useCallback((): void => {
+    const invoker = invokerRef.current;
+    invokerRef.current = null;
+    // Synchronously, before the store update: the focus effect above only fires
+    // while `open`, so nothing races this back onto the input. `document.body`
+    // is not a focus target — it is what "nothing was focused" looks like.
+    if (invoker !== null && invoker !== document.body && invoker.isConnected) invoker.focus();
+    useStore.getState().setQuickBarOpen(false);
+  }, []);
+
+  /**
+   * The modal keyboard, at the window and in the capture phase.
+   *
+   * Two keys, one listener, and both halves of the audit's first finding.
+   *
+   * **Escape** was an `onKeyDown` on the input, which meant it worked only
+   * while the input had focus — and one `Shift+Tab` was enough to lose that,
+   * because there was no trap. So the palette could be left open with its
+   * keyboard on a control behind the scrim, invisible under 60% black and
+   * unreachable by mouse, with nothing but the backdrop as a way out. Capture
+   * at the window is the pattern `Modal.tsx` already ships, and it buys the
+   * same thing here that it buys there: Esc wins over Monaco and xterm.
+   *
+   * **Tab** cycles inside the dialog and never leaves it. In practice the ring
+   * has one stop — the combobox — because the options are addressed with
+   * `aria-activedescendant` and are deliberately not tab stops (the ARIA
+   * combobox pattern; fifty file rows in the tab order was its own bug). It is
+   * written as a ring rather than as "swallow Tab" so a control added to this
+   * overlay later is reachable without anyone remembering this function.
+   *
+   * Registered through `useOverlayKeys` rather than directly at the window,
+   * which is what keeps it from answering a key aimed at a dialog *above* it:
+   * `Alt+W` on a dirty buffer opens the close confirmation over an open palette,
+   * and the native window close does the same with no click at all. Only the
+   * top layer acts (`overlays.ts`).
+   *
+   * Only while `open`: during the exit window the overlay is still mounted, and
+   * an Escape aimed at whatever is underneath must reach it.
+   */
+  useOverlayKeys(open, (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    event.preventDefault();
+    const stops = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)];
+    if (stops.length === 0) return;
+    const at = stops.indexOf(document.activeElement as HTMLElement);
+    // Focus that is already outside comes back to the near end rather than
+    // stepping from a position in a ring it is not in.
+    const next = at < 0 ? 0 : (at + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
+    stops[next]?.focus();
+  });
+
   useEffect(() => {
     selRef.current?.scrollIntoView({ block: "nearest" });
   }, [sel, query]);
@@ -194,7 +341,20 @@ export function QuickBar() {
   }, [tree]);
 
   if (!present) return null;
-  const close = (): void => useStore.getState().setQuickBarOpen(false);
+  /**
+   * Run a row and get out of the way.
+   *
+   * Deliberately *not* `dismiss`: the command owns the keyboard from here. "New
+   * terminal" focuses the terminal it opened, "Open file" focuses the editor —
+   * restoring the invoker would yank focus straight back off whatever the user
+   * just asked for. Cancelling is the case where the user goes back to where
+   * they were; running is the case where they asked to be somewhere else.
+   */
+  const choose = (row: Row): void => {
+    invokerRef.current = null;
+    row.run();
+    useStore.getState().setQuickBarOpen(false);
+  };
   const exiting = leaving ? " is-leaving" : "";
 
   // Three modes, one surface. A `quickPick` is a list some capability supplied
@@ -295,6 +455,26 @@ export function QuickBar() {
   };
   const clamped = Math.min(sel, Math.max(0, rows.length - 1));
   const selIdx = rows[clamped]?.disabled === true ? runnableFrom(clamped) : clamped;
+  // The popup is "expanded" exactly when there is a listbox to expand into. An
+  // empty result is a *collapsed* combobox with a message where the list was —
+  // not a listbox with nothing in it, which is what the markup used to say.
+  const expanded = rows.length > 0;
+
+  /**
+   * Consecutive rows of one category, which is what a section already was.
+   *
+   * A `listbox` may own only `option` and `group` children, so the category
+   * headers — loose `div`s among the rows until now — become the label of a
+   * real group. Nothing moves: the header is still the first thing in its
+   * section and still `position: sticky`, only now inside its own group rather
+   * than the whole list, which is where a sticky header should stop anyway.
+   */
+  const sections: { category: string | undefined; rows: { row: Row; index: number }[] }[] = [];
+  rows.forEach((row, index) => {
+    const last = sections[sections.length - 1];
+    if (last !== undefined && last.category === row.category) last.rows.push({ row, index });
+    else sections.push({ category: row.category, rows: [{ row, index }] });
+  });
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>): void => {
     if (e.key === "ArrowDown") {
@@ -306,27 +486,90 @@ export function QuickBar() {
     } else if (e.key === "Enter") {
       e.preventDefault();
       const row = rows[selIdx];
-      if (row && row.disabled !== true) {
-        row.run();
-        close();
-      }
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      close();
+      if (row && row.disabled !== true) choose(row);
     }
+    // Escape is deliberately absent: it is handled at the window in the capture
+    // phase (see the effect above), which is what makes it work when focus is
+    // anywhere but here. That listener stops propagation, so this handler would
+    // never see the key even if it wanted to.
   };
+
+  /** One result row: an `option` in the listbox, addressed by id, never a tab
+   * stop. It stays a `<button>` — for the click, for `:disabled`, and for every
+   * selector in `quickbar.css` that draws it. */
+  const renderRow = ({ row, index }: { row: Row; index: number }) => (
+    <button
+      key={row.key}
+      type="button"
+      role="option"
+      id={optionId(index)}
+      aria-selected={index === selIdx}
+      tabIndex={-1}
+      disabled={row.disabled === true}
+      ref={index === selIdx ? selRef : undefined}
+      className={"wb-qb-row" + (index === selIdx ? " is-selected" : "")}
+      onClick={() => choose(row)}
+      onMouseMove={() => {
+        if (row.disabled !== true) setSel(index);
+      }}
+    >
+      <Labelled
+        className="wb-qb-row-title"
+        text={row.title}
+        query={matched}
+        positions={row.titleHits}
+      />
+      <Labelled
+        className="wb-qb-row-detail"
+        text={row.detail}
+        query={matched}
+        positions={row.detailHits}
+      />
+      {row.chord !== undefined && (
+        <span className="wb-qb-row-keys">
+          {chordKeycaps(row.chord).map((cap) => (
+            <span key={cap} className="wb-keycap">
+              {cap}
+            </span>
+          ))}
+        </span>
+      )}
+    </button>
+  );
 
   return (
     <>
-      <div className={"wb-qb-backdrop" + exiting} onClick={close} />
-      {/* No `aria-hidden` while it leaves: the input inside still holds focus
-          for those few frames, and hiding a focused subtree from the
+      <div className={"wb-qb-backdrop" + exiting} onClick={dismiss} />
+      {/* `aria-modal` is what tells assistive tech the window behind the scrim
+          is not there — the visual half (60% black, `z-index` above the dock)
+          always said so, the accessibility tree did not. The keyboard half is
+          the Tab ring in the effect above; the two together are what make this
+          a dialog rather than a floating div.
+
+          No `aria-hidden` while it leaves: the input inside may still hold
+          focus for those few frames, and hiding a focused subtree from the
           accessibility tree is worse than describing a dialog that is fading.
           `pointer-events: none` in the stylesheet is what makes it inert. */}
-      <div className={"wb-qb" + exiting} role="dialog" aria-label={pick?.label ?? "Quick open"}>
+      <div
+        ref={dialogRef}
+        className={"wb-qb" + exiting}
+        role="dialog"
+        aria-modal="true"
+        aria-label={pick?.label ?? "Quick open"}
+      >
+        {/* The ARIA combobox pattern: focus never leaves this input, and the
+            option it is "on" is named by `aria-activedescendant`. That is the
+            whole of the second finding — the amber wash said which row Enter
+            would run to a pair of eyes and to nothing else. */}
         <input
           ref={inputRef}
           className="wb-qb-input"
+          role="combobox"
+          aria-label={pick?.label ?? "Quick open"}
+          aria-autocomplete="list"
+          aria-controls={LISTBOX_ID}
+          aria-expanded={expanded}
+          {...(expanded ? { "aria-activedescendant": optionId(selIdx) } : {})}
           placeholder={pick?.placeholder ?? "Search files — type > for actions"}
           value={query}
           spellCheck={false}
@@ -336,7 +579,11 @@ export function QuickBar() {
           }}
           onKeyDown={onKeyDown}
         />
-        <div className="wb-qb-results">
+        <div
+          className="wb-qb-results"
+          id={LISTBOX_ID}
+          {...(expanded ? { role: "listbox", "aria-label": "Results" } : {})}
+        >
           {rows.length === 0 && (
             <div className="wb-qb-empty">
               {pick !== null
@@ -346,49 +593,23 @@ export function QuickBar() {
                   : "No matching files"}
             </div>
           )}
-          {rows.map((row, i) => (
-            <Fragment key={row.key}>
-              {row.category !== undefined && row.category !== rows[i - 1]?.category && (
-                <div className="wb-qb-cat">{row.category}</div>
-              )}
-              <button
-                type="button"
-                disabled={row.disabled === true}
-                ref={i === selIdx ? selRef : undefined}
-                className={"wb-qb-row" + (i === selIdx ? " is-selected" : "")}
-                onClick={() => {
-                  row.run();
-                  close();
-                }}
-                onMouseMove={() => {
-                  if (row.disabled !== true) setSel(i);
-                }}
-              >
-                <Labelled
-                  className="wb-qb-row-title"
-                  text={row.title}
-                  query={matched}
-                  positions={row.titleHits}
-                />
-                <Labelled
-                  className="wb-qb-row-detail"
-                  text={row.detail}
-                  query={matched}
-                  positions={row.detailHits}
-                />
-                {row.chord !== undefined && (
-                  <span className="wb-qb-row-keys">
-                    {chordKeycaps(row.chord).map((cap) => (
-                      <span key={cap} className="wb-keycap">
-                        {cap}
-                      </span>
-                    ))}
-                  </span>
-                )}
-              </button>
-            </Fragment>
-          ))}
+          {sections.map((section, i) =>
+            section.category === undefined ? (
+              <Fragment key={`§${String(i)}`}>{section.rows.map(renderRow)}</Fragment>
+            ) : (
+              // The header is `aria-hidden` because the group is already
+              // labelled with the same words — otherwise a reader hears
+              // "Panes" twice before every row in the section.
+              <div key={`§${String(i)}`} role="group" aria-label={section.category}>
+                <div className="wb-qb-cat" aria-hidden="true">
+                  {section.category}
+                </div>
+                {section.rows.map(renderRow)}
+              </div>
+            ),
+          )}
         </div>
+        <ResultCount count={rows.length} />
         <div className="wb-qb-footer">
           <span>
             <span className="wb-keycap">↑↓</span> navigate

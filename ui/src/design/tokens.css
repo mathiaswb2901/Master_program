@@ -447,7 +447,9 @@ html {
   color: var(--text-tertiary);
 }
 
-/* The only looping animation in the app: agent "working" dot. */
+/* The app's one looping keyframe. Two marks wear it — the agent "working" dot
+   and the voice recording mark (DESIGN.md §5.4) — and that is the point: one
+   loop, stopped in one place by the reduced-motion block below. */
 @keyframes wb-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
