@@ -191,7 +191,18 @@ export function pruneLayout(value: unknown, known: PaneVocabulary): PrunedLayout
   }
   if (Object.keys(kept).length === 0) return null;
 
-  const root = pruneNode(grid.root, kept);
+  // Detached windows are vetted *before* the grid, because what survives out
+  // there decides what has to survive in here: a popped-out pane docks back
+  // into a named grid group, and that group is an empty leaf (see `anchors`).
+  const floating = reviseDetached(value.floatingGroups, kept);
+  const popouts = reviseDetached(value.popoutGroups, kept);
+  const anchors = new Set(
+    popouts
+      .map((group) => group.gridReferenceGroup)
+      .filter((id): id is string => typeof id === "string"),
+  );
+
+  const root = pruneNode(grid.root, kept, anchors);
   if (root === null) return null;
 
   const prunedGrid: Json = { ...grid, root };
@@ -203,22 +214,23 @@ export function pruneLayout(value: unknown, known: PaneVocabulary): PrunedLayout
   if (typeof value.activeGroup === "string" && !survivingGroups.has(value.activeGroup)) {
     delete layout.activeGroup;
   }
-  for (const key of ["floatingGroups", "popoutGroups"] as const) {
-    const groups = value[key];
-    if (!Array.isArray(groups)) continue;
-    const surviving = groups.filter((group) => {
-      if (!isRecord(group) || pruneGroup(group.data, kept) === null) return false;
-      // A popped-out pane re-grids into the group it names on close/restore, so
-      // one whose `gridReferenceGroup` did not survive pruning has nowhere to go
-      // back to — dockview would fail to restore it. Drop it with the panels it
-      // held; a floating group carries no such reference and keeps this pass.
-      if (key === "popoutGroups" && typeof group.gridReferenceGroup === "string") {
-        return survivingGroups.has(group.gridReferenceGroup);
-      }
-      return true;
-    });
-    if (surviving.length === 0) delete layout[key];
-    else layout[key] = surviving.map((group) => reviseFloating(group as Json, kept));
+  const surviving: Record<"floatingGroups" | "popoutGroups", Json[]> = {
+    floatingGroups: floating,
+    // A popped-out pane re-grids into the group it names on close/restore, so
+    // one whose `gridReferenceGroup` is not in the grid at all has nowhere to
+    // go back to — dockview would fail to restore it. `anchors` kept every such
+    // group the file *did* have, so what this drops is a dangling reference,
+    // not a group we pruned out from under it.
+    popoutGroups: popouts.filter(
+      (group) =>
+        typeof group.gridReferenceGroup !== "string" ||
+        survivingGroups.has(group.gridReferenceGroup),
+    ),
+  };
+  for (const [key, groups] of Object.entries(surviving)) {
+    if (!Array.isArray(value[key])) continue;
+    if (groups.length === 0) delete layout[key];
+    else layout[key] = groups;
   }
   // The one cast in the module: dockview's published `SerializedDockview` omits
   // `grid.maximizedNode`, which its own serializer writes and its deserializer
@@ -242,30 +254,82 @@ function addressablePane(id: string, component: string, known: PaneVocabulary): 
   return instance === null || known.plural.has(component);
 }
 
-function reviseFloating(group: Json, kept: Json): Json {
-  const data = pruneGroup(group.data, kept);
-  return data === null ? group : { ...group, data };
+/**
+ * The floating / popped-out windows that still hold something, with their
+ * contents pruned. Dropped entries are simply absent from the result.
+ *
+ * Two shapes, because dockview 7 let a detached window host a whole grid rather
+ * than a single group: `data` is the legacy single-group form (still written
+ * whenever a window holds one group, which is all this app ever makes), `grid`
+ * is the nested one. We build no UI for nested windows, but a user who drags a
+ * second pane into a popped-out one gets that shape in their file — so it is
+ * pruned like any other grid rather than falling off the end of a shape check
+ * and taking the whole window with it.
+ */
+function reviseDetached(groups: unknown, kept: Json): Json[] {
+  if (!Array.isArray(groups)) return [];
+  const revised: Json[] = [];
+  for (const group of groups) {
+    if (!isRecord(group)) continue;
+    if (isRecord(group.data)) {
+      const data = pruneGroup(group.data, kept, EMPTY_ANCHORS);
+      if (data !== null) revised.push({ ...group, data });
+      continue;
+    }
+    const nested = group.grid;
+    if (!isRecord(nested) || !isRecord(nested.root)) continue;
+    const root = pruneNode(nested.root, kept, EMPTY_ANCHORS);
+    if (root !== null) revised.push({ ...group, grid: { ...nested, root } });
+  }
+  return revised;
 }
 
+/** Grid groups that must survive even with nothing in them — see `pruneGroup`.
+ * Empty for a detached window's own contents: nothing docks back into those. */
+const EMPTY_ANCHORS: ReadonlySet<string> = new Set();
+
 /** One grid node, pruned. null = nothing left in it. */
-function pruneNode(node: unknown, kept: Json): Json | null {
+function pruneNode(node: unknown, kept: Json, anchors: ReadonlySet<string>): Json | null {
   if (!isRecord(node)) return null;
   if (node.type === "branch") {
     if (!Array.isArray(node.data)) return null;
     const children = node.data
-      .map((child) => pruneNode(child, kept))
+      .map((child) => pruneNode(child, kept, anchors))
       .filter((child): child is Json => child !== null);
     return children.length === 0 ? null : { ...node, data: children };
   }
-  const data = pruneGroup(node.data, kept);
+  const data = pruneGroup(node.data, kept, anchors);
   return data === null ? null : { ...node, data };
 }
 
-/** One group's view list, pruned. null = the group has no panels left. */
-function pruneGroup(data: unknown, kept: Json): Json | null {
+/**
+ * One group's view list, pruned. null = the group has no panels left.
+ *
+ * **Except an anchor.** When a pane pops out to its own window dockview leaves
+ * its source group behind in the grid as an invisible, view-less leaf and
+ * points the popout's `gridReferenceGroup` at it — that leaf is *where the pane
+ * comes home to*, on close, on a blocked popup, and on restore. Pruning it as
+ * "an empty group" left the popout naming a group that no longer existed, so
+ * the whole popout entry was dropped and the pane it held disappeared from the
+ * window the user had saved. Anchors are therefore kept exactly as dockview
+ * wrote them, empty views and all.
+ *
+ * Only a group that *arrived* empty, though. A group that emptied out **here**,
+ * because the tool it held is gone, is genuinely dead — it still has a real
+ * size in the grid, so keeping it would restore a blank pane — and a popout
+ * anchored to it has lost its home just as surely as one anchored to a group
+ * that was never there.
+ */
+function pruneGroup(data: unknown, kept: Json, anchors: ReadonlySet<string>): Json | null {
   if (!isRecord(data) || !Array.isArray(data.views)) return null;
   const views = data.views.filter((view) => typeof view === "string" && view in kept);
-  if (views.length === 0) return null;
+  if (views.length === 0) {
+    if (data.views.length > 0) return null;
+    if (typeof data.id !== "string" || !anchors.has(data.id)) return null;
+    const anchor: Json = { ...data, views };
+    delete anchor.activeView;
+    return anchor;
+  }
   const group: Json = { ...data, views };
   if (typeof group.activeView !== "string" || !views.includes(group.activeView)) {
     delete group.activeView;
