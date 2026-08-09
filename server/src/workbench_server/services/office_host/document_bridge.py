@@ -38,6 +38,7 @@ from workbench_server.models.office_bridge import (
     CellWindow,
     DocStructure,
     LiveWorkbookStatus,
+    SlideText,
     WordEdit,
     WordText,
 )
@@ -135,6 +136,22 @@ class DocumentBridge(Protocol):
         by itself. Reports the whole used range so the caller can ask for the
         rest. Raises :class:`RangeInvalidError` for an unknown sheet or a
         malformed range, :class:`DocGoneError` if the instance has closed.
+        """
+        ...
+
+    async def read_powerpoint(
+        self, handle: HostHandle, start_slide: int, max_chars: int
+    ) -> SlideText:
+        """Read the deck's text from ``start_slide`` (one-based), up to ``max_chars``.
+
+        Whole slides, joined by blank lines, each headed by its number and title;
+        stops before ``max_chars`` is exceeded and reports what it did not reach.
+        Raises :class:`RangeInvalidError` if ``start_slide`` is outside a
+        non-empty deck, :class:`DocGoneError` if the instance has closed.
+
+        There is no ``write_powerpoint`` beside this one, deliberately: see
+        ``models/office_bridge.py`` for why a slide has no addressable write
+        target yet.
         """
         ...
 

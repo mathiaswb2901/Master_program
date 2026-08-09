@@ -334,12 +334,22 @@ export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
       onMessage: (data) => {
         const event = data as WorkspaceEvent;
         if (event.type !== "office_host") return;
+        const before = get().hosts[event.host.path];
         set((state) => ({ hosts: { ...state.hosts, [event.host.path]: event.host } }));
         // Re-read the sign-in when a window actually docks: a user who signed
         // into Word between launch and embed should see the line catch up,
         // without polling the registry on every frame. `embedded` is the one
         // transition worth a read — the rest never change who is signed in.
         if (event.host.state === "embedded") void get().refreshIdentity();
+        // And re-read what can be docked when a host starts or stops being live.
+        // PowerPoint runs one instance for the whole session, so a deck arriving
+        // takes `powerpoint` out of `hostable_kinds` and a deck settling puts it
+        // back (`services/office_host/service.py`, `_kind_notes`). Without this
+        // the *next* deck would be sent to a launch the server has already
+        // decided to refuse, and land on a card instead of the preview. Twice
+        // per document, not once per frame: only the live/settled edge asks.
+        const wasLive = before !== undefined && !TERMINAL.has(before.state);
+        if (wasLive !== !TERMINAL.has(event.host.state)) void get().refreshCapabilities();
       },
       onOpen: () => {
         void get().refreshCapabilities();
@@ -445,7 +455,7 @@ export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
 
   live: () =>
     Object.entries(get().hosts)
-      .filter(([, host]) => !TERMINAL.has(host.state))
+      .filter(([, host]) => hostIsLive(host))
       .map(([path]) => path),
 
   closeLive: async () => {
@@ -488,6 +498,18 @@ export const useOfficeHostStore = create<OfficeHostStore>((set, get) => ({
 const MAX_DRAINS = 10;
 
 const TERMINAL = new Set(["closed", "crashed", "failed"]);
+
+/**
+ * Does this host still name a window somebody has to deal with?
+ *
+ * `detached` counts: that document is on the user's desktop, open, and still
+ * ours. Only the terminal states have nothing left behind them. Exported because
+ * the panel needs the same question — a document that is *already* docked is
+ * hostable whatever `hostable_kinds` says about starting a *new* one.
+ */
+export function hostIsLive(host: OfficeHostInfo | undefined): boolean {
+  return host !== undefined && !TERMINAL.has(host.state);
+}
 
 /**
  * Hold the command socket open for the life of the window.

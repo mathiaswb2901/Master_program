@@ -22,10 +22,30 @@ conditional on is built and measured (``host::mover`` in the shell — a hung
 guest costs a resize frame ~1.5 ms instead of ~1 s), so the remaining conditions
 are ones the machine answers, not ones a reviewer has to. Windows, an Office to
 launch, and a desktop shell attached to the host channel: any of them missing is
-reported by ``capabilities`` and the UI falls back to OnlyOffice. PowerPoint is
-refused whatever the mode — it is single-instance and offers no window handle to
-prove ownership with, so preview is the honest answer in v1. Nothing here
-touches the OnlyOffice path, which stays exactly as it was.
+reported by ``capabilities`` and the UI falls back to OnlyOffice.
+
+**PowerPoint is hosted conditionally, and the condition is reported before it is
+hit.** It is genuinely single-instance — its COM class factory is multi-use, so a
+launch made while one is running returns the *user's* PowerPoint rather than a
+private one (measured; see ``office_com``) — and a process we did not start must
+never reach the job object that reaps ours. So the answer is neither "host it
+anyway" nor "preview-only forever": host it when Workbench started the process,
+refuse when it did not, and say which of those is true right now in
+``capabilities().kind_notes`` so the UI degrades to preview from a fact rather
+than from a failed launch. Nothing here touches the OnlyOffice path, which stays
+exactly as it was.
+
+**And the instance most often in the way is our own.** Hosting one deck consumes
+the single process, so the second deck cannot dock either — the "one deck at a
+time" limitation, which is a *consequence* of single-instance hosting rather than
+a separate rule. It has to be answered from :attr:`_hosts` and not from a window
+probe, because docking reparents the frame into a child window and a top-level
+``EnumWindows`` walk stops being able to see it (``office_com``'s probe is
+deliberately window-based so it can answer a REST request off the apartment
+thread). Whose PowerPoint it is changes the only action the user can take —
+"close that tab" versus "close PowerPoint" — so the two are different reasons
+(``powerpoint_hosted_here`` / ``powerpoint_already_running``) and different
+sentences, never one message that is right half the time.
 """
 
 import asyncio
@@ -46,11 +66,14 @@ from workbench_server.models.office_bridge import (
     CellWindow,
     DocStructure,
     LiveWorkbookStatus,
+    SlideText,
     WordEdit,
     WordText,
 )
 from workbench_server.models.office_host import (
     HOSTABLE_KINDS,
+    SINGLE_INSTANCE_KINDS,
+    HostAppKind,
     HostReason,
     HostState,
     OfficeCapabilities,
@@ -78,6 +101,7 @@ from workbench_server.services.office_host.document_bridge import (
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
 from workbench_server.services.office_host.fake_document_bridge import FakeDocumentBridge
 from workbench_server.services.office_host.identity import fake_identity, probe_identity
+from workbench_server.services.office_host.office_com import application_window_exists
 from workbench_server.services.office_host.real_document_bridge import ShellDocumentBridge
 from workbench_server.services.office_host.shell_backend import ShellHostBackend
 from workbench_server.services.office_host.shell_channel import ShellChannel
@@ -135,6 +159,15 @@ _WORD_EXE_GLOBS = (
     "Microsoft Office/root/Office*/WINWORD.EXE",
     "Microsoft Office/Office*/WINWORD.EXE",
 )
+
+#: The application's own name, for the sentences ``kind_notes`` puts on screen.
+#: :data:`~...office_host.HostAppKind` is a wire token — a user reads "PowerPoint",
+#: not "powerpoint".
+_APP_NAMES: dict[HostAppKind, str] = {
+    "word": "Word",
+    "excel": "Excel",
+    "powerpoint": "PowerPoint",
+}
 
 
 class HostRefusedError(Exception):
@@ -283,6 +316,7 @@ class OfficeHostService:
         fake: bool = False,
         channel: ShellChannel | None = None,
         detector: Callable[[], bool] = detect_office,
+        running_probe: Callable[[HostAppKind], bool] = application_window_exists,
         clock: Callable[[], float] = time.time,
         poll_interval_s: float = POLL_INTERVAL_S,
         launch_timeout_s: float = LAUNCH_TIMEOUT_S,
@@ -308,6 +342,12 @@ class OfficeHostService:
         #: ``office_read`` tool reports that plainly rather than failing opaquely.
         self._bridge = None if mode == "off" else bridge
         self._office_detected = detector()
+        #: "Is one of these already running?", for the single-instance kinds.
+        #: Injected like ``detector`` so tests drive it without a real window —
+        #: and called per ``capabilities()`` rather than cached, because the user
+        #: can open PowerPoint at any moment and a cached "no" would send them to
+        #: a launch that is going to be refused.
+        self._running_probe = running_probe
         self._clock = clock
         self._poll_interval_s = poll_interval_s
         self._launch_timeout_s = launch_timeout_s
@@ -332,17 +372,110 @@ class OfficeHostService:
         the UI never has to combine them itself.
         """
         native = self.hosting_available
+        notes = self._kind_notes() if native else {}
         return OfficeCapabilities(
             office_native=self._mode,
             native_hosting=native,
             office_detected=self._office_detected,
             fake_backend=self._fake and native,
             shell_attached=self._shell_attached,
-            hostable_kinds=list(HOSTABLE_KINDS) if native else [],
+            hostable_kinds=[kind for kind in HOSTABLE_KINDS if kind not in notes] if native else [],
+            kind_notes=notes,
             onlyoffice=onlyoffice_enabled,
             fallback="native" if native else ("onlyoffice" if onlyoffice_enabled else "preview"),
             detail=self._detail(onlyoffice_enabled),
         )
+
+    def _kind_notes(self) -> dict[HostAppKind, str]:
+        """Why a supported kind cannot be hosted *at this moment*, and by whom.
+
+        Only the single-instance kinds can produce one, and there are two ways
+        for the one process to be taken.
+
+        **Workbench is already hosting one** — asked first, and asked of
+        :attr:`_hosts` rather than of a probe. This is the common case (open a
+        second deck) *and* the one a window probe structurally cannot answer:
+        docking reparents the frame into a child window, so the top-level
+        ``EnumWindows`` walk behind ``running_probe`` stops seeing it the moment
+        the embed lands. Reading our own map is also exact rather than advisory —
+        a host is live because we launched it — and it holds from ``launching``
+        onwards, so two decks opened in the same second cannot both be told yes.
+        The sentence names the document, because the window to close is a
+        Workbench tab and possibly behind another one.
+
+        **The user has one open outside Workbench** — the window probe, which is
+        advisory in both directions: it cannot see an instance running without a
+        window (an ``/AUTOMATION`` PowerPoint some other tool is driving), and
+        the user can start one a second after the answer is sent. The launch
+        pre-flight is the exact question and the ownership check behind it is the
+        guarantee; this exists so the common case degrades to preview without a
+        failed launch first.
+
+        The fake short-circuits the *probe* only: it starts no processes, so
+        under ``WORKBENCH_OFFICE_FAKE`` there is no machine-wide instance to
+        collide with and CI stays deterministic with no Office and no window
+        station. Our own hosts are not a probe — the fake creates them exactly as
+        the real backend does — so the first branch applies there too, which is
+        what lets the E2E suite walk the second-deck journey a user actually
+        hits.
+        """
+        notes: dict[HostAppKind, str] = {}
+        for kind in HOSTABLE_KINDS:
+            if kind not in SINGLE_INSTANCE_KINDS:
+                continue
+            app = _APP_NAMES[kind]
+            hosted = self._hosted_path_for(kind)
+            if hosted is not None:
+                notes[kind] = (
+                    f"Workbench is already showing {hosted} in {app}, which runs one instance "
+                    "for the whole session. Close that tab to dock this file; until then it "
+                    "opens as a preview."
+                )
+            elif not self._fake and self._running_probe(kind):
+                notes[kind] = (
+                    f"{app} is already running outside Workbench. It runs one instance for "
+                    "the whole session, so Workbench cannot start its own — close it and "
+                    "reopen this file to dock it."
+                )
+        return notes
+
+    def _hosted_path_for(self, kind: HostAppKind, *, other_than: str | None = None) -> str | None:
+        """The document this application is already holding for us, if any.
+
+        ``other_than`` excludes one host by id: the host being launched is in the
+        map (and non-terminal) before its own launch returns, so a refusal has to
+        ask about *the others* or it would always find itself.
+        """
+        return next(
+            (
+                host.lifecycle.path
+                for host_id, host in self._hosts.items()
+                if host.lifecycle.kind == kind
+                and not host.lifecycle.terminal
+                and host_id != other_than
+            ),
+            None,
+        )
+
+    def _whose_instance(self, host: _Host, reason: HostReason) -> HostReason:
+        """Sharpen "the application is already running" into *whose* it is.
+
+        The backend knows only that one is up — the pre-flight it raises from is
+        a COM question about the machine, not about Workbench. The service knows
+        the other half: whether the instance in the way is the one it is hosting
+        itself. That changes the only action the user can take, so it changes the
+        reason rather than being left to a card that says "close PowerPoint"
+        about a window docked in a panel behind another tab.
+
+        Reached on the race the capabilities report cannot close: ``kind_notes``
+        is read when the panel mounts, and a deck docked in the moment between
+        that read and this launch still lands here.
+        """
+        if reason != "powerpoint_already_running":
+            return reason
+        if self._hosted_path_for(host.lifecycle.kind, other_than=host.lifecycle.host_id) is None:
+            return reason
+        return "powerpoint_hosted_here"
 
     async def identity(self) -> OfficeIdentity:
         """Which Microsoft account this machine's Office is signed in as.
@@ -392,11 +525,9 @@ class OfficeHostService:
         kind = host_app_kind(path)
         if kind is None:
             raise HostRefusedError("unsupported_file", f"{path} is not an Office document")
-        if kind not in HOSTABLE_KINDS:
+        if kind not in HOSTABLE_KINDS:  # pragma: no cover - every kind is hostable today
             raise HostRefusedError(
-                "powerpoint_preview_only",
-                "PowerPoint is preview-only in this version: it is single-instance and "
-                "offers no way to prove a window is one we launched",
+                "unsupported_file", f"{kind} documents cannot be docked in this version"
             )
         file_path = self._workspace.safe_path(path)
         if not file_path.is_file():
@@ -434,13 +565,14 @@ class OfficeHostService:
             )
             return self._settle(host, "failed", "launch_timeout")
         except HostBackendError as error:
+            reason = self._whose_instance(host, error.reason)
             log.warning(
                 "office_host.launch_failed",
                 host=host.lifecycle.host_id,
-                reason=error.reason,
+                reason=reason,
                 detail=str(error),
             )
-            return self._settle(host, "failed", error.reason)
+            return self._settle(host, "failed", reason)
         if handle.adopted:
             # The document is already open in an instance we did not start.
             # Refuse it: reparenting here would take over the user's own window,
@@ -774,19 +906,23 @@ class OfficeHostService:
         sheet: str | None = None,
         a1_range: str | None = None,
         start_paragraph: int = 0,
-    ) -> WordText | CellWindow:
+        start_slide: int = 1,
+    ) -> WordText | CellWindow | SlideText:
         """Read a window of the live document at ``path``.
 
         Word documents are read by ``start_paragraph``/``max_chars``; Excel
         worksheets by ``sheet``/``a1_range``, trimmed to ``max_cells`` cells and
         ``max_chars`` of aggregate cell text so one long cell cannot overrun the
-        window. Reading
+        window; PowerPoint decks by ``start_slide``/``max_chars``, whole slides at
+        a time. Reading
         an Excel document without a ``sheet`` is a caller error here — the tool
         returns the structure instead — so it is refused rather than guessed.
         """
         host, bridge, handle = self._live_document(path, "reading")
         if host.lifecycle.kind == "word":
             return await self._guarded_op(bridge.read_word(handle, start_paragraph, max_chars))
+        if host.lifecycle.kind == "powerpoint":
+            return await self._guarded_op(bridge.read_powerpoint(handle, start_slide, max_chars))
         if sheet is None:
             raise DocNotReadableError("name a sheet to read from an Excel document")
         return await self._guarded_op(
@@ -815,6 +951,16 @@ class OfficeHostService:
         reports (not docked, still opening, foreign window, gone, unavailable).
         """
         host, bridge, handle = self._live_document(path, "writing")
+        if host.lifecycle.kind == "powerpoint":
+            # Read-only by design, not by omission: a slide has no single
+            # addressable text target the way a paragraph or a cell does (its
+            # text lives in positional, typed shapes), so there is nothing here
+            # to write *to* yet. Said plainly so an agent stops rather than
+            # retrying with a different guess at the arguments.
+            raise RangeInvalidError(
+                "PowerPoint decks are read-only in Workbench: a slide has no single text "
+                "target to address. Read it with office_read, and edit it in the panel."
+            )
         if host.lifecycle.kind == "word":
             if paragraph is None:
                 raise RangeInvalidError("name a paragraph to write in a Word document")

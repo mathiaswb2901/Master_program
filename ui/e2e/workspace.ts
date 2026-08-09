@@ -91,8 +91,16 @@ export const XLSX_REFUSES_EMBED = "sample-refuse-embed.xlsx";
  * switch would have unmounted.
  */
 export const DOCX_REFUSES_CLOSE = "sample-refuse-close.docx";
-/** A deck, for the one application v1 deliberately does not dock. */
+/** A deck that docks, like the .docx and .xlsx beside it. */
 export const PPTX_FILE = "slides.pptx";
+/** A deck that cannot dock because PowerPoint is already running — the
+ * `app-running` trigger, which is the one refusal unique to PowerPoint being
+ * single-instance. */
+export const PPTX_APP_RUNNING = "slides-app-running.pptx";
+/** A second, ordinary deck. Nothing is wrong with *it*: it cannot dock only
+ * because {@link PPTX_FILE} is already holding the one PowerPoint there is, and
+ * that is the journey it exists for. */
+export const PPTX_SECOND = "slides-two.pptx";
 /** Body of the working shell shortcut; the terminal journey asserts this text
  * lands on the prompt line and that nothing ever ran it. */
 export const SHORTCUT_NAME = "Show the marker";
@@ -360,8 +368,8 @@ function seed(root: string): void {
   fs.writeFileSync(path.join(root, NOTES_FILE), `# Notes\n\n${NOTES_MARKER}.\n`, "utf-8");
   // Never opened by an editor. The office journey runs against the *fake* host
   // backend with no Document Server configured, so nothing ever reads a byte of
-  // these — three of them are named to choose a branch of the host lifecycle,
-  // and the fourth is the application v1 will not dock.
+  // these — their *names* choose a branch of the host lifecycle, one per
+  // application and one per refusal worth a journey.
   for (const name of [
     DOCX_FILE,
     DOCX_ALREADY_OPEN,
@@ -370,6 +378,8 @@ function seed(root: string): void {
     XLSX_FILE,
     XLSX_REFUSES_EMBED,
     PPTX_FILE,
+    PPTX_APP_RUNNING,
+    PPTX_SECOND,
   ]) {
     fs.writeFileSync(path.join(root, name), "not a real document\n", "utf-8");
   }

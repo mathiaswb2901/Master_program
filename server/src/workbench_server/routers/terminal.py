@@ -1,7 +1,7 @@
 """WebSocket endpoint bridging xterm.js to a PTY session."""
 
 import asyncio
-import contextlib
+from collections.abc import AsyncIterator
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -17,22 +17,22 @@ from workbench_server.services.local_auth import ws_subprotocol_to_echo
 from workbench_server.services.pty_manager import PtyManager, PtySession
 from workbench_server.services.terminal_stream import coalesced_output
 from workbench_server.services.workspace import Workspace
+from workbench_server.services.ws_lifecycle import drain_pump, send_frames
 
 log = structlog.get_logger()
 
 router = APIRouter()
 
 
-async def _pump_output(session: PtySession, ws: WebSocket) -> None:
-    """PTY -> WebSocket until the process exits.
+async def _output_frames(session: PtySession) -> AsyncIterator[str]:
+    """The session's output as wire frames, ending with the exit frame.
 
     One frame per *batch* of ConPTY reads, not per read — the batching policy
     (and why it costs no interactive latency) lives in `terminal_stream`.
     """
-    with contextlib.suppress(RuntimeError):  # ws already closed mid-send
-        async for chunk in coalesced_output(session):
-            await ws.send_text(TerminalOutput(data=chunk).model_dump_json())
-        await ws.send_text(TerminalExit().model_dump_json())
+    async for chunk in coalesced_output(session):
+        yield TerminalOutput(data=chunk).model_dump_json()
+    yield TerminalExit().model_dump_json()
 
 
 @router.websocket("/ws/terminal")
@@ -47,7 +47,9 @@ async def terminal_ws(ws: WebSocket) -> None:
     await ws.accept(subprotocol=ws_subprotocol_to_echo(ws.scope))
 
     session = manager.spawn(cwd=workspace.root)
-    pump = asyncio.create_task(_pump_output(session, ws))
+    pump = asyncio.create_task(
+        send_frames(ws, _output_frames(session), stream="terminal", session_id=session.session_id)
+    )
     try:
         while True:
             raw = await ws.receive_text()
@@ -63,7 +65,13 @@ async def terminal_ws(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        pump.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pump
-        manager.release(session)
+        # The release is the line that hands the OS its child process back, so
+        # it gets a `finally:` of its own — never a line *after* an `await` that
+        # can still raise. And it goes off the loop thread: reaping a wedged
+        # child blocks for up to a second, which on this thread is a second of
+        # dead server for every other socket. Both rules: `services/ws_lifecycle`
+        # and `PtyManager._TEARDOWN_THREADS`.
+        try:
+            await drain_pump(pump, stream="terminal", session_id=session.session_id)
+        finally:
+            await manager.release_async(session)
