@@ -335,22 +335,68 @@ and the other is not.
 
 ### The reviewer session
 
-`SessionKind` gains `"reviewer"` (one word in `models/agents.py`), and that one word buys
-four things from code that already exists:
+`SessionKind` gains `"reviewer"` (one word in `models/agents.py`). That word is cheap. The
+isolation it is supposed to buy is **not already in the code**, and this plan says so
+plainly rather than letting a build lane discover it: three of the four bullets below are
+**changes to existing, currently-unconditional logic that every other kind runs through** —
+not an additive branch like the orchestrator's five tools. A lane that adds a branch and
+stops will ship a reviewer that can still see and call `office_write` and `run_command`.
 
-- `tools_for("reviewer")` returns **only** `report_findings` — no `office_read`, no
-  `run_command`, no `workspace_search`, so the reviewer's schema cost is one tool. It lives
-  in its own `REVIEWER_TOOLS` tuple rather than in `AGENT_TOOLS`, for the same reason the
-  five orchestrator tools do: a tool a chat session can see is a schema every chat session
-  pays for on every request;
-- `build_agent_options` gives it `Read`, `Glob`, `Grep` and nothing that writes — no
-  `Write`, no `Edit`, no `Bash`;
-- a permission request from a reviewer is **denied and logged**, never escalated to a
-  card: a check that runs unattended must not be able to interrupt the user, and a
-  reviewer that wanted a tool it was not given has a finding to make, not a permission to
-  ask for (m6-proof §3's unattended posture, applied to a session kind);
-- it appears in the activity feed and Mission Control as a `reviewer` row, so a review in
-  flight is visible rather than a mystery pause. It also counts against
+- **The toolset — a required refactor of `build_context_bridge`, not an addition.**
+  `tools_for("reviewer")` returns **only** `report_findings` — no `office_read`, no
+  `office_write`, no `run_command`, no `workspace_search` — living in its own
+  `REVIEWER_TOOLS` tuple rather than in `AGENT_TOOLS`, for the same reason the five
+  orchestrator tools do: a tool a chat session can see is a schema every chat session pays
+  for on every request. **Defining that tuple changes nothing on its own.**
+  `build_context_bridge` (`services/sdk_factory.py`, lines 134–142) hardcodes a base list
+  of seven `@tool` closures for *every* kind and only ever *adds* to it (the `kind ==
+  "orchestrator"` branch at line 143); no kind subtracts, and the construction never reads
+  `tools_for`. The one caller of `tools_for` today is `allowed_tool_names`
+  (`services/agent_tools.py:1438`), which feeds `allowed_tools` — and per the SDK's own
+  docstring `allowed_tools` names "tool names that are auto-allowed without prompting"; it
+  does **not** remove a tool from the model's context. Only `tools` (the builtin set) and
+  `disallowed_tools` ("removed from the model's context and cannot be used") do that, and
+  this codebase passes neither. So PR 2 **rewrites the base-list construction to build from
+  `tools_for(kind)`** — one `@tool` closure per spec, selected by kind, with the
+  orchestrator's five folded into the same selection instead of appended after it. That
+  touches the path every existing kind takes, so it ships with a per-kind test asserting
+  the exact tool names the bridge exposes: `chat` and `worker` get the base set unchanged —
+  today's seven **plus PR 1's `run_gates`**, which the refactor must carry rather than drop
+  — `orchestrator` gets that set plus its five, and `reviewer` gets `report_findings`
+  alone. Names, not counts: a count passes while a tool is quietly swapped.
+- **The builtin tools — `_AUTO_ALLOWED` is unconditional today and must stop being.**
+  `_AUTO_ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep"]` (`sdk_factory.py:58`) is
+  spread into every session's `allowed_tools` with no kind gate (line 241), and no
+  `disallowed_tools` is passed anywhere. A reviewer assembled by adding a branch elsewhere
+  would therefore still have `Write` and `Edit` **pre-approved, ahead of `can_use_tool`**.
+  PR 2 gates the spread on kind — `Read`, `Glob`, `Grep` for a reviewer — **and** passes
+  `disallowed_tools` for that kind covering `Write`, `Edit` and `Bash`. Both, on purpose,
+  because they do different jobs: gating the allow-list removes the silent auto-approval,
+  while `disallowed_tools` is the SDK's only documented way to take the tool out of the
+  model's context so the reviewer does not spend turns asking for one it cannot have.
+- **The permission posture — new safety-critical code, with no precedent to copy.** There
+  is no deny-and-log path in this repo to "apply". `can_use_tool`
+  (`sdk_factory.py:209-212`) calls `bridge.ask_permission(...)` unconditionally for every
+  kind — `worker` and `orchestrator` included — and the `PreToolUse` broker
+  (`services/permission_broker.py:127`) escalates brokered shell calls through the *same*
+  future, so there are **two** paths to the user's screen, not one. `m6-proof.md` §3
+  described an unattended deny-and-log policy alongside `ObjectiveCaps`, but the objective
+  sessions that shipped in #90 implement neither: `Objective` in `models/sessions.py` is a
+  thin `{statement, acceptance}` record with status derived, and `ObjectiveCaps`,
+  `max_iterations` and `max_wall_clock_s` appear nowhere in `server/src`. So PR 2 **builds
+  this from nothing**: a `kind == "reviewer"` branch inside `can_use_tool` that returns
+  `PermissionResultDeny` with a message naming the read-only posture and logs it, **without
+  calling `bridge.ask_permission`**, plus the same short-circuit in the brokered hook so
+  the second path cannot escalate either. The reason is the check's whole premise — a check
+  that runs unattended must not be able to interrupt the user, and a reviewer that wanted a
+  tool it was not given has a finding to make, not a permission to ask for. Because this is
+  the first code in the repo that answers a permission with no human in the loop, it ships
+  its own test: a reviewer's blocked tool call reaches neither `bridge.ask_permission` nor
+  the pending-permission map behind the board, asserted with a spy rather than by reading
+  the branch, and the denial is asserted to be logged.
+- **What the one word does buy for free**, and it is the fourth bullet rather than the
+  first: a `reviewer` appears in the activity feed and Mission Control as a `reviewer` row,
+  so a review in flight is visible rather than a mystery pause. It also counts against
   `WORKBENCH_MAX_CONCURRENT_SESSIONS`, and a review that cannot start because that cap
   binds is a `skipped` evidence line naming the setting — the `SpawnRefusal` idiom, where
   a cap that is hit renders as a cap with a way out.
@@ -429,33 +475,50 @@ approval.
 - **Owns (new):** `server/src/workbench_server/models/review.py`,
   `server/src/workbench_server/services/review.py`, `server/tests/test_review.py`.
 - **Owns (append-only, one place each):** `"reviewer"` in `SessionKind`
-  (`models/agents.py`); `REPORT_FINDINGS` + `tools_for("reviewer")` in
-  `services/agent_tools.py`; the reviewer branch in `services/sdk_factory.py`; the
-  reviewer script in `services/fake_agent.py`; registration in `main.py`; the review
-  settings in `config.py`; one optional field on `EvidencePayload`
-  (`models/evidence.py`, created by PR 1); mirror types and the findings rendering in
-  `ui/src/types.ts` and `ui/src/panels/ReviewPanel.tsx`.
+  (`models/agents.py`); `REPORT_FINDINGS` + `REVIEWER_TOOLS` + the `"reviewer"` arm of
+  `tools_for` in `services/agent_tools.py`; the reviewer script in
+  `services/fake_agent.py`; registration in `main.py`; the review settings in `config.py`;
+  one optional field on `EvidencePayload` (`models/evidence.py`, created by PR 1); mirror
+  types and the findings rendering in `ui/src/types.ts` and
+  `ui/src/panels/ReviewPanel.tsx`.
+- **Owns (a rewrite of shared, currently-unconditional logic — the exception to
+  "append-only", called out because it is the one place this PR can break other kinds):**
+  `services/sdk_factory.py`. Three edits, none of them a new branch bolted on the side:
+  the `build_context_bridge` tool list becomes a selection over `tools_for(kind)`;
+  `_AUTO_ALLOWED` becomes kind-dependent and `disallowed_tools` starts being passed; and
+  `can_use_tool` grows the reviewer's deny-and-log short-circuit, mirrored in the brokered
+  `PreToolUse` hook (`services/permission_broker.py`).
 - **Models added:** `ReviewFinding`, `ReviewReport`, `ReviewSpec`, `ReportFindingsRequest`.
 - **Test story** (`test_review.py`): canned findings become one grouped `diff` line whose
   outcome is the worst severity; no findings is an explicit `pass` line that says so; a
   reviewer that times out or exceeds `max_budget_usd` is a `fail` naming the setting; the
   session cap binding is a `skipped` naming `WORKBENCH_MAX_CONCURRENT_SESSIONS`; the diff
   builder **includes untracked files** (the regression test for the silent-green trap) and
-  truncates with a stated size; `tools_for("reviewer")` excludes every writing tool and
-  `build_agent_options(kind="reviewer")` carries no `Write`/`Edit`/`Bash`; **the check
-  never approves**, asserted both ways. `test_agent_tools.py` gains the three ceilings for
-  `report_findings`.
+  truncates with a stated size; **the check never approves**, asserted both ways. In
+  `test_sdk_factory.py`, the three isolation assertions the bullets above are worth nothing
+  without: `build_context_bridge` exposes exactly `report_findings` for `kind="reviewer"`
+  and the *unchanged* name sets for `chat`, `worker` and `orchestrator` (the regression
+  test for the refactor); `build_agent_options(kind="reviewer")` auto-allows no `Write` or
+  `Edit` and disallows `Write`/`Edit`/`Bash`; and a reviewer's blocked tool call resolves
+  to a denial having called neither `bridge.ask_permission` nor the broker's escalation —
+  a spy asserting zero awaits, since "it is denied" and "it is denied without waking the
+  user" are different claims and only the second is the feature. `test_agent_tools.py`
+  gains the three ceilings for `report_findings`.
 
 ## 3. Sequence and file ownership
 
 **Two PRs, in order — deliberately not two parallel lanes.** Their *owned* files are
 disjoint (`gates.py` + `evidence.py` vs. `review.py`, and their models and tests), but they
-share five append-only registration points: `services/agent_tools.py`,
-`services/sdk_factory.py`, `main.py`, `config.py` and `ui/src/panels/ReviewPanel.tsx`.
-Serialising two PRs costs a rebase; landing them concurrently costs five conflicts in the
-files every capability has to touch. PR 2 rebases onto PR 1, which also gives it the
-`EvidencePayload` envelope to append its one field to. Stated here so the order is not
-rediscovered by whoever runs the second lane.
+share five registration points: `services/agent_tools.py`, `services/sdk_factory.py`,
+`main.py`, `config.py` and `ui/src/panels/ReviewPanel.tsx`. Four of the five are
+append-only. **`services/sdk_factory.py` is not**, and that asymmetry is the strongest
+argument for the order: PR 1 *appends* `run_gates` to the hardcoded tool list, and PR 2
+*rewrites that list* into a selection over `tools_for(kind)` — so the two lanes running
+concurrently would not merely conflict, they would silently disagree about whether
+`run_gates` survives, which is a green suite and a missing tool. PR 2 rebases onto PR 1,
+carries `run_gates` through the refactor deliberately, and gets the `EvidencePayload`
+envelope to append its one field to. Stated here so the order is not rediscovered by
+whoever runs the second lane.
 
 Neither PR touches `services/validation.py`, `models/validation.py`,
 `services/reconciliation.py`, `ui/src/mission.ts` or `services/sessions.py`. The frame is
