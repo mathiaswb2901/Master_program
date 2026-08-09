@@ -1692,3 +1692,57 @@ export interface SetupStatus {
    * reading) gets out of the way when true. */
   all_ok: boolean;
 }
+
+// ---- settings (M7 V8) -------------------------------------------------------
+// Mirrors server/models/settings.py. The knobs that used to be environment
+// variables, in one small document under the machine's app-data dir — never in
+// the workspace and never in `~/.claude`. The stored choices are what the
+// controls show; `effective` is what the server is using; the two differ only
+// where an override or a pending restart says so.
+
+/** How the window picks its palette. `system` follows the OS preference. */
+export type ThemeChoice = "system" | "dark" | "light";
+
+/** The settings a client can address — and the only keys an override names. */
+export type SettingKey = "theme" | "office_native" | "voice_input";
+
+/** A user's stored choices, and the PUT body (the same shape). */
+export interface WorkbenchSettings {
+  theme: ThemeChoice;
+  /** Whether documents open in the real installed Word/Excel, docked. Read at
+   * launch, so a change is reported in `pending_restart` until a restart. */
+  office_native: OfficeCapabilities["office_native"];
+  /** Push-to-talk voice input. Remembered even on a machine where the local
+   * transcriber is not installed yet (M7 §3). */
+  voice_input: boolean;
+}
+
+/** A setting this process was configured with from outside the app — an
+ * environment variable or `workbench.toml`. The control shows the value and is
+ * disabled with `detail` as the reason; the stored choice is left untouched. */
+export interface SettingOverride {
+  key: SettingKey;
+  value: string;
+  detail: string;
+}
+
+/** Not a setting: the zero-telemetry position, stated by the server. `enabled`
+ * is `false` in every shape of this model — there is nothing to turn on. */
+export interface TelemetryStance {
+  enabled: false;
+  detail: string;
+}
+
+/** GET/PUT /api/settings — stored choices, what is in force, and why. */
+export interface SettingsState {
+  stored: WorkbenchSettings;
+  effective: WorkbenchSettings;
+  overrides: SettingOverride[];
+  /** Stored values this running process has not picked up: read at launch only. */
+  pending_restart: SettingKey[];
+  /** Where the document lives — machine-local state, shown so it is not a mystery. */
+  path: string;
+  telemetry: TelemetryStance;
+  /** Why the stored document was ignored, if it could not be read. */
+  problem: string | null;
+}
