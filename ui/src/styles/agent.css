@@ -1,4 +1,115 @@
-/* Agent area: sessions list + chat (DESIGN.md §6.3, §6.4). */
+/* The agent surface: the §2.6 status vocabulary, the session picker, the chat
+   (ANVIL V5 — DESIGN.md §2.6, §6.3, §6.4, §6.12).
+
+   This is the surface the user stares at most, and the one that has to read as
+   *a fleet of agents* rather than as a text box. Three things carry that, and
+   they are the three sections below:
+
+     1. **One vocabulary for state.** A dot is not decoration — it is the answer
+        to "what is this session doing", and every place that asks (a picker
+        row, a status chip, a chat badge, a tool call) spells it the same way.
+        A component names the *state*; this sheet owns what a state looks like.
+     2. **A picker that shows the fleet**, in a box that was already there
+        before the listing arrived (§1.9), with the state said in words as well
+        as in hue (§7).
+     3. **A chat with a hierarchy**: prose is the content, a tool call is
+        machinery subordinate to it, and a card is an interruption that has to
+        stop you. Flat gaps between all three is what made this read as a log.
+
+   Tokens only, no raw hex, and no new colour. */
+
+/* ==========================================================================
+   1. The agent-status vocabulary (DESIGN.md §2.6)
+
+   Class, not an inline colour: `statusVisual` (panels/Chat.tsx) maps a server
+   state to one of five names and the component writes the name, so the palette
+   lives here and there is exactly one table of it. The dots cross-fade on the
+   tint channel because they change when a *session* does, not when the user
+   does — §5.4's "status dot changes: tint only".
+   ========================================================================== */
+
+.wb-dot.is-working,
+.wb-dot.is-attention,
+.wb-dot.is-idle,
+.wb-dot.is-done,
+.wb-dot.is-error {
+  transition: background-color var(--motion-tint);
+}
+
+/* The canonical "changing right now" — and the only one that pulses, driven by
+   `.u-agent-pulse` from the component (tokens.css owns the keyframe and stops
+   it under reduced motion). */
+.wb-dot.is-working {
+  background: var(--agent-working);
+}
+
+/* Deliberately NOT amber: a session waiting on you is a standing state that can
+   sit on screen for an hour, and standing amber spends the one colour that has
+   to mean motion (§2.4). */
+.wb-dot.is-attention {
+  background: var(--agent-attention);
+}
+
+.wb-dot.is-idle {
+  background: var(--agent-idle);
+}
+
+.wb-dot.is-done {
+  background: var(--agent-done);
+}
+
+.wb-dot.is-error {
+  background: var(--agent-error);
+}
+
+/* Hollow: a transcript on disk is not a state a session is in, it is the
+   absence of one — so it is drawn as an empty ring rather than as a sixth
+   colour (§6.12). */
+.wb-dot-disk {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+/* The pill form of the same vocabulary (§6.4): 6px dot + label, on the status
+   tint. **The label is `--text-primary`, not the status colour**, and that is a
+   measured departure from §6.4's "text = status color": at 11px the status hue
+   on its own 16% wash is 4.05:1 (working, light) and 3.76:1 (attention, light),
+   under §7's 4.5:1 floor — the same failure V4 measured in the status bar and
+   answered the same way. The dot carries the hue; the label carries the
+   reading. On these washes `--text-primary` is 10.45:1 (dark) / 12.97:1
+   (light). */
+.wb-badge.is-working,
+.wb-badge.is-attention,
+.wb-badge.is-idle,
+.wb-badge.is-done,
+.wb-badge.is-error {
+  color: var(--text-primary);
+  transition: background-color var(--motion-tint);
+}
+
+.wb-badge.is-working {
+  background: var(--agent-working-bg);
+}
+
+.wb-badge.is-attention {
+  background: var(--agent-attention-bg);
+}
+
+.wb-badge.is-idle {
+  background: var(--agent-idle-bg);
+}
+
+.wb-badge.is-done {
+  background: var(--agent-done-bg);
+}
+
+.wb-badge.is-error {
+  background: var(--agent-error-bg);
+}
+
+/* ==========================================================================
+   2. The panel shell and the session picker (§6.12)
+   ========================================================================== */
 
 .wb-agent {
   height: 100%;
@@ -6,8 +117,6 @@
   flex-direction: column;
   background: var(--surface-panel);
 }
-
-/* ---- Sessions list -------------------------------------------------------- */
 
 /* Header + the reserved list below, and never more than 40% of the pane: the
    cap is the one thing here that may depend on the window, because the window's
@@ -23,9 +132,52 @@
 .wb-sessions-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-4);
   flex: none;
   padding: var(--space-4) var(--space-5);
+}
+
+/* The button is pinned right by its own auto margin rather than by the header
+   distributing space, and that is not a stylistic choice: the live count beside
+   the label is absent until the listing arrives, so a `space-between` header
+   would put *New session* next to the label on a cold launch and slide it to
+   the edge the moment the first session landed. A pinned control cannot move
+   whatever appears to its left (§1.9). */
+.wb-sessions-header .wb-btn {
+  margin-left: auto;
+}
+
+/* "SESSIONS" and, beside it, how many are live. The count is the fleet stated
+   as a number, and it follows the status bar's quiet-bar doctrine (§6.7): it is
+   absent at zero rather than reading "0". */
+.wb-sessions-label,
+.wb-sessions-count {
+  flex: none;
+}
+
+.wb-sessions-count {
+  min-width: 0;
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-tertiary);
+}
+
+/* The ceiling, in words, when *New session* is refused — §6.5's disabled-row
+   rule applied to a button: a control that is offered and then refuses says the
+   cap and the setting that raises it, and says it on screen rather than only in
+   a tooltip nobody hovers. Quiet, because a limit is not a failure. */
+.wb-sessions-cap {
+  flex: none;
+  margin: 0;
+  padding: 0 var(--space-5) var(--space-3);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-tertiary);
+}
+
+.wb-sessions-cap code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
 }
 
 /* Reserved, never content-sized (DESIGN.md §1.9, §6.12).
@@ -39,13 +191,19 @@
    `0 1 <basis>`: it may shrink under the 40% cap above when the pane is short,
    and it never grows with its content — beyond the reserved box the rows
    scroll. The long list lives in the Conversations panel, which is a browser
-   rather than a switcher. */
+   rather than a switcher.
+
+   `scrollbar-gutter` is the same principle one level down: the fifth session is
+   what makes the scrollbar appear, and without a reserved gutter its arrival
+   shifts every row's text sideways inside a box built precisely so that nothing
+   moves. */
 .wb-sessions-list {
   flex: 0 1 var(--sessions-list-height);
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding-bottom: var(--space-3);
 }
 
@@ -60,12 +218,33 @@
      read as chosen, not as a list that failed to arrive. */
   margin: auto;
   padding: var(--space-2) var(--space-5) var(--space-4);
+  text-align: center;
+}
+
+.wb-sessions-none-title {
   font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.wb-sessions-none-hint {
+  margin-top: var(--space-1);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
   color: var(--text-tertiary);
 }
 
+/* Sticky, because the box shows four rows and the fifth scrolls under: a folder
+   label that scrolled away would leave the rows below it unattributed, which is
+   the one thing this grouping exists to say. Opaque for the same reason the
+   conversation browser's group heads are. */
 .wb-sessions-folder {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   padding: var(--space-3) var(--space-5) var(--space-1);
+  background: var(--surface-panel);
 }
 
 .wb-session-row {
@@ -78,10 +257,16 @@
   font-size: var(--type-sm-size);
   color: var(--text-secondary);
   text-align: left;
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
 }
 
+/* Instant in, eased out (§5.1.5): the wash answers the pointer on the frame it
+   arrives, and only its decay is animated. */
 .wb-session-row:hover {
   background: var(--surface-hover);
+  transition-duration: 0s;
 }
 
 .wb-session-row.is-selected {
@@ -102,12 +287,7 @@
 
 .wb-session-row.is-detached:hover {
   background: transparent;
-}
-
-/* Hollow marker for non-live (on-disk) sessions. */
-.wb-dot-disk {
-  background: transparent;
-  border: 1px solid var(--border-strong);
+  transition-duration: 0s;
 }
 
 .wb-session-title {
@@ -116,11 +296,29 @@
 }
 
 .wb-session-time {
+  flex: none;
   font-size: var(--type-xs-size);
   color: var(--text-tertiary);
 }
 
-/* ---- Chat ----------------------------------------------------------------- */
+/* What a session is doing, in the same words its dot is labelled with. This is
+   the fleet made legible: four rows and you can see which one is working
+   without decoding a hue, which §7 requires of a status colour anyway. It takes
+   the time cell's place rather than a column of its own — a row that is doing
+   something has said the more useful of the two. */
+.wb-session-state {
+  flex: none;
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ==========================================================================
+   3. Chat (§6.3)
+   ========================================================================== */
 
 .wb-chat-area {
   flex: 1;
@@ -136,6 +334,10 @@
   flex-direction: column;
 }
 
+/* The session header: 11px uppercase name + the status badge (§6.3). Pinned by
+   being outside the scroller rather than by `position: sticky` — the chat is a
+   flex column and the list is the only part that scrolls, so the header cannot
+   leave the top of the pane. */
 .wb-chat-header {
   display: flex;
   align-items: center;
@@ -171,6 +373,28 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+/* The hierarchy, in one place (§6.3). Every block in the column is 8px from its
+   neighbour; the two that *interrupt* — a permission prompt and a plan card —
+   take a step more air on each side, because a decision the app is blocked on
+   should not read as one more line of transcript. Margin, not a bigger gap: a
+   flex gap cannot be different for one pair. */
+.wb-chat-col > .wb-perm-card,
+.wb-chat-col > .wb-plan-card {
+  margin: var(--space-3) 0;
+}
+
+/* The chat's own empty state: the §6.10 anatomy without the 32px glyph, because
+   this box is a conversation waiting to start rather than a panel with nothing
+   in it — and it names the key that starts it. */
+.wb-chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-8) var(--space-6);
+  text-align: center;
 }
 
 /* User: bubble, right-aligned. Assistant: full-width text, no bubble (§6.3). */
@@ -299,12 +523,17 @@
   color: var(--error);
 }
 
-/* Tool call: row + (expanded) output block. */
+/* ---- Tool calls: machinery, subordinate to the prose (§6.3) --------------- */
+
+/* Inset from the column, so a tool call reads as a step the assistant took
+   inside its turn rather than as a message of its own. The 2px status edge is
+   the rail that run of steps hangs off. */
 .wb-tool {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   min-width: 0;
+  padding-left: var(--space-3);
 }
 
 /* Tool-call row: 28px, mono 12px, 2px status edge (§6.3). */
@@ -312,7 +541,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  min-height: 28px;
+  min-height: var(--control-height);
   padding: 0 var(--space-4);
   border-left: 2px solid var(--agent-working);
   font-family: var(--font-mono);
@@ -333,6 +562,24 @@
   border-left-color: var(--error);
 }
 
+/* The dot §6.3 asks for: "`--agent-working` pulses via the dot, border steady".
+   It is also the row's non-colour signal — it carries the accessible name of
+   the state, which a 2px edge cannot (§7). `--success`/`--error` when settled
+   rather than the `--agent-*` pair: this is one tool call's result, not a
+   session's state, and §6.3 names those tokens for exactly this row. */
+.wb-tool-row .wb-dot {
+  background: var(--agent-working);
+  transition: background-color var(--motion-tint-slow);
+}
+
+.wb-tool-row.is-settled .wb-dot {
+  background: var(--success);
+}
+
+.wb-tool-row.is-failed .wb-dot {
+  background: var(--error);
+}
+
 /* Chevron: expands the output block instantly (no animation, §6.3). */
 .wb-tool-chevron {
   display: flex;
@@ -343,10 +590,12 @@
   flex: none;
   color: var(--text-tertiary);
   font-family: var(--font-ui);
+  transition: color var(--motion-tint);
 }
 
 .wb-tool-chevron:hover {
   color: var(--text-primary);
+  transition-duration: 0s;
 }
 
 .wb-tool-chevron.is-empty {
@@ -358,7 +607,7 @@
   color: var(--text-primary);
 }
 
-/* Output excerpt: the terminal "well" surface, like chat code blocks (§6.3). */
+/* Output excerpt: the code "well" surface, like chat code blocks (§6.3). */
 .wb-tool-output {
   margin: 0 0 0 var(--space-6);
   padding: var(--space-4) var(--space-5);
@@ -379,37 +628,68 @@
   min-width: 0;
 }
 
-/* Summaries that resolve to a workspace file open it on click. */
+/* Summaries that resolve to a workspace file open it on click. Demoted from
+   accent by the §2.4 audit — a hover is answered by the text stepping up, not
+   by the one colour that means "live". */
 .wb-tool-link {
   font: inherit;
   color: inherit;
   text-align: left;
   cursor: pointer;
+  transition: color var(--motion-tint);
 }
 
 .wb-tool-link:hover {
   color: var(--text-primary);
   text-decoration: underline;
+  transition-duration: 0s;
 }
 
-/* Permission prompt card (§6.3). */
+/* ---- Permission prompt: the one thing the app is blocked on (§6.3) -------- */
+
 .wb-perm-card {
   background: var(--surface-elevated);
   border: 1px solid var(--warn);
   border-radius: var(--radius-md);
   overflow: hidden;
+  transition: border-color var(--motion-tint-slow);
 }
 
 .wb-perm-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   padding: var(--space-4) var(--space-5);
   background: var(--warn-bg);
   font-size: var(--type-md-size);
   font-weight: var(--weight-medium);
+  transition: background-color var(--motion-tint-slow);
+}
+
+.wb-perm-tool {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+/* Answered, and therefore no longer a warning. A card that keeps its `--warn`
+   rim after you have decided is a standing alarm about something that already
+   happened — the same mistake as a standing amber, one hue over (§2.4, §2.5:
+   warn is rare and means *now*). It settles to the card language every other
+   block in the column uses, on the tint channel. */
+.wb-perm-card.is-decided {
+  border-color: var(--border-default);
+}
+
+.wb-perm-card.is-decided .wb-perm-head {
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 .wb-perm-body {
   padding: var(--space-4) var(--space-5);
+  font-family: var(--font-mono);
   font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
   color: var(--text-secondary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -421,13 +701,27 @@
   padding: 0 var(--space-5) var(--space-4);
 }
 
+/* What you decided, said once, quietly — with a dot so the answer is legible
+   without reading (§7 pairs the colour with the word, never colour alone). */
 .wb-perm-decision {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   padding: 0 var(--space-5) var(--space-4);
   font-size: var(--type-sm-size);
   color: var(--text-tertiary);
 }
 
-/* Input row. */
+.wb-perm-decision .wb-dot.is-allow {
+  background: var(--success);
+}
+
+.wb-perm-decision .wb-dot.is-deny {
+  background: var(--text-disabled);
+}
+
+/* ---- Input row ------------------------------------------------------------ */
+
 .wb-chat-input {
   flex: none;
   display: flex;
