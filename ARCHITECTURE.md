@@ -195,6 +195,22 @@ main.tsx ──► App ──► EditorArea (panel: tabs, empty state, provenanc
   helpers the store calls (`setModelContent`, `disposeModel`) no-op until the
   editor exists, which is the same answer as "no model for that path" and is what
   the store already handled.
+- **A text model belongs to the file, not to the pane showing it.** More than one
+  editor can be looking at one file — the tab strip's, plus every
+  `editors#<path>` pane — so `monaco.ts` keeps a module-level registry
+  (`acquireModel` / `releaseModel`, the `terminalInput.ts` pattern) and every
+  `<Editor>` is mounted with `keepCurrentModel`. Without it `@monaco-editor/react`
+  disposes the model on unmount, and Monaco answers a disposed model by detaching
+  it from *every* editor showing it and removing their DOM nodes
+  (`codeEditorWidget.js`: `model.onWillDispose(() => this.setModel(null))`) — so
+  closing one pane blanked the other, tab strip and unsaved dot still on screen
+  above nothing. Disposal is the store's call and only the store's:
+  `disposeModel` (from `closeFile`/`adoptWorkspace`) retires the model, and the
+  last view to let go finishes it, so it is never pulled out from under a live
+  editor either. Scroll and cursor go the other way — they are the *view's* state,
+  kept per pane rather than per path, which is why the library's own
+  `saveViewState` is off. Reproduced in `ui/e2e/editorPanes.spec.ts`, pinned in
+  `ui/src/monacoModels.test.ts`.
 - **Anything read from a CSS token is read when the bundle lands, never when the
   load is armed.** Loading late puts a window between "the prefetch is scheduled"
   and "Monaco exists" in which `defineWorkbenchTheme` can do nothing — so a theme
@@ -375,7 +391,7 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, notebook, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host, usage, worktrees, orchestrator |
+| `models/` | REST/WS schemas: files, notebook, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host + bridge, usage, worktrees, orchestrator, conversations, workspaces, named sessions, commands, documents, search, settings, setup, voice, and the proof stack — validation, evidence, reconciliation, gates, review |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
@@ -419,6 +435,22 @@ in-process calls where the model and the user dominate.
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
 | `services/voice.py` | push-to-talk dictation: the `VoiceBackend` Protocol, the `register_backend` plug-in point, `FakeVoiceBackend` (scripted, no audio hardware), and the bounded lifecycle. Holds no audio |
 | `routers/voice.py` | `GET /api/voice/capabilities`, `POST /api/voice/start`, `.../{id}/chunk`, `.../{id}/stop`, `.../{id}/cancel` |
+| `services/validation.py` | running a validation and holding its result: the check registry, the derived risk, the bounded result map, the one human approval |
+| `services/reconciliation.py` | the workbook↔code numeric reconciliation gate — M6's first *domain* check: unit-aware, DST-aware, openpyxl (no Office needed) |
+| `services/gates.py` | the toolchain gate (`ValidationCheck` id `gates`): a server-owned catalog of gate commands run inside the checkout the subject session is writing in |
+| `services/review.py` | the adversarial review (`ValidationCheck`): a fresh-context reviewer session over the subject's diff. Produces evidence, never an approval |
+| `routers/validation.py` | `POST /api/validation/run`, `GET /api/validation` (replay) and `/{id}`, `POST /api/validation/{id}/approve`, `GET /api/validation/payload/{kind}/{ref}` |
+| `services/search.py` | workspace-wide content search — a bounded walk that respects the tree's ignore rules |
+| `services/settings.py` | the settings document on disk, and the precedence around it |
+| `services/setup.py` | first-run detection: an honest read of what is wired up (Claude login *detected, never performed*; Office through the host's own capabilities) |
+| `services/documents.py` | creating a *valid* blank document of a requested kind, from templates shipped as package data (M5 item 16) |
+| `services/commands.py` | the command relay — the event bus run backwards, so a shell (`workbench-cmd`) or an agent can invoke a registered command |
+| `services/local_auth.py` | local-API security hardening: the per-launch token and the WS Origin allowlist |
+| `services/permission_broker.py` | the `PreToolUse` broker — the gate a shell request cannot walk around |
+| `services/plan_anchors.py` | resolving an annotation anchor against the artifact it claims to point into; an anchor that names nothing is a refused decision |
+| `services/titles.py` | session title derivation, shared by live sessions and the transcript index |
+| `services/fake_agent.py` | the scripted fake agent (`WORKBENCH_FAKE_AGENT=1`) — see *Testing layers* |
+| `routers/` (rest) | `auth.py`, `commands.py`, `health.py`, `office.py` (OnlyOffice), `search.py`, `settings.py`, `setup.py` — thin, each over the service above it |
 
 ## The file tree
 
@@ -1804,7 +1836,10 @@ Format spec: `docs/shortcuts.md`.
 3. Live smoke (`WORKBENCH_LIVE_AGENT=1`): real SDK + machine's Claude login.
 4. E2E (Playwright, per milestone — `cd ui && npm run e2e`): `ui/e2e/` drives the
    **built** UI (`vite preview` over `ui/dist`) against a real `workbench-server`
-   launched in a per-run temp workspace with fake-agent mode on. Eleven journeys: file
+   launched in a per-run temp workspace with fake-agent mode on. **`ui/e2e/` holds 40
+   journey specs as of 2026-08-09** — every milestone since has added its own, and each
+   new capability ships one — so the enumeration below is the founding eleven rather than
+   the current list; read the directory for the rest. The eleven: file
    CRUD + save + watcher round-trip + conflict + dirty-close, terminal tabs against real
    ConPTY, QuickBar/shortcuts (including the never-executed rule, and a registered
    tool reaching the user through the registry alone), chat streaming and

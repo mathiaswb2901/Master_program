@@ -995,6 +995,42 @@ affordances that run the command they describe** — 8px/12px rows carrying a la
   a saved arrangement is the truth about which panels are open, and a panel added
   while `fromJSON` is in flight would be removed a frame later.
 
+#### 6.13.1 Two surfaces greet a fresh window, and the order is decided here
+
+> Added 2026-08-09. This section had described the welcome card as though it were the
+> only thing that greets a stranger. It is not — the Setup walkthrough (`ui/src/setup.tsx`)
+> auto-opens on the same condition — and the two colliding produced **three different
+> windows across four identical launches** of the same fresh workspace, including two
+> where the welcome card did not open at all. What follows is the rule that replaced the
+> coin flip, written down because "whichever finished last" is not a design.
+
+**The condition is asked once, for all of them, before any of them opens.** Both halves
+of the auto-open rule above are per-surface except the second — *no saved arrangement* is
+a fact about the **window**, and opening a panel is itself a layout change (§6.9), so a
+surface that opens first flips the answer for every surface that asks after it. One
+shared question, asked after every surface has said whether it wants to greet, and before
+any of them acts on it. The coordinator is `ui/src/firstRun.ts`; it names no capability,
+so a third greeting adds itself without editing it.
+
+**Everything that wants to greet, greets. The order decides only which tab is in front.**
+Nothing is suppressed to make room for something else — both are centre tabs, side by
+side, and neither hides the other. A surface declares an `order` beside its
+`defaultLocation`; the **highest opens last and is therefore the tab a stranger lands on**
+(dockview brings each opened panel forward).
+
+| order | surface | why it sits there |
+|---|---|---|
+| 10 | The welcome card (§6.13) | Teaches *the window*. It is the reference a user comes back to, and it is one click away from the tab in front. |
+| 20 | The Setup walkthrough | Teaches *the connections*, and is **the actionable half** — it is the only surface that can say "Claude is not signed in, run `claude /login`". A stranger whose agent cannot start needs that sentence before they need the chord for split. |
+
+Setup carries a *Show the welcome card* button, which is what makes this ordering
+non-lossy rather than a preference: the surface in front contains the route to the one
+behind it, so nothing a stranger needs is more than one click from where they land. **A
+new first-run surface must earn the front position the same way** — by being more
+actionable than Setup *and* carrying routes back to what it displaced — or it takes an
+order below 20 and opens behind it. It never takes the front by opening last by accident,
+which is the failure this subsection exists to prevent.
+
 **Tooltips name their chord, and read it from the registry.** Where a control exists for a
 gesture that also has a chord, its `title` is `"<what it does> — <chord>"`, so the mouse
 path teaches the keyboard one: the split glyphs (§6.11), the terminal's `+`, the layout
