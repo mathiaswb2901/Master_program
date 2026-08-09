@@ -152,6 +152,11 @@ export default defineConfig({
         // host lifecycle, its refusals and its fallbacks, with no Office, no
         // Rust and no native window anywhere near CI. Journey 7 drives it.
         WORKBENCH_OFFICE_FAKE: "1",
+        // The third of the same family (M6 staged review PR1): the toolchain
+        // gate's whole flow — slot resolution, the fingerprint, the bounded log,
+        // the payload route and the expander — with no ruff, no pytest and no
+        // npm anywhere near CI. Journey `review.spec.ts` drives it.
+        WORKBENCH_GATE_FAKE: "1",
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: E2E_WORKSPACE,
         // A *sibling* of the workspace, seeded by `e2e/workspace.ts`: pointing

@@ -28,11 +28,17 @@
 import type { IDockviewPanelProps } from "dockview";
 import { memo, useEffect, useMemo, useState, type CSSProperties } from "react";
 
-import { ApiError } from "../api";
+import { ApiError, getEvidencePayload } from "../api";
 import { openPanel } from "../dock";
 import { paneInstance } from "../panes";
 import type { WorkbenchTool } from "../registry";
-import type { CheckOutcome, EvidenceItem, RiskLevel, ValidationResult } from "../types";
+import type {
+  CheckOutcome,
+  EvidenceItem,
+  EvidencePayload,
+  RiskLevel,
+  ValidationResult,
+} from "../types";
 import {
   awaitingApproval,
   orderResults,
@@ -97,14 +103,119 @@ export function OutcomePill({ outcome }: { outcome: CheckOutcome }) {
 
 // ---- the evidence gallery ----------------------------------------------------
 
-/** One row: its label, its outcome pill, its detail line, and — when it names a
- * detail payload — an expand.
+/** What the expander is showing right now. `evicted` is its own state, not an
+ * error: the payload store is a bounded LRU and being dropped from it is the
+ * honest, expected end of a log's life — never a spinner that never resolves. */
+type PayloadState =
+  | { phase: "idle" }
+  | { phase: "loading" }
+  | { phase: "ready"; payload: EvidencePayload }
+  | { phase: "evicted" }
+  | { phase: "error" };
+
+/** The bounded detail behind one `payload_ref`, fetched **lazily** — on the
+ * first time its expander is opened, never on render. An index of a hundred
+ * results must not be a hundred round trips for detail nobody asked to see.
  *
- * #82 exposes **no payload endpoint**, so the expand shows the inline detail and
- * says the bounded payload view (the reconciliation table, a captured log) is
- * deferred until that endpoint ships. We do not invent a server route here.
+ * Exported so the states render under a static markup test rather than only in a
+ * browser: a `gate` log, a `numeric` table, and the evicted 404.
+ */
+export function EvidencePayloadView({ state }: { state: PayloadState }) {
+  if (state.phase === "loading") {
+    return <p className="wb-evidence-payload">Loading the payload…</p>;
+  }
+  if (state.phase === "evicted") {
+    return (
+      <p className="wb-evidence-payload">
+        This payload has been evicted — validation detail is held in a bounded in-memory
+        store, so a busy server (or a restart) forgets the oldest. Re-run the validation to
+        capture it again.
+      </p>
+    );
+  }
+  if (state.phase === "error") {
+    return (
+      <p className="wb-evidence-payload" role="alert">
+        Could not load the payload. Try opening it again.
+      </p>
+    );
+  }
+  if (state.phase === "idle") return null;
+
+  const { gate_log: log, reconciliation: report } = state.payload;
+  if (log !== null) {
+    return (
+      <div className="wb-evidence-payload">
+        <p className="wb-evidence-argv u-tabular">
+          {log.argv.join(" ")} —{" "}
+          {log.exit_code === null ? "no exit code" : `exit ${String(log.exit_code)}`} in{" "}
+          {(log.duration_ms / 1000).toFixed(1)}s
+        </p>
+        <pre className="wb-evidence-log">{log.text}</pre>
+        {log.truncated !== null && (
+          <p className="wb-evidence-truncation u-tabular">{log.truncated.detail}</p>
+        )}
+      </div>
+    );
+  }
+  if (report !== null) {
+    return (
+      <div className="wb-evidence-payload">
+        <p className="u-tabular">
+          {report.matched} matched, {report.mismatched} mismatched of {report.total} —{" "}
+          {report.workbook}
+        </p>
+        <ul className="wb-evidence-rows">
+          {report.comparisons.map((row) => (
+            <li key={row.cell} className="u-tabular" data-outcome={row.outcome}>
+              {row.cell}: expected {row.expected}
+              {row.actual === null ? ", no value" : `, got ${String(row.actual)}`}
+              {row.unit === "" ? "" : ` ${row.unit}`}
+              {row.reason === null ? "" : ` — ${row.reason}`}
+            </li>
+          ))}
+        </ul>
+        {report.truncated !== null && (
+          <p className="wb-evidence-truncation u-tabular">{report.truncated.detail}</p>
+        )}
+      </div>
+    );
+  }
+  // A ref the server holds but this build has no shape for. Said out loud rather
+  // than rendered as an empty box (AXI shape 2).
+  return (
+    <p className="wb-evidence-payload">
+      This payload is a kind this version of the app cannot render.
+    </p>
+  );
+}
+
+/** One row: its label, its outcome pill, its detail line, and — when it names a
+ * detail payload — an expander that redeems the ref.
+ *
+ * The #82 frame stored payloads and shipped no route to fetch them, so this
+ * expander was a placeholder saying so. PR 1 closes that gap
+ * (`GET /api/validation/payload/{kind}/{ref}`), because the *entire* value of a
+ * failing gate is its captured output and a gate whose log a human cannot read
+ * is a gate they have to take on faith.
+ *
  * Numbers in the detail render in tabular figures (the DESIGN numeric rule). */
 function EvidenceRow({ item }: { item: EvidenceItem }) {
+  const [state, setState] = useState<PayloadState>({ phase: "idle" });
+  const ref = item.payload_ref;
+
+  const load = (): void => {
+    if (ref === null || state.phase !== "idle") return;
+    setState({ phase: "loading" });
+    void getEvidencePayload(item.kind, ref)
+      .then((payload) => setState({ phase: "ready", payload }))
+      .catch((err: unknown) => {
+        setState(
+          err instanceof ApiError && err.status === 404 ? { phase: "evicted" } : { phase: "error" },
+        );
+      });
+  };
+
   return (
     <li className="wb-evidence" data-kind={item.kind} data-outcome={item.outcome}>
       <div className="wb-evidence-head">
@@ -115,14 +226,15 @@ function EvidenceRow({ item }: { item: EvidenceItem }) {
         <span className="wb-evidence-kind">{item.kind}</span>
       </div>
       <p className="wb-evidence-detail u-tabular">{item.detail}</p>
-      {item.payload_ref !== null && (
-        <details className="wb-evidence-expand">
+      {ref !== null && (
+        <details
+          className="wb-evidence-expand"
+          onToggle={(e) => {
+            if (e.currentTarget.open) load();
+          }}
+        >
           <summary>Detail payload</summary>
-          <p className="wb-evidence-payload u-tabular">
-            The bounded payload view (ref {item.payload_ref}) arrives with the payload
-            endpoint — deferred past this PR. The line above is the whole of what #82
-            carries inline.
-          </p>
+          <EvidencePayloadView state={state} />
         </details>
       )}
     </li>

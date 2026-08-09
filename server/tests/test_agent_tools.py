@@ -11,12 +11,16 @@ nobody takes.
 """
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel
 
 from workbench_server.config import Settings
 from workbench_server.models.agents import UiState
 from workbench_server.models.commands import CommandInvokeResult, CommandManifest
+from workbench_server.models.gates import MAX_GATE_LOG_BYTES, MAX_GATES_PER_RUN, GateLog
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
@@ -32,6 +36,14 @@ from workbench_server.models.plans import (
     PlanArtifact,
     PlanResponse,
 )
+from workbench_server.models.validation import (
+    EvidenceItem,
+    EvidenceKind,
+    RiskLevel,
+    ValidationResult,
+    ValidationSpec,
+    ValidationSubject,
+)
 from workbench_server.services.agent_tools import (
     AGENT_TOOLS,
     ALL_AGENT_TOOLS,
@@ -43,11 +55,13 @@ from workbench_server.services.agent_tools import (
     OFFICE_WRITE,
     ORCHESTRATOR_TOOLS,
     PRESENT_PLAN,
+    RUN_GATES,
     allowed_tool_names,
     clamp_result,
     handle_office_read,
     handle_office_write,
     handle_present_plan,
+    handle_run_gates,
     workspace_state_result,
 )
 from workbench_server.services.sdk_factory import UiStateStore, build_agent_options
@@ -238,6 +252,7 @@ class TestRegistry:
             "office_reconcile",
             "run_command",
             "workspace_search",
+            "run_gates",
         ]
         for spec in AGENT_TOOLS:
             # ``output_format``, ``max_result_bytes`` and ``max_schema_bytes``
@@ -276,6 +291,7 @@ class TestRegistry:
             "mcp__workbench__office_reconcile",
             "mcp__workbench__run_command",
             "mcp__workbench__workspace_search",
+            "mcp__workbench__run_gates",
         ]
 
     def test_a_chat_session_pays_nothing_for_the_orchestrator_toolset(self) -> None:
@@ -592,3 +608,185 @@ class TestOfficeWriteBudget:
         assert len(text.encode()) <= OFFICE_WRITE.max_result_bytes
         assert text.endswith("…")  # proof the truncation branch actually engaged
         assert "�" not in text
+
+
+class _GateService:
+    """A ``ToolchainRunner`` stub: the real ``ValidationService`` narrowed to the
+    two methods the tool uses, holding one canned result and its payloads."""
+
+    def __init__(self, result: ValidationResult, payloads: dict[str, GateLog]) -> None:
+        self.result = result
+        self.payloads = payloads
+        self.specs: list[ValidationSpec] = []
+
+    async def run(self, spec: ValidationSpec) -> ValidationResult:
+        self.specs.append(spec)
+        return self.result
+
+    def payload(self, kind: EvidenceKind, ref: str) -> BaseModel | None:
+        return self.payloads.get(ref)
+
+
+def gate_result(evidence: list[EvidenceItem], risk: RiskLevel = "high") -> ValidationResult:
+    return ValidationResult(
+        validation_id="val_gates1",
+        subject=ValidationSubject(kind="session_output", ref="wrk_1", label="wrk_1"),
+        risk=risk,
+        evidence=evidence,
+        summary="summary",
+        created_at=datetime(2026, 8, 9, 12, 0, tzinfo=UTC),
+    )
+
+
+def failing_gates(log_text: str) -> _GateService:
+    """Three clean gates and a failing ``pytest`` whose log is behind a ref."""
+    log = GateLog(
+        gate="pytest",
+        argv=["uv", "run", "pytest", "-q"],
+        exit_code=1,
+        duration_ms=12_400,
+        text=log_text,
+    )
+    evidence = [
+        EvidenceItem(kind="gate", label="ruff check .", outcome="pass", detail="ruff: exit 0."),
+        EvidenceItem(kind="gate", label="mypy --strict", outcome="pass", detail="mypy: exit 0."),
+        EvidenceItem(
+            kind="gate",
+            label="pytest -q",
+            outcome="fail",
+            detail="pytest -q: exit 1 in 12.4s, 2140 bytes of output captured — open the log.",
+            payload_ref="gate_abc",
+        ),
+        EvidenceItem(kind="gate", label="npm run test (ui)", outcome="pass", detail="npm: exit 0."),
+    ]
+    return _GateService(gate_result(evidence), {"gate_abc": log})
+
+
+class TestRunGatesBudget:
+    """``run_gates`` is the session proving its own work, and it is the widest
+    result in the registry on purpose — a failing gate whose captured output the
+    model cannot read costs a second call to fetch it. So the ceiling is sized
+    for one whole 8 KiB log and pinned here."""
+
+    def test_the_schema_carries_no_argv_no_cwd_and_no_path(self) -> None:
+        """The reason this tool can be auto-allowed like every other workbench
+        tool without being the shell escape ``_AUTO_ALLOWED``'s omission of
+        ``Bash`` exists to prevent: it *cannot express a command*."""
+        properties = RUN_GATES.input_schema["properties"]
+        assert set(properties) == {"gates", "log_bytes"}
+        for forbidden in ("argv", "cwd", "path", "command", "session_id", "slot"):
+            assert forbidden not in properties
+        assert "required" not in RUN_GATES.input_schema
+        assert properties["gates"]["items"] == {"type": "string"}
+
+    def test_the_description_and_schema_fit_their_ceilings(self) -> None:
+        assert len(RUN_GATES.description) <= MAX_DESCRIPTION_CHARS
+        assert RUN_GATES.schema_bytes <= RUN_GATES.max_schema_bytes
+
+    async def test_the_tool_names_the_session_it_was_called_from(self) -> None:
+        """The slot is resolved from ``bridge.session_id``, never from ``args`` —
+        so the tool cannot be pointed at another session's checkout. Asserted on
+        the spec the tool builds, which is the only place that choice is made."""
+        service = failing_gates("1 failed\n")
+        await handle_run_gates(service, "wrk_42", {"path": "../elsewhere", "cwd": "/"})
+        assert service.specs[0].subject.ref == "wrk_42"
+        assert service.specs[0].checks == ["gates"]
+        assert set(service.specs[0].params) == {"gates", "log_bytes"}
+
+    async def test_a_failing_run_shows_the_log_and_ends_with_where_to_read(self) -> None:
+        """AXI shape 3: the last line is the next action, not a full stop."""
+        service = failing_gates(
+            "server/tests/test_dispatch.py:118: assert 17 == 18\n1 failed, 118 passed\n"
+        )
+        text = result_text(await handle_run_gates(service, "wrk_1", {"log_bytes": 4_000}))
+        assert "1 of 4 gates FAIL" in text
+        assert "1 failed, 118 passed" in text
+        assert text.rstrip().endswith("Next: read server/tests/test_dispatch.py:118.")
+        assert len(text.encode()) <= RUN_GATES.max_result_bytes
+
+    async def test_a_truncated_excerpt_states_its_size_and_names_the_widener(self) -> None:
+        """AXI shape 1: a capped window says how much was cut and which argument
+        widens it. Silence is what turns one call into three."""
+        service = failing_gates("x" * 2_140)
+        text = result_text(await handle_run_gates(service, "wrk_1", {}))
+        assert "showing 400 of 2140 bytes" in text
+        assert "log_bytes" in text
+        assert len(text.encode()) <= RUN_GATES.max_result_bytes
+
+    async def test_the_widest_possible_result_stays_within_the_ceiling(self) -> None:
+        """The worst case the check can hand this tool: a full 8 KiB captured log
+        asked for in full, on top of four evidence lines."""
+        service = failing_gates("E   " * 2_048)
+        text = result_text(
+            await handle_run_gates(service, "wrk_1", {"log_bytes": MAX_GATE_LOG_BYTES})
+        )
+        assert len(text.encode()) <= RUN_GATES.max_result_bytes
+
+    async def test_a_clean_run_says_so_explicitly(self) -> None:
+        """AXI shape 2: an all-green answer must say it is green, because a blank
+        result is one a model reads as either clean or broken."""
+        evidence = [
+            EvidenceItem(
+                kind="gate", label=label, outcome="pass", detail=f"{label}: exit 0 in 1.0s."
+            )
+            for label in ("ruff check .", "mypy --strict", "pytest -q", "npm run test (ui)")
+        ]
+        service = _GateService(gate_result(evidence, risk="pass"), {})
+        text = result_text(await handle_run_gates(service, "wrk_1", {}))
+        assert text.startswith("All 4 gates pass (ruff check .")
+        assert "nothing to fix" in text
+
+    async def test_a_session_with_no_slot_gets_the_refusal_not_an_empty_result(self) -> None:
+        """The other half of shape 2, and the one that matters most: a refusal
+        read as "clean" is exactly the silent green this milestone kills."""
+        service = _GateService(
+            gate_result(
+                [
+                    EvidenceItem(
+                        kind="gate",
+                        label="toolchain gates",
+                        outcome="skipped",
+                        detail="this session holds no worktree slot; gates run in the checkout…",
+                    )
+                ],
+                risk="low",
+            ),
+            {},
+        )
+        text = result_text(await handle_run_gates(service, "wrk_1", {}))
+        assert text.startswith("No gates ran")
+        assert "holds no worktree slot" in text
+
+    async def test_an_evicted_log_is_said_out_loud(self) -> None:
+        service = failing_gates("gone")
+        service.payloads.clear()
+        text = result_text(await handle_run_gates(service, "wrk_1", {}))
+        assert "evicted" in text
+
+    def test_the_schema_declares_the_cap_rather_than_only_enforcing_it(self) -> None:
+        """Every id in ``gates`` buys a whole toolchain run, so the list is
+        bounded — and a model that can *see* the bound asks inside it, where one
+        that cannot spends a turn discovering it."""
+        assert RUN_GATES.input_schema["properties"]["gates"]["maxItems"] == MAX_GATES_PER_RUN
+        assert RUN_GATES.schema_bytes <= RUN_GATES.max_schema_bytes
+
+    async def test_the_same_gate_asked_for_fifty_times_is_asked_for_once(self) -> None:
+        """``["pytest"] * 50`` would otherwise be fifty serial ``pytest`` runs —
+        hours — over one unchanged tree, holding the session's slot throughout."""
+        service = failing_gates("1 failed\n")
+        await handle_run_gates(service, "wrk_1", {"gates": ["pytest"] * 50})
+        assert service.specs[0].params["gates"] == ["pytest"]
+
+    async def test_ids_past_the_cap_are_stated_not_silently_dropped(self) -> None:
+        """AXI shape 1 on an argument instead of on a log: say what was cut and
+        how to get the rest. The tool clips rather than raising, because a raise
+        costs the session a whole turn to learn it asked for too much."""
+        service = failing_gates("1 failed\n")
+        asked = [f"gate-{index}" for index in range(MAX_GATES_PER_RUN + 3)]
+        text = result_text(await handle_run_gates(service, "wrk_1", {"gates": asked}))
+
+        assert service.specs[0].params["gates"] == asked[:MAX_GATES_PER_RUN]
+        assert f"Only the first {MAX_GATES_PER_RUN} gate ids ran" in text
+        assert "3 more were not" in text
+        assert "second call" in text
+        assert len(text.encode()) <= RUN_GATES.max_result_bytes

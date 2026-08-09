@@ -126,6 +126,80 @@ export type WorkspaceEvent =
   | WorkspaceChangedEvent
   | CommandInvokeEvent;
 
+// ---- notebook.py ------------------------------------------------------------
+// A `.ipynb`, read and never run. There is no execution in this feature — no
+// kernel, no run endpoint, and nothing below that could describe one — so a
+// cell's `execution_count` is history, not state.
+
+export type NotebookCellType = "code" | "markdown" | "raw";
+
+export type NotebookOutputType = "stream" | "execute_result" | "display_data" | "error";
+
+export type NotebookImageMime = "image/png" | "image/jpeg" | "image/gif";
+
+/** Base64 exactly as the notebook stores it — the panel builds a `data:` URI,
+ * so the bytes never become a URL anything could be asked to fetch. */
+export interface NotebookImage {
+  mime: NotebookImageMime;
+  base64: string;
+}
+
+/**
+ * One output, already reduced server-side to the single representation worth
+ * painting; `mime` names which one was chosen out of the file's MIME bundle.
+ *
+ * `html_source` is HTML **as source text**, never markup. Notebook HTML is
+ * arbitrary author-controlled markup and this app renders none of it (the same
+ * call `markdown.tsx` makes for chat); the field name is what stops a renderer
+ * quietly changing its mind.
+ */
+export interface NotebookOutput {
+  output_type: NotebookOutputType;
+  mime: string;
+  /** "stdout" | "stderr" for a stream output; null otherwise. */
+  stream: string | null;
+  text: string | null;
+  html_source: string | null;
+  image: NotebookImage | null;
+  /** The decoded size of an image that is *not* here — past the server's
+   * per-image cap, or past what was left of the document's image budget. Set
+   * means "there is a figure and you do not have it", which the panel states
+   * with this size; `null` means the image (if any) was carried whole. */
+  image_omitted_bytes: number | null;
+  ename: string | null;
+  evalue: string | null;
+  /** A payload was held back — `text`/`html_source` cut at the server's cap, or
+   * the image named by `image_omitted_bytes` — and the panel says so. */
+  truncated: boolean;
+}
+
+export interface NotebookCell {
+  /** Positional (`c0`, `c1`, …) and unique within one response — a list key,
+   * not a link target. */
+  id: string;
+  cell_type: NotebookCellType;
+  source: string;
+  execution_count: number | null;
+  outputs: NotebookOutput[];
+  truncated: boolean;
+}
+
+export interface NotebookDocument {
+  path: string;
+  nbformat: number;
+  nbformat_minor: number;
+  /** Lowercased highlighting language. A default (`python`), never a claim. */
+  language: string;
+  kernel: string | null;
+  cells: NotebookCell[];
+  /** The file's cell count, which is not `cells.length` when `truncated`. */
+  cell_count: number;
+  truncated: boolean;
+  /** Schema validity. False still renders — see `validation_message`. */
+  valid: boolean;
+  validation_message: string | null;
+}
+
 // ---- provenance.py ----------------------------------------------------------
 // Who last changed a file. `agent === null` is the honest "we do not know" —
 // never a guess at the most recent session.
@@ -1575,6 +1649,63 @@ export interface ValidationResults {
 export interface ValidationEvent {
   type: "validation";
   result: ValidationResult;
+}
+
+// ---- gates.py / evidence.py -------------------------------------------------
+// M6 staged review PR1: the toolchain gate, and the payload route the #82 frame
+// left open. Only the two shapes the *UI* reads are mirrored here — `GateCommand`,
+// `GateSpec`, `GateRunReport` and `SlotRef` are server-side selection and
+// bookkeeping types no browser ever sees, and a mirror of a type nothing reads is
+// a second authority to keep honest with nothing checking it.
+
+/** The payload behind a `gate` EvidenceItem: one gate's bounded head+tail log.
+ * `exit_code` is null when the gate timed out or could not start — distinct from
+ * a non-zero code, and the evidence line says which. */
+export interface GateLog {
+  gate: string;
+  argv: string[];
+  exit_code: number | null;
+  duration_ms: number;
+  text: string;
+  /** Set when the capture window bit (AXI shape 1); null means the log is whole. */
+  truncated: EvidenceTruncation | null;
+}
+
+/** One expected-vs-actual verdict — a row of the reconciliation table.
+ * `actual`/`delta` are null when the cell was empty, non-numeric or unreadable. */
+export interface CellComparison {
+  cell: string;
+  label: string | null;
+  expected: number;
+  actual: number | null;
+  unit: string;
+  delta: number | null;
+  outcome: CheckOutcome;
+  reason: string | null;
+}
+
+/** The payload behind a `numeric` EvidenceItem: the workbook↔code table,
+ * bounded worst-first with `truncated` stating the cut (AXI shape 1). */
+export interface ReconciliationReport {
+  workbook: string;
+  matched: number;
+  mismatched: number;
+  total: number;
+  comparisons: CellComparison[];
+  truncated: EvidenceTruncation | null;
+}
+
+/** GET /api/validation/payload/{kind}/{ref} — what an `EvidenceItem.payload_ref`
+ * resolves to. Exactly one payload field is set, chosen by `kind`. **404 once
+ * the bounded LRU has dropped it**, which the expander renders as "evicted"
+ * rather than a spinner that never resolves. */
+export interface EvidencePayload {
+  kind: EvidenceKind;
+  ref: string;
+  /** `kind === "numeric"`. */
+  reconciliation: ReconciliationReport | null;
+  /** `kind === "gate"`. */
+  gate_log: GateLog | null;
 }
 
 // ---- search.py --------------------------------------------------------------

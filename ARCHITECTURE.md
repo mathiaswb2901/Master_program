@@ -375,11 +375,12 @@ in-process calls where the model and the user dominate.
 | Module | Owns |
 |---|---|
 | `config.py` | pydantic-settings; env prefix `WORKBENCH_` |
-| `models/` | REST/WS schemas: files, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host, usage, worktrees, orchestrator |
+| `models/` | REST/WS schemas: files, notebook, terminal, agents, plans, visuals, shortcuts, provenance, activity, layouts, office host, usage, worktrees, orchestrator |
 | `routers/files.py` | dir listing/tree/read/write/create/rename/delete; jail + conflict mapping |
 | `routers/terminal.py` | `/ws/terminal` bridge |
 | `routers/events.py` | `/ws/events` fan-out (file changes + session status) |
 | `routers/agents.py` | session REST + `/ws/agent/{id}` |
+| `routers/notebook.py` | `GET /api/notebook` (one `.ipynb`, parsed by nbformat: cells, outputs, MIME bundles reduced to what a viewer can paint) |
 | `routers/conversations.py` | `GET /api/conversations` (Claude Code's whole transcript store, grouped by folder) |
 | `routers/shortcuts.py` | `GET /api/shortcuts` (merged shortcuts.md state) |
 | `routers/provenance.py` | `GET /api/provenance` + acknowledge |
@@ -401,6 +402,7 @@ in-process calls where the model and the user dominate.
 | `services/pty_posix.py` | the POSIX PTY backend — stdlib `pty.fork`, behind an injectable syscall surface |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
+| `services/notebook.py` | reading a notebook: nbformat `reads(as_version=4)` (which migrates an nbformat-3 file rather than calling it corrupt) + `validate` (non-fatal), the MIME-bundle choice, the caps, ANSI out of tracebacks. No kernel, no execution, no write path |
 | `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
 | `services/conversations.py` | the whole store, browsable: enumerate + mtime-cached reads, lossy-key resolution, the workspace jail |
 | `services/agent_tools.py` | the agent-facing tool registry + its ergonomics budget |

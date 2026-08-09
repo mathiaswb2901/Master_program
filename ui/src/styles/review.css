@@ -123,6 +123,59 @@
   font-size: var(--type-xs-size);
 }
 
+/* The redeemed payload (M6 staged review PR1). The captured log is the one place
+ * in this panel where the *shape* of the text is information — a pytest summary
+ * and a mypy error are read column-wise — so it is monospaced and scrolls in its
+ * own box rather than reflowing into the pane. Bounded height: a 8 KiB log must
+ * not push the approval gate off the bottom of the pane it is evidence for. */
+.wb-evidence-argv {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.wb-evidence-log {
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-code);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs-size);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wb-evidence-rows {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  max-height: 22rem;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Colour is never the only signal (DESIGN.md §7): the outcome word is already in
+ * the row's text, and this only tints what the reader is scanning for. */
+.wb-evidence-rows li[data-outcome="fail"] {
+  color: var(--error);
+}
+
+.wb-evidence-rows li[data-outcome="warn"] {
+  color: var(--warn);
+}
+
+.wb-evidence-truncation {
+  margin: var(--space-2) 0 0;
+  color: var(--text-tertiary);
+}
+
 /* The explicit empty state — a gallery says "none", never blankness (AXI 2). */
 .wb-review-none {
   color: var(--text-secondary);
