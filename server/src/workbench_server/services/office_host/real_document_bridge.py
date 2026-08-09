@@ -28,8 +28,8 @@ CLAUDE.md rule). The windowing that shapes a read is the *same* code the fake
 runs (``document_window.py``), so the two produce the identical shape.
 """
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 
@@ -37,6 +37,7 @@ from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
     DocStructure,
+    LiveWorkbookStatus,
     SheetDim,
     SlideText,
     WordEdit,
@@ -152,6 +153,82 @@ class ShellDocumentBridge:
             return CellEdit(sheet=sheet, a1_cell=cell_ref(row, col), written_chars=len(value))
 
         return await self._com(handle, work)
+
+    # ---- the value-typed read (the reconciliation seam) ---------------------
+
+    async def workbook_status(self, handle: HostHandle) -> LiveWorkbookStatus:
+        def work(instance: OfficeInstance) -> LiveWorkbookStatus:
+            return LiveWorkbookStatus(
+                saved=office_com.workbook_saved(instance),
+                calculation=office_com.calculation_state(instance),
+            )
+
+        return await self._com(handle, work)
+
+    async def read_cells(
+        self, handle: HostHandle, sheet: str | None, cells: Sequence[str]
+    ) -> list[Any]:
+        def work(instance: OfficeInstance) -> list[Any]:
+            worksheet = self._worksheet(instance, sheet)
+            values: list[Any] = []
+            for address in cells:
+                # One `Range` per address rather than one call for the union:
+                # the addresses are arbitrary and unordered, and a union range's
+                # `Value` collapses to its first area, which would silently
+                # score every expectation against the wrong cell.
+                rectangle = office_com.excel_range_values(worksheet, address)
+                values.append(rectangle[0][0] if rectangle and rectangle[0] else None)
+            return values
+
+        return await self._com(handle, work)
+
+    async def read_columns(
+        self,
+        handle: HostHandle,
+        sheet: str | None,
+        ts_column: str,
+        value_column: str,
+        start_row: int,
+        max_rows: int,
+    ) -> list[tuple[Any, Any]]:
+        def work(instance: OfficeInstance) -> list[tuple[Any, Any]]:
+            worksheet = self._worksheet(instance, sheet)
+            last = office_com.excel_used_rows(worksheet)
+            end = min(last, start_row + max_rows - 1)
+            if end < start_row:
+                return []
+            stamps = office_com.excel_range_values(
+                worksheet, f"{ts_column}{start_row}:{ts_column}{end}"
+            )
+            values = office_com.excel_range_values(
+                worksheet, f"{value_column}{start_row}:{value_column}{end}"
+            )
+            # The window, verbatim — blank rows included. Where the *data* ends
+            # is not this layer's call: the reconciliation seam applies one rule
+            # (`column_data_rows`) to whichever bridge answered, so a live read
+            # and a read of the same file on disk cover the same rows. A bridge
+            # that trimmed on its own would be a second copy of that rule, and
+            # two copies is what let a live read keep rows disk had dropped.
+            return [
+                (
+                    stamps[row][0] if row < len(stamps) and stamps[row] else None,
+                    values[row][0] if row < len(values) and values[row] else None,
+                )
+                for row in range(end - start_row + 1)
+            ]
+
+        return await self._com(handle, work)
+
+    def _worksheet(self, instance: OfficeInstance, sheet: str | None) -> Any:
+        """The named worksheet, or the active one when ``sheet`` is None — the
+        disk reader's own convention, so the two implementations of
+        ``WorkbookReader`` address the same cells for the same spec."""
+        if sheet is None:
+            return instance.document.ActiveSheet
+        worksheet = office_com.excel_worksheet(instance, sheet)
+        if worksheet is None:
+            raise no_sheet_error(sheet, office_com.excel_sheet_names(instance))
+        return worksheet
 
     async def _com(self, handle: HostHandle, work: Callable[[OfficeInstance], T]) -> T:
         """Run one COM operation on the backend's apartment thread, mapping every

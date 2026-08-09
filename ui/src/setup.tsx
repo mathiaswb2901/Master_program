@@ -33,6 +33,7 @@ import { create } from "zustand";
 
 import * as api from "./api";
 import { closePanel, openPanel } from "./dock";
+import { forgetFirstRun, greetFirstRun, type FirstRunSurface } from "./firstRun";
 import type { ToolCommand, WorkbenchTool } from "./registry";
 import type { SetupStatus } from "./types";
 
@@ -132,27 +133,42 @@ function openSetup(): void {
 }
 
 /**
- * Auto-open on a window that has never been arranged and never dismissed Setup —
- * the same deterministic rule the welcome card uses, and for the same reason: if
- * a saved arrangement exists it is the truth about which panels are open and this
- * does nothing; if it does not, nothing will restore over the panel we add. Setup
- * opens *beside* the welcome card (both are centre tabs), and both retire once
- * answered.
+ * Setup's half of the first-run greeting.
+ *
+ * The "is this window already arranged?" question is *not* asked here any more:
+ * it is shared with the welcome card and asked once by `firstRun.ts`, because
+ * opening either panel is itself a layout change that would flip the answer for
+ * the other one — which is how first run came to show one teaching tab, the
+ * other, or both, depending on nothing the user did. Setup still owns its own
+ * dismissal, which is true whether or not it ends up opening.
  */
-async function openIfFirstRun(): Promise<void> {
-  const dismissed = await readDismissed();
-  useSetup.setState({ dismissed });
-  if (dismissed) return;
-  try {
-    if ((await api.getLayouts()).state.current !== null) return;
-  } catch {
-    // layouts unavailable: nothing will restore over us either
-  }
-  // Load the body before opening, so the pane mounts front-and-active rather
-  // than suspending while another tab keeps the focus (see `loadPanel`).
-  await loadPanel();
-  openPanel(TOOL_ID);
-}
+const setupFirstRun: FirstRunSurface = {
+  /**
+   * Setup opens **last, and is the tab a stranger lands on**, with the welcome
+   * card beside it. It is the actionable half — it is the surface that can say
+   * "Claude is not signed in, run `claude /login`" — and it carries a *Show the
+   * welcome card* button, so the window basics are one click away from inside
+   * it. Nothing is hidden either way: both are centre tabs.
+   *
+   * That is a **product decision, and it is written down** rather than implied
+   * by this number: `DESIGN.md` §6.13.1 is the binding statement of the two-
+   * surface ordering, including what a third greeting has to do to take the
+   * front position. Change one and change the other.
+   */
+  order: 20,
+  wanted: async () => {
+    const dismissed = await readDismissed();
+    useSetup.setState({ dismissed });
+    if (dismissed) return false;
+    // Load the body before the greeting opens anything, so the pane mounts
+    // front-and-active rather than suspending while another tab keeps the
+    // focus (see `loadPanel`). Done here rather than in `open` so the chunk is
+    // fetched while the shared arrangement question is still in flight.
+    await loadPanel();
+    return true;
+  },
+  open: () => openPanel(TOOL_ID),
+};
 
 /** Warm the panel chunk when the browser is idle, so a returning user's "Show
  * setup…" opens instantly rather than paying the dynamic import on the click.
@@ -168,10 +184,11 @@ function warmPanel(): void {
 function onDockReady(dock: DockviewApi | null): void {
   if (dock === null) {
     useSetup.setState({ dismissed: null, status: null });
+    forgetFirstRun();
     return;
   }
   void refreshStatus();
-  void openIfFirstRun();
+  greetFirstRun(dock, setupFirstRun);
   warmPanel();
 }
 

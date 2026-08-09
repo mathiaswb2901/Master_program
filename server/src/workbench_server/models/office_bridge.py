@@ -26,9 +26,43 @@ seam for it needs an addressing scheme this PR does not invent. Reading is the
 half that pays for itself immediately: an agent can check the deck it just built.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from workbench_server.models.office_host import HostAppKind
+
+#: Whether Excel has finished working out what the workbook's formulas say.
+#: Mirrors ``Application.CalculationState``: ``xlDone`` (0), ``xlCalculating``
+#: (1), ``xlPending`` (2). Anything but ``done`` means a live read would return
+#: numbers Excel is still in the middle of revising — which is a reason to wait,
+#: never a reason to call it a pass.
+CalculationState = Literal["done", "pending", "calculating"]
+
+
+class LiveWorkbookStatus(BaseModel):
+    """Whether the live docked workbook can be believed right now.
+
+    Two properties, both read straight off the live instance and both cheap
+    enough to ask before any cell is touched:
+
+    * :attr:`saved` is ``Workbook.Saved`` — ``False`` means the user has edits
+      the ``.xlsx`` on disk does not have, so **the file is not the workbook**.
+      That single boolean is what turns "reconcile the file" from a conservative
+      fallback into a wrong answer, and it is the front gate of
+      ``services/reconciliation.py``.
+    * :attr:`calculation` is the application's calculation state. A workbook
+      mid-calculation is a third thing, neither clean nor wrong: its formula
+      cells hold values Excel has not finished revising.
+
+    Measured over real COM on Windows 11 / Excel / pywin32 311 — ``Saved`` flips
+    ``True → False`` across one cell edit and ``CalculationState`` reads ``0``
+    when idle (``scripts/dev/probe_live_com.py`` reproduces both).
+    """
+
+    #: ``Workbook.Saved``: True when the live instance and the file agree.
+    saved: bool
+    calculation: CalculationState
 
 
 class SheetDim(BaseModel):
