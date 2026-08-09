@@ -26,6 +26,16 @@
  * which is what lets the panel disable that control with a reason instead of
  * offering a button that does nothing.
  *
+ * ## Writes are ordered, because clicks are not
+ *
+ * Every change PUTs the whole document, and a panel of segmented controls is
+ * clicked faster than a round trip. Two rules keep that honest, and both are
+ * spelled out at "ordering" below: a reply is applied only if it is the newest
+ * exchange issued, and a patch merges onto the document we *intend* to store
+ * rather than onto the last one that settled. Writes are serialized and
+ * coalesced on top of that, so the file and the panel cannot disagree about
+ * which click won.
+ *
  * ## The theme is the one setting with two homes, on purpose
  *
  * `localStorage` stays the **pre-paint cache** — `index.html` reads it before
@@ -122,9 +132,57 @@ function applyTheme(choice: ThemeChoice): void {
  * which is what makes {@link applyTheme}'s own `setTheme` inert here.
  */
 function onAppThemeChanged(theme: Theme): void {
-  const current = useSettings.getState().state;
-  if (current === null || resolveTheme(current.stored.theme) === theme) return;
+  const base = intended();
+  if (base === null || resolveTheme(base.theme) === theme) return;
   void save({ theme });
+}
+
+// ---- ordering: one writer, and only the newest answer lands -----------------
+//
+// A settings panel is clicked fast — theme, then voice, inside one round trip —
+// and a whole-document PUT per click gives two ways to lose an answer. Both are
+// closed here, and both are reproduced in `settings.test.ts`.
+//
+//  1. **A stale answer must not land.** Every exchange with the server takes a
+//     ticket from `issued`, and its result is applied only if that ticket is
+//     still the newest one. That covers a slow PUT replying after a later one,
+//     and equally a GET that was already in flight when a write was issued —
+//     `onDockReady` starts a read and then subscribes to the theme, so that
+//     second one is a live path, not a hypothetical.
+//  2. **A patch must merge onto what the user last chose**, not onto the last
+//     answer that happened to settle. `desired` is the document we intend to
+//     store; every patch merges onto *that*, so the body actually written is
+//     cumulative instead of un-doing the click before it.
+//
+// Writes are also serialized — one PUT outstanding, the rest coalesced into the
+// next body — which is what makes the *file* agree with the panel: two PUTs in
+// flight at once can reach a single-threaded disk in either order, and no
+// amount of client-side bookkeeping can decide that after the fact.
+
+/** Monotonic ticket for every exchange that may write to the store. */
+let issued = 0;
+
+/** The document we intend to have stored, while a write is outstanding. */
+let desired: WorkbenchSettings | null = null;
+
+/** The write currently draining, so `save` starts one drain and no more. */
+let writing: Promise<void> | null = null;
+
+/**
+ * What we believe will be stored: the newest queued write if there is one, and
+ * otherwise the server's last answer. Every merge, and every "is this already
+ * the case?" question, asks this rather than `state.stored` — which is a
+ * *settled* answer and therefore behind for as long as a write is in flight.
+ */
+function intended(): WorkbenchSettings | null {
+  return desired ?? useSettings.getState().state?.stored ?? null;
+}
+
+/** Forget any outstanding exchange: whatever is in flight loses its ticket and
+ * its answer is dropped. The drain unwinds itself once `desired` is empty. */
+function forget(): void {
+  issued += 1;
+  desired = null;
 }
 
 // ---- reading and writing ----------------------------------------------------
@@ -132,35 +190,73 @@ function onAppThemeChanged(theme: Theme): void {
 /** Read the document into the store and put the window in its theme. A failure
  * leaves the last good state in place; the panel shows the error. */
 export async function refresh(): Promise<void> {
+  // A write already outstanding is a newer question than this one, and its own
+  // reply is the same `SettingsState` a GET would return. Standing down saves
+  // the round trip and, more to the point, means no read can ever land on top
+  // of a write that has not settled.
+  if (writing !== null) return writing;
+  const ticket = ++issued;
   try {
     const state = await api.getSettings();
+    if (ticket !== issued) return; // superseded while it flew
     useSettings.setState({ state, error: null });
     applyTheme(state.effective.theme);
   } catch (error) {
+    if (ticket !== issued) return;
     useSettings.setState({ error: message(error) });
   }
 }
 
 /**
- * Change one or more settings: merge onto the stored document, PUT it whole,
- * and take the server's answer as the new truth (it carries the overrides and
- * the pending-restart list a client cannot derive).
+ * Change one or more settings: merge onto the document we intend to store, PUT
+ * it whole, and take the server's answer as the new truth (it carries the
+ * overrides and the pending-restart list a client cannot derive).
  *
  * Whole-document writes, like layouts: there is no partial-update path to get
- * wrong, and two controls changed in quick succession cannot interleave into a
- * document neither of them meant.
+ * wrong. The promise settles when the change has actually reached the server —
+ * including when it was coalesced into a later body — so `await save(…)` means
+ * what it looks like it means.
  */
-export async function save(patch: Partial<WorkbenchSettings>): Promise<void> {
-  const current = useSettings.getState().state;
-  if (current === null) return; // nothing loaded: there is no document to merge into
-  const next: WorkbenchSettings = { ...current.stored, ...patch };
+export function save(patch: Partial<WorkbenchSettings>): Promise<void> {
+  const base = intended();
+  if (base === null) return Promise.resolve(); // nothing loaded: no document to merge into
+  desired = { ...base, ...patch };
   useSettings.setState({ error: null });
-  try {
-    const state = await api.putSettings(next);
-    useSettings.setState({ state });
-    applyTheme(state.effective.theme);
-  } catch (error) {
-    useSettings.setState({ error: message(error) });
+  return arm();
+}
+
+/** Ensure exactly one drain is running, and answer with it. */
+function arm(): Promise<void> {
+  const started =
+    writing ??
+    drain().finally(() => {
+      writing = null;
+      // A patch queued between the drain's last check and this line would
+      // otherwise sit in `desired` forever. Nothing schedules user code in that
+      // window today; re-arming costs a comparison and removes the reasoning.
+      if (desired !== null) void arm();
+    });
+  writing = started;
+  return started;
+}
+
+/** Send the intended document, then whatever replaced it while that was flying,
+ * until nothing is queued. One PUT outstanding at a time, by construction. */
+async function drain(): Promise<void> {
+  while (desired !== null) {
+    const body = desired;
+    const ticket = ++issued;
+    try {
+      const state = await api.putSettings(body);
+      if (desired === body) desired = null; // nothing newer queued while it flew
+      if (ticket !== issued) continue; // superseded: this answer is history
+      useSettings.setState({ state, error: null });
+      applyTheme(state.effective.theme);
+    } catch (error) {
+      desired = null; // do not spin on a body the server just refused
+      if (ticket === issued) useSettings.setState({ error: message(error) });
+      return;
+    }
   }
 }
 
@@ -207,6 +303,8 @@ function onDockReady(dock: DockviewApi | null): void {
   unsubscribeTheme?.();
   unsubscribeTheme = null;
   if (dock === null) {
+    // The state is dropped, so nothing still in flight may write to it either.
+    forget();
     useSettings.setState({ state: null, error: null });
     return;
   }
