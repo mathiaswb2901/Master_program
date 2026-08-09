@@ -26,17 +26,25 @@ Two seams, the same split the host backend already uses:
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import structlog
 
 from workbench_server.models.office_host import OfficeAccount, OfficeIdentity
 
-if TYPE_CHECKING:
+if TYPE_CHECKING and sys.platform == "win32":
     # Windows-only, and imported here purely so the ``_value`` annotation
     # resolves; the runtime imports live inside the functions that the
     # ``sys.platform`` guard only reaches on Windows.
     import winreg
+
+    RegistryKey: TypeAlias = winreg.HKEYType
+else:
+    # The annotation still has to resolve on the matrix's linux and macos legs,
+    # where `winreg` — and therefore `winreg.HKEYType` — does not exist at all.
+    # Everything that touches a real key is unreachable there, so `object` costs
+    # no checking on the platform that has the type.
+    RegistryKey: TypeAlias = object
 
 log = structlog.get_logger()
 
@@ -71,6 +79,11 @@ def probe_identity() -> OfficeIdentity:
     only a cheap registry read; kept synchronous so the service can push it off
     the event loop with :func:`asyncio.to_thread`, the same way the host backend
     runs its COM work off-loop.
+
+    The platform check is an ``if``/``else`` rather than an early return on
+    purpose: mypy exempts a *branch* guarded by ``sys.platform`` from
+    ``warn_unreachable``, but not the tail of a function an early return made
+    unreachable — and this file is type-checked on all three matrix legs.
     """
     if sys.platform != "win32":
         return OfficeIdentity(
@@ -78,41 +91,42 @@ def probe_identity() -> OfficeIdentity:
             license="unknown",
             detail="reading the Office account is only available on Windows",
         )
-    try:
-        accounts = _read_accounts()
-    except OSError as error:
-        # A locked or malformed hive, or a permissions refusal. Degrade rather
-        # than let it out of the endpoint — an unknown identity is a safe answer.
-        log.warning("office_identity.read_failed", detail=f"{type(error).__name__}: {error}")
+    else:
+        try:
+            accounts = _read_accounts()
+        except OSError as error:
+            # A locked or malformed hive, or a permissions refusal. Degrade rather
+            # than let it out of the endpoint — an unknown identity is a safe answer.
+            log.warning("office_identity.read_failed", detail=f"{type(error).__name__}: {error}")
+            return OfficeIdentity(
+                signed_in=False,
+                license="unknown",
+                detail="could not read the Office identity from the registry",
+            )
+        if not accounts:
+            # Said explicitly: "none signed in" is a different answer from "could not
+            # read", and the UI (and a reading agent) must not have to guess which.
+            return OfficeIdentity(
+                signed_in=False,
+                license="unknown",
+                detail="no Microsoft account is signed into Office on this machine",
+            )
+        # Which of several accounts a launched instance runs as is not something the
+        # Identities hive alone reveals — that determination is part of the
+        # switching spike, not this read. So: the sole account when there is one,
+        # and an honest "cannot tell" when there are several.
+        active = accounts[0] if len(accounts) == 1 else None
         return OfficeIdentity(
-            signed_in=False,
+            signed_in=True,
+            active=active,
+            accounts=accounts,
+            # The registry names the accounts but not, reliably, the license state —
+            # that needs a COM read of the live application, which lands with the
+            # rest of the COM bridge. Honest "unknown" until then, never a guessed
+            # "licensed" that would silently strand the user.
             license="unknown",
-            detail="could not read the Office identity from the registry",
+            detail=_detail(accounts, active),
         )
-    if not accounts:
-        # Said explicitly: "none signed in" is a different answer from "could not
-        # read", and the UI (and a reading agent) must not have to guess which.
-        return OfficeIdentity(
-            signed_in=False,
-            license="unknown",
-            detail="no Microsoft account is signed into Office on this machine",
-        )
-    # Which of several accounts a launched instance runs as is not something the
-    # Identities hive alone reveals — that determination is part of the
-    # switching spike, not this read. So: the sole account when there is one,
-    # and an honest "cannot tell" when there are several.
-    active = accounts[0] if len(accounts) == 1 else None
-    return OfficeIdentity(
-        signed_in=True,
-        active=active,
-        accounts=accounts,
-        # The registry names the accounts but not, reliably, the license state —
-        # that needs a COM read of the live application, which lands with the
-        # rest of the COM bridge. Honest "unknown" until then, never a guessed
-        # "licensed" that would silently strand the user.
-        license="unknown",
-        detail=_detail(accounts, active),
-    )
 
 
 def _detail(accounts: list[OfficeAccount], active: OfficeAccount | None) -> str:
@@ -136,52 +150,63 @@ def _read_accounts() -> list[OfficeAccount]:
     imports cleanly on any platform for collection. A missing Identities key
     means Office is not installed, or nobody has signed in: an empty list, not
     an error.
+
+    The body sits inside a ``sys.platform`` branch, not behind an early return,
+    for the reason :func:`probe_identity` spells out: off Windows `winreg` has no
+    attributes at all in typeshed, so the ubuntu and macos legs only type-check
+    this at all because mypy skips the branch outright.
     """
-    import winreg
+    if sys.platform != "win32":
+        raise RuntimeError("the Office identity read is Windows-only")
+    else:
+        import winreg
 
-    try:
-        identities = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _IDENTITIES_KEY)
-    except FileNotFoundError:
-        return []
-    accounts: list[OfficeAccount] = []
-    with identities:
-        subkey_count = winreg.QueryInfoKey(identities)[0]
-        for index in range(subkey_count):
-            name = winreg.EnumKey(identities, index)
-            try:
-                with winreg.OpenKey(identities, name) as account:
-                    email = _value(account, "EmailAddress")
-                    friendly = _value(account, "FriendlyName")
-            except OSError as error:
-                # One restricted or corrupted identity subkey must not discard
-                # the accounts already read. Skip the bad one and keep going —
-                # a machine with two signed-in accounts where only the second
-                # trips a PermissionError still reports the first, instead of
-                # the whole read degrading to "could not read".
-                log.warning(
-                    "office_identity.subkey_read_failed",
-                    subkey=name,
-                    detail=f"{type(error).__name__}: {error}",
-                )
-                continue
-            if email or friendly:
-                accounts.append(OfficeAccount(display_name=friendly, email=email))
-    return accounts
+        try:
+            identities = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _IDENTITIES_KEY)
+        except FileNotFoundError:
+            return []
+        accounts: list[OfficeAccount] = []
+        with identities:
+            subkey_count = winreg.QueryInfoKey(identities)[0]
+            for index in range(subkey_count):
+                name = winreg.EnumKey(identities, index)
+                try:
+                    with winreg.OpenKey(identities, name) as account:
+                        email = _value(account, "EmailAddress")
+                        friendly = _value(account, "FriendlyName")
+                except OSError as error:
+                    # One restricted or corrupted identity subkey must not discard
+                    # the accounts already read. Skip the bad one and keep going —
+                    # a machine with two signed-in accounts where only the second
+                    # trips a PermissionError still reports the first, instead of
+                    # the whole read degrading to "could not read".
+                    log.warning(
+                        "office_identity.subkey_read_failed",
+                        subkey=name,
+                        detail=f"{type(error).__name__}: {error}",
+                    )
+                    continue
+                if email or friendly:
+                    accounts.append(OfficeAccount(display_name=friendly, email=email))
+        return accounts
 
 
-def _value(key: winreg.HKEYType, name: str) -> str | None:
+def _value(key: RegistryKey, name: str) -> str | None:
     """One string value under ``key``, or None when it is absent or not a string.
 
     A registry hiccup on a single value is not worth failing the whole read for —
     an account with a readable name and an unreadable email is still worth
     reporting — so a missing value degrades that field to None.
     """
-    import winreg
+    if sys.platform != "win32":
+        raise RuntimeError("the Office identity read is Windows-only")
+    else:
+        import winreg
 
-    try:
-        value, kind = winreg.QueryValueEx(key, name)
-    except FileNotFoundError:
-        return None
-    if kind != winreg.REG_SZ or not isinstance(value, str) or not value:
-        return None
-    return value
+        try:
+            value, kind = winreg.QueryValueEx(key, name)
+        except FileNotFoundError:
+            return None
+        if kind != winreg.REG_SZ or not isinstance(value, str) or not value:
+            return None
+        return value

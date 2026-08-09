@@ -9,6 +9,7 @@ from any project.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,16 +93,21 @@ def test_update_and_delete_raise_on_an_unknown_id(tmp_path: Path) -> None:
         store.delete("nope")
 
 
-def test_entries_filter_by_workspace_case_insensitively(tmp_path: Path) -> None:
+def test_entries_filter_by_workspace_the_way_the_platform_compares_paths(tmp_path: Path) -> None:
     store = SessionsStore(tmp_path / "appdata")
     a = str(tmp_path / "Alpha")
     b = str(tmp_path / "Beta")
     store.create(_create("in alpha", a))
     store.create(_create("in beta", b))
     assert [s.name for s in store.entries(a)] == ["in alpha"]
-    # A window rooted at a differently-cased spelling of the same path still
-    # sees its session — Windows paths are case-insensitive.
-    assert {s.name for s in store.entries(a.upper())} == {"in alpha"}
+    # The store keys on `os.path.normcase`, so a differently-cased spelling is
+    # the same workspace exactly where the OS says it is. On Windows a window
+    # rooted at the shouted spelling still sees its session; on linux and macOS
+    # `normcase` is the identity function and `ALPHA` is a different directory,
+    # so it correctly sees nothing. Asserting one rule on both platforms would
+    # be asserting the wrong one on one of them.
+    shouted = {s.name for s in store.entries(a.upper())}
+    assert shouted == ({"in alpha"} if sys.platform == "win32" else set())
     # No workspace filter returns every session across every project.
     assert len(store.entries()) == 2
 

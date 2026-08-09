@@ -401,6 +401,13 @@ def _live_server(settings: Settings) -> Iterator[int]:
     finally:
         server.should_exit = True
         thread.join(timeout=15)
+        # Asserted, not hoped for. `should_exit` only ends uvicorn's *accept*
+        # loop; it then waits for every live connection task, so a WebSocket
+        # handler that never notices its client left keeps this thread — and the
+        # whole app, watcher included — running for the life of the process.
+        # That is the shape of a Ctrl-C that hangs, and a bare `join(timeout=)`
+        # turns it into fifteen silent seconds instead of a red test.
+        assert not thread.is_alive(), "uvicorn never shut down: a connection task is still live"
 
 
 async def test_ws_reject_delivers_policy_close_code_over_real_server(settings: Settings) -> None:

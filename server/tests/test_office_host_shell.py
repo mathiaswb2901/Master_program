@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -318,8 +319,17 @@ def test_a_document_is_open_elsewhere_only_when_the_running_object_table_says_so
 
 def test_the_ownership_snapshot_is_every_process_not_a_guess() -> None:
     """`launch` refuses any window whose pid was already running, so a snapshot
-    that missed processes would be a snapshot that adopts one."""
-    assert os.getpid() in office_com.running_pids()
+    that missed processes would be a snapshot that adopts one.
+
+    Both halves of the platform split are asserted, because both are contracts.
+    On Windows the snapshot is `EnumProcesses` and must contain this very
+    process. Off Windows it is empty *by design* — there is no Office to adopt,
+    and an empty snapshot means `launch` claims nothing rather than everything.
+    """
+    if sys.platform == "win32":
+        assert os.getpid() in office_com.running_pids()
+    else:
+        assert office_com.running_pids() == set()
 
 
 # ---- the COM half's decisions --------------------------------------------------
