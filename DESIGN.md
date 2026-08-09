@@ -709,6 +709,17 @@ through the token file and fails the build if a colour-only one lands on a sprin
   place in its section: a row that vanishes answers "where did *New agent session* go?"
   with silence, and a row that is offered and then refused spends the whole gesture
   before saying so. Never a dead button (CLAUDE.md, panes).
+- **It is a real modal, and a real combobox** (§7). `role="dialog"` + `aria-modal`, a
+  Tab ring that cycles inside the overlay and never lands on a control behind the scrim,
+  `Esc` on a window-level capture listener — the same one `Modal.tsx` uses, so it beats
+  Monaco and xterm wherever the keyboard is — and focus handed back to whatever opened it
+  when the gesture is *cancelled* (a row that runs leaves focus to the command it ran).
+  The input is a `combobox` over a `listbox` of `option` rows, and the selected row is
+  named by `aria-activedescendant`: the amber wash and the 2px edge are what *seeing*
+  the selection looks like, and this is the same fact said to a screen reader. Section
+  headers are the label of a `group`, because a listbox may own only options and groups.
+  The result count is announced in a polite, debounced, screen-reader-only region — one
+  announcement per pause, never one per keystroke.
 - Keycap hints: 11px mono on `--surface-elevated`, 1px `--border-default`,
   `--radius-xs`, padding 1px 5px.
 - Motion (§5.4): fade + scale `--motion-scale-in`→1 on `--motion-enter`; exit is a
