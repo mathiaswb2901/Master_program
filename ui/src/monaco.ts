@@ -17,6 +17,10 @@
  *   `disposeModel` act on models, and until Monaco has loaded there are none,
  *   so "not loaded" and "no model for that path" are the same answer — which
  *   the store already handles (`setModelContent(...) ?? content`).
+ * * **This module owns model lifetime**, because more than one pane can be
+ *   looking at one file and none of them owns what they are looking at. See
+ *   the registry below (`acquireModel`/`releaseModel`/`disposeModel`) for the
+ *   rule and for why "dispose at zero refs" is not it.
  * * **Loading is idempotent and shared.** `loadMonaco` memoizes its promise, so
  *   the idle-time prefetch and a user clicking a file in the same moment
  *   produce one download, not two.
@@ -151,26 +155,123 @@ export function defineWorkbenchTheme(theme: Theme): void {
 
 // ---- model helpers ----------------------------------------------------------
 
-/** Uri scheme must match the `path` prop given to <Editor> (see EditorArea). */
-export const editorPathProp = (path: string): string => `file:///${path}`;
+/**
+ * Uri scheme must match the `path` prop given to <Editor> (see EditorArea).
+ *
+ * Separators are normalised because this string *is* the model's identity:
+ * Monaco keys models by Uri, so `src\bid.py` and `src/bid.py` would be two
+ * models — two buffers over one file, each able to save over the other. Every
+ * path the app has comes from the server as POSIX-relative, so this only ever
+ * fires on a path that took a Windows detour, which is exactly the case worth
+ * catching.
+ */
+export const editorPathProp = (path: string): string => `file:///${path.replace(/\\/g, "/")}`;
 
-let activeEditor: Monaco.editor.IStandaloneCodeEditor | null = null;
+/**
+ * The model registry: **who owns a Monaco text model, and when it dies.**
+ *
+ * A pane is a view onto a resource it does not own (CLAUDE.md, ROADMAP product
+ * principle 4). For the editor the resource is the *model* — the buffer, its
+ * undo stack, its markers — and the views are the tab strip's editor plus every
+ * `editors#<path>` pane. `@monaco-editor/react` does not know that: its
+ * `<Editor>` disposes whatever model it is showing when it unmounts, which is
+ * only correct when there is exactly one editor in the window. With two, the
+ * first pane to close took the model out from under the other, and Monaco's own
+ * reaction is to detach it everywhere — every editor attached to a model
+ * registers `model.onWillDispose(() => this.setModel(null))`, and detaching
+ * removes the view's DOM node — so the surviving pane went *blank*, tab strip
+ * and unsaved dot still on screen above nothing. Hence `keepCurrentModel` on
+ * every `<Editor>` (`panels/CodeEditor.tsx`) and this map.
+ *
+ * **The disposal decision, stated: a model dies with its FILE, never with a
+ * pane.** Two things end it, both explicit:
+ *
+ *  1. the store closes the file (`closeFile`, `adoptWorkspace`) and calls
+ *     `disposeModel` — the tab is gone, so the buffer should be too, and
+ *     reopening must come back from disk rather than from a stale buffer;
+ *  2. that retirement then waits for the last view to let go, so a model is
+ *     never disposed under a live editor either — the mirror of the same bug,
+ *     which closing a tab while a pane showed the same file used to hit.
+ *
+ * The rejected alternative is "dispose at zero refs". It is wrong here for one
+ * concrete reason: a file open in the tab strip but *displayed* by nobody (the
+ * strip is on another tab) has zero views, and disposing there would throw away
+ * the undo history and the markers of a file the user still has open, at the
+ * moment they close an unrelated pane. "Keep-N for fast reopen" was rejected
+ * for the opposite reason — the keep set would be a second, invisible answer to
+ * "is this file open?", and reopening is supposed to re-read disk.
+ */
+interface ModelEntry {
+  /** Mounted editors currently displaying this model. */
+  views: number;
+  /** The store has closed the file: dispose as soon as the last view lets go. */
+  retired: boolean;
+}
+const models = new Map<string, ModelEntry>();
 
-export function setActiveEditor(editor: Monaco.editor.IStandaloneCodeEditor | null): void {
-  activeEditor = editor;
+/** Per-*view* scroll and cursor, keyed by pane and path — never by path alone.
+ * Two panes on one file scroll independently because where you are looking is
+ * the view's state, not the model's; a map keyed by path is the same singleton
+ * assumption in miniature (and is what `@monaco-editor/react`'s own
+ * `saveViewState` does, which is why this module turns it off). */
+const viewStates = new Map<string, Map<string, Monaco.editor.ICodeEditorViewState>>();
+
+export function rememberViewState(
+  pane: string,
+  path: string,
+  state: Monaco.editor.ICodeEditorViewState | null,
+): void {
+  if (state === null) return;
+  const key = editorPathProp(path);
+  const byPane = viewStates.get(key) ?? new Map<string, Monaco.editor.ICodeEditorViewState>();
+  byPane.set(pane, state);
+  viewStates.set(key, byPane);
+}
+
+export function recallViewState(
+  pane: string,
+  path: string,
+): Monaco.editor.ICodeEditorViewState | null {
+  return viewStates.get(editorPathProp(path))?.get(pane) ?? null;
+}
+
+/** A view is now displaying this path. Balanced by `releaseModel`. */
+export function acquireModel(path: string): void {
+  const key = editorPathProp(path);
+  const entry = models.get(key);
+  if (entry === undefined) models.set(key, { views: 1, retired: false });
+  else {
+    entry.views += 1;
+    // Somebody wants it again — a pane that reopened a file the strip closed.
+    entry.retired = false;
+  }
 }
 
 /**
- * Withdraw an editor that is going away — and *only* it.
+ * A view has stopped displaying this path.
  *
- * There is more than one editor in the window now (the tab strip's, plus one
- * per `editors#<path>` pane), so "an editor unmounted" is not "there is no
- * active editor": closing one pane must not cost the pane beside it the cursor
- * and scroll restore that `setModelContent` does. A no-op unless the editor
- * being dropped is the one currently registered.
+ * The model survives unless the store has already retired it: closing a pane
+ * closes a *view*, and the file behind it is still open in the tab strip with
+ * its undo stack intact.
  */
-export function clearActiveEditor(editor: Monaco.editor.IStandaloneCodeEditor): void {
-  if (activeEditor === editor) activeEditor = null;
+export function releaseModel(path: string): void {
+  const key = editorPathProp(path);
+  const entry = models.get(key);
+  if (entry === undefined) return;
+  entry.views = Math.max(0, entry.views - 1);
+  if (entry.views === 0 && entry.retired) destroyModel(key);
+}
+
+/** Actually end it, and forget every view's memory of where it was looking. */
+function destroyModel(key: string): void {
+  models.delete(key);
+  // Dispose *before* forgetting the view states, not after: Monaco answers a
+  // disposed model by calling `setModel(null)` on every editor still attached
+  // to it, and that fires the `onWillChangeModel` handler in `CodeEditor`,
+  // which files one last view state under this very key.
+  const model = api?.editor.getModel(api.Uri.parse(key)) ?? null;
+  model?.dispose();
+  viewStates.delete(key);
 }
 
 /** The model for a path, or null — including "the editor has not loaded yet",
@@ -179,9 +280,17 @@ function modelFor(path: string): Monaco.editor.ITextModel | null {
   return api?.editor.getModel(api.Uri.parse(editorPathProp(path))) ?? null;
 }
 
+/** Every mounted editor currently showing this model — one per pane, and the
+ * reason nothing here reaches for "the" editor. */
+function viewsOf(model: Monaco.editor.ITextModel): readonly Monaco.editor.ICodeEditor[] {
+  return (api?.editor.getEditors() ?? []).filter((editor) => editor.getModel() === model);
+}
+
 /**
- * Replace a model's content from an external (on-disk) change. If the model is
- * currently shown in the editor, cursor and scroll position are preserved.
+ * Replace a model's content from an external (on-disk) change, preserving where
+ * **every** pane showing it was looking — `setValue` is a full-model edit, so a
+ * pane that is not restored jumps to the top of the file.
+ *
  * Returns the content as the model now holds it (Monaco normalizes mixed line
  * endings), or null when no model exists for the path yet — callers should
  * store the returned value so dirty-tracking compares like with like.
@@ -189,19 +298,33 @@ function modelFor(path: string): Monaco.editor.ITextModel | null {
 export function setModelContent(path: string, content: string): string | null {
   const model = modelFor(path);
   if (model === null) return null;
-  if (activeEditor && activeEditor.getModel() === model) {
-    const viewState = activeEditor.saveViewState();
-    model.setValue(content);
-    if (viewState) activeEditor.restoreViewState(viewState);
-  } else {
-    model.setValue(content);
-  }
+  const views = viewsOf(model);
+  const states = views.map((editor) => editor.saveViewState());
+  model.setValue(content);
+  views.forEach((editor, index) => {
+    const state = states[index];
+    if (state !== undefined && state !== null) editor.restoreViewState(state);
+  });
   return model.getValue();
 }
 
-/** Drop the cached model when a tab closes so reopening reloads from disk. */
+/**
+ * The file is closed: retire its model so reopening reloads from disk.
+ *
+ * Deferred while a view still holds it, which is what stops the *other* half of
+ * the plural bug — closing the last tab while an `editors#<path>` pane is still
+ * on screen used to dispose the model under that pane's live editor. The pane
+ * unmounts a moment later (it renders its "closed / Reopen" note instead), and
+ * `releaseModel` finishes the job then.
+ */
 export function disposeModel(path: string): void {
-  modelFor(path)?.dispose();
+  const key = editorPathProp(path);
+  const entry = models.get(key);
+  if (entry !== undefined && entry.views > 0) {
+    entry.retired = true;
+    return;
+  }
+  destroyModel(key);
 }
 
 /**
