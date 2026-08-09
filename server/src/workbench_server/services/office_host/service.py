@@ -54,7 +54,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
@@ -84,6 +84,7 @@ from workbench_server.models.office_host import (
     PanelRect,
     host_app_kind,
 )
+from workbench_server.models.settings import SettingSource
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.office_host.backend import (
     HostBackend,
@@ -123,6 +124,23 @@ MAX_HOSTS = 32
 #: Where a window goes when the caller has not laid the panel out yet. The first
 #: real bounds replace it; a window has to be given *some* rectangle.
 DEFAULT_RECT = PanelRect(x=0, y=0, width=800, height=600)
+
+#: How "off" is explained, by where the "off" actually came from — the second
+#: half of the **Policy** note above, and the reason ``mode`` no longer arrives
+#: alone. Since M7 V8 ``office_native`` is a setting as well as an environment
+#: variable, so an operator's ``WORKBENCH_OFFICE_NATIVE`` and the user's own
+#: answer in the Settings panel both reach this service as ``mode="off"``. This
+#: sentence is what the Setup panel's Office row prints verbatim
+#: (``services/setup.py``), so hard-coding the variable would tell someone who
+#: never exported one to go and unset it instead of naming the switch they
+#: flipped. Each knob naming the mechanism by which it really takes effect is the
+#: whole point of the settings surface; a control that lies about its own
+#: mechanism is worse than one that says nothing.
+_OFF_DETAIL: Mapping[SettingSource, str] = {
+    "environment": "native hosting is off (WORKBENCH_OFFICE_NATIVE=off)",
+    "external": "native hosting is off (set outside the app for this launch)",
+    "stored": "native hosting is off (turned off in Settings)",
+}
 
 #: Ceiling on one backend call. Launching Word is the slow one — about a second
 #: normally, far worse on a cold machine — so it gets its own; everything else
@@ -293,6 +311,7 @@ class OfficeHostService:
         *,
         bridge: DocumentBridge | None = None,
         mode: OfficeNativeMode = "auto",
+        mode_source: SettingSource = "stored",
         fake: bool = False,
         channel: ShellChannel | None = None,
         detector: Callable[[], bool] = detect_office,
@@ -305,6 +324,11 @@ class OfficeHostService:
         self._workspace = workspace
         self._bus = bus
         self._mode: OfficeNativeMode = mode
+        #: Which mechanism decided that mode, so ``off`` can name the right one
+        #: (:data:`_OFF_DETAIL`). ``create_app`` asks the settings service; the
+        #: default is the user's own stored answer because that is the ordinary
+        #: way it is off now, and it is the one wording that asserts no variable.
+        self._mode_source: SettingSource = mode_source
         self._fake = fake
         #: Only for reporting whether a shell is attached. The backend is what
         #: actually uses it; the service holds it so ``capabilities`` can say
@@ -471,7 +495,7 @@ class OfficeHostService:
 
     def _detail(self, onlyoffice_enabled: bool) -> str:
         if self._mode == "off":
-            return "native hosting is off (WORKBENCH_OFFICE_NATIVE=off)"
+            return _OFF_DETAIL[self._mode_source]
         if self.hosting_available and self._fake:
             return "the fake host backend is active: no real document is hosted"
         if self._backend is None:
