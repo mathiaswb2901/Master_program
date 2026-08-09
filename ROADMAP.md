@@ -1071,11 +1071,29 @@ named as deferred rather than blocking. Summary of the sequence:
   permission policy; pass/fail evidence (a `ValidationResult` reaching `pass`) closes it. It
   **reuses the named-session store (#70)** — an `Objective` references a `session_id` and
   adds only a goal, a spec and caps; no second session store, no `store.activeObjective`.
-- **Deferred past M6's first cut** (named, not forgotten): the staged adversarial
-  fresh-context review + intent-directed E2E checks (they plug into `ValidationCheck`
-  later), the push/PR babysitter with bounded retries, the live-COM reconciliation reader
-  (needs the owner's Office box), and persisting results/objectives to `.workbench/` (M6
-  stays in memory, the provenance/activity/usage posture).
+- **Staged review** (`docs/plan/staged-review.md`) — the deferred checks, scoped as two
+  PRs that add no mechanism: both are `ValidationCheck` implementations, so everything
+  downstream (risk, gallery, bus event, replay, the one human approval) is the #82 frame's.
+  **PR 1 — the toolchain gate** (`models/gates.py`, `models/evidence.py`,
+  `services/gates.py`): a check with id `gates` that runs a **server-owned** catalog of
+  gate commands (`ruff`/`mypy`/`pytest`/`npm-test`, selected by id — never an argv from a
+  caller) inside the borrowed checkout the subject session is writing in, and turns each
+  into one `gate` `EvidenceItem` with a bounded head+tail log. It takes no lease,
+  fingerprints the tree before and after (a tree that moved is `skipped`, never a pass),
+  refuses a session with no slot rather than falling back to the live workspace root, and
+  refuses a per-workspace `.workbench/gates.json` out loud. It also closes the frame's one
+  gap — `GET /api/validation/payload/{kind}/{ref}`, which makes the Review panel's expander
+  work — and ships the `run_gates` agent tool (the `office_reconcile` precedent: a session
+  proves its own work). `WORKBENCH_GATES` / `WORKBENCH_GATE_TIMEOUT_S` configure it;
+  `WORKBENCH_GATE_FAKE=1` is the CI posture.
+  **PR 2 — the adversarial review**: a fresh-context reviewer session over the subject's
+  diff, delivering typed findings through `report_findings`. Never approves anything.
+- **Deferred past M6's first cut** (named, not forgotten): the intent-directed E2E check
+  (it plugs into `ValidationCheck` later), the push/PR babysitter with bounded retries, the
+  live-COM reconciliation reader (needs the owner's Office box), per-workspace gate
+  configuration (it needs an explicit one-time trust prompt, which is a feature), and
+  persisting results/objectives to `.workbench/` (M6 stays in memory, the
+  provenance/activity/usage posture).
 
 ### M7 — Premium & Public (identity + OSS release)
 
