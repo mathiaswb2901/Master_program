@@ -942,14 +942,21 @@ because other sections and five running lanes reference these numbers.
     not have to know that a spreadsheet is spelled `.xlsx`. Exit: every listed kind is
     created from inside the app, opens in its own editor or native host without a repair
     prompt, and a `.ipynb` opens in the notebook view rather than as raw JSON.
-    **Partially landed (PR #62): template creation, the `POST /api/files/document` API,
-    and the "New document…" UI landed** — the owner-preferred answer won, blank OOXML +
+    **Landed in two parts. PR #62: template creation, the `POST /api/files/document`
+    API, and the "New document…" UI** — the owner-preferred answer won, blank OOXML +
     `.ipynb` templates shipped as package data (a few KB each, valid with no Office
     installed, zero new runtime dependencies), offered by name from the tree context
-    menu, the tree toolbar and the QuickBar. **The notebook-view half is deferred**:
-    there is no notebook rendering panel in the app yet, so a `.ipynb` opens in Monaco
-    as raw JSON, not the notebook view the exit line asks for — that last clause is the
-    one open sub-piece.
+    menu, the tree toolbar and the QuickBar. **The notebook view closes the last
+    clause** (M4 tail): `.ipynb` is its own `OpenFile` kind, so clicking one in the tree
+    opens a rendered notebook — markdown cells, coloured code, and real outputs
+    (streams, images from their own bytes, tracebacks) — rather than raw JSON in Monaco.
+    Read-only and deliberately so: no kernel, no run control, and nothing behind one.
+    Server-side parse is nbformat (`services/notebook.py`), the one new runtime
+    dependency, taken for the two things it alone knows — migrating an nbformat-3
+    notebook instead of calling it corrupt, and the schema `validate` that lets a bad
+    file say *why*. Registered as a plural tool (`ui/src/panels/Notebook.tsx` plus one
+    line in `tools.ts`), so a notebook also opens in a pane of its own, two at a time,
+    surviving a reload.
 17. ~~**Discoverability — the app tells you what it can do**~~ **done** (2026-08-06), on
     the owner's change request below: after a day of features landing, *"I am not sure how
     to use these features."* That is a product failure, not a user failure — we shipped a
