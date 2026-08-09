@@ -72,6 +72,7 @@ from workbench_server.services.orchestrator import OrchestratorService
 from workbench_server.services.provenance import ProvenanceService
 from workbench_server.services.pty_manager import PtyManager
 from workbench_server.services.reconciliation import ReconciliationCheck
+from workbench_server.services.review import AdversarialReviewCheck
 from workbench_server.services.sdk_factory import UiStateStore, sdk_client_factory
 from workbench_server.services.search import SearchService
 from workbench_server.services.session_index import SessionIndex
@@ -256,6 +257,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             default_gates=configured_gate_ids(settings.gates),
         )
     )
+    # M6 staged review PR2: the *adversarial* review — the third registered
+    # check, and the one that asks whether a change is right rather than whether
+    # it builds. Same `SlotLocator` seam as the gate (it reads the subject
+    # session's own checkout and takes no lease), plus the #63 spawn seam: it
+    # puts a fresh-context, read-only reviewer session in front of that session's
+    # diff. Built here because the client factory closes over it as the
+    # `FindingsReceiver`, and handed the session manager through `bind` below —
+    # the same construction cycle, and the same solution, as the orchestrator's.
+    review_check = AdversarialReviewCheck(
+        orchestrator_service,
+        timeout_s=settings.review_timeout_s,
+        max_turns=settings.review_max_turns,
+        max_budget_usd=settings.review_max_budget_usd,
+        # The reviewer's own turns and dollars, read from the *one* accumulator
+        # the board renders and the orchestrator's budget is enforced against.
+        spend=lambda session_id: (
+            (entry.turns, entry.cost_usd)
+            if (entry := usage_service.session_entry(session_id)) is not None
+            else (0, 0.0)
+        ),
+    )
+    validation_service.register(review_check)
     session_index = SessionIndex(settings.resolved_projects_dir())
     # The same storage, browsed whole instead of one folder at a time. Read-only
     # and lazy: nothing scans until a client asks, so this costs a bare object
@@ -269,7 +292,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "agent.fake_mode_enabled",
             detail="WORKBENCH_FAKE_AGENT is set: replies are scripted, no agent is running",
         )
-        client_factory = fake_client_factory(orchestrator_service)
+        client_factory = fake_client_factory(orchestrator_service, review_check)
     else:
         client_factory = sdk_client_factory(
             ui_state_store,
@@ -291,6 +314,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if (entry := usage_service.session_entry(worker_id)) is not None
                 else 0.0
             ),
+            # Where a reviewer session's `report_findings` lands, narrowed to
+            # `FindingsReceiver` so the SDK factory never imports the check.
+            review_check,
+            # …and the ceilings the *next* reviewer session is built with. A
+            # callable rather than a value because a review may name its own in
+            # `ValidationSpec.params`, and the check parks them immediately
+            # before it spawns.
+            review_check.reviewer_caps,
         )
     session_manager = SessionManager(
         workspace.root,
@@ -314,6 +345,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # The other half of the construction cycle above: the factory closes over
     # the orchestrator, and the orchestrator needs the manager the factory built.
     orchestrator_service.bind(session_manager)
+    # The same cycle, the same solution: the client factory closes over the
+    # review check (as the `FindingsReceiver`) and the manager is built from that
+    # factory, so the manager cannot be a constructor argument to the check.
+    review_check.bind(session_manager)
     office_service = OfficeService(
         workspace,
         server_url=settings.onlyoffice_url,
