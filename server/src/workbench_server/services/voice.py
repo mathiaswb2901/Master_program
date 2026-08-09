@@ -630,9 +630,21 @@ class VoiceService:
         awaiting a backend there would let a second start slip past the cap. The
         backend's own buffer for a dead id is bounded by the same ceiling and is
         dropped when it next sees the id, or when the process ends.
+
+        **Only a still-recording utterance can be abandoned.** A held key nobody
+        released stays ``recording`` and is exactly what this reaps. One that is
+        already ``transcribing`` has been released and the backend is finishing
+        it, bounded by :data:`STOP_TIMEOUT_S` — reaping *that* would delete a live
+        utterance out from under :meth:`stop`, which is the real failure a long
+        dictation hits: released near :data:`MAX_UTTERANCE_S`, its ``started_at``
+        is already past this cutoff while the model is still running, so a second
+        client's start would reap it, defeat the cap the long utterance is meant
+        to enjoy, and 404 an honest retry. The transcribing slot is freed the
+        moment ``stop`` returns or its ceiling fires, so sparing it here leaks
+        nothing.
         """
         cutoff = time.time() - (MAX_UTTERANCE_S + ABANDON_GRACE_S)
         for voice_id, session in list(self._sessions.items()):
-            if session.started_at < cutoff:
+            if session.state == "recording" and session.started_at < cutoff:
                 log.warning("voice.abandoned", voice_id=voice_id)
                 del self._sessions[voice_id]

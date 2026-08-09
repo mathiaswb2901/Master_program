@@ -270,6 +270,35 @@ describe("push to talk", () => {
     expect(box.draft).toBe("typed summarise the day-ahead spread for tomorrow");
   });
 
+  it("keeps text the human types by hand while dictating, instead of clobbering it", async () => {
+    // The toggle gesture frees the hands to type *while* speaking. Each interim
+    // is the whole utterance so far, so a naive rewrite from a base captured once
+    // at start discards the manual edit. The base must self-heal against the live
+    // draft: keep the human's text, replace only the spoken part.
+    const voice = await loadVoice();
+    const box = composer("");
+    voice.registerComposer("s1", box.handle);
+
+    await voice.startDictation("s1");
+    api.sendVoiceChunk.mockResolvedValueOnce(session("v1", "summarise the"));
+    emitChunk?.();
+    await settle();
+    expect(box.draft).toBe("summarise the");
+
+    // The human prepends a note by hand while the microphone is still open.
+    box.handle.current.setDraft("NOTE: summarise the");
+
+    api.sendVoiceChunk.mockResolvedValueOnce(session("v1", "summarise the day-ahead"));
+    emitChunk?.();
+    await settle();
+    // The interim still grows, but the hand-typed "NOTE:" is not discarded.
+    expect(box.draft).toBe("NOTE: summarise the day-ahead");
+
+    await voice.releaseDictation("stop");
+    // And the final transcript lands after the human's text, not over it.
+    expect(box.draft).toBe("NOTE: summarise the day-ahead spread for tomorrow");
+  });
+
   it("stops and explains when a chunk is refused mid-utterance", async () => {
     const voice = await loadVoice();
     const box = composer("typed");
@@ -283,6 +312,79 @@ describe("push to talk", () => {
     expect(box.draft).toBe("typed");
     expect(toasts.at(-1)?.kind).toBe("error");
     expect(toasts.at(-1)?.message).toContain("120s");
+  });
+});
+
+// ---- releasing when the composer goes away ---------------------------------------
+
+describe("the microphone is released when its composer unmounts", () => {
+  it("cancels the gesture when the holding composer's pane goes away", async () => {
+    // Close the pane (Ctrl+W, detach) while Listening and the mic must not keep
+    // recording until the server reaps the utterance ~2.5 min later. VoiceButton
+    // registers through `registerComposer`, and its unmount/target-change cleanup
+    // is exactly that call's disposer — so tearing the registration down is how a
+    // pane closing reaches this module.
+    const voice = await loadVoice();
+    const box = composer("");
+    const dispose = voice.registerComposer("s1", box.handle);
+
+    await voice.startDictation("s1");
+    expect(api.startVoice).toHaveBeenCalled();
+
+    dispose(); // the pane unmounts
+    await settle();
+
+    // The utterance is handed back with a cancel, not left recording — and not
+    // stopped, because there is no composer left to receive a final transcript.
+    expect(api.cancelVoice).toHaveBeenCalledWith("v1");
+    expect(api.stopVoice).not.toHaveBeenCalled();
+    expect(captureStops).toBe(1);
+  });
+
+  it("acts on a release that beats the server's answer when the pane unmounts", async () => {
+    // The quick-close race: the pane goes away while `POST /start` is still open.
+    // The gesture is claimed synchronously, so the cancel is remembered and acted
+    // on the moment the id arrives, rather than leaking a server-side utterance.
+    const voice = await loadVoice();
+    const box = composer("");
+    const dispose = voice.registerComposer("s1", box.handle);
+
+    let answer: (value: VoiceSession) => void = () => undefined;
+    api.startVoice.mockImplementation(
+      () =>
+        new Promise<VoiceSession>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const started = voice.startDictation("s1");
+    dispose(); // unmount before the server answered start
+
+    await vi.waitFor(() => expect(api.startVoice).toHaveBeenCalled());
+    answer(session("v1"));
+    await started;
+    await settle();
+    expect(api.cancelVoice).toHaveBeenCalledWith("v1");
+  });
+
+  it("leaves the microphone alone when a different composer unmounts", async () => {
+    // Only the holder's teardown releases. A sibling pane closing must not cancel
+    // the utterance a different composer is still dictating.
+    const voice = await loadVoice();
+    const held = composer("");
+    const other = composer("");
+    voice.registerComposer("s1", held.handle);
+    const disposeOther = voice.registerComposer("s2", other.handle);
+
+    await voice.startDictation("s1");
+    disposeOther(); // the *other* pane unmounts
+    await settle();
+
+    expect(api.cancelVoice).not.toHaveBeenCalled();
+    // s1's gesture is still live: releasing it now stops the same utterance,
+    // proving the sibling's teardown never touched it.
+    await voice.releaseDictation("stop");
+    expect(api.stopVoice).toHaveBeenCalledWith("v1");
+    expect(held.draft).toBe("summarise the day-ahead spread for tomorrow");
   });
 });
 
