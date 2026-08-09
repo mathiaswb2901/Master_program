@@ -61,6 +61,7 @@ from workbench_server.services.gates import (
 )
 from workbench_server.services.layouts import LayoutsService
 from workbench_server.services.local_auth import LocalAuthMiddleware, is_local_origin
+from workbench_server.services.market_check import MarketRulesCheck
 from workbench_server.services.office import OfficeService
 from workbench_server.services.office_host import (
     OfficeHostService,
@@ -128,6 +129,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # The reconciliation gate is registered further down, once the Office host
     # exists: it needs that host as its live-workbook seam, so it can refuse to
     # reconcile a docked workbook's stale file instead of quietly passing it.
+    # M6: the market-rules *domain* check, and the one with no prior art to copy — does
+    # a bid/schedule artifact respect the market's own rules? Gate closure in local
+    # wall-clock (a UTC-naive comparison is the bug it exists to catch), delivery
+    # periods on the market time unit, 23-/25-hour DST days, and MW-vs-MWh unit
+    # headers. Its rules come from the server-owned catalog in `models/market.py`,
+    # selected by id; the artifact never states its own deadline. It needs no Office
+    # host, so it registers here; the frame dispatches on "market_rules".
+    validation_service.register(MarketRulesCheck())
 
     # Productivity loops PR-B: **ambient CI for workbooks**. A checked-in
     # `.workbench/reconcile/<name>.toml` names the analyst's own callables; a

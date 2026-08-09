@@ -34,13 +34,15 @@ Three domain failure modes are first-class here, not comments:
 * **Units are compared, not assumed** (:func:`convert`). A value read in kWh against an
   MWh expectation, or MWh against MW, cannot pass silently — the x1000 that hides inside
   a spreadsheet diff is caught, and a legitimate unit change is *named* in the evidence.
-  Prices are currency-aware: NOK/SEK/DKK are first-class alongside EUR, scaling within a
-  currency is a named multiply, and comparing *across* currencies is an explicit refusal
-  (:class:`CrossCurrency`) rather than an invented FX rate.
+  Prices are currency-aware: NOK/SEK/DKK are first-class alongside EUR — as is every
+  currency the market-rules catalog settles in, which :func:`currencies_for` derives
+  rather than restates — scaling within a currency is a named multiply, and comparing
+  *across* currencies is an explicit refusal (:class:`CrossCurrency`) rather than an
+  invented FX rate.
 * **Time-indexed rows are aligned by local wall-clock time** (:func:`_align_time_rows`),
   telling the repeated 02:00 of a fall-back DST day apart from an ordinary row that was
   pasted twice by asking the *zone* whether that wall clock is genuinely ambiguous
-  (:func:`_is_ambiguous`) — never by order of appearance alone. A naive positional join
+  (:func:`is_ambiguous_local`) — never by order of appearance alone. A naive positional join
   that drops or invents the duplicated hour is refused, and so is a duplicate row
   masquerading as a fold. A timestamp that carries a **UTC offset** is refused rather
   than normalised (:class:`OffsetNotAllowed`): the two occurrences of a fall-back hour
@@ -68,6 +70,7 @@ import openpyxl
 import structlog
 from pydantic import ValidationError
 
+from workbench_server.models.market import MARKETS, MarketSpec
 from workbench_server.models.office_bridge import LiveWorkbookStatus
 from workbench_server.models.reconciliation import (
     CellComparison,
@@ -130,23 +133,55 @@ _OUTCOME_SEVERITY: dict[CheckOutcome, int] = {
 }
 
 
-class _Unit(NamedTuple):
+class Unit(NamedTuple):
     """One known unit: what it measures, how it scales to that dimension's base
-    unit, and — for monetary units only — which currency it is denominated in."""
+    unit, and — for monetary units only — which currency it is denominated in.
+
+    Public, with :data:`UNIT_TO_BASE`, because the unit table is a *domain*
+    primitive rather than this gate's private business: the market-rules check
+    (``services/market_check.py``) asks the same table whether a bid file's volume
+    header is power or energy. Two tables would be two chances to disagree about
+    what ``MWh`` means.
+    """
 
     dimension: str
     factor: float
     currency: str | None = None
 
 
-def _currency_units(code: str) -> dict[str, _Unit]:
+def _currency_units(code: str) -> dict[str, Unit]:
     """The three monetary units of one currency: the bare amount and the two
     per-energy denominations an analyst actually types."""
     return {
-        f"{code}/MWH": _Unit("price_energy", 1.0, code),
-        f"{code}/KWH": _Unit("price_energy", 1e3, code),
-        code: _Unit("money", 1.0, code),
+        f"{code}/MWH": Unit("price_energy", 1.0, code),
+        f"{code}/KWH": Unit("price_energy", 1e3, code),
+        code: Unit("money", 1.0, code),
     }
+
+
+#: The currencies an analyst types at this gate regardless of any market: Nord Pool
+#: publishes NO/SE/DK zone prices in both EUR and the local currency, so a model
+#: denominated in NOK/MWh must reconcile with a named x1000 rather than fall off the
+#: table as an "unknown unit".
+_ANALYST_CURRENCIES = ("EUR", "NOK", "SEK", "DKK")
+
+
+def currencies_for(markets: Iterable[MarketSpec]) -> tuple[str, ...]:
+    """Every currency :data:`UNIT_TO_BASE` must know, given a market catalog.
+
+    The catalog's own settlement currencies are **derived, not typed out a second
+    time**. ``services/market_check.py`` asks this table whether a bid file's price
+    column is denominated in the market's currency, so a catalog currency missing
+    here would not merely be a gap — it would make that check *unpassable*: a
+    correctly denominated ``price_pln_mwh`` column on a PLN market would be refused
+    as an unrecognised unit by a message recommending ``PLN/MWh``, the format the
+    analyst already used, with nothing pointing at the real cause. Deriving it is
+    what makes ``models/market.py``'s "adding a market is one row" true.
+
+    Order is stable and duplicate-free: the analyst set first, then catalog
+    currencies in catalog order.
+    """
+    return tuple(dict.fromkeys((*_ANALYST_CURRENCIES, *(market.currency for market in markets))))
 
 
 #: unit (upper-cased) → (dimension, factor to the dimension's base unit, currency).
@@ -156,28 +191,32 @@ def _currency_units(code: str) -> dict[str, _Unit]:
 #: (kWh↔MWh, NOK/kWh↔NOK/MWh) therefore cannot happen by accident — it is a named,
 #: explicit multiply or it is a fail.
 #:
-#: The Nordic currencies are first-class, not an afterthought: Nord Pool publishes
-#: NO/SE/DK zone prices in both EUR and the local currency, and a model denominated
-#: in NOK/MWh is the normal case for this product's users — it must reconcile with a
-#: named x1000 like the EUR path does, not fall off the table as an "unknown unit".
-#: Deliberately hand-rolled rather than pulled from a units library: the whole value
-#: here is the *refusal* rules (dimension, currency), which a general converter would
-#: happily paper over.
-_UNIT_TO_BASE: dict[str, _Unit] = {
-    "MWH": _Unit("energy", 1.0),
-    "KWH": _Unit("energy", 1e-3),
-    "GWH": _Unit("energy", 1e3),
-    "WH": _Unit("energy", 1e-6),
-    "MW": _Unit("power", 1.0),
-    "KW": _Unit("power", 1e-3),
-    "GW": _Unit("power", 1e3),
-    "W": _Unit("power", 1e-6),
-    "%": _Unit("ratio", 1.0),
-    "": _Unit("dimensionless", 1.0),
-    **_currency_units("EUR"),
-    **_currency_units("NOK"),
-    **_currency_units("SEK"),
-    **_currency_units("DKK"),
+#: The Nordic currencies are first-class, not an afterthought (see
+#: :data:`_ANALYST_CURRENCIES`). Deliberately hand-rolled rather than pulled from a
+#: units library: the whole value here is the *refusal* rules (dimension, currency),
+#: which a general converter would happily paper over.
+#:
+#: The monetary half is built by :func:`currencies_for` from the market-rules catalog
+#: (``models/market.py``), which is how GBP got here — a currency a catalog entry
+#: settles in must never reach an analyst as "unknown unit". The honest answer to a
+#: GBP column on a EUR market is the principled cross-currency refusal the Nordic
+#: currencies already get, and that answer is only available for a *known* unit.
+UNIT_TO_BASE: dict[str, Unit] = {
+    "MWH": Unit("energy", 1.0),
+    "KWH": Unit("energy", 1e-3),
+    "GWH": Unit("energy", 1e3),
+    "WH": Unit("energy", 1e-6),
+    "MW": Unit("power", 1.0),
+    "KW": Unit("power", 1e-3),
+    "GW": Unit("power", 1e3),
+    "W": Unit("power", 1e-6),
+    "%": Unit("ratio", 1.0),
+    "": Unit("dimensionless", 1.0),
+    **{
+        unit: base
+        for code in currencies_for(MARKETS.values())
+        for unit, base in _currency_units(code).items()
+    },
 }
 
 
@@ -213,8 +252,8 @@ def convert(value: float, from_unit: str, to_unit: str) -> tuple[float, str | No
     b = to_unit.strip().upper()
     if a == b:
         return value, None
-    known_a = _UNIT_TO_BASE.get(a)
-    known_b = _UNIT_TO_BASE.get(b)
+    known_a = UNIT_TO_BASE.get(a)
+    known_b = UNIT_TO_BASE.get(b)
     if known_a is None or known_b is None:
         raise UnitMismatch(f"unknown unit in {from_unit!r} vs {to_unit!r}")
     if known_a.dimension != known_b.dimension:
@@ -691,7 +730,7 @@ def _as_local_datetime(value: object) -> datetime | None:
     return None
 
 
-def _is_ambiguous(local: datetime, zone: ZoneInfo) -> bool:
+def is_ambiguous_local(local: datetime, zone: ZoneInfo) -> bool:
     """Is this naive local wall-clock time one the zone genuinely writes **twice**?
 
     True only on a fall-back transition — 2024-10-27 02:30 in ``Europe/Oslo`` is both
@@ -700,6 +739,10 @@ def _is_ambiguous(local: datetime, zone: ZoneInfo) -> bool:
     spring-forward gap also disagree on offset, so they are excluded first by the
     round-trip — a wall time that does not survive local → UTC → local never happened,
     and a row carrying it is not a second occurrence of anything.
+
+    Public because the market-rules check (``services/market_check.py``) asks exactly
+    the same question of a bid file's delivery periods. One implementation, so the two
+    gates can never disagree about whether an hour repeated.
     """
     fold0 = local.replace(tzinfo=zone, fold=0)
     if fold0.astimezone(UTC).astimezone(zone).replace(tzinfo=None) != local:
@@ -764,7 +807,7 @@ def _align_time_rows(pairs: list[tuple[object, object]], zone: ZoneInfo) -> _Ali
         if occurrence == 0:
             values[(local, 0)] = value
             continue
-        if occurrence == 1 and _is_ambiguous(local, zone):
+        if occurrence == 1 and is_ambiguous_local(local, zone):
             values[(local, 1)] = value  # the genuine second pass of a fall-back hour
             continue
         duplicates[local] = seen[local]
@@ -1056,7 +1099,7 @@ class ReconciliationCheck:
                     )
                 )
                 continue
-            if exp.fold and not _is_ambiguous(local, zone):
+            if exp.fold and not is_ambiguous_local(local, zone):
                 # A fold only exists where the zone repeats an hour. Asking for one
                 # anywhere else is a spec error, and saying "alignment gap" here would
                 # send the analyst hunting for a missing workbook row that was never
@@ -1179,7 +1222,7 @@ class ReconciliationCheck:
                 count=count,
                 timezone=spec.timezone,
             )
-            if _is_ambiguous(local, zone):
+            if is_ambiguous_local(local, zone):
                 # A genuine fall-back hour, but repeated *more* than the two times the
                 # zone writes it. Saying "not ambiguous" here would be a false statement
                 # in the evidence, and would send the analyst to the wrong fix.
