@@ -112,10 +112,10 @@ npm run tauri dev              # window opens on a dev server that never started
 That starts Vite itself and then either **attaches** to a backend already listening on
 8787 (so `uv run workbench-server` in your workspace keeps owning it) or **spawns** one
 from the repo root and reaps it when the window closes. The window opens straight away
-and shows that it is starting; nothing connects until the backend answers. Everything
-works in both hosts; the shell only adds what a browser tab cannot do — a native window,
-native Office hosting, a close guard for unsaved buffers, and the needs-attention badge
-on the window title.
+and shows that it is starting; nothing connects until the backend answers. The app itself
+runs unchanged in both hosts; the shell only adds what a browser tab cannot do — a native
+window, native Office hosting, a close guard for unsaved buffers, the OS folder picker,
+and the needs-attention badge on the window title.
 
 `WORKBENCH_PORT`/`WORKBENCH_HOST` move the server, the shell and the dev proxy together.
 Which backend the shell chose, and why, is in `shell.log` under
@@ -145,7 +145,10 @@ QuickBar's *Switch workspace…* re-root the running server.
 Early development, and the plan of record is [`ROADMAP.md`](ROADMAP.md): what has landed,
 what is in flight, and what is deliberately deferred. Foundations, the IDE-lite shell and
 Office editing are done; the instrument, parallel-agent and premium/public milestones are
-where the work is now. It is not packaged yet — you run it from source.
+where the work is now. There is no published build yet, so you run it from source — the
+tag-triggered installer pipeline exists (`.github/workflows/release.yml`) but is
+deliberately unsigned and pre-release until signing, a versioning policy and the name are
+settled.
 
 ## Documentation
 
