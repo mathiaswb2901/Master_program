@@ -14,11 +14,13 @@ made somewhere else in the repo:
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
-from httpx import AsyncClient
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
@@ -51,6 +53,25 @@ def _write(directory: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+@asynccontextmanager
+async def _launched(settings: Settings) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
+    """A server started the way a restart starts one, and a client on it.
+
+    The `client` fixture builds its app from the `settings` fixture, so a test
+    that needs a *particular* launch — a stored document already on disk, an
+    environment variable exported — has to build its own. This is the whole
+    difference between reading `_detail` directly and reading it through the
+    endpoints a user's window and the Setup panel actually call.
+    """
+    app = create_app(settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-Workbench-Token": app.state.auth_token},
+    ) as client:
+        yield app, client
 
 
 # ---- defaults and the round trip -------------------------------------------
@@ -280,3 +301,80 @@ def test_create_app_builds_the_office_host_from_the_stored_setting(
     assert host.capabilities(False).office_native == "off"
     service: SettingsService = app.state.settings_service
     assert service.state().overrides == []
+
+
+# ---- "off" names the mechanism that really turned it off -------------------
+#
+# Making the setting real (above) also made `off` reachable from the panel, and
+# a reason sentence that hard-codes the environment variable then sends a user
+# hunting something they never exported. These read the two surfaces that echo
+# it — `GET /api/office/capabilities`, which the Office panel degrades from, and
+# the Setup panel's Office row, which is `caps.detail` verbatim
+# (`services/setup.py`) — through a real launch rather than calling `_detail`.
+
+
+async def test_off_from_the_panel_blames_settings_and_not_an_unset_variable(
+    tmp_path: Path, app_data_root: Path
+) -> None:
+    SettingsService(app_data_root).save(WorkbenchSettings(office_native="off"))
+    async with _launched(Settings(workspace_root=tmp_path)) as (_, client):
+        caps = (await client.get("/api/office/capabilities")).json()
+        status = (await client.get("/api/setup/status")).json()
+    assert caps["office_native"] == "off"
+    assert caps["native_hosting"] is False
+    # The variable is not set in this process (conftest scrubs WORKBENCH_*), so
+    # naming it would be false — and it is the string a user is told to go fix.
+    assert "WORKBENCH_OFFICE_NATIVE" not in caps["detail"]
+    assert "Settings" in caps["detail"]
+    office = next(check for check in status["checks"] if check["id"] == "office")
+    assert office["detail"] == caps["detail"]
+
+
+async def test_off_from_the_environment_still_names_the_variable(
+    tmp_path: Path, app_data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The operator's launch decision, unchanged: the message that sends them to
+    # the variable is right precisely when the variable is really there.
+    monkeypatch.setenv("WORKBENCH_OFFICE_NATIVE", "off")
+    SettingsService(app_data_root).save(WorkbenchSettings(office_native="on"))
+    async with _launched(Settings(workspace_root=tmp_path, office_native="off")) as (_, client):
+        caps = (await client.get("/api/office/capabilities")).json()
+    assert caps["detail"] == "native hosting is off (WORKBENCH_OFFICE_NATIVE=off)"
+
+
+async def test_off_configured_without_the_variable_names_no_variable(
+    tmp_path: Path, app_data_root: Path
+) -> None:
+    # Configured outside the app by some other route (workbench.toml, an
+    # embedding host). Same vaguer, true wording `SettingOverride.detail` uses:
+    # telling someone to unset a variable they never exported is the same lie.
+    SettingsService(app_data_root).save(WorkbenchSettings(office_native="on"))
+    async with _launched(Settings(workspace_root=tmp_path, office_native="off")) as (_, client):
+        caps = (await client.get("/api/office/capabilities")).json()
+    assert "WORKBENCH_OFFICE_NATIVE" not in caps["detail"]
+    assert "outside the app" in caps["detail"]
+
+
+def test_the_source_of_a_setting_is_only_ever_stored_when_nothing_configured(
+    tmp_path: Path,
+) -> None:
+    # The unit behind those three, for the keys that have no variable at all.
+    plain = _service(tmp_path)
+    assert plain.source_of("office_native") == "stored"
+    assert plain.source_of("theme") == "stored"
+    assert plain.source_of("voice_input") == "stored"
+    configured = _service(
+        tmp_path,
+        config=ProcessConfig(office_native="off"),
+        environ={"WORKBENCH_OFFICE_NATIVE": "off"},
+    )
+    assert configured.source_of("office_native") == "environment"
+    # Only the key that was configured — a variable for one knob says nothing
+    # about the others.
+    assert configured.source_of("theme") == "stored"
+    assert (
+        _service(tmp_path, config=ProcessConfig(office_native="off"), environ={}).source_of(
+            "office_native"
+        )
+        == "external"
+    )

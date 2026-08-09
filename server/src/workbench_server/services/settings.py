@@ -51,6 +51,7 @@ from workbench_server.models.settings import (
     SettingKey,
     SettingOverride,
     SettingsFile,
+    SettingSource,
     SettingsState,
     TelemetryStance,
     WorkbenchSettings,
@@ -90,8 +91,9 @@ class ProcessConfig(BaseModel):
 
     ``None`` means "nobody said", and the stored choice decides. One field per
     setting that has an environment variable; adding a second overridable knob
-    is a field here, a line in :meth:`SettingsService.effective` and a row in
-    :meth:`SettingsService._overrides`.
+    is a field here, a line in :meth:`SettingsService.effective`, a row in
+    :meth:`SettingsService._overrides` and a branch in
+    :meth:`SettingsService.source_of`.
     """
 
     office_native: OfficeNativeMode | None = None
@@ -176,6 +178,21 @@ class SettingsService:
             problem=problem,
         )
 
+    def source_of(self, key: SettingKey) -> SettingSource:
+        """Where the value in force for ``key`` came from.
+
+        The distinction every *message* about a setting needs, and the reason it
+        is a method rather than a sentence parsed back out of
+        :attr:`SettingOverride.detail`: other services explain the value they were
+        built with (``office_host`` says why native hosting is off, and the Setup
+        panel echoes that verbatim), and since the panel can turn a knob off, the
+        environment variable is no longer the only way it gets there. Only a knob
+        with a :class:`ProcessConfig` field can be anything but ``stored``.
+        """
+        if key != "office_native" or self._config.office_native is None:
+            return "stored"
+        return "environment" if ENV_VARS[key] in self._environ else "external"
+
     def _overrides(self) -> list[SettingOverride]:
         if self._config.office_native is None:
             return []
@@ -187,7 +204,7 @@ class SettingsService:
         detail = (
             f"Set by {variable} for this launch — the stored choice is kept and used again "
             "once that is unset."
-            if variable in self._environ
+            if self.source_of("office_native") == "environment"
             else "Set outside the app for this launch."
         )
         return [

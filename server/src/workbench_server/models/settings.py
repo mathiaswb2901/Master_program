@@ -42,6 +42,21 @@ ThemeChoice = Literal["system", "dark", "light"]
 #: The settings a client can address, and the only keys an override may name.
 SettingKey = Literal["theme", "office_native", "voice_input"]
 
+#: Where the value *in force* for a setting came from. ``stored`` is the user's
+#: own answer in the Settings panel; ``environment`` is the named variable really
+#: present in this process's environment; ``external`` is anything else that
+#: configured the process from outside (``workbench.toml``, an embedding host)
+#: with no variable to name.
+#:
+#: Not a field on any payload — it is the vocabulary a *reason sentence* is built
+#: from, shared by the service that resolves precedence
+#: (:class:`~workbench_server.services.settings.SettingsService`) and the ones
+#: that have to explain the result. It exists because those two are no longer the
+#: same knob: since the panel can turn native Office hosting off, "off" is far
+#: more often the user's own choice than an operator's variable, and a message
+#: that names the wrong one sends someone hunting a variable they never exported.
+SettingSource = Literal["stored", "environment", "external"]
+
 
 class WorkbenchSettings(BaseModel):
     """A user's stored choices — and the PUT body, which is the same shape.

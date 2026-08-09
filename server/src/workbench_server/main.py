@@ -172,6 +172,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
     )
     office_native = settings_service.effective().office_native
+    # …and *which* of the two decided it, because the host has to explain itself.
+    # "Off" now has two ways to be true — an operator's variable and the user's
+    # own answer in the panel — and `capabilities.detail` is echoed verbatim by
+    # the Setup panel's Office row, so a host that assumed the variable would
+    # send someone hunting one they never exported. The service maps this to the
+    # sentence (`office_host/service.py::_OFF_DETAIL`); nothing about which knob
+    # is user-facing copy belongs here.
+    office_native_source = settings_service.source_of("office_native")
     # Native Office hosting, constructed before the session manager because a
     # session reads the live docked document through it (narrowed to
     # OfficeDocumentReader in the SDK factory). The backend is None on any
@@ -199,6 +207,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         host_backend,
         bridge=host_bridge,
         mode=office_native,
+        mode_source=office_native_source,
         fake=settings.office_fake,
         channel=host_channel,
     )
