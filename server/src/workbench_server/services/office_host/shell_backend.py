@@ -49,6 +49,7 @@ from workbench_server.services.office_host.backend import (
     HostBackendError,
     HostHandle,
     HostLiveness,
+    InstanceBusyError,
     LaunchFailedError,
     LaunchTimeoutError,
 )
@@ -127,6 +128,13 @@ class ShellHostBackend:
             raise LaunchTimeoutError(
                 f"{kind} did not open the document within {self._launch_timeout_s:g}s"
             ) from error
+        except office_com.InstanceBusyError as error:
+            # Raised by the pre-flight, before any COM object was created — so
+            # there is nothing started to abandon, and the user's instance was
+            # never touched. Checked before DocumentBusyError because it is the
+            # narrower subclass of neither: both derive from OfficeComError, and
+            # the order here is the order the launch itself asks the questions.
+            raise InstanceBusyError(str(error)) from error
         except office_com.DocumentBusyError as error:
             raise DocumentOpenElsewhereError(str(error)) from error
         except office_com.OfficeComError as error:

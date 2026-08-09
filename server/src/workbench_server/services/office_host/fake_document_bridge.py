@@ -25,6 +25,10 @@ name (the ``FAILURE_TRIGGERS`` precedent):
 * ``…empty…`` / ``…blank…`` (Excel) -> a single sheet with no used range.
 * ``…notes…`` (Excel) -> a ``Notes`` sheet of few but very long non-ASCII cells,
   so a read exercises the aggregate-text bound, not just the cell-count cap.
+* PowerPoint, ordinary -> a three-slide deck whose last slide has no text.
+* ``…empty…`` (PowerPoint) -> a deck with no slides, so a read says "none".
+* ``…long…`` (PowerPoint) -> 60 slides, so a read has to window and say what it
+  did not reach.
 * an instance that has been killed -> :class:`DocGoneError`, the read racing a
   close.
 
@@ -66,6 +70,7 @@ from workbench_server.models.office_bridge import (
     DocStructure,
     LiveWorkbookStatus,
     SheetDim,
+    SlideText,
     WordEdit,
     WordText,
 )
@@ -79,11 +84,14 @@ from workbench_server.services.office_host.document_bridge import (
 )
 from workbench_server.services.office_host.document_window import (
     Grid,
+    SlideContent,
     check_paragraph,
     no_sheet_error,
     parse_write_cell,
+    slide_dims,
     used_dims,
     window_cells,
+    window_slides,
     window_word,
 )
 from workbench_server.services.office_host.fake_backend import FakeHostBackend
@@ -215,6 +223,39 @@ def coerce_written(value: str) -> object:
         return value
 
 
+def slide_deck(name: str) -> list[SlideContent]:
+    """The slides a deck of this name would have.
+
+    Same minting rule as the Word and Excel content above, so every PowerPoint
+    read branch is reachable in CI and drivable from a test that opens the right
+    file name: ``…empty…`` is a deck with no slides at all (the "none" answer), a
+    deck named ``…long…`` is 60 slides so a read has to window and report what it
+    did not reach, and anything else is a short deck that fits in one window.
+    A slide with no text is included on purpose — it is the "(no text)" branch a
+    real deck's section divider produces.
+    """
+    low = name.lower()
+    if "empty" in low:
+        return []
+    stem = Path(name).stem
+    if "long" in low:
+        return [
+            SlideContent(title=f"Hour {index}", texts=[f"SE3 price {index}.5 EUR/MWh"])
+            for index in range(1, 61)
+        ]
+    return [
+        SlideContent(title=_titleize(stem), texts=["Workbench — the live deck docked in a panel"]),
+        SlideContent(
+            title="Findings",
+            texts=[
+                "Delivery hours are normalised across the autumn DST boundary.",
+                "MW and MWh are reconciled between the table and the text.",
+            ],
+        ),
+        SlideContent(title="Appendix"),
+    ]
+
+
 class FakeDocumentBridge:
     """A scripted document reader. Satisfies the ``DocumentBridge`` protocol."""
 
@@ -227,6 +268,11 @@ class FakeDocumentBridge:
         #: write sees the edit — the fake stand-in for the live COM instance.
         self._word_docs: dict[int, list[str]] = {}
         self._excel_docs: dict[int, dict[str, ValueGrid]] = {}
+        #: PowerPoint decks are read-only (there is no ``write_powerpoint``), so
+        #: this overlay never mutates — it is kept for the same reason as the
+        #: other two: one mint per pid, so repeated reads of one deck are stable
+        #: rather than re-derived.
+        self._slide_docs: dict[int, list[SlideContent]] = {}
         #: Pids whose workbook has been written since it was opened. The stand-in
         #: for ``Workbook.Saved``: a write dirties the live instance and nothing
         #: here ever writes the file, so it stays dirty — which is exactly the
@@ -259,6 +305,13 @@ class FakeDocumentBridge:
             self._excel_docs[handle.pid] = excel_value_sheets(name)
         return self._excel_docs[handle.pid]
 
+    def _slide_deck(self, handle: HostHandle) -> list[SlideContent]:
+        """The live slides for this pid — minted once, then stable."""
+        name = self._name(handle)
+        if handle.pid not in self._slide_docs:
+            self._slide_docs[handle.pid] = slide_deck(name)
+        return self._slide_docs[handle.pid]
+
     def _excel_text(self, handle: HostHandle, sheet: str) -> Grid:
         """One sheet as the text a window read renders. Derived, never stored:
         the typed values are the workbook, text is how it looks."""
@@ -275,10 +328,15 @@ class FakeDocumentBridge:
                 for rows, cols in (used_dims(self._excel_text(handle, sheet)),)
             ]
             return DocStructure(kind="excel", sheets=sheets)
-        raise DocNotReadableError(f"{kind} documents cannot be read")
+        return DocStructure(kind="powerpoint", slides=slide_dims(self._slide_deck(handle)))
 
     async def read_word(self, handle: HostHandle, start_paragraph: int, max_chars: int) -> WordText:
         return window_word(self._word_body(handle), start_paragraph, max_chars)
+
+    async def read_powerpoint(
+        self, handle: HostHandle, start_slide: int, max_chars: int
+    ) -> SlideText:
+        return window_slides(self._slide_deck(handle), start_slide, max_chars)
 
     async def read_excel(
         self, handle: HostHandle, sheet: str, a1_range: str | None, max_cells: int, max_chars: int

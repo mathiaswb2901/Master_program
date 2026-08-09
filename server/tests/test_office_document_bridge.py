@@ -19,7 +19,7 @@ from typing import cast
 
 import pytest
 
-from workbench_server.models.office_bridge import CellWindow, DocStructure, WordText
+from workbench_server.models.office_bridge import CellWindow, DocStructure, SlideText, WordText
 from workbench_server.models.office_host import PanelRect
 from workbench_server.services.agent_tools import handle_office_read
 from workbench_server.services.event_bus import EventBus
@@ -244,3 +244,114 @@ class TestRefusals:
         text = _text(await handle_office_read(service, {"path": name}))
         assert text.strip()
         assert name in text
+
+
+# ---- PowerPoint --------------------------------------------------------------
+
+
+class TestPowerPoint:
+    """The deck read, fake-first — the same three AXI shapes the other two owe.
+
+    Read-only by design: there is no ``write_powerpoint``, and the service says
+    so rather than failing obscurely (asserted at the end).
+    """
+
+    async def test_structure_lists_the_slides_by_title(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "deck.pptx")
+
+        structure = await service.document_structure(name)
+
+        assert structure.kind == "powerpoint"
+        assert structure.paragraph_count is None and structure.sheets is None
+        assert structure.slides is not None
+        assert [slide.index for slide in structure.slides] == [1, 2, 3]
+        assert [slide.title for slide in structure.slides] == ["Deck", "Findings", "Appendix"]
+        # The last slide has no text, and the count says so without a read.
+        assert [slide.shapes for slide in structure.slides] == [1, 2, 0]
+
+    async def test_a_whole_deck_reads_with_an_end_of_deck_footer(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "deck.pptx")
+
+        slides = await service.read_document(name, max_chars=6_000, max_cells=600)
+
+        assert isinstance(slides, SlideText)
+        assert (slides.start_slide, slides.returned_slides, slides.total_slides) == (1, 3, 3)
+        assert "Slide 1: Deck" in slides.text
+        assert "Slide 3: Appendix" in slides.text
+        # A slide with no text says so rather than rendering as a bare heading a
+        # model could read as a truncation.
+        assert "(no text)" in slides.text
+
+        text = _text(await handle_office_read(service, {"path": name}))
+        assert "slides 1-3 of 3" in text
+        assert "end of deck" in text
+
+    async def test_an_empty_deck_says_none(self, tmp_path: Path) -> None:
+        """AXI shape 2: blankness a model has to interpret is the failure."""
+        service, name = await _docked(tmp_path, "empty-deck.pptx")
+
+        slides = await service.read_document(name, max_chars=6_000, max_cells=600)
+
+        assert isinstance(slides, SlideText)
+        assert (slides.total_slides, slides.text) == (0, "")
+        structure = await service.document_structure(name)
+        assert structure.slides == []
+        text = _text(await handle_office_read(service, {"path": name}))
+        assert "empty" in text.lower()
+        assert "no slides" in text.lower()
+
+    async def test_a_long_deck_truncates_and_says_what_to_ask_for_next(
+        self, tmp_path: Path
+    ) -> None:
+        """AXI shape 1: a capped result states what was cut and names the
+        argument that gets the rest."""
+        service, name = await _docked(tmp_path, "long-deck.pptx")
+
+        text = _text(await handle_office_read(service, {"path": name, "max_chars": 120}))
+
+        assert "of 60" in text
+        assert "start_slide=" in text
+        # And the continuation it names really is the next slide, not a guess.
+        window = await service.read_document(name, max_chars=120, max_cells=600)
+        assert isinstance(window, SlideText)
+        follow_on = window.start_slide + window.returned_slides
+        rest = await service.read_document(
+            name, max_chars=6_000, max_cells=600, start_slide=follow_on
+        )
+        assert isinstance(rest, SlideText)
+        assert rest.start_slide == follow_on
+        assert f"Slide {follow_on}" in rest.text
+
+    async def test_a_slide_past_the_end_is_a_fixable_refusal(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "deck.pptx")
+
+        with pytest.raises(RangeInvalidError, match="past the last slide"):
+            await service.read_document(name, max_chars=6_000, max_cells=600, start_slide=9)
+
+    async def test_slides_are_numbered_from_one(self, tmp_path: Path) -> None:
+        """Zero is a caller error worth naming: PowerPoint, the panel and
+        :class:`SlideDim` all count from 1, so silently treating 0 as the first
+        slide would make an off-by-one invisible."""
+        service, name = await _docked(tmp_path, "deck.pptx")
+
+        with pytest.raises(RangeInvalidError, match="numbered from 1"):
+            await service.read_document(name, max_chars=6_000, max_cells=600, start_slide=0)
+
+    async def test_a_deck_that_closed_mid_read_says_so(self, tmp_path: Path) -> None:
+        (tmp_path / "deck.pptx").write_bytes(b"PK\x03\x04")
+        service, backend = _service(tmp_path)
+        info = await service.open("deck.pptx", RECT)
+        assert info.pid is not None
+        backend.kill(info.pid)
+
+        with pytest.raises(DocGoneError):
+            await service.read_document("deck.pptx", max_chars=6_000, max_cells=600)
+
+    async def test_a_deck_is_read_only_and_says_why(self, tmp_path: Path) -> None:
+        """The deferral, stated where an agent hits it. A slide has no single
+        addressable text target, so the write seam names that instead of
+        pretending an argument combination would work."""
+        service, name = await _docked(tmp_path, "deck.pptx")
+
+        with pytest.raises(RangeInvalidError, match="read-only"):
+            await service.write_document(name, content="nope", paragraph=0)

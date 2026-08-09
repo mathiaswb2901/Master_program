@@ -39,6 +39,7 @@ from workbench_server.models.office_bridge import (
     DocStructure,
     LiveWorkbookStatus,
     SheetDim,
+    SlideText,
     WordEdit,
     WordText,
 )
@@ -55,8 +56,10 @@ from workbench_server.services.office_host.document_window import (
     check_paragraph,
     no_sheet_error,
     parse_write_cell,
+    slide_dims,
     used_dims,
     window_cells,
+    window_slides,
     window_word,
 )
 from workbench_server.services.office_host.office_com import OfficeInstance
@@ -95,7 +98,9 @@ class ShellDocumentBridge:
                     rows, cols = used_dims(office_com.excel_grid(worksheet))
                     sheets.append(SheetDim(name=name, rows=rows, cols=cols))
                 return DocStructure(kind="excel", sheets=sheets)
-            raise DocNotReadableError(f"{kind} documents cannot be read")
+            return DocStructure(
+                kind="powerpoint", slides=slide_dims(office_com.powerpoint_slides(instance))
+            )
 
         return await self._com(handle, work)
 
@@ -117,6 +122,14 @@ class ShellDocumentBridge:
             return window_cells(
                 sheet, office_com.excel_grid(worksheet), a1_range, max_cells, max_chars
             )
+
+        return await self._com(handle, work)
+
+    async def read_powerpoint(
+        self, handle: HostHandle, start_slide: int, max_chars: int
+    ) -> SlideText:
+        def work(instance: OfficeInstance) -> SlideText:
+            return window_slides(office_com.powerpoint_slides(instance), start_slide, max_chars)
 
         return await self._com(handle, work)
 
