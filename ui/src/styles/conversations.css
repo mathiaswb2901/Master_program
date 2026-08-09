@@ -118,10 +118,15 @@
   font-size: var(--type-sm-size);
   color: var(--text-secondary);
   text-align: left;
+  transition:
+    background-color var(--motion-tint),
+    color var(--motion-tint);
 }
 
+/* Instant in, eased out (DESIGN.md §5.1.5). */
 .wb-conv-row:hover {
   background: var(--surface-hover);
+  transition-duration: 0s;
 }
 
 .wb-conv-row:focus-visible {
@@ -179,16 +184,23 @@
 }
 
 /* A conversation whose folder is outside the workspace: it opens, but clicking
-   re-roots the window there first. The affordance is a word, not just a colour
-   (DESIGN.md §7); the accent marks it as the one row in a refused group that
-   actually does something. */
+   re-roots the window there first. The affordance is a word, not a colour
+   (DESIGN.md §7).
+
+   **Demoted from accent** by the §2.4 audit, and this one was a standing amber
+   of exactly the kind that audit exists to stop: a row is outside the workspace
+   for as long as the workspace is what it is, so the marker was still true when
+   you looked away — and a browser listing a hundred conversations could put a
+   column of them on screen at once. An outlined neutral pill says the same
+   thing, in the same words, and leaves the amber to mean *now*. Same treatment,
+   and the same reasoning, as the plan card's *Recommended* pill. */
 .wb-conv-switch {
   flex: none;
   padding: 0 var(--space-2);
-  border: 1px solid var(--accent-muted);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
   font-size: var(--type-xs-size);
-  color: var(--accent);
+  color: var(--text-secondary);
 }
 
 .wb-conv-row.is-switch {
