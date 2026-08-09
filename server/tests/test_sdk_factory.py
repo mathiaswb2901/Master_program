@@ -363,6 +363,23 @@ class TestBundledSkillsAreGatedForAnUnattendedReviewer:
         assert any(name.startswith("Skill(") for name in _options("chat").allowed_tools)
         assert not any(name.startswith("Skill(") for name in options.allowed_tools)
 
+    def test_every_attended_kind_still_auto_allows_a_bundled_skill(self) -> None:
+        """The middle of the change, by name across every attended kind.
+
+        The reviewer test above pins the two endpoints — reviewer denied, chat
+        still allowed — but ``is_unattended`` gates all three of the others, and
+        chat alone standing in for ``worker`` and ``orchestrator`` is the gap a
+        typo widening ``is_unattended`` to ``worker``, or a future kind added on
+        the unattended side, would slip through unseen. Its per-kind siblings
+        (``test_every_other_kind_is_untouched``, the two-modules-agree pin) all
+        loop the attended kinds by name, so this one does too — names, not
+        counts, with the kind in the message so a failure says which one lost
+        its skills.
+        """
+        for kind in ("chat", "worker", "orchestrator"):
+            allowed = _options(kind).allowed_tools
+            assert any(name.startswith("Skill(") for name in allowed), kind
+
     def test_a_chat_session_still_auto_allows_the_two_named_skills(self) -> None:
         """The ergonomics the skill allows exist to protect must not regress: an
         attended session still opens plan-visual and remember without a prompt."""
