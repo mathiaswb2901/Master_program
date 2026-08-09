@@ -17,6 +17,8 @@ import type {
   CreateSessionRequest,
   DirListing,
   DocEditorConfig,
+  EvidenceKind,
+  EvidencePayload,
   FileContent,
   FolderSessions,
   LayoutsResponse,
@@ -169,6 +171,15 @@ export const approveValidation = (
   body: ApproveRequest,
 ): Promise<ValidationResult> =>
   request(`/api/validation/${encodeURIComponent(validationId)}/approve`, jsonInit("POST", body));
+
+/** Redeem an `EvidenceItem.payload_ref` — the bounded detail behind one evidence
+ * line (a captured gate log, a reconciliation table). **404 once the per-kind LRU
+ * has dropped it** (`ApiError.status`), which the Review expander renders as
+ * "evicted" rather than a spinner that never resolves. */
+export const getEvidencePayload = (kind: EvidenceKind, ref: string): Promise<EvidencePayload> =>
+  request(
+    `/api/validation/payload/${encodeURIComponent(kind)}/${encodeURIComponent(ref)}`,
+  );
 
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 

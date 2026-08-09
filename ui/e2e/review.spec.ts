@@ -56,19 +56,26 @@ test.beforeEach(async ({ page }) => {
 
 /** Mint a real result through the server, from inside the page so the token
  * rides along. Returns its `validation_id`. */
-async function seedValidation(page: Page, subject: ValidationSubject): Promise<string> {
-  return page.evaluate(async (subject) => {
-    const tokenRes = await fetch("/api/auth/token");
-    const { token } = (await tokenRes.json()) as { token: string };
-    const res = await fetch("/api/validation/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Workbench-Token": token },
-      body: JSON.stringify({ subject, checks: [], params: {} }),
-    });
-    if (!res.ok) throw new Error(`run failed: ${String(res.status)}`);
-    const result = (await res.json()) as { validation_id: string; risk: string };
-    return result.validation_id;
-  }, subject);
+async function seedValidation(
+  page: Page,
+  subject: ValidationSubject,
+  checks: string[] = [],
+): Promise<string> {
+  return page.evaluate(
+    async ({ subject, checks }) => {
+      const tokenRes = await fetch("/api/auth/token");
+      const { token } = (await tokenRes.json()) as { token: string };
+      const res = await fetch("/api/validation/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Workbench-Token": token },
+        body: JSON.stringify({ subject, checks, params: {} }),
+      });
+      if (!res.ok) throw new Error(`run failed: ${String(res.status)}`);
+      const result = (await res.json()) as { validation_id: string; risk: string };
+      return result.validation_id;
+    },
+    { subject, checks },
+  );
 }
 
 /** Open the Review panel the way a user reaches a tool not on screen: the
@@ -198,5 +205,172 @@ test("two Review panes are independent, through a reload", async ({ page }) => {
   });
 
   // Put the arrangement back for whatever journey shares this workspace next.
+  await page.request.put("/api/layouts", { data: NO_LAYOUT });
+});
+
+/**
+ * The toolchain gate (M6 staged review PR1), end to end in a real browser — and
+ * the half no unit test can claim: **the captured log opens in the panel**.
+ *
+ * The gate runs in the checkout the subject session is actually writing in, so
+ * this journey has to produce one: it starts an orchestrator, lets it spawn
+ * workers through the real service (each really borrows a pool slot), and then
+ * validates *a worker's own session id*. `WORKBENCH_GATE_FAKE=1` scripts the
+ * exit codes and the output — nothing runs ruff or pytest inside a slot on CI —
+ * but everything around them is production: the slot lookup, the git
+ * fingerprint before and after, the bounded head+tail capture, the bounded
+ * payload store, `GET /api/validation/payload/gate/{ref}`, and the expander.
+ *
+ * The last two steps matter as much as the first: a `high` result **awaits a
+ * human**, and approving it leaves the bar quiet for whatever runs next.
+ */
+const SPAWN_PROMPT = "spawn workers please";
+
+interface Roster {
+  orchestrators: {
+    orchestrator_id: string;
+    workers: { worker_id: string; slot: string | null }[];
+  }[];
+}
+
+/** Open Mission Control the way a user reaches a tool not on screen. */
+async function openBoard(page: Page): Promise<void> {
+  await page.keyboard.press("Control+Shift+P");
+  const quickbar = page.getByRole("dialog", { name: "Quick open" });
+  await quickbar.locator(".wb-qb-input").fill(">mission control");
+  await quickbar.locator(".wb-qb-row", { hasText: "Show Mission Control" }).first().click();
+  await expect(page.locator(".wb-mission")).toBeVisible();
+}
+
+/** Drive the orchestrator the way a user does from the board: click its card to
+ * open (and focus) its chat, then type into the pane that click just focused.
+ * `.dv-active-group` scopes the input — an unscoped `.wb-chat-input textarea`
+ * would be several elements once other panes are open (CLAUDE.md). */
+async function sendToOrchestrator(page: Page, text: string): Promise<void> {
+  await page.locator('.wb-mission-card[data-kind="orchestrator"] .wb-mission-title').click();
+  const input = page.locator(".dv-active-group .wb-chat-input textarea");
+  await input.fill(text);
+  await input.press("Enter");
+  await expect(
+    page.locator(".dv-active-group .wb-msg-user").filter({ hasText: text }),
+  ).toBeVisible();
+}
+
+test("a toolchain gate proves a worker's checkout, and its log opens in the panel", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await test.step("the pool is really there — or this journey tests a refusal", async () => {
+    // Without a git repository every spawn is refused and the gate would answer
+    // "no slot" for a reason that has nothing to do with the gate.
+    const pool = (await (await page.request.get("/api/worktrees")).json()) as {
+      problem: string | null;
+    };
+    expect(pool.problem, `the E2E workspace is not a git repository: ${String(pool.problem)}`).toBe(
+      null,
+    );
+  });
+
+  await test.step("an orchestrator spawns a worker, which borrows a slot", async () => {
+    await openBoard(page);
+    await page.keyboard.press("Control+Shift+P");
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    await quickbar.locator(".wb-qb-input").fill(">new orchestrator");
+    await quickbar.locator(".wb-qb-row", { hasText: "New orchestrator session" }).first().click();
+    await expect(page.locator('.wb-mission-card[data-kind="orchestrator"]')).toHaveCount(1);
+    await sendToOrchestrator(page, SPAWN_PROMPT);
+    await expect
+      .poll(
+        async () => {
+          const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
+          return roster.orchestrators.flatMap((crew) => crew.workers).length;
+        },
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThan(0);
+  });
+
+  const workerId = await test.step("read the worker the gate will judge", async () => {
+    const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
+    const worker = roster.orchestrators.flatMap((crew) => crew.workers)[0];
+    expect(worker, "the orchestrator spawned no worker").toBeDefined();
+    // A slot each is the whole reason the pool exists — and the thing the gate
+    // resolves rather than being handed.
+    expect(worker.slot).not.toBeNull();
+    return worker.worker_id;
+  });
+
+  const validationId = await test.step("the gate runs in that worker's own checkout", async () => {
+    // `checks: ["gates"]` — the toolchain gate alone. An empty `checks` runs
+    // *every* registered check, and the reconciliation gate handed no spec would
+    // add a `numeric` fail of its own, which is a different feature's evidence
+    // in this journey's assertions.
+    const id = await seedValidation(
+      page,
+      { kind: "session_output", ref: workerId, label: "Worker gates" },
+      ["gates"],
+    );
+    expect(id).toMatch(/^val_/);
+    return id;
+  });
+
+  await test.step("four gate lines, one per gate, and the failing one is a Fail", async () => {
+    await openReviewPanel(page);
+    await page.locator(".wb-review-row", { hasText: "Worker gates" }).click();
+    const body = page.locator(`.wb-review-body[data-validation="${validationId}"]`);
+    await expect(body).toBeVisible();
+    // One line per gate, not one grouped line — that is the design decision, and
+    // it is visible here rather than only in a unit test.
+    await expect(body.locator('.wb-evidence[data-kind="gate"]')).toHaveCount(4);
+    await expect(body.locator('.wb-evidence[data-outcome="fail"]')).toHaveCount(1);
+    await expect(body.locator(".wb-review-head .wb-pill")).toContainText("High risk");
+  });
+
+  await test.step("the payload route works: the captured log opens in the expander", async () => {
+    const body = page.locator(`.wb-review-body[data-validation="${validationId}"]`);
+    const failing = body.locator('.wb-evidence[data-outcome="fail"]');
+    // Lazily fetched: nothing is loaded until the expander is opened.
+    await expect(failing.locator(".wb-evidence-log")).toHaveCount(0);
+    await failing.locator("summary").click();
+    const log = failing.locator(".wb-evidence-log");
+    await expect(log).toBeVisible();
+    // The scripted pytest failure, read back through
+    // GET /api/validation/payload/gate/{ref} — the frame's dead handle, alive.
+    await expect(log).toContainText("1 failed, 118 passed");
+    await expect(log).toContainText("test_dispatch.py:118");
+    await expect(failing.locator(".wb-evidence-argv")).toContainText("exit 1");
+  });
+
+  await test.step("a failing gate awaits a human, and approving leaves the bar quiet", async () => {
+    const body = page.locator(`.wb-review-body[data-validation="${validationId}"]`);
+    await expect(body.locator(".wb-review-awaiting")).toContainText("Awaiting approval");
+    await body.locator(".wb-review-approve").click();
+    await expect(body.locator(".wb-review-approved")).toContainText("Approved by you");
+  });
+
+  await test.step("cleanup: the crew is reaped and its slots go back", async () => {
+    // Through the REST stop path rather than the board's own button: this is
+    // teardown, not a claim — a leaked lease is a checkout no later journey can
+    // borrow for an hour, and `mission.spec.ts` is where reaping *from the
+    // board* is the assertion. `REAP_PROMPT` is the agent-driven equivalent and
+    // is exercised there too.
+    const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
+    for (const crew of roster.orchestrators) {
+      await page.request.post(`/api/orchestrator/sessions/${crew.orchestrator_id}/stop`);
+    }
+    await expect
+      .poll(
+        async () => {
+          const pool = (await (await page.request.get("/api/worktrees")).json()) as {
+            slots: { state: string }[];
+          };
+          return pool.slots.filter((slot) => slot.state === "leased").length;
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(0);
+  });
+
   await page.request.put("/api/layouts", { data: NO_LAYOUT });
 });

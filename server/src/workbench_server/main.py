@@ -47,6 +47,12 @@ from workbench_server.services.conversations import ConversationBrowser
 from workbench_server.services.documents import DocumentService
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.fake_agent import fake_client_factory
+from workbench_server.services.gates import (
+    ToolchainGateCheck,
+    build_catalog,
+    build_runner,
+    configured_gate_ids,
+)
 from workbench_server.services.layouts import LayoutsService
 from workbench_server.services.local_auth import LocalAuthMiddleware, is_local_origin
 from workbench_server.services.office import OfficeService
@@ -189,6 +195,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_fleet_cost_usd=settings.orchestrator_fleet_cost_usd,
         ),
         worktree_service,
+    )
+    # M6 staged review PR1: the *toolchain* gate — the second registered check,
+    # and the one that generalizes the proof from "workbooks proven" to "work
+    # proven". Registered here rather than beside the reconciliation check
+    # because it needs the orchestrator as its `SlotLocator`: gates run in the
+    # borrowed checkout the subject session is writing in, resolved through that
+    # narrow seam (so `services/gates.py` never imports the orchestrator), and a
+    # session with no slot is refused rather than fallen back to the live
+    # workspace root. No lease is taken — the session holds it.
+    validation_service.register(
+        ToolchainGateCheck(
+            orchestrator_service,
+            build_runner(settings.gate_fake),
+            catalog=build_catalog(settings.gate_timeout_s),
+            default_gates=configured_gate_ids(settings.gates),
+        )
     )
     session_index = SessionIndex(settings.resolved_projects_dir())
     # The same storage, browsed whole instead of one folder at a time. Read-only

@@ -40,6 +40,7 @@ from pydantic import BaseModel, ValidationError
 from workbench_server.models.agent_reconcile import ReconcileMismatch, ReconcileSummary
 from workbench_server.models.agents import SessionKind, UiState
 from workbench_server.models.commands import CommandInvokeResult, CommandManifest
+from workbench_server.models.gates import MAX_GATE_LOG_BYTES, GateLog, GateSpec
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
@@ -1398,6 +1399,224 @@ def handle_workspace_search(searcher: WorkspaceSearcher, args: dict[str, Any]) -
     return text_result(clamp_result(_format_search(response), WORKSPACE_SEARCH.max_result_bytes))
 
 
+# ---- run_gates --------------------------------------------------------------
+#
+# The office_reconcile precedent, aimed at the other half of "is this right": a
+# session that can prove its own work does not need a human to run the gate for
+# it. M6 staged review PR1 — the check is services/gates.py, registered on the
+# ValidationService as "gates".
+#
+# **The schema carries no argv, no cwd and no path**, and that is what makes this
+# tool auto-allowed like every other workbench tool without being the shell
+# escape ``_AUTO_ALLOWED``'s omission of ``Bash`` and the PreToolUse broker exist
+# to prevent: it cannot express an arbitrary command. The gates are a
+# server-owned catalog selected by id, and the *checkout* is resolved from the
+# calling session's own id — which the bridge closes over — so the tool cannot be
+# pointed at another session's work either. ``test_agent_tools.py`` asserts both.
+
+
+class ToolchainRunner(Protocol):
+    """The narrow slice of ``ValidationService`` this tool needs — the same two
+    methods :class:`ReconciliationRunner` names, kept as its own protocol so the
+    gate tool reads as what it is rather than borrowing reconciliation's name.
+    ``run`` dispatches to the registered ``gates`` check; ``payload`` fetches the
+    stored :class:`GateLog` the excerpt is read from."""
+
+    async def run(self, spec: ValidationSpec) -> ValidationResult: ...
+    def payload(self, kind: EvidenceKind, ref: str) -> BaseModel | None: ...
+
+
+#: Bytes of the first failing gate's log the tool shows by default. Small on
+#: purpose: the common case is a model that needs the summary and the first
+#: failure, and the whole log is one ``log_bytes`` away (AXI shape 1). The stored
+#: payload is **never** narrowed by this — the human's expander always gets the
+#: full captured window.
+RUN_GATES_LOG_EXCERPT = 400
+
+#: Clip on one evidence line echoed into the summary, so N gates cannot blow the
+#: budget on wording alone.
+_GATES_LINE_CLIP = 200
+
+RUN_GATES = AgentToolSpec(
+    name="run_gates",
+    description=(
+        "Prove the change you just wrote: run this project's configured gates "
+        "(ruff, mypy, pytest, npm-test) in your own worktree and get each one's "
+        "verdict. Optional gates (ids; omit for all) and log_bytes (how much of "
+        "the first failing gate's output to show, default 400, max 8192). You "
+        "cannot pass a command, a path or a cwd — the gates are server-owned and "
+        "the checkout is your session's. Returns one line per gate with its exit "
+        "code and duration, then the failing gate's captured output and where to "
+        "read next. Says so explicitly when everything passes, and refuses (never "
+        "silently passes) when your session holds no worktree."
+    ),
+    output_format="text",
+    # One excerpt of at most MAX_GATE_LOG_BYTES (8,192) plus a header, up to eight
+    # per-gate lines clipped to _GATES_LINE_CLIP, and a next-step sentence:
+    # 8,192 + 8*200 + ~400 measures under 10,200. 10,240 is that with a margin the
+    # budget test pins, and the body is clamped to it as a backstop (it is text
+    # the model reads, never JSON it parses, so clamping is safe). Large because
+    # the captured output *is* the value of this tool — a failing gate whose log
+    # the model cannot read costs a second call to fetch it.
+    max_result_bytes=10_240,
+    # Two small properties, neither required. Measured near 400 bytes; 560 leaves
+    # room to reword a description without a third argument slipping in
+    # unmeasured — the schema is paid on every request whether the tool runs.
+    max_schema_bytes=560,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "gates": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Gate ids to run, e.g. ruff. Omit to run all configured.",
+            },
+            "log_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": MAX_GATE_LOG_BYTES,
+                "description": (
+                    f"Bytes of the failing gate's output to show (default {RUN_GATES_LOG_EXCERPT})."
+                ),
+            },
+        },
+    },
+)
+
+
+def _gate_excerpt(text: str, budget: int) -> tuple[str, int]:
+    """The tail of a captured log, bounded, plus how many bytes it holds.
+
+    The **tail**, because that is where ``pytest`` and ``mypy`` put the summary a
+    model acts on; the head is already reflected in the evidence line when a gate
+    could not start.
+    """
+    encoded = text.encode()
+    if len(encoded) <= budget:
+        return text, len(encoded)
+    kept = encoded[len(encoded) - budget :].decode(errors="ignore")
+    return kept, budget
+
+
+def _first_location(text: str) -> str | None:
+    """A ``path:line`` a model should read next, if the log offers one.
+
+    Deliberately a shallow scan rather than a per-tool parser: ruff, mypy and
+    pytest all print ``path:line`` somewhere, and a wrong guess here costs a
+    model one glance while a per-tool parser costs every future gate a branch.
+    """
+    for raw in text.splitlines():
+        cleaned = raw.replace("(", " ").replace(")", " ").replace(",", " ")
+        for token in cleaned.split():
+            # Split on every colon rather than the last: real output ends in
+            # ``path:line:`` (ruff) or ``path:line:col:`` (mypy), so a rpartition
+            # would keep finding the trailing separator and nothing else.
+            parts = token.split(":")
+            for index in range(len(parts) - 1):
+                head, number = parts[index], parts[index + 1]
+                if not number.isdigit() or "." not in head:
+                    continue
+                if head.rsplit(".", 1)[-1].isalpha():
+                    return f"{head}:{number}"
+    return None
+
+
+async def handle_run_gates(
+    runner: ToolchainRunner, session_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """The run_gates tool body, free of SDK imports so it is directly testable.
+
+    All three AXI shapes. A truncated excerpt states its size and names
+    ``log_bytes`` as the widener (shape 1); an all-clean run says so in words
+    rather than returning a blank a model reads as either clean or broken, and so
+    does a refusal (shape 2); a failing run ends by naming the first failing
+    location, which is where the model should read next (shape 3).
+    """
+    raw_gates = args.get("gates")
+    gates = (
+        [str(item) for item in raw_gates if isinstance(item, str)]
+        if isinstance(raw_gates, list)
+        else []
+    )
+    raw_bytes = args.get("log_bytes")
+    excerpt_budget = (
+        min(raw_bytes, MAX_GATE_LOG_BYTES)
+        if isinstance(raw_bytes, int) and not isinstance(raw_bytes, bool) and raw_bytes >= 0
+        else RUN_GATES_LOG_EXCERPT
+    )
+    # `log_bytes` sizes what *this result* shows, never what the check captures:
+    # narrowing the stored payload would shrink the human's expander to fit a
+    # model's budget, which is the wrong trade in the one place a person has to
+    # read the evidence themselves.
+    spec = ValidationSpec(
+        subject=ValidationSubject(kind="session_output", ref=session_id, label=session_id),
+        checks=["gates"],
+        params=GateSpec(gates=gates).model_dump(),
+    )
+    result = await runner.run(spec)
+    body = _format_gates(result, runner, excerpt_budget)
+    return text_result(clamp_result(body, RUN_GATES.max_result_bytes))
+
+
+def _format_gates(result: ValidationResult, runner: ToolchainRunner, budget: int) -> str:
+    """One compact text body: the verdicts, then the first failure in detail."""
+    gate_lines = [item for item in result.evidence if item.kind == "gate"]
+    if not gate_lines:
+        return (
+            "No gate evidence was produced — nothing ran and nothing was judged. "
+            f"Validation {result.validation_id}."
+        )
+    skipped = [item for item in gate_lines if item.outcome == "skipped"]
+    failed = [item for item in gate_lines if item.outcome == "fail"]
+    passed = [item for item in gate_lines if item.outcome == "pass"]
+
+    if not failed and not passed:
+        # Every line is a refusal — the no-slot case, and the one place an empty
+        # answer would be read as "clean". Say the refusal instead.
+        return "\n".join(
+            [f"No gates ran ({result.risk})."]
+            + [_clip(item.detail, 600) for item in skipped]
+            + [f"Validation {result.validation_id}."]
+        )
+
+    header = (
+        f"All {len(passed)} gates pass ({', '.join(item.label for item in passed)})."
+        if not failed
+        else f"{len(failed)} of {len(failed) + len(passed)} gates FAIL."
+    )
+    lines = [header]
+    lines += [
+        f"{item.outcome}: {_clip(item.detail, _GATES_LINE_CLIP)}"
+        for item in gate_lines
+        if item.outcome != "pass" or failed
+    ]
+    if not failed:
+        lines.append(f"Validation {result.validation_id} — nothing to fix.")
+        return "\n".join(lines)
+
+    first = failed[0]
+    payload = runner.payload("gate", first.payload_ref) if first.payload_ref else None
+    if isinstance(payload, GateLog):
+        excerpt, shown = _gate_excerpt(payload.text, budget)
+        total = (
+            payload.truncated.total if payload.truncated is not None else len(payload.text.encode())
+        )
+        lines.append(f"--- {payload.gate} output ---")
+        lines.append(excerpt)
+        if shown < total:
+            lines.append(
+                f"[showing {shown} of {total} bytes; pass log_bytes up to "
+                f"{MAX_GATE_LOG_BYTES} for more]"
+            )
+        location = _first_location(excerpt)
+        lines.append(
+            f"Next: read {location}." if location else f"Next: fix {payload.gate} and re-run."
+        )
+    else:
+        lines.append(f"Next: fix {first.label} and re-run (its log has been evicted).")
+    return "\n".join(lines)
+
+
 # ---- the registry -----------------------------------------------------------
 
 #: Every session's toolset — office_read and office_write included, so every
@@ -1411,6 +1630,7 @@ AGENT_TOOLS: tuple[AgentToolSpec, ...] = (
     OFFICE_RECONCILE,
     RUN_COMMAND,
     WORKSPACE_SEARCH,
+    RUN_GATES,
 )
 
 #: The extra toolset an ``orchestrator`` session carries. Never in the context

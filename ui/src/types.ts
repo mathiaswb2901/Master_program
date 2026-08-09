@@ -1560,6 +1560,63 @@ export interface ValidationEvent {
   result: ValidationResult;
 }
 
+// ---- gates.py / evidence.py -------------------------------------------------
+// M6 staged review PR1: the toolchain gate, and the payload route the #82 frame
+// left open. Only the two shapes the *UI* reads are mirrored here — `GateCommand`,
+// `GateSpec`, `GateRunReport` and `SlotRef` are server-side selection and
+// bookkeeping types no browser ever sees, and a mirror of a type nothing reads is
+// a second authority to keep honest with nothing checking it.
+
+/** The payload behind a `gate` EvidenceItem: one gate's bounded head+tail log.
+ * `exit_code` is null when the gate timed out or could not start — distinct from
+ * a non-zero code, and the evidence line says which. */
+export interface GateLog {
+  gate: string;
+  argv: string[];
+  exit_code: number | null;
+  duration_ms: number;
+  text: string;
+  /** Set when the capture window bit (AXI shape 1); null means the log is whole. */
+  truncated: EvidenceTruncation | null;
+}
+
+/** One expected-vs-actual verdict — a row of the reconciliation table.
+ * `actual`/`delta` are null when the cell was empty, non-numeric or unreadable. */
+export interface CellComparison {
+  cell: string;
+  label: string | null;
+  expected: number;
+  actual: number | null;
+  unit: string;
+  delta: number | null;
+  outcome: CheckOutcome;
+  reason: string | null;
+}
+
+/** The payload behind a `numeric` EvidenceItem: the workbook↔code table,
+ * bounded worst-first with `truncated` stating the cut (AXI shape 1). */
+export interface ReconciliationReport {
+  workbook: string;
+  matched: number;
+  mismatched: number;
+  total: number;
+  comparisons: CellComparison[];
+  truncated: EvidenceTruncation | null;
+}
+
+/** GET /api/validation/payload/{kind}/{ref} — what an `EvidenceItem.payload_ref`
+ * resolves to. Exactly one payload field is set, chosen by `kind`. **404 once
+ * the bounded LRU has dropped it**, which the expander renders as "evicted"
+ * rather than a spinner that never resolves. */
+export interface EvidencePayload {
+  kind: EvidenceKind;
+  ref: string;
+  /** `kind === "numeric"`. */
+  reconciliation: ReconciliationReport | null;
+  /** `kind === "gate"`. */
+  gate_log: GateLog | null;
+}
+
 // ---- search.py --------------------------------------------------------------
 // Workspace content search (M7 V7b). `POST /api/search` finds literal text across
 // the workspace's files, respecting the file tree's ignore rules (IGNORED_DIRS +
