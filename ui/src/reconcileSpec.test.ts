@@ -81,6 +81,7 @@ function spec(name: string, patch: Partial<SpecState> = {}): SpecState {
     digest: `digest-${name}`,
     checks: 1,
     approval: null,
+    pending_covered: [],
     last_run: null,
     detail: "detail",
     ...patch,

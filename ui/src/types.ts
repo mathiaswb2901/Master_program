@@ -1709,6 +1709,12 @@ export interface SpecState {
   digest: string;
   checks: number;
   approval: SpecApproval | null;
+  /** What clicking **Approve** would cover, for a spec that is not approved yet
+   * (or whose code moved). Empty once `approval` carries the same receipt — the
+   * decision is taken *before* the approval exists, so the file list has to
+   * reach the panel before the click or "this spec, running exactly this code"
+   * is a sentence with nothing behind it. */
+  pending_covered: CoveredSource[];
   /** In memory server-side: a restart forgets the run and keeps the approval. */
   last_run: SpecRunReport | null;
   detail: string;

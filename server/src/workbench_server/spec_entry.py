@@ -9,14 +9,25 @@ working directory. That argv is **fixed and server-owned**
 What it does, in order:
 
 1. read one JSON request from stdin — a list of ``module:function`` strings;
-2. import each module and call the function **with no arguments**;
+2. import each module — **only if it is this workspace's own code** — and call
+   the function with no arguments;
 3. turn the answer into either a scalar or ``(ISO timestamp, value)`` pairs;
 4. walk ``sys.modules`` and report every module whose ``__file__`` resolves under
    the working directory;
 5. write one compact JSON line to stdout.
 
-Three deliberate properties, each of which is a line of code rather than a
+Four deliberate properties, each of which is a line of code rather than a
 comment:
+
+**The import is jailed to the working directory.** ``module:function`` is
+documented everywhere as being *within the workspace*, and until
+:func:`outside_workspace` existed nothing held it: ``import_module`` resolves
+through ``sys.path``, so a spec naming an installed distribution ran whatever
+``site-packages`` last received — under an approval whose digest was recorded
+against an in-tree path that never existed and could therefore never move. The
+top-level name is checked *before* the import (with ``PathFinder``, which does
+not execute the module it finds), and the imported module's own ``__file__`` is
+checked after.
 
 **The callable's own output never touches stdout.** ``print`` inside user code is
 redirected to stderr for the duration of the call, and the envelope is written to
@@ -43,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import importlib
+import importlib.machinery
 import json
 import sys
 import traceback
@@ -139,23 +151,100 @@ def _as_pairs(value: Any, max_pairs: int) -> tuple[list[list[Any]], int] | None:
     return pairs, total
 
 
-def call_one(reference: str, max_pairs: int) -> dict[str, Any]:
+def _under(root: Path, where: str | None) -> bool:
+    """Is ``where`` a real path under ``root``?
+
+    ``exists()`` rather than a string comparison: a ``ModuleSpec`` origin is not
+    always a path — ``"built-in"`` and ``"frozen"`` would otherwise resolve
+    relative to the cwd (which *is* ``root`` here) and read as in-tree, letting
+    through exactly the modules this refuses.
+    """
+    if where is None:
+        return False
+    try:
+        path = Path(where).resolve()
+        if not path.exists():
+            return False
+    except (OSError, ValueError):
+        return False
+    return path == root or root in path.parents
+
+
+def outside_workspace(module_name: str, root: Path) -> str | None:
+    """Why importing ``module_name`` would not be running *this workspace's*
+    code, or ``None``.
+
+    The contract is ``module:function`` **within the workspace**, and it was
+    stated in three docstrings without being held anywhere: ``import_module``
+    resolves through ``sys.path``, so a spec naming an installed distribution ran
+    whatever ``site-packages`` last received — under an approval whose digest was
+    recorded against a workspace path that does not exist and therefore can never
+    move. The parent refuses such a spec at load time; this is the same refusal
+    at the only place that can be sure, because it is the place that imports.
+
+    Asked of the **top-level** name and asked *before* the import, with
+    :class:`importlib.machinery.PathFinder` rather than
+    :func:`importlib.util.find_spec` — the latter imports parent packages, and
+    the whole point is that an installed package that shadows a spec's name never
+    gets to run its module body.
+    """
+    top = module_name.partition(".")[0]
+    if top in sys.builtin_module_names:
+        return f"{top!r} is a built-in module"
+    try:
+        found = importlib.machinery.PathFinder.find_spec(top, sys.path)
+    except (ImportError, AttributeError, TypeError, ValueError, OSError):
+        return None  # let the import itself produce the better message
+    if found is None:
+        return None  # not importable at all — the ImportError says it plainly
+    where = [found.origin] if found.origin is not None else []
+    where.extend(found.submodule_search_locations or [])
+    outside = [place for place in where if not _under(root, place)]
+    if not outside:
+        return None
+    return f"{top!r} resolves to {outside[0]}"
+
+
+def call_one(reference: str, max_pairs: int, root: Path) -> dict[str, Any]:
     """Import and call one ``module:function``, and describe what came back.
 
     Never raises: every failure is one ``ok: false`` entry with a sentence, so a
     spec with one broken callable still reports the other nine. That is the same
     posture ``ReconciliationCheck`` takes towards one unreadable cell.
+
+    ``root`` is the workspace, and the import is **jailed to it** at both ends:
+    the name is refused before it is imported when the import system would
+    answer it from outside, and the module is refused after it is imported when
+    its ``__file__`` did not land under the root after all.
     """
     entry: dict[str, Any] = {"call": reference, "ok": False, "pairs": []}
     module_name, _, function_name = reference.partition(":")
     if not module_name or not function_name:
         entry["error"] = f"not a module:function reference: {reference!r}"
         return entry
+    shadowed = outside_workspace(module_name, root)
+    if shadowed is not None:
+        entry["error"] = _clip(
+            f"refused {module_name!r}: {shadowed}, which is not code in {root}. A spec's "
+            "callable must live under the workspace root — the approval covers files there "
+            "and nowhere else."
+        )
+        return entry
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:  # any import error is one evidence line, not a crash
         traceback.print_exc(file=sys.stderr)
         entry["error"] = _clip(f"could not import {module_name!r} — {_describe(exc)}")
+        return entry
+    origin = getattr(module, "__file__", None)
+    if not _under(root, origin if isinstance(origin, str) else None):
+        # Belt to the pre-import brace: a top-level name that *did* resolve
+        # in-tree can still hand back a submodule from elsewhere (a path entry a
+        # `.pth` added, a package that rewrites its own `__path__`). The digest
+        # only ever covers files under the root, so anything else is refused.
+        entry["error"] = _clip(
+            f"refused {module_name!r}: imported from {origin!r}, which is outside {root}"
+        )
         return entry
     function = getattr(module, function_name, None)
     if function is None:
@@ -245,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     # Everything the callables print goes to stderr. The envelope is written to
     # the handle captured above, so one stray ``print`` cannot corrupt the parse.
     with contextlib.redirect_stdout(sys.stderr):
-        values = [call_one(reference, max_pairs) for reference in references]
+        values = [call_one(reference, max_pairs, root) for reference in references]
     _emit(
         envelope_out,
         {"ok": True, "values": values, "modules": workspace_modules(root), "error": None},

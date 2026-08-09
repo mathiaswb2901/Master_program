@@ -287,6 +287,18 @@ class SpecState(BaseModel):
     digest: str
     checks: int = 0
     approval: SpecApproval | None = None
+    #: What clicking **Approve** would cover, for a spec that is not approved yet
+    #: (or whose code moved and needs approving again). Empty once
+    #: :attr:`approval` carries the same receipt.
+    #:
+    #: This exists because the decision is taken *before* the approval does. The
+    #: panel's copy is "this spec, running exactly this code, on this machine,
+    #: until either changes", and a sentence like that is only worth saying next
+    #: to a list a person can check — but :attr:`SpecApproval.covered` is
+    #: ``None`` until the click, so the only reader who ever saw the file list
+    #: was one who had already trusted it. A one-time content-hash approval whose
+    #: coverage you can read only afterwards is a rubber stamp with extra steps.
+    pending_covered: list[CoveredSource] = Field(default_factory=list)
     #: The last run this server observed, or ``None``. In memory: a restart
     #: forgets it, and the approval — which is the part that matters — does not.
     last_run: SpecRunReport | None = None

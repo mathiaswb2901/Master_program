@@ -59,11 +59,13 @@ from workbench_server.services.reconcile_spec import (
     ReconcileSpecService,
     SpecApprovalStore,
     SpecConflict,
+    SpecProblem,
     SubprocessSpecRunner,
     build_spec_runner,
     compile_spec,
     composite_digest,
     file_digest,
+    module_outside_workspace,
     parse_range,
     resolve_module,
 )
@@ -738,6 +740,99 @@ callable = "se3.reporting:chatty_annual_revenue"
         assert asyncio.run(service.run("dispatch")).outcome == "blocked"
         assert runner.calls == []
 
+    def test_7_a_callable_that_names_an_installed_package_is_refused_not_approved(
+        self, workspace: Path, store_dir: Path
+    ) -> None:
+        """The hole the composite digest could not see, because it never looked.
+
+        ``resolve_module`` fabricates an in-tree candidate for **any** dotted
+        name, so a spec naming a distribution that is actually installed recorded
+        ``<name>.py`` at ``absent`` — a path nobody will ever create, whose digest
+        therefore never moves. The approval would stand forever while
+        ``spec_entry`` imported the real thing off ``sys.path``: a dependency
+        bump, or a compromise of that package, running unattended on every save
+        with no staleness and no re-prompt. ``json`` stands in for the analyst's
+        installed dependency here — it is a package Python answers from the
+        stdlib on every machine this suite runs on.
+        """
+        write_spec(
+            workspace,
+            "shadowed",
+            """
+workbook = "models/budget.xlsx"
+
+[default_tolerance]
+rel = 0.001
+
+[[check]]
+cell = "B2"
+callable = "json.decoder:JSONDecoder"
+""",
+        )
+        service, runner, _ = build_service(workspace, store_dir)
+        state = service.state("shadowed")
+        assert state is not None and state.status == "invalid"
+        assert "not this workspace's code" in state.detail
+        assert "json" in state.detail
+
+        # …and it cannot be talked into an approval, so the absent digest never
+        # becomes a standing authorisation.
+        with pytest.raises(SpecProblem, match="not this workspace's code"):
+            service.approve("shadowed", APPROVER, state.digest)
+        assert asyncio.run(service.run("shadowed")).outcome == "blocked"
+        assert runner.calls == []
+
+    def test_a_module_not_written_yet_is_still_allowed(
+        self, workspace: Path, store_dir: Path
+    ) -> None:
+        """The other side of the same coin, and the distinction the refusal above
+        turns on: ``se3.not_yet`` addresses a place *inside* this workspace, so it
+        is a module nobody has written rather than a name the import system
+        already answers. ``absent`` there is a promise that moves the day the file
+        appears (:class:`TestTheCompositeDigest`), which is a real guard."""
+        write_spec(
+            workspace,
+            "future",
+            """
+workbook = "models/budget.xlsx"
+
+[default_tolerance]
+rel = 0.001
+
+[[check]]
+cell = "B2"
+callable = "se3.not_yet:value"
+""",
+        )
+        service, _, _ = build_service(workspace, store_dir)
+        state = service.state("future")
+        assert state is not None and state.status == "unapproved"
+
+    def test_a_module_name_that_is_not_one_is_invalid_rather_than_unapprovable_forever(
+        self, workspace: Path, store_dir: Path
+    ) -> None:
+        """A name that cannot address a file under the root has the same shape of
+        defect — a covered line whose digest can never move — so it is a stated
+        refusal rather than a row that looks armable."""
+        write_spec(
+            workspace,
+            "notaname",
+            """
+workbook = "models/budget.xlsx"
+
+[default_tolerance]
+rel = 0.001
+
+[[check]]
+cell = "B2"
+callable = "../escape:value"
+""",
+        )
+        service, _, _ = build_service(workspace, store_dir)
+        state = service.state("notaname")
+        assert state is not None and state.status == "invalid"
+        assert "not a module name" in state.detail
+
     def test_an_approval_survives_a_new_store_object(
         self, workspace: Path, store_dir: Path
     ) -> None:
@@ -786,6 +881,47 @@ callable = "se3.not_yet:value"
         after = service.state("future")
         assert after is not None and after.status == "stale"
 
+    def test_the_covered_list_reaches_the_panel_before_the_click_not_after(
+        self, workspace: Path, store_dir: Path
+    ) -> None:
+        """The receipt has to arrive with the question, not with the answer.
+
+        ``SpecApproval.covered`` is ``None`` until a spec *has* been approved, so
+        it can only ever be read by somebody who already trusted it. The state a
+        user is looking at when they decide carries ``pending_covered`` — the
+        exact list Approve would stand for — which is the difference between an
+        informed one-time trust decision and a rubber stamp.
+        """
+        service, _, _ = build_service(workspace, store_dir)
+        before = service.state("dispatch")
+        assert before is not None and before.status == "unapproved"
+        assert before.approval is None
+        assert [(c.path, c.origin) for c in before.pending_covered] == [
+            (".workbench/reconcile/dispatch.toml", "spec"),
+            ("se3/reporting.py", "callable"),
+        ]
+
+        approve(service)
+        after = service.state("dispatch")
+        assert after is not None and after.approval is not None
+        # Once the approval carries the same receipt, the row stops paying for it
+        # twice on every fan-out.
+        assert after.pending_covered == []
+        assert [c.path for c in after.approval.covered] == [c.path for c in before.pending_covered]
+
+        # …and a stale row carries both: what was trusted, and what "Approve
+        # again" would trust. The difference between them *is* the question.
+        (workspace / "se3" / "reporting.py").write_text(
+            "def annual_revenue():\n    return 9999.0\n", encoding="utf-8"
+        )
+        stale = service.state("dispatch")
+        assert stale is not None and stale.status == "stale"
+        assert stale.approval is not None
+        assert [c.path for c in stale.pending_covered] == [c.path for c in stale.approval.covered]
+        assert [c.digest for c in stale.pending_covered] != [
+            c.digest for c in stale.approval.covered
+        ]
+
     def test_the_digest_folds_order_path_and_bytes(self, tmp_path: Path) -> None:
         one = CoveredSource(path="a.py", digest="aa", origin="callable")
         two = CoveredSource(path="b.py", digest="bb", origin="callable")
@@ -816,6 +952,26 @@ callable = "se3.not_yet:value"
         address a file outside the root is not a module name."""
         assert resolve_module(workspace, module) is None
 
+    @pytest.mark.parametrize("module", ["se3.reporting", "se3", "se3.not_yet", "brand_new"])
+    def test_a_name_that_is_this_workspace_is_not_called_shadowed(
+        self, workspace: Path, module: str
+    ) -> None:
+        """Written, not written yet, and a top-level name nothing answers to —
+        all three are the workspace's own, and the ``absent`` digest recorded for
+        the unwritten ones is a promise that moves the day somebody writes them."""
+        assert module_outside_workspace(workspace, module) is None
+
+    @pytest.mark.parametrize("module", ["json", "json.decoder", "sys", "unittest.mock"])
+    def test_a_name_the_import_system_already_answers_is_named_as_shadowed(
+        self, workspace: Path, module: str
+    ) -> None:
+        """The stdlib stands in for any installed distribution: the digest would
+        be recorded against an in-tree path that will never exist, while the code
+        that actually ran came from somewhere the approval never looked."""
+        reason = module_outside_workspace(workspace, module)
+        assert reason is not None
+        assert "not this workspace's code" in reason
+
 
 # --------------------------------------------------------------------------- the loop
 
@@ -825,13 +981,17 @@ def _change(path: str, change: Literal["added", "modified", "deleted"] = "modifi
 
 
 async def _settle(service: ReconcileSpecService) -> None:
-    """Let every debounced run finish.
+    """Let every scheduled run finish.
 
-    Awaits the pending *tasks* rather than sleeping on a wall clock: the fixtures
-    use ``debounce_s=0``, so what has to be waited for is the run behind the
-    debounce (which really does hit a thread and a subprocess seam), not a timer.
+    Awaits the *tasks* rather than sleeping on a wall clock: the fixtures use
+    ``debounce_s=0``, so what has to be waited for is the run behind the debounce
+    (which really does hit a thread and a subprocess seam), not a timer.
+
+    ``_running`` and not ``_pending``: a run leaves the debounce map the moment
+    it is past its window, and the set is the only handle on one that is actually
+    executing — which is the same reason ``stop()`` reaches for it.
     """
-    while tasks := list(service._pending.values()):  # the pending map is the point
+    while tasks := list(service._running):  # the scheduled set is the point
         await asyncio.gather(*tasks, return_exceptions=True)
     await asyncio.sleep(0)
 
@@ -1098,6 +1258,112 @@ class TestTheRealSubprocess:
         assert output.exit_code is None
         assert output.result is None
         assert "could not start" in output.log
+
+    def test_a_callable_outside_the_workspace_is_refused_before_it_is_imported(
+        self, tmp_path: Path
+    ) -> None:
+        """The child's own half of the "within the workspace" contract.
+
+        Driven through the real entry module because the claim is about what
+        Python's import machinery does, which a fake cannot have an opinion
+        about: ``json`` is importable in any interpreter, has an attribute that
+        answers, and lives nowhere near the workspace. It comes back as one
+        ``ok: false`` line naming where it resolved — never as a value the gate
+        would then reconcile a workbook against.
+        """
+        root = self._workspace(tmp_path, "def value():\n    return 1.0\n")
+        output = asyncio.run(
+            SubprocessSpecRunner(LOCAL_ARGV).run(
+                SpecEntryRequest(callables=["json:dumps", "mymod:value"]),
+                root,
+                60.0,
+                MAX_SPEC_LOG_BYTES,
+            )
+        )
+        assert output.result is not None
+        refused, allowed = output.result.values
+        assert refused.ok is False
+        assert "refused 'json'" in str(refused.error)
+        # …and the workspace's own callable in the same request still answers.
+        assert allowed.ok is True and allowed.scalar == 1.0
+
+    @pytest.mark.timeout(90)
+    def test_shutdown_kills_a_run_that_is_already_holding_a_subprocess(
+        self, tmp_path: Path, store_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``main.py``'s shutdown comment, held.
+
+        It claims "a debounced run that is mid-flight is cancelled rather than
+        left holding a subprocess in the user's folder". It was not: a run left
+        the pending map the instant it passed the debounce, so ``stop()`` could
+        only ever reach one still *asleep* — the only kind with no child to
+        orphan — and the runner had no cancellation branch to kill one anyway. A
+        server stop (or a dev-server restart) landing on a live run left the
+        analyst's code running unsupervised with nothing holding a handle to it.
+
+        Driven with the **real** subprocess runner, because "the child is dead"
+        is not a claim a fake can make.
+        """
+        root = tmp_path / "shutdown"
+        root.mkdir()
+        write_workbook(root / "models" / "budget.xlsx", GOOD)
+        (root / "slow.py").write_text(
+            "import time\n\n\ndef value():\n    time.sleep(120)\n    return 1.0\n",
+            encoding="utf-8",
+        )
+        write_spec(
+            root,
+            "dispatch",
+            """
+workbook = "models/budget.xlsx"
+
+[default_tolerance]
+rel = 0.001
+
+[[check]]
+cell = "B2"
+callable = "slow:value"
+""",
+        )
+        spawned: list[asyncio.subprocess.Process] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def recording(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            proc = await real_exec(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+
+        async def scenario() -> None:
+            bus = EventBus()
+            validation = ValidationService(root, bus)
+            validation.register(ReconciliationCheck())
+            service = ReconcileSpecService(
+                root,
+                bus,
+                SubprocessSpecRunner(LOCAL_ARGV),
+                validation,
+                SpecApprovalStore(store_dir),
+                debounce_s=0.0,
+            )
+            approve(service)
+            service.note_file_change(_change("models/budget.xlsx"))
+            for _ in range(600):  # until the child is really up (never a sleep)
+                await asyncio.sleep(0.05)
+                if spawned:
+                    break
+            assert spawned, "the watcher never spawned a run to interrupt"
+            assert spawned[0].returncode is None, "the child finished before it could be killed"
+
+            await service.stop()
+
+            # Dead and reaped. Before the fix this assertion failed with the
+            # child still sleeping out its two minutes in the user's folder.
+            assert spawned[0].returncode is not None
+            assert service._running == set()
+
+        asyncio.run(scenario())
 
     def test_stdout_that_is_not_an_envelope_is_a_named_failure_not_a_crash(
         self, tmp_path: Path

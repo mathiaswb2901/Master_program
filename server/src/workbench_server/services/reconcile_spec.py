@@ -88,9 +88,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import importlib.machinery
 import json
 import os
 import re
+import sys
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -280,6 +282,100 @@ def _relative(root: Path, path: Path) -> str | None:
         return None
 
 
+def _inside(root: Path, where: str | None) -> bool:
+    """Is ``where`` a real path under ``root``?
+
+    ``exists()`` rather than a pure string comparison because a
+    :class:`~importlib.machinery.ModuleSpec` origin is not always a path:
+    ``"built-in"`` and ``"frozen"`` would otherwise resolve *relative to the
+    process's cwd* and read as in-tree, which is the answer that would let the
+    stdlib through the check below.
+    """
+    if where is None:
+        return False
+    try:
+        path = Path(where).resolve()
+        if not path.exists():
+            return False
+    except (OSError, ValueError):
+        return False
+    return path == root or root in path.parents
+
+
+def _import_origin(root: Path, top: str) -> str | None:
+    """Where Python's own machinery answers ``top`` from, when that is *outside*
+    ``root``. ``None`` when nothing answers it, or the answer is in-tree.
+
+    Deliberately **import-free**. :class:`importlib.machinery.PathFinder`
+    consults the path hooks and hands back a spec without executing a line of the
+    module it found, which is the only acceptable way to ask this question from a
+    listing endpoint whose whole promise is that reading it runs nothing. The
+    server's own ``sys.path`` is an approximation of the child's — it is the
+    stdlib and the installed distributions that matter here, and those are the
+    same set — and a false *negative* only leaves the behaviour that shipped.
+    """
+    if top in sys.builtin_module_names:
+        return "a built-in module"
+    try:
+        found = importlib.machinery.PathFinder.find_spec(top, sys.path)
+    except (ImportError, AttributeError, TypeError, ValueError, OSError):
+        return None
+    if found is None:
+        return None
+    where = [found.origin] if found.origin is not None else []
+    where.extend(found.submodule_search_locations or [])
+    outside = [place for place in where if not _inside(root, place)]
+    return outside[0] if outside else None
+
+
+def module_outside_workspace(root: Path, module: str) -> str | None:
+    """Why this ``module`` cannot be the workspace's own code, or ``None``.
+
+    The contract a ``callable`` states — and the one the panel repeats — is
+    *module:function within the workspace*, and until this function existed
+    nothing held it. :func:`resolve_module` hands back a fabricated in-tree
+    candidate for **any** dotted name, so a spec naming an *installed*
+    distribution recorded ``root/<name>.py`` at :data:`ABSENT_DIGEST`; that
+    phantom path is never created, so :meth:`ReconcileSpecService._rehash`
+    recomputes the same "absent" digest forever and the approval can never go
+    stale. Meanwhile ``spec_entry.call_one`` imports the name through
+    ``sys.path``, so the code that really runs is whatever a ``uv sync`` last
+    put in ``site-packages``. That is the exact defect the composite digest
+    exists to prevent — an approval authorising code it never hashed — reached
+    by a different door.
+
+    So the two "there is no file at that path" cases are told apart:
+
+    * **not written yet** — the name addresses a place *inside* the workspace,
+      or nothing on the import path answers to it. ``absent`` is recorded and
+      the approval is revoked the moment somebody writes the file, which is what
+      ``test_a_missing_module_is_covered_as_absent_not_omitted`` pins.
+    * **shadowed** — the stdlib or an installed distribution answers the
+      top-level name today. Refused here, by name, at load time: the spec is
+      ``invalid``, it cannot be approved, and it runs nothing.
+    """
+    resolved = resolve_module(root, module)
+    if resolved is None:
+        return (
+            f"`callable` names {module!r}, which is not a module name — a callable is "
+            "`module:function` in this workspace's own code."
+        )
+    if resolved.is_file():
+        return None
+    top = module.partition(".")[0]
+    if (root / top).is_dir() or (root / f"{top}.py").is_file():
+        return None
+    origin = _import_origin(root, top)
+    if origin is None:
+        return None
+    return (
+        f"`callable` names {module!r}, which is not this workspace's code: Python resolves "
+        f"{top!r} to {origin}. A spec may only name a module under the workspace root — an "
+        "approval keyed to a file that is not there could never go stale when the code that "
+        "actually runs changes."
+    )
+
+
 # ---- the runner seam ---------------------------------------------------------
 
 
@@ -353,13 +449,35 @@ class SubprocessSpecRunner:
         try:
             await asyncio.wait_for(self._drive(proc, payload, stdout, errors), timeout_s)
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
-            await proc.wait()
+            await self._kill(proc)
             errors.feed(f"\n[killed: no exit after {timeout_s:.0f}s]".encode())
             return self._output(None, None, started, errors)
+        except asyncio.CancelledError:
+            # Shutdown, or a re-root, reaching a run that is *already spawned*.
+            # Without this branch the cancellation unwinds straight out of here
+            # with the child still running the analyst's code in their own
+            # folder, unsupervised, with nothing left holding a handle to it —
+            # the orphan the timeout branch above was written to prevent, by the
+            # one route that skips it. Kill, reap, then let the cancellation
+            # continue: a shutdown that swallowed it would never finish.
+            await self._kill(proc)
+            raise
         envelope, _ = stdout.render()
         return self._output(envelope, proc.returncode, started, errors)
+
+    @staticmethod
+    async def _kill(proc: asyncio.subprocess.Process) -> None:
+        """Kill the child and reap it.
+
+        The reap is suppressed against a *second* cancellation rather than
+        skipped: the kill has already been delivered by then, so the child is
+        gone either way, and a shutdown must not hang waiting for a wait that
+        will be interrupted again.
+        """
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(asyncio.CancelledError):
+            await proc.wait()
 
     @staticmethod
     def _env() -> dict[str, str]:
@@ -709,7 +827,16 @@ class ReconcileSpecService:
         self._debounce_s = debounce_s
         self._clock = clock
         self._last_runs: dict[str, SpecRunReport] = {}
+        #: Debouncing runs, keyed by workbook — the ones a *newer save* of the
+        #: same workbook supersedes. A task leaves this map the moment it is past
+        #: its debounce, which is why it cannot be the only handle on a run.
         self._pending: dict[str, asyncio.Task[None]] = {}
+        #: Every scheduled run until it returns, debouncing **or in flight**.
+        #: ``stop()`` cancels these, and a run cancelled mid-flight is what kills
+        #: and reaps its subprocess; ``_pending`` alone could only ever reach one
+        #: still asleep in the debounce window, which is precisely the run with
+        #: no child to leave behind.
+        self._running: set[asyncio.Task[None]] = set()
         self._queue: asyncio.Queue[BaseModel] | None = None
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -723,9 +850,7 @@ class ReconcileSpecService:
         self._task = asyncio.create_task(self._consume(), name="reconcile-spec")
 
     async def stop(self) -> None:
-        for task in list(self._pending.values()):
-            task.cancel()
-        self._pending.clear()
+        await self._cancel_scheduled()
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -734,6 +859,23 @@ class ReconcileSpecService:
         if self._queue is not None:
             self._bus.unsubscribe(self._queue)
             self._queue = None
+
+    async def _cancel_scheduled(self) -> None:
+        """Cancel every scheduled run — debouncing *and* in flight — and wait.
+
+        The waiting is the whole point, and it is what ``main.py``'s shutdown
+        comment has always claimed: a task cancelled mid-run is what reaches
+        :meth:`SubprocessSpecRunner._kill`, and a shutdown that cancelled without
+        awaiting would return before the child was killed, leaving it running in
+        the user's folder with nothing left to supervise it.
+        """
+        self._pending.clear()
+        scheduled = list(self._running)
+        self._running.clear()
+        for task in scheduled:
+            task.cancel()
+        if scheduled:
+            await asyncio.gather(*scheduled, return_exceptions=True)
 
     def set_workspace_root(self, root: Path) -> None:
         """Re-root, and forget every *run*.
@@ -746,8 +888,14 @@ class ReconcileSpecService:
         """
         self._root = root.resolve()
         self._last_runs.clear()
-        for task in list(self._pending.values()):
+        # In-flight runs too, and for the same reason ``stop()`` cancels them: a
+        # subprocess spawned against the folder the user just left has nothing
+        # left to judge. This one cannot await the reap — ``set_workspace_root``
+        # is synchronous by contract — but the cancellation still reaches
+        # ``SubprocessSpecRunner``'s kill.
+        for task in list(self._running):
             task.cancel()
+        self._running.clear()
         self._pending.clear()
 
     # ---- reading the folder -------------------------------------------------
@@ -805,6 +953,25 @@ class ReconcileSpecService:
                 "ReconciliationSpec, which carries one time index. Split the ranges across "
                 "one spec file each"
             )
+            return self._with_sources(loaded)
+        shadowed = next(
+            (
+                reason
+                for reason in (
+                    module_outside_workspace(self._root, check.call.partition(":")[0])
+                    for check in loaded.spec.checks
+                )
+                if reason is not None
+            ),
+            None,
+        )
+        if shadowed is not None:
+            # Refused at *load* rather than at run: an approval over a name the
+            # import system answers from `site-packages` is keyed to a file that
+            # does not exist, so its digest can never move — a dependency bump
+            # under it would be invisible to the mechanism written to catch an
+            # edit. `spec_entry.py` refuses the same name again on its own side.
+            loaded.problem = f"{relative}: {shadowed}"
             return self._with_sources(loaded)
         if self._workbook_path(loaded.spec.workbook) is None:
             loaded.problem = (
@@ -883,6 +1050,10 @@ class ReconcileSpecService:
                 digest=fresh_digest,
                 checks=checks,
                 approval=None,
+                # The receipt for a decision nobody has taken yet — the list the
+                # panel puts *beside* the Approve button, so the sentence below
+                # is checkable before the click rather than only after it.
+                pending_covered=list(loaded.sources),
                 last_run=self._last_runs.get(loaded.name),
                 detail=(
                     f"Not approved. Approving runs {checks} callable(s) from this workspace's own "
@@ -915,6 +1086,10 @@ class ReconcileSpecService:
             digest=fresh_digest,
             checks=checks,
             approval=approval,
+            # Both lists ride a stale row on purpose: `approval.covered` is what
+            # was trusted, `pending_covered` is what "Approve again" would trust.
+            # The difference between them is the decision being asked for.
+            pending_covered=list(loaded.sources),
             last_run=self._last_runs.get(loaded.name),
             detail=_stale_detail(changed),
         )
@@ -1256,21 +1431,47 @@ class ReconcileSpecService:
         existing = self._pending.pop(key, None)
         if existing is not None:
             existing.cancel()
-        self._pending[key] = asyncio.create_task(
+        task = asyncio.create_task(
             self._after_debounce(key, list(names)), name=f"reconcile-spec:{key}"
         )
+        self._pending[key] = task
+        self._running.add(task)
+        # A *done callback* and not a `finally` inside the coroutine: a task
+        # cancelled before its first step — which is every task a rapid burst of
+        # saves supersedes — never executes a line of its own body, so a `finally`
+        # there would leave it in this set forever.
+        task.add_done_callback(self._running.discard)
 
     async def _after_debounce(self, key: str, names: Sequence[str]) -> None:
+        current = asyncio.current_task()
         try:
-            await asyncio.sleep(self._debounce_s)
-        except asyncio.CancelledError:
-            return
-        self._pending.pop(key, None)
-        for name in names:
             try:
-                await self.run(name, trigger="watcher")
-            except Exception:  # one bad spec must not stop the next
-                log.exception("reconcile_spec.watcher_run_failed", spec=name)
+                await asyncio.sleep(self._debounce_s)
+            except asyncio.CancelledError:
+                return
+            # Past the debounce window and about to spawn. It leaves `_pending`
+            # here — a newer save of the same workbook must not cancel a run that
+            # already has a child — but it stays in `_running`, which is the map
+            # shutdown reaches for. Dropping both here is the bug that let a
+            # server stop while a subprocess was still running the analyst's code.
+            self._unpend(key, current)
+            for name in names:
+                try:
+                    await self.run(name, trigger="watcher")
+                except Exception:  # one bad spec must not stop the next
+                    log.exception("reconcile_spec.watcher_run_failed", spec=name)
+        finally:
+            self._unpend(key, current)
+
+    def _unpend(self, key: str, task: asyncio.Task[None] | None) -> None:
+        """Drop this key's debounce entry, but only when it is still *this* run.
+
+        Identity-checked because a later save of the same workbook installs its
+        own task under the same key: popping unconditionally would leave that
+        newer, still-debouncing run with nothing able to supersede it.
+        """
+        if self._pending.get(key) is task:
+            self._pending.pop(key, None)
 
 
 # ---- compiling a spec into the gate's own vocabulary --------------------------

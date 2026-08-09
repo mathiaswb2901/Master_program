@@ -2,15 +2,17 @@
  * The Specs panel — the body behind `reconcileSpec.ts`'s dynamic `import()`.
  *
  * One row per `.workbench/reconcile/<name>.toml`: what it proves, whether it may
- * run, what its last run said, and — for an approved spec — **the list of files
- * that approval stands for**, rendered verbatim.
+ * run, what its last run said, and **the list of files the approval stands for**
+ * — or, before the click, the list it *would* stand for — rendered verbatim.
  *
  * That last part is the panel's job and not decoration. The copy this surface
  * uses is *this spec, running exactly this code, on this machine, until either
  * changes*, and a sentence like that is only worth saying next to a list a
  * person can check. An approval that authorises code it never hashed is a trust
  * prompt's shadow; an approval whose coverage a user cannot read is the same
- * shadow one step further along.
+ * shadow one step further along — and one they can read only *after* deciding is
+ * the shadow with a receipt printed too late to be evidence, which is why
+ * `SpecState.pending_covered` exists and is rendered beside the button.
  *
  * Nothing here can make a spec run on its own. Approve echoes the digest **this
  * row was rendered with**, so a spec whose bytes moved between the render and
@@ -61,11 +63,22 @@ const ORIGIN_WORD: Record<CoveredSource["origin"], string> = {
 
 /** The receipt behind the approval sentence. `imported` entries are the ones a
  * previous run actually loaded — which is why the list can grow after run 1, and
- * why the panel shows it rather than describing it. */
-function Covered({ covered }: { covered: readonly CoveredSource[] }): ReactElement | null {
+ * why the panel shows it rather than describing it.
+ *
+ * Rendered on **both** sides of the decision. Before the click it is
+ * `pending_covered` — what Approve would cover — because a user vouching for
+ * code whose file names they cannot see is rubber-stamping, not deciding; after
+ * it, `approval.covered`, which is the same list with the bytes it stood for. */
+function Covered({
+  covered,
+  label,
+}: {
+  covered: readonly CoveredSource[];
+  label: string;
+}): ReactElement | null {
   if (covered.length === 0) return null;
   return (
-    <ul className="wb-spec-covered" aria-label="Files this approval covers">
+    <ul className="wb-spec-covered" aria-label={label}>
       {covered.map((source) => (
         <li key={source.path}>
           <span className="wb-spec-covered-origin">{ORIGIN_WORD[source.origin]}</span>
@@ -100,7 +113,21 @@ function SpecCard({ spec }: { spec: SpecState }): ReactElement {
           {lastRun.trigger === "watcher" ? "on save" : "run by hand"} — {lastRun.detail}
         </p>
       )}
-      {spec.approval !== null && <Covered covered={spec.approval.covered} />}
+      {spec.approval !== null && (
+        <Covered covered={spec.approval.covered} label="Files this approval covers" />
+      )}
+      {/* The list beside the button, not behind it. A spec that is not approved
+          carries no `approval`, so this is the *only* place its coverage can be
+          read — and reading it is the whole difference between an informed
+          one-time trust decision and a click. */}
+      <Covered
+        covered={spec.pending_covered}
+        label={
+          spec.status === "stale"
+            ? "Files approving again would cover"
+            : "Files this approval would cover"
+        }
+      />
       <div className="wb-spec-actions">
         {spec.status !== "invalid" && !armed && (
           <button
