@@ -896,13 +896,13 @@ it.
 declaration) — different functions, and E rebases onto D if both are in flight. Nothing else
 is shared.
 
-**Composition with the open PRs, honestly.** Every row below was checked with
+**Composition with the PRs in flight, honestly.** Every row below was checked with
 `git diff --stat origin/master...origin/<branch>` on 2026-08-09, not read off the PR titles
 — which is how three of them came back overlapping a lane their title gives no hint of:
 "gate-closure check" rewrites `services/reconciliation.py`, "PowerPoint hosting" rewrites the
 whole document bridge, and "store permission flags" edits `ui/src/mission.ts`.
 
-| Open PR | Overlaps | Verdict |
+| PR (status 2026-08-09) | Overlaps | Verdict |
 |---|---|---|
 | **#114** gate-closure check | **PR-A** — both own `services/reconciliation.py` (#114: +120/−38) | **PR-A rebases onto it.** See PR-A's composition bullet: #114 renames `_Unit`/`_UNIT_TO_BASE`/`_is_ambiguous` public and leaves `OpenpyxlReader` alone, so PR-A's rename merges *cleanly and wrongly* if it goes first |
 | **#107** PowerPoint hosting | **PR-A** — `document_bridge.py`, `real_`/`fake_document_bridge.py`, `office_com.py` (+305), `service.py` (+172) | **PR-A rebases onto it if it is still open.** Additive on both sides, conflicting in the same Protocol body every time |
@@ -910,7 +910,7 @@ whole document bridge, and "store permission flags" edits `ui/src/mission.ts`.
 | **#119** store permission flags | **PR-D** — both edit `ui/src/mission.ts` (#119: +40/−11, inside `useMissionStore.answer`) | **PR-D rebases onto it.** Different functions in one file, exactly like the D/E overlap on `registry.ts` above — and it also touches `ui/src/mission.test.ts`, which PR-D extends |
 | **#118** dockview v7 | **PR-D**, softly | Wanted, not required: without it, one spurious layout save per agent-driven open (stated under PR-D rather than hidden) |
 | **#113** voice seam | none | Disjoint, and a natural later customer for PR-E: a voice command resolving to `layout.switch{name}` is a parameterised invocation, which is why PR-E's validation lives in the relay rather than in the CLI |
-| **#116** terminal/agent WS lifecycle, **#121** shell thread discipline, **#123** monaco shared model, **#125** QuickBar a11y | none | Disjoint from all five |
+| **#116** terminal/agent WS lifecycle, **#123** monaco shared model, **#125** QuickBar a11y (open); **#121** shell thread discipline (merged) | none | Disjoint from all five |
 
 Two notes the table cannot hold:
 
