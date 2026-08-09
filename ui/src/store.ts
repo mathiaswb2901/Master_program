@@ -14,6 +14,16 @@ import { withoutTransitions } from "./motion";
 import { chatNeedsHydration, transcriptToChatItems } from "./liveTranscript";
 import { isNotebookPath } from "./notebook";
 import { isOfficePath, preloadDocsApi } from "./office";
+import {
+  notePermission,
+  // Aliased: the store action of the same name is the one callers use, and this
+  // is the fold it runs (`permissions.ts` holds the rules, the store holds the
+  // state — the split `provenance.ts` already follows).
+  settlePermission as settleRecord,
+  settleVanished,
+  type PermissionOutcome,
+  type PermissionRecord,
+} from "./permissions";
 import { anchorKey, MAX_ANNOTATIONS } from "./plan/anchors";
 import { applyProvenanceSnapshot, prunedDismissed } from "./provenance";
 import { cancelShellClose, closeShellWindow } from "./shell";
@@ -35,6 +45,7 @@ import type {
   ProvenanceEntry,
   SessionInfo,
   SessionLimits,
+  SessionPermissionEvent,
   SessionState,
   SessionStatusEvent,
   ShortcutEntry,
@@ -121,11 +132,18 @@ export type ChatItem =
       output: string;
     }
   | {
+      /**
+       * Where a prompt sits in the conversation — and nothing else about it.
+       *
+       * The tool, the command and whether it has been answered live in one
+       * `PermissionRecord` (`permissions`, keyed by this id), because the same
+       * prompt is also a chip on the Mission Control board and is retracted by
+       * the server on a timeout. A copy on the row is a second answer to "is
+       * this still a question", and the two drifted: a card answered from the
+       * board kept its buttons and a second click hit a settled prompt (404).
+       */
       kind: "permission";
       requestId: string;
-      tool: string;
-      description: string;
-      decision: "allow" | "deny" | null;
     }
   | { kind: "plan"; plan: PlanArtifact }
   | { kind: "error"; message: string };
@@ -303,6 +321,18 @@ interface WorkbenchStore {
   detachedSessions: Record<string, string>;
   transcriptView: { session: SessionInfo; messages: TranscriptMessage[] } | null;
   chats: Record<string, ChatState>;
+  /**
+   * Every permission prompt this window has been shown, by request id.
+   *
+   * The single record behind every rendering of a prompt: a card in a chat pane
+   * asks whether *this* is still open, and so would any other surface. Keyed by
+   * request id rather than by session because a request id is unique across
+   * sessions and a session can be blocked on more than one prompt at a time —
+   * and because that is the id both channels that move a prompt speak
+   * (`/ws/agent`'s `permission_request`, `/ws/events`' `session_permission`).
+   * See `permissions.ts` for what settles a record and what must not.
+   */
+  permissions: Record<string, PermissionRecord>;
   /** Unsent message text per session — in the store because prompt shortcuts
    * write it from outside the chat component. */
   chatDrafts: Record<string, string>;
@@ -444,6 +474,18 @@ interface WorkbenchStore {
    * mean. Called when a session pane takes focus: the focused pane is the one
    * you are talking to, exactly as in tmux. */
   focusSession: (sessionId: string) => void;
+  /**
+   * This session's transcript is in front of the user *now*.
+   *
+   * The one seam the "finished/failed since last viewed" markers
+   * (`sessionFlags`, DESIGN.md §2.6) are spent through. Viewing is what clears
+   * them, and there is more than one way to look at a session: picking it in
+   * the browser, and a pane bound to it taking focus or becoming visible. Every
+   * one of those ends here rather than clearing the flags itself — a clear call
+   * per surface is exactly how the pane path came to be missing one, leaving a
+   * session watched only through its own pane wearing a Done dot forever.
+   */
+  markSessionViewed: (sessionId: string) => void;
   openTranscript: (info: SessionInfo) => Promise<void>;
   /** Rebuild `detachedSessions` from the named-session store for this workspace,
    * keeping only records whose session is still live in this server process — a
@@ -473,7 +515,15 @@ interface WorkbenchStore {
   ) => Promise<string | null>;
   resumeSession: () => Promise<void>;
   sendChat: (text: string) => void;
+  /** Answer one prompt over its own session's socket. Addressed by request id:
+   * the record names the session, so a card in an unfocused pane answers the
+   * conversation it belongs to rather than the one the keyboard is in. */
   decidePermission: (requestId: string, allow: boolean) => void;
+  /** Record that a prompt is no longer open, from a surface that answered it
+   * some other way — Mission Control's chips POST to the session instead of
+   * using a socket this window may not hold. The record is what every card
+   * renders, so this is what settles them all at once. */
+  settlePermission: (requestId: string, outcome: PermissionOutcome) => void;
   setPlanChoice: (planId: string, nodeId: string, optionId: string) => void;
   /** Write (or clear, with "") the note on one anchor. */
   setPlanNote: (planId: string, anchor: AnnotationAnchor, text: string) => void;
@@ -490,6 +540,11 @@ interface WorkbenchStore {
   interrupt: () => void;
   handleAgentMessage: (sessionId: string, message: AgentServerMessage) => void;
   handleSessionStatus: (event: SessionStatusEvent) => void;
+  /** The fleet-wide prompt channel: one session's whole open set, whenever it
+   * changes. Mission Control renders its own view of this; the store listens
+   * for one reason — a prompt that left the set is closed, however it closed
+   * (answered elsewhere, or timed out), and the cards for it must say so. */
+  handleSessionPermission: (event: SessionPermissionEvent) => void;
 }
 
 /** `index.html` applies the persisted theme before first paint; the store just
@@ -656,6 +711,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     detachedSessions: {},
     transcriptView: null,
     chats: {},
+    permissions: {},
     chatDrafts: {},
     plans: {},
     lastCostUsd: null,
@@ -684,6 +740,7 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           // no per-file event can describe that — re-read what is on screen.
           else if (event.type === "tree_invalidated") void get().reconcileTree();
           else if (event.type === "session_status") get().handleSessionStatus(event);
+          else if (event.type === "session_permission") get().handleSessionPermission(event);
           else if (event.type === "shortcuts_changed") void get().refreshShortcuts();
           else if (event.type === "file_provenance") get().handleFileProvenance(event);
         },
@@ -894,6 +951,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         folders: [],
         sessionStates: {},
         sessionFlags: {},
+        // `permissions` is deliberately NOT cleared here, for the same reason
+        // `chats` is not: a chat kept across the switch still renders its
+        // prompt cards, and a card whose record had been thrown away would
+        // vanish from a transcript the user can still scroll.
         detachedSessions: {},
         transcriptView: null,
         orphanedPaths: orphaned,
@@ -1583,8 +1644,10 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         activeSessionId: id,
         transcriptView: null,
         chats: id in s.chats ? s.chats : { ...s.chats, [id]: { items: [] } },
-        sessionFlags: { ...s.sessionFlags, [id]: { done: false, error: false } },
       }));
+      // Picking a session in the browser is looking at it — through the one
+      // seam, not a `sessionFlags` write of its own (see `markSessionViewed`).
+      get().markSessionViewed(id);
     },
 
     attachSession: (sessionId) => {
@@ -1628,9 +1691,26 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       get().attachSession(sessionId);
       // A transcript and a live pane cannot both be what the keyboard means, so
       // taking focus into a session pane closes the transcript view — the same
-      // thing `openLiveSession` does, minus the flag reset, because arriving at
-      // a pane is not the same event as opening a session.
+      // thing `openLiveSession` does.
       set({ activeSessionId: sessionId, transcriptView: null });
+      // …and, like it, this is the user looking at the conversation. It used to
+      // be deliberately left out on the grounds that "arriving at a pane is not
+      // the same event as opening a session" — which is true of the *transcript
+      // view* and false of the marker: a session watched only through its own
+      // pane never passes through `openLiveSession`, so its Done/Error dot had
+      // nothing left to clear it and stood for the rest of the session.
+      get().markSessionViewed(sessionId);
+    },
+
+    markSessionViewed: (sessionId) => {
+      const flags = get().sessionFlags[sessionId];
+      // Nothing to spend. Guarded so that the surfaces that call this on every
+      // focus, visibility change and mount do not write an identical object
+      // into the store and re-render every reader of `sessionFlags`.
+      if (flags === undefined || (!flags.done && !flags.error)) return;
+      set((s) => ({
+        sessionFlags: { ...s.sessionFlags, [sessionId]: { done: false, error: false } },
+      }));
     },
 
     openTranscript: async (info) => {
@@ -1814,24 +1894,26 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
     },
 
     decidePermission: (requestId, allow) => {
-      const id = get().activeSessionId;
-      if (!id) return;
-      ensureAgentSocket(id).send({ type: "permission_decision", request_id: requestId, allow });
+      const record = get().permissions[requestId];
+      // Nothing to answer, or answered already. A second click on a settled
+      // prompt is a 404 by design (`resolve_permission`), and the card no longer
+      // offers one — this is the belt to that braces.
+      if (record === undefined || record.decision !== null) return;
+      // The record's session, never `activeSessionId`: with four chat panes on
+      // screen the focused one is not necessarily the one holding this card, and
+      // answering over the wrong socket answers the wrong agent's question.
+      ensureAgentSocket(record.sessionId).send({
+        type: "permission_decision",
+        request_id: requestId,
+        allow,
+      });
+      get().settlePermission(requestId, allow ? "allow" : "deny");
+    },
+
+    settlePermission: (requestId, outcome) => {
       set((s) => {
-        const chat = s.chats[id];
-        if (!chat) return {};
-        return {
-          chats: {
-            ...s.chats,
-            [id]: {
-              items: chat.items.map((item) =>
-                item.kind === "permission" && item.requestId === requestId
-                  ? { ...item, decision: allow ? "allow" : "deny" }
-                  : item,
-              ),
-            },
-          },
-        };
+        const permissions = settleRecord(s.permissions, requestId, outcome);
+        return permissions === s.permissions ? {} : { permissions };
       });
     },
 
@@ -1998,21 +2080,26 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
           break;
         case "permission_request":
           // The server replays still-pending prompts on (re)connect, so the
-          // same request_id can arrive twice — render it once.
+          // same request_id can arrive twice — render it once, and keep the
+          // record it already has (`notePermission` is idempotent, so a replay
+          // never puts the buttons back under an answer already given).
           set((s) => {
+            const permissions = notePermission(s.permissions, {
+              requestId: message.request_id,
+              sessionId,
+              tool: message.tool,
+              description: message.description,
+            });
             const chat = s.chats[sessionId] ?? { items: [] };
             const seen = chat.items.some(
               (item) => item.kind === "permission" && item.requestId === message.request_id,
             );
-            if (seen) return {};
-            const item: ChatItem = {
-              kind: "permission",
-              requestId: message.request_id,
-              tool: message.tool,
-              description: message.description,
-              decision: null,
+            if (seen) return { permissions };
+            const item: ChatItem = { kind: "permission", requestId: message.request_id };
+            return {
+              permissions,
+              chats: { ...s.chats, [sessionId]: { items: [...chat.items, item] } },
             };
-            return { chats: { ...s.chats, [sessionId]: { items: [...chat.items, item] } } };
           });
           break;
         case "plan_presented":
@@ -2112,6 +2199,24 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       // A session we have never listed (started by another window, or created
       // since our last poll): pull the listing so it gets a title and a row.
       if (!known) scheduleSessionsRefresh();
+    },
+
+    handleSessionPermission: (event) => {
+      // Arrives for EVERY session, on the same socket as `session_status`, and
+      // carries the session's whole open set — including the empty one. So a
+      // prompt of that session's that is missing from it is closed, and the card
+      // for it stops being a question: answered from Mission Control, answered
+      // in another window, or denied by the ten-minute timeout. The frame says
+      // nothing about *which*, and neither does the card (see
+      // `PermissionOutcome`).
+      set((s) => {
+        const permissions = settleVanished(
+          s.permissions,
+          event.session.session_id,
+          event.session.pending.map((prompt) => prompt.request_id),
+        );
+        return permissions === s.permissions ? {} : { permissions };
+      });
     },
   };
 });

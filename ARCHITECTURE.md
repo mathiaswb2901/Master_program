@@ -1369,6 +1369,16 @@ redacted the way the activity feed's paths are, because an approval you cannot
 read is one you cannot give informedly; and a stale answer comes back **404**
 rather than 200, so a click that changed nothing is never reported as a decision.
 
+Two channels for one prompt is exactly the shape that produces two copies of it,
+so on the client there is **one record per `request_id`** — `store.permissions`,
+folded by `ui/src/permissions.ts` — and every surface renders it. The chat card
+carries only the id; the frame that retracts a prompt settles the record however
+it was closed (answered here, answered on the board, answered in another window,
+or timed out), and because that frame carries no verdict a card that did not see
+the answer says only that the question is closed rather than inventing one. The
+404 above is what the old shape produced in the hand: a card that had kept its
+own copy of "still asking" offered Allow for a prompt that was already settled.
+
 ### The orchestrator (`services/orchestrator.py`)
 
 An orchestrator is an ordinary `AgentSession` with `kind="orchestrator"`,
