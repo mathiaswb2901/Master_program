@@ -1,4 +1,9 @@
-"""Terminal stack tests: protocol units, the framing budget, and a real PowerShell round-trip."""
+"""Terminal stack tests: protocol units, the framing budget, and a real shell round-trip.
+
+The round-trip runs on whichever PTY backend the platform has — pywinpty on
+Windows, the stdlib `pty.fork()` twin elsewhere (`services/pty_posix.py`) — so
+the 3-OS matrix is what proves both halves of the seam against a real kernel.
+"""
 
 import asyncio
 import json
@@ -282,11 +287,26 @@ class TestFramingOverTheWire:
         assert chars / frames >= MIN_MEAN_FRAME_BYTES
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="pywinpty is Windows-only")
+# Every platform the app ships on has a PTY backend now (M7 §C1): pywinpty on
+# Windows, the stdlib `pty.fork()` twin on POSIX. So this class runs everywhere
+# rather than on win32 only — which is the whole point of the 3-OS matrix (§C2):
+# these two tests are the only place `pty_posix` is exercised against a real
+# kernel instead of a fake syscall table. `emscripten`/`wasi` have no `fork`, so
+# the guard is "a backend exists", not "not Windows".
+_HAS_PTY_BACKEND = sys.platform == "win32" or sys.platform in ("linux", "darwin")
+
+
+@pytest.mark.skipif(not _HAS_PTY_BACKEND, reason="no PTY backend on this platform")
 @pytest.mark.timeout(90)
 class TestIntegration:
-    def test_powershell_round_trip(self, settings: Settings) -> None:
-        """Full pipeline: WS connect -> spawn shell -> command -> output comes back."""
+    def test_shell_round_trip(self, settings: Settings) -> None:
+        """Full pipeline: WS connect -> spawn shell -> command -> output comes back.
+
+        `echo` is the one command PowerShell, bash, zsh and `/bin/sh` all spell
+        the same way, so the assertion is identical on every matrix leg: the
+        marker comes back twice, once as the terminal's echo of the keystrokes
+        and once as the shell's output.
+        """
         app = create_app(settings)
         with TestClient(app) as client, client.websocket_connect("/ws/terminal") as ws:
             ws.send_text(json.dumps({"type": "resize", "cols": 120, "rows": 30}))

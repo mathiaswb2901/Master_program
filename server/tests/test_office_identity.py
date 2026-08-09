@@ -145,22 +145,33 @@ windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="winreg and HKCU exist only on Windows"
 )
 
+#: Every helper below touches `winreg`, whose attributes typeshed defines only
+#: under `sys.platform == "win32"` — so on the matrix's linux and macos legs
+#: (M7 §C2) the bodies have to sit inside a platform branch, not merely behind
+#: the `windows_only` mark. mypy skips a branch a platform check rules out; a
+#: pytest mark it does not see at all. The non-Windows half of each branch never
+#: runs — the mark is what stops these being called there.
+_NOT_WINDOWS = "winreg is Windows-only; this helper is guarded by @windows_only"
+
 
 def _delete_tree(path: str) -> None:
-    import winreg
+    if sys.platform != "win32":
+        raise RuntimeError(_NOT_WINDOWS)
+    else:
+        import winreg
 
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_ALL_ACCESS)
-    except FileNotFoundError:
-        return
-    with key:
-        while True:
-            try:
-                child = winreg.EnumKey(key, 0)
-            except OSError:
-                break
-            _delete_tree(path + "\\" + child)
-    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_ALL_ACCESS)
+        except FileNotFoundError:
+            return
+        with key:
+            while True:
+                try:
+                    child = winreg.EnumKey(key, 0)
+                except OSError:
+                    break
+                _delete_tree(path + "\\" + child)
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
 
 
 def _write_account(
@@ -170,26 +181,59 @@ def _write_account(
     friendly: str | None = None,
     email_kind: int | None = None,
 ) -> None:
-    import winreg
+    if sys.platform != "win32":
+        raise RuntimeError(_NOT_WINDOWS)
+    else:
+        import winreg
 
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _SCRATCH_KEY + "\\" + subkey) as key:
-        if email is not None:
-            winreg.SetValueEx(key, "EmailAddress", 0, email_kind or winreg.REG_SZ, email)
-        if friendly is not None:
-            winreg.SetValueEx(key, "FriendlyName", 0, winreg.REG_SZ, friendly)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _SCRATCH_KEY + "\\" + subkey) as key:
+            if email is not None:
+                winreg.SetValueEx(key, "EmailAddress", 0, email_kind or winreg.REG_SZ, email)
+            if friendly is not None:
+                winreg.SetValueEx(key, "FriendlyName", 0, winreg.REG_SZ, friendly)
+
+
+def _reg_expand_sz() -> int:
+    """``winreg.REG_EXPAND_SZ``, read behind the branch mypy needs off Windows."""
+    if sys.platform != "win32":
+        raise RuntimeError(_NOT_WINDOWS)
+    else:
+        import winreg
+
+        return winreg.REG_EXPAND_SZ
+
+
+def _refuse_to_open(monkeypatch: pytest.MonkeyPatch, subkey: str) -> None:
+    """Make ``winreg.OpenKey`` raise ``PermissionError`` for one subkey name."""
+    if sys.platform != "win32":
+        raise RuntimeError(_NOT_WINDOWS)
+    else:
+        import winreg
+
+        real_open = winreg.OpenKey
+
+        def open_but_refuse_the_bad_one(key: Any, sub_key: str, *args: Any, **kwargs: Any) -> Any:
+            if sub_key == subkey:
+                raise PermissionError("access is denied")
+            return real_open(key, sub_key, *args, **kwargs)
+
+        monkeypatch.setattr(winreg, "OpenKey", open_but_refuse_the_bad_one)
 
 
 @pytest.fixture
 def scratch_identities(monkeypatch: pytest.MonkeyPatch) -> Any:
-    import winreg
+    if sys.platform != "win32":
+        raise RuntimeError(_NOT_WINDOWS)
+    else:
+        import winreg
 
-    _delete_tree(_SCRATCH_KEY)
-    winreg.CreateKey(winreg.HKEY_CURRENT_USER, _SCRATCH_KEY).Close()
-    monkeypatch.setattr(identity_module, "_IDENTITIES_KEY", _SCRATCH_KEY)
-    try:
-        yield
-    finally:
         _delete_tree(_SCRATCH_KEY)
+        winreg.CreateKey(winreg.HKEY_CURRENT_USER, _SCRATCH_KEY).Close()
+        monkeypatch.setattr(identity_module, "_IDENTITIES_KEY", _SCRATCH_KEY)
+        try:
+            yield
+        finally:
+            _delete_tree(_SCRATCH_KEY)
 
 
 @windows_only
@@ -219,13 +263,11 @@ def test_value_narrows_a_non_reg_sz_type_to_none(scratch_identities: None) -> No
     ``EmailAddress`` stored as ``REG_EXPAND_SZ`` reads back as None, while a
     sibling ``REG_SZ`` FriendlyName is kept — the account is still reported by
     name rather than the whole read tripping on the unexpected type."""
-    import winreg
-
     _write_account(
         "id-oddtype",
         email="expand@example.com",
         friendly="Odd Type",
-        email_kind=winreg.REG_EXPAND_SZ,
+        email_kind=_reg_expand_sz(),
     )
     accounts = identity_module._read_accounts()
     assert [(a.display_name, a.email) for a in accounts] == [("Odd Type", None)]
@@ -238,19 +280,9 @@ def test_one_unreadable_subkey_does_not_discard_the_others(
     """A permissions refusal on a single identity subkey degrades that one entry,
     not the whole read: the good account still comes through. Regression for the
     conflation of 'partially readable' with 'nothing readable'."""
-    import winreg
-
     _write_account("id-good", email="good@example.com", friendly="Good Account")
     _write_account("id-bad", email="bad@example.com", friendly="Bad Account")
-
-    real_open = winreg.OpenKey
-
-    def open_but_refuse_the_bad_one(key: Any, sub_key: str, *args: Any, **kwargs: Any) -> Any:
-        if sub_key == "id-bad":
-            raise PermissionError("access is denied")
-        return real_open(key, sub_key, *args, **kwargs)
-
-    monkeypatch.setattr(winreg, "OpenKey", open_but_refuse_the_bad_one)
+    _refuse_to_open(monkeypatch, "id-bad")
     accounts = identity_module._read_accounts()
     assert [(a.display_name, a.email) for a in accounts] == [("Good Account", "good@example.com")]
 

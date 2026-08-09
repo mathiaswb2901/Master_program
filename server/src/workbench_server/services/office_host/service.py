@@ -194,9 +194,14 @@ def detect_office(roots: Sequence[Path] | None = None) -> bool:
     launch, so a false negative costs a line of text and not a feature.
     """
     if roots is None:
+        # `if`/`else` rather than an early return: mypy exempts a branch guarded
+        # by `sys.platform` from `warn_unreachable`, but flags the tail an early
+        # return leaves unreachable — and the 3-OS matrix type-checks this file
+        # on linux and macos too.
         if sys.platform != "win32":
             return False
-        roots = program_files_roots()
+        else:
+            roots = program_files_roots()
     for root in roots:
         for pattern in _WORD_EXE_GLOBS:
             with contextlib.suppress(OSError):
@@ -220,9 +225,12 @@ def build_backend(
         return None
     if fake:
         return FakeHostBackend()
-    if channel is None or sys.platform != "win32":
+    if channel is None:
         return None
-    return ShellHostBackend(channel)
+    if sys.platform != "win32":  # nothing to host with — reported, not raised
+        return None
+    else:
+        return ShellHostBackend(channel)
 
 
 def build_bridge(
