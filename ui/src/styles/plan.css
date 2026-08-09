@@ -28,14 +28,37 @@
   color: var(--text-primary);
 }
 
+/* The verdict, once there is one. The word carries the reading and the dot
+   carries the hue — the same split the agent-status badge makes (agent.css,
+   §6.4/§7), because an 11px uppercase label in a semantic colour is the pairing
+   that fails the contrast floor in the light theme. */
 .wb-plan-verdict {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
   font-size: var(--type-xs-size);
   line-height: var(--type-xs-line);
   font-weight: var(--weight-medium);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--text-tertiary);
+}
+
+.wb-plan-verdict .wb-dot {
+  background: var(--text-tertiary);
+}
+
+.wb-plan-verdict.is-approve .wb-dot {
+  background: var(--success);
+}
+
+.wb-plan-verdict.is-revise .wb-dot {
+  background: var(--info);
+}
+
+.wb-plan-verdict.is-reject .wb-dot {
+  background: var(--error);
 }
 
 .wb-plan-summary {
@@ -90,17 +113,34 @@
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition:
-    background-color var(--duration-1) var(--ease-standard),
-    border-color var(--duration-1) var(--ease-standard);
+    background-color var(--motion-tint),
+    border-color var(--motion-tint);
 }
 
+/* Instant in, eased out (§5.1.5) — the base rule above would otherwise fade the
+   edge *up* under the cursor, which is the feel of lag however short it is. */
 .wb-plan-option:hover {
   border-color: var(--border-strong);
+  transition-duration: 0s;
 }
 
+/* The choice you have made: amber as *where I am* (§2.4), and the one place in
+   this card the accent is spent besides Approve. */
 .wb-plan-option.is-selected {
   background: var(--surface-selected);
   border-color: var(--accent);
+}
+
+/* A decided card is history: the options it did not take recede to a hairline
+   so the chosen one is the only thing left with weight. Neither is dimmed below
+   §7's floor — this is a step down in border weight and one in text, not an
+   opacity wash. */
+.wb-plan-card.is-settled .wb-plan-option:not(.is-selected) {
+  border-color: var(--border-subtle);
+}
+
+.wb-plan-card.is-settled .wb-plan-option:not(.is-selected) .wb-plan-option-label {
+  color: var(--text-secondary);
 }
 
 /* The radio itself is screen-reader-only; the card carries the focus ring. */
@@ -175,12 +215,25 @@
   gap: var(--space-4);
 }
 
-/* +/− carries the meaning, so pros and cons are legible without color (§7). */
+/* +/− carries the meaning, so pros and cons are legible without color (§7) —
+   and because the sign is there, the colour is allowed to double it. This is
+   §7's own sanctioned pairing ("diff/PnL colors pair with +/− signs"), and it
+   is what lets a reader weigh two options at a glance instead of reading eight
+   lines of prose. Semantic, not accent: a trade-off is a standing property of
+   an option. */
 .wb-plan-sign {
   flex: none;
   width: 10px;
   font-family: var(--font-mono);
   color: var(--text-tertiary);
+}
+
+.wb-plan-sign.is-pro {
+  color: var(--success);
+}
+
+.wb-plan-sign.is-con {
+  color: var(--error);
 }
 
 /* ---- Steps ---------------------------------------------------------------- */
@@ -229,13 +282,15 @@
   white-space: nowrap;
   text-overflow: ellipsis;
   transition:
-    color var(--duration-1) var(--ease-standard),
-    border-color var(--duration-1) var(--ease-standard);
+    color var(--motion-tint),
+    border-color var(--motion-tint);
 }
 
+/* Demoted from accent by the §2.4 audit, and instant on the way in (§5.1.5). */
 .wb-plan-file:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
+  transition-duration: 0s;
 }
 
 /* ---- Questions, notes, footer --------------------------------------------- */
@@ -305,9 +360,14 @@
    a real focus ring, because the mode has to be operable from the keyboard
    (DESIGN.md §7) and a mouse-only mode would fail that outright. */
 
+/* An outline rather than a `box-shadow` ring: §1.4 gives shadows to things that
+   float and gives structure to hairlines, and a card in a chat column floats
+   over nothing. `outline` also costs no layout — a second border would move the
+   whole column by 1px the moment the mode turned on. */
 .wb-plan-card.is-annotating {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-muted);
+  outline: 1px solid var(--accent-muted);
+  outline-offset: 0;
 }
 
 .wb-plan-head .wb-btn.is-active {
@@ -343,13 +403,16 @@
   padding: 0 var(--space-1);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  outline: 1px dashed var(--border-strong);
+  outline: 1px dashed var(--border-default);
   outline-offset: 1px;
 }
 
+/* The wash answers the hover; the dashes step up in weight. Demoted from accent
+   by the §2.4 audit for the same reason plan-file hover was — a hover is not a
+   thing that is changing, and it is over the moment you look away. */
 .wb-plan-phrase:hover {
   background: var(--surface-hover);
-  outline-color: var(--accent);
+  outline-color: var(--border-strong);
 }
 
 .wb-plan-phrase:focus-visible {
@@ -367,7 +430,7 @@
   font-size: var(--type-sm-size);
   color: var(--text-secondary);
   background: none;
-  border: 1px dashed var(--border-strong);
+  border: 1px dashed var(--border-default);
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-3);
   cursor: pointer;
@@ -375,7 +438,7 @@
 
 .wb-plan-whole:hover {
   color: var(--text-primary);
-  border-color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 .wb-plan-whole:focus-visible {

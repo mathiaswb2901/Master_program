@@ -176,6 +176,54 @@ export function assistantBlocks(page: Page): Locator {
 }
 
 /**
+ * What `var(<token>)` computes to *in this page*, as a normalised `rgb(...)`.
+ *
+ * A probe rather than reading the custom property off `:root`: the declared
+ * value is a hex string and the value under test is a computed colour, so the
+ * two cannot be compared without re-implementing the browser's parsing.
+ * Resolving it the way the element under test resolves its own is what closes
+ * the one bug a source-level check cannot see — a `var()` naming a token nobody
+ * defined is valid CSS and paints nothing (`tokenRefs.test.ts`, and the search
+ * highlight that shipped invisible).
+ *
+ * `e2e/ambient.spec.ts` has a copy of this that predates it and belongs here;
+ * moving it is that lane's to do, not this one's.
+ */
+export async function tokenColor(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${name})`;
+    document.body.append(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    return computed;
+  }, token);
+}
+
+/**
+ * A computed style read *after* any CSS transition on the element has been run
+ * to its end.
+ *
+ * DESIGN.md §5.4 cross-fades every status colour on this surface, so a one-shot
+ * read races the fade: the settled tool-call dot came back as `rgb(4, 114, 44)`
+ * against the token's `rgb(3, 114, 44)` — 99.2% of the way from the live amber
+ * to `--success`, caught about a millisecond from the end. What these journeys
+ * assert is where a colour *lands*, so finishing the transition first says that
+ * exactly, rather than sleeping until it is probably true.
+ */
+export async function settledStyle(target: Locator, property: string): Promise<string> {
+  return target.evaluate((el, name) => {
+    // Transitions only. The agent "working" dot also carries the app's one
+    // *infinite* animation (`u-agent-pulse`), and `finish()` on an infinite
+    // animation throws.
+    for (const animation of el.getAnimations()) {
+      if (animation instanceof CSSTransition) animation.finish();
+    }
+    return getComputedStyle(el).getPropertyValue(name);
+  }, property);
+}
+
+/**
  * Is a settled tool row on screen *inside a turn that is still running*?
  *
  * Read in one DOM snapshot on purpose. `turn_done` settles every unsettled row

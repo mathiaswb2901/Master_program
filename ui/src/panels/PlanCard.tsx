@@ -173,7 +173,7 @@ function OptionGroup({
                 <ul className="wb-plan-tradeoffs">
                   {option.pros.map((pro, i) => (
                     <li key={`p${i}`}>
-                      <span className="wb-plan-sign" aria-hidden="true">
+                      <span className="wb-plan-sign is-pro" aria-hidden="true">
                         +
                       </span>
                       <span className="u-sr-only">Pro: </span>
@@ -182,7 +182,7 @@ function OptionGroup({
                   ))}
                   {option.cons.map((con, i) => (
                     <li key={`c${i}`}>
-                      <span className="wb-plan-sign" aria-hidden="true">
+                      <span className="wb-plan-sign is-con" aria-hidden="true">
                         −
                       </span>
                       <span className="u-sr-only">Con: </span>
@@ -533,7 +533,9 @@ export function PlanCard({ plan }: { plan: PlanArtifact }) {
 
   return (
     <section
-      className={"wb-plan-card" + (annotating ? " is-annotating" : "")}
+      className={
+        "wb-plan-card" + (annotating ? " is-annotating" : "") + (settled ? " is-settled" : "")
+      }
       aria-labelledby={titleId}
       onKeyDown={onKeyDown}
     >
@@ -554,7 +556,13 @@ export function PlanCard({ plan }: { plan: PlanArtifact }) {
           </button>
         )}
         {draft.verdict !== null && (
-          <span className="wb-plan-verdict">{VERDICT_LABEL[draft.verdict]}</span>
+          // The word carries the reading, the dot carries the hue — the same
+          // split the agent-status badge makes, and for the same measured
+          // reason (§7: an 11px label in a semantic colour misses the floor).
+          <span className={`wb-plan-verdict is-${draft.verdict}`}>
+            <span className="wb-dot" aria-hidden="true" />
+            {VERDICT_LABEL[draft.verdict]}
+          </span>
         )}
       </header>
       {annotating && (

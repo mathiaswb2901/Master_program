@@ -29,7 +29,8 @@ vi.mock("../dock", () => ({ dockApiHandle: () => null, focusPanel: () => undefin
 vi.mock("./Panes", () => ({ revealPane: () => undefined }));
 vi.mock("./Chat", () => ({
   Chat: ({ sessionId }: { sessionId: string }) => <div data-chat={sessionId}>chat</div>,
-  statusVisual: () => ({ color: "", pulse: false, label: "" }),
+  statusVisual: () => ({ color: "", bg: "", pulse: false, label: "", tone: "idle" }),
+  dotClass: () => "wb-dot is-idle",
   TranscriptView: () => null,
 }));
 vi.mock("./PlanCard", () => ({ planCommands: [], planShortcuts: {} }));
