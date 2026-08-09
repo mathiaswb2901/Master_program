@@ -163,6 +163,9 @@ describe("command registry", () => {
       "editor.nextTab",
       "editor.prevTab",
       "editor.close",
+      // The Notebook tool's, straight after the Editor's: the other way of
+      // reading a file in the centre of the window (ROADMAP M4 tail).
+      "notebook.open",
       "session.new",
       "session.detach",
       "session.jump.1",

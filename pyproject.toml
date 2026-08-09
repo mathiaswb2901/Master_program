@@ -29,6 +29,16 @@ dependencies = [
     # note); hand-parsing the OOXML zip with the stdlib would reinvent it for no gain.
     # Read-only, data_only=True (the *cached computed* values, not formula strings).
     "openpyxl>=3.1.5",
+    # The notebook view reads .ipynb server-side (M4 tail). nbformat is Jupyter's
+    # own reference reader: it is the only thing that knows the format's *versions*
+    # — `read(as_version=4)` upgrades a v3 notebook in place, so a 2015 notebook
+    # renders instead of being called corrupt — and `validate()` is the schema the
+    # format is defined by, which is what lets the panel say "this file is not a
+    # notebook" with a reason rather than a guess. `json.load` would be the same
+    # call for the happy path and a hand-written version-migration + schema for
+    # everything else. Read-only; no kernel, no execution (nbclient/jupyter-client
+    # are not pulled in).
+    "nbformat>=5.10.4",
 ]
 
 [dependency-groups]
