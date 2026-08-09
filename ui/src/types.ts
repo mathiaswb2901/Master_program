@@ -823,9 +823,11 @@ export type SessionState = "idle" | "working" | "needs_attention";
 
 /** What a session *is*. `chat` is every session Workbench has ever had and is
  * the default everywhere; `orchestrator` carries Mission Control's toolset;
- * `worker` is one an orchestrator spawned, bound to a pooled worktree. A
- * transcript on disk is always `chat` — a kind is live state about a process. */
-export type SessionKind = "chat" | "orchestrator" | "worker";
+ * `worker` is one an orchestrator spawned, bound to a pooled worktree;
+ * `reviewer` is the M6 read-only session the review check puts in front of
+ * another session's diff. A transcript on disk is always `chat` — a kind is
+ * live state about a process. Mirrors `SessionKind` in `models/agents.py`. */
+export type SessionKind = "chat" | "orchestrator" | "worker" | "reviewer";
 
 export interface SessionInfo {
   session_id: string;

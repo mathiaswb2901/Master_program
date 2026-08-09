@@ -50,7 +50,7 @@ import {
 import type { WorkbenchTool } from "../registry";
 import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
-import type { OrchestratorSnapshot, SpawnRefusal, UsageSessionEntry } from "../types";
+import type { OrchestratorSnapshot, SessionKind, SpawnRefusal, UsageSessionEntry } from "../types";
 import { useUsageStore } from "../usage";
 import { statusVisual } from "./Chat";
 import { revealPane } from "./Panes";
@@ -202,9 +202,20 @@ function PermissionChips({ card, now }: { card: MissionCard; now: number }) {
   );
 }
 
+// One entry per `SessionKind`, so a new kind is a compile error here rather than
+// a card silently mislabelled: `reviewer` used to fall through the old binary
+// ternary and render as "Worker" with an unstyled `is-reviewer` class. `chat`
+// wears no badge — it is every session's default and would be noise on all of them.
+const KIND_LABELS: Record<SessionKind, string | null> = {
+  chat: null,
+  orchestrator: "Orchestrator",
+  worker: "Worker",
+  reviewer: "Reviewer",
+};
+
 function KindBadge({ card }: { card: MissionCard }) {
-  if (card.kind === "chat") return null;
-  const label = card.kind === "orchestrator" ? "Orchestrator" : "Worker";
+  const label = KIND_LABELS[card.kind];
+  if (label === null) return null;
   return (
     <span className={`wb-mission-kind is-${card.kind}`} title={`This session is a ${label}`}>
       {label}

@@ -133,6 +133,14 @@
   background: var(--agent-working-bg);
 }
 
+/* Distinct from the amber the other two badges share: a reviewer is a read-only
+   observer of another session's diff, not part of the working fleet, so it reads
+   in the informational magenta rather than the "changing right now" amber. */
+.wb-mission-kind.is-reviewer {
+  color: var(--info);
+  background: var(--info-bg);
+}
+
 .wb-mission-where {
   margin: 0;
   font-size: var(--type-xs-size);

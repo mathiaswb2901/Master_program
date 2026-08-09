@@ -321,6 +321,26 @@ describe("four workers", () => {
   });
 });
 
+// ---- the kind badge -----------------------------------------------------------
+
+describe("the kind badge", () => {
+  it("labels a reviewer and gives it its own class, not a worker's", () => {
+    // The bug this guards: a reviewer card fell through the old binary ternary
+    // and rendered the "Worker" label with an `is-reviewer` class the stylesheet
+    // did not define — mislabelled and unstyled at once. It must read "Reviewer".
+    const html = board([card("r", { kind: "reviewer" })]);
+    expect(html).toContain("is-reviewer");
+    expect(html).toContain("Reviewer");
+    expect(html).not.toContain("is-worker");
+    expect(html).not.toContain("Worker");
+  });
+
+  it("wears no badge on an ordinary chat session", () => {
+    // `chat` is every session's default; a badge on all of them is noise.
+    expect(board([card("c", { kind: "chat" })])).not.toContain("wb-mission-kind");
+  });
+});
+
 // ---- the card in isolation ----------------------------------------------------
 
 describe("one card", () => {
