@@ -54,6 +54,16 @@ test.beforeEach(async ({ page }) => {
   await page.request.put("/api/layouts", { data: NO_LAYOUT });
 });
 
+// And on the way out, whether or not the journey passed. The layout is
+// server-side state on a server every spec file shares, so a test that dies
+// holding two agent panes open leaves them open for whatever file runs next —
+// which is how one red test here also turned `status.spec.ts` red, with a
+// `.wb-chat-input textarea` that resolved to two elements and a failure message
+// pointing at neither cause. A cleanup that only runs on success is not one.
+test.afterEach(async ({ page }) => {
+  await page.request.put("/api/layouts", { data: NO_LAYOUT });
+});
+
 /** Mint a real result through the server, from inside the page so the token
  * rides along. Returns its `validation_id`. */
 async function seedValidation(
@@ -242,12 +252,49 @@ async function openBoard(page: Page): Promise<void> {
   await expect(page.locator(".wb-mission")).toBeVisible();
 }
 
-/** Drive the orchestrator the way a user does from the board: click its card to
- * open (and focus) its chat, then type into the pane that click just focused.
- * `.dv-active-group` scopes the input — an unscoped `.wb-chat-input textarea`
- * would be several elements once other panes are open (CLAUDE.md). */
-async function sendToOrchestrator(page: Page, text: string): Promise<void> {
-  await page.locator('.wb-mission-card[data-kind="orchestrator"] .wb-mission-title').click();
+/** The session id of every orchestrator the fleet currently knows about.
+ *
+ * From `GET /api/activity`, and both halves of that choice are forced.
+ * Not `/api/orchestrator`: that roster only gains an entry when an orchestrator
+ * *spawns* (`_rosters.setdefault`, inside `spawn`), so the orchestrator this
+ * journey has only just started is absent from it. Not the DOM either: a
+ * "what was already here" snapshot taken from cards races the board's own
+ * fetch, and a stale card arriving a frame later would read as the new one.
+ * The activity feed is the fleet's per-session identity from the moment a
+ * session is created — the very source the board builds its cards from — and
+ * `session_id` there is the `data-session` on the card and the
+ * `orchestrator_id` the roster will use a moment later. */
+async function orchestratorSessionIds(page: Page): Promise<string[]> {
+  const feed = (await (await page.request.get("/api/activity")).json()) as {
+    sessions: { session_id: string; kind: string }[];
+  };
+  return feed.sessions.filter((row) => row.kind === "orchestrator").map((row) => row.session_id);
+}
+
+/** How many workers *this journey's* orchestrator has — never every crew's. */
+async function workerCount(page: Page, orchestratorId: string): Promise<number> {
+  const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
+  return roster.orchestrators
+    .filter((crew) => crew.orchestrator_id === orchestratorId)
+    .flatMap((crew) => crew.workers).length;
+}
+
+/** Drive one named orchestrator the way a user does from the board: click its
+ * card to open (and focus) its chat, then type into the pane that click just
+ * focused. Both locators are scoped, and for the same reason. `.dv-active-group`
+ * scopes the input — an unscoped `.wb-chat-input textarea` is several elements
+ * once other panes are open — and `[data-session]` scopes the *card*, because
+ * the board is shared with every journey that ran before this one and a stopped
+ * crew keeps its card (CLAUDE.md: nothing assumes it is the only one of itself). */
+async function sendToOrchestrator(
+  page: Page,
+  orchestratorId: string,
+  text: string,
+): Promise<void> {
+  await page
+    .locator(`.wb-mission-card[data-kind="orchestrator"][data-session="${orchestratorId}"]`)
+    .locator(".wb-mission-title")
+    .click();
   const input = page.locator(".dv-active-group .wb-chat-input textarea");
   await input.fill(text);
   await input.press("Enter");
@@ -272,28 +319,54 @@ test("a toolchain gate proves a worker's checkout, and its log opens in the pane
     );
   });
 
-  await test.step("an orchestrator spawns a worker, which borrows a slot", async () => {
-    await openBoard(page);
-    await page.keyboard.press("Control+Shift+P");
-    const quickbar = page.getByRole("dialog", { name: "Quick open" });
-    await quickbar.locator(".wb-qb-input").fill(">new orchestrator");
-    await quickbar.locator(".wb-qb-row", { hasText: "New orchestrator session" }).first().click();
-    await expect(page.locator('.wb-mission-card[data-kind="orchestrator"]')).toHaveCount(1);
-    await sendToOrchestrator(page, SPAWN_PROMPT);
-    await expect
-      .poll(
-        async () => {
-          const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
-          return roster.orchestrators.flatMap((crew) => crew.workers).length;
-        },
-        { timeout: 30_000 },
-      )
-      .toBeGreaterThan(0);
-  });
+  const orchestratorId = await test.step(
+    "an orchestrator spawns a worker, which borrows a slot",
+    async () => {
+      await openBoard(page);
+      // The board is server-side state shared with every journey that ran
+      // before this one, and stopping a crew does not remove its card. So this
+      // records what was already there and claims only the orchestrator it
+      // starts: `toHaveCount(1)` over *every* orchestrator card is the
+      // singleton assumption CLAUDE.md forbids, and it is precisely what made
+      // this journey red whenever `mission.spec.ts` ran ahead of it.
+      const before = new Set(await orchestratorSessionIds(page));
+      await page.keyboard.press("Control+Shift+P");
+      const quickbar = page.getByRole("dialog", { name: "Quick open" });
+      await quickbar.locator(".wb-qb-input").fill(">new orchestrator");
+      await quickbar.locator(".wb-qb-row", { hasText: "New orchestrator session" }).first().click();
+
+      let mine = "";
+      await expect
+        .poll(
+          async () => {
+            mine = (await orchestratorSessionIds(page)).filter((id) => !before.has(id))[0] ?? "";
+            return mine;
+          },
+          { timeout: 15_000 },
+        )
+        .not.toBe("");
+      // The board really renders a card for the one this journey started —
+      // the original claim, made about a named orchestrator instead of as a
+      // census of a board every earlier journey also wrote to.
+      await expect(
+        page.locator(`.wb-mission-card[data-kind="orchestrator"][data-session="${mine}"]`),
+      ).toHaveCount(1);
+
+      await sendToOrchestrator(page, mine, SPAWN_PROMPT);
+      await expect
+        .poll(async () => workerCount(page, mine), { timeout: 30_000 })
+        .toBeGreaterThan(0);
+      return mine;
+    },
+  );
 
   const workerId = await test.step("read the worker the gate will judge", async () => {
     const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
-    const worker = roster.orchestrators.flatMap((crew) => crew.workers)[0];
+    // This journey's crew, by id. A `flatMap` over the whole roster would judge
+    // whichever worker another spec happened to leave behind.
+    const crews = roster.orchestrators.filter((crew) => crew.orchestrator_id === orchestratorId);
+    expect(crews, "the orchestrator this journey started left the roster").toHaveLength(1);
+    const worker = crews[0].workers[0];
     expect(worker, "the orchestrator spawned no worker").toBeDefined();
     // A slot each is the whole reason the pool exists — and the thing the gate
     // resolves rather than being handed.
@@ -371,6 +444,4 @@ test("a toolchain gate proves a worker's checkout, and its log opens in the pane
       )
       .toBe(0);
   });
-
-  await page.request.put("/api/layouts", { data: NO_LAYOUT });
 });
