@@ -20,7 +20,7 @@ registry point. A local-whisper implementation is one module that does::
         def ready(self) -> bool: ...
         def report(self) -> BackendReport: ...
         async def start(self, session: VoiceSession) -> None: ...
-        async def feed(self, voice_id: str, audio: bytes) -> str: ...
+        async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str: ...
         async def stop(self, voice_id: str) -> VoiceTranscript: ...
         async def cancel(self, voice_id: str) -> None: ...
 
@@ -85,11 +85,19 @@ ABANDON_GRACE_S = 30.0
 
 #: Ceilings this service applies to a backend call, whatever the backend thinks.
 #: The office host learned this one the expensive way: an implementation that
-#: forgets to bound itself otherwise hangs the request that started it. ``feed``
-#: is on the interactive path and gets a short one; ``stop`` may really be
-#: running a model over a two-minute utterance and gets a long one.
+#: forgets to bound itself otherwise hangs the request that started it.
+#:
+#: There is one for **every** method, because a ceiling that covers three calls
+#: out of four is not a guarantee, it is a coincidence. ``start`` may lazily load
+#: a model and gets room for it; ``feed`` is on the interactive path and gets a
+#: short one; ``stop`` may really be running a model over a two-minute utterance
+#: and gets a long one; ``cancel`` is a buffer being dropped and should be
+#: instant — its ceiling exists so a backend that wedges on the way out cannot
+#: take the server's shutdown with it.
+START_TIMEOUT_S = 30.0
 FEED_TIMEOUT_S = 10.0
 STOP_TIMEOUT_S = 90.0
+CANCEL_TIMEOUT_S = 5.0
 
 
 # ---- the seam ----------------------------------------------------------------
@@ -122,8 +130,9 @@ class VoiceBackend(Protocol):
     explicit here keeps the service written for the real cost from the start.
 
     **Every method must come back.** A backend is expected to bound its own
-    work; the service does not trust that and applies its own ceiling
-    (:data:`FEED_TIMEOUT_S`, :data:`STOP_TIMEOUT_S`), cancelling the coroutine
+    work; the service does not trust that and applies its own ceiling to *each*
+    of the four (:data:`START_TIMEOUT_S`, :data:`FEED_TIMEOUT_S`,
+    :data:`STOP_TIMEOUT_S`, :data:`CANCEL_TIMEOUT_S`), cancelling the coroutine
     when it runs out. A backend must therefore treat cancellation as a real
     outcome and leave nothing running behind it.
     """
@@ -145,13 +154,19 @@ class VoiceBackend(Protocol):
         """Begin one utterance. The domain-vocabulary initial prompt goes here."""
         ...
 
-    async def feed(self, voice_id: str, audio: bytes) -> str:
+    async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str:
         """Ingest one chunk and return the interim transcript **so far**.
 
         The whole utterance as heard to this point, not the delta — a composer
         that has to stitch deltas together is a composer that gets the stitching
         wrong. ``""`` is the honest answer while there is not yet enough audio
         to say anything, and it is not an error.
+
+        ``sequence`` is the chunk's 0-based place in capture order. The service
+        guarantees it advances (a duplicate or a late slice is refused before it
+        reaches here) but **not** that it is contiguous: a client that dropped a
+        slice jumps the number, and a backend that cares — one splicing PCM into
+        a buffer, where a silent gap is right and a splice is not — can see it.
         """
         ...
 
@@ -290,7 +305,11 @@ class FakeVoiceBackend:
         self._heard[session.voice_id] = 0
         self._rates[session.voice_id] = session.sample_rate_hz
 
-    async def feed(self, voice_id: str, audio: bytes) -> str:
+    async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str:
+        # `sequence` is ignored on purpose: the fake transcribes nothing, so it
+        # has no buffer to splice a slice into and no gap to fill with silence.
+        # A real backend is where that argument earns its keep.
+        #
         # `audio` is counted and dropped. Read once so a caller passing an empty
         # chunk does not silently advance the script.
         if not audio:
@@ -431,13 +450,44 @@ class VoiceService:
                 sample_rate_hz=sample_rate_hz,
             )
             self._sessions[session.voice_id] = session
-        await backend.start(session)
+        # Bounded exactly like `feed` and `stop`, and for a sharper reason than
+        # either: a real backend's `start` is where a model gets loaded, so it is
+        # the call most likely to take seconds or wedge. The session is already
+        # in `_sessions` (it has to be, or two starts could race past the cap),
+        # which means a failure here that did not put it back would leak one of
+        # only MAX_ACTIVE_SESSIONS slots until a *later* start happened to reap
+        # it — a handful of transient failures would 429-lock the one microphone
+        # on this machine for minutes. `_fail` frees the slot and lets the
+        # backend drop whatever it managed to allocate.
+        try:
+            await asyncio.wait_for(backend.start(session), START_TIMEOUT_S)
+        except TimeoutError as exc:
+            await self._fail(session.voice_id)
+            raise VoiceBackendTimeoutError(
+                f"the voice backend did not open the utterance within {START_TIMEOUT_S:.0f}s"
+            ) from exc
+        except Exception as exc:
+            await self._fail(session.voice_id)
+            raise VoiceBackendError(str(exc) or type(exc).__name__) from exc
         log.info("voice.started", voice_id=session.voice_id, sample_rate_hz=sample_rate_hz)
         return session
 
     async def feed(self, voice_id: str, sequence: int, audio: bytes) -> VoiceSession:
         """Ingest one chunk and answer with the utterance's interim text."""
         session = self._recording(voice_id)
+        # The chunk must be *ahead of* the audio already ingested. `chunks` is
+        # that watermark: after N accepted slices the next 0-based sequence can
+        # be N (contiguous) or higher (the client dropped some), never lower.
+        # Anything lower is a duplicate or a slice that lost its race, and
+        # splicing it in would corrupt the utterance silently — which is the one
+        # outcome worth a refusal, since a transcript nobody can tell is wrong is
+        # worse than a chunk that was rejected out loud. The utterance stays
+        # recording: one confused slice is not a reason to drop the sentence.
+        if sequence < session.chunks:
+            raise VoiceStateError(
+                f"chunk {sequence} does not advance this utterance "
+                f"({session.chunks} already ingested) — it is a duplicate or arrived late"
+            )
         budget = int(session.sample_rate_hz * MAX_UTTERANCE_S) * BYTES_PER_FRAME
         if session.audio_bytes + len(audio) > budget:
             await self.cancel(voice_id)
@@ -446,7 +496,9 @@ class VoiceService:
             )
         backend = self._require_backend()
         try:
-            interim = await asyncio.wait_for(backend.feed(voice_id, audio), FEED_TIMEOUT_S)
+            interim = await asyncio.wait_for(
+                backend.feed(voice_id, sequence, audio), FEED_TIMEOUT_S
+            )
         except TimeoutError as exc:
             await self._fail(voice_id)
             raise VoiceBackendTimeoutError(
@@ -505,14 +557,19 @@ class VoiceService:
         session = self._sessions.pop(voice_id, None)
         if session is None:
             raise VoiceNotFoundError(voice_id)
-        if self._backend is not None:
-            await self._backend.cancel(voice_id)
+        await self._discard(voice_id)
         log.info("voice.cancelled", voice_id=voice_id)
         return session.model_copy(update={"state": "cancelled"})
 
     async def shutdown(self) -> None:
         """Cancel every utterance still in flight. A held microphone must not
-        outlive the server that was listening."""
+        outlive the server that was listening.
+
+        Bounded per utterance by :data:`CANCEL_TIMEOUT_S` (see :meth:`_discard`),
+        so a wedged backend costs teardown a few seconds rather than the whole
+        shutdown — this runs inside ``main.py``'s lifespan, where a call that
+        never returns is a process that never exits.
+        """
         for voice_id in list(self._sessions):
             try:
                 await self.cancel(voice_id)
@@ -540,13 +597,31 @@ class VoiceService:
     async def _fail(self, voice_id: str) -> None:
         """Settle a broken utterance and let the backend drop its buffer."""
         self._sessions.pop(voice_id, None)
-        if self._backend is not None:
-            try:
-                await self._backend.cancel(voice_id)
-            except Exception as exc:
-                # Already failing — a cancel that also throws must not mask the
-                # failure that got us here.
-                log.warning("voice.cancel_failed", voice_id=voice_id, error=str(exc))
+        await self._discard(voice_id)
+
+    async def _discard(self, voice_id: str) -> None:
+        """Tell the backend to drop this utterance's audio: bounded, best effort.
+
+        Every caller has already removed the session from :attr:`_sessions`, so
+        the slot is free whatever happens here and the only thing left is the
+        backend's own buffer. That makes both halves of this obvious. It is
+        **bounded**, by :data:`CANCEL_TIMEOUT_S`, because this runs on the
+        shutdown path — a backend that wedges while dropping a buffer would
+        otherwise hang the server's teardown, holding the microphone open for
+        exactly as long as it took someone to reach for the power switch. And it
+        **never raises**: the caller is either already reporting a failure this
+        must not mask, or has nothing left to tell the user, since the audio is
+        gone from this service either way.
+        """
+        backend = self._backend
+        if backend is None:
+            return
+        try:
+            await asyncio.wait_for(backend.cancel(voice_id), CANCEL_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("voice.cancel_timeout", voice_id=voice_id, timeout_s=CANCEL_TIMEOUT_S)
+        except Exception as exc:
+            log.warning("voice.cancel_failed", voice_id=voice_id, error=str(exc))
 
     def _reap(self) -> None:
         """Drop utterances nobody is going to release.

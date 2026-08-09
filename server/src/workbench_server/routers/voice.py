@@ -63,6 +63,15 @@ async def start(request: Request, body: StartVoiceRequest) -> VoiceSession:
         # The concurrency cap. 429 rather than 409: nothing about *this* request
         # is wrong, there is simply no slot, and the message names the ceiling.
         raise HTTPException(429, str(e)) from e
+    # A backend can fail or hang while *opening* an utterance too — loading a
+    # model is the slowest thing it does. Same two codes as /chunk and /stop, so
+    # the composer reads one vocabulary across the whole lifecycle instead of
+    # meeting a 500 on the one call that had no mapping. Timeout first: it is a
+    # subclass, and the broader clause would otherwise swallow it.
+    except VoiceBackendTimeoutError as e:
+        raise HTTPException(504, str(e)) from e
+    except VoiceBackendError as e:
+        raise HTTPException(502, str(e)) from e
 
 
 @router.post("/{voice_id}/chunk")

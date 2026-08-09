@@ -22,7 +22,7 @@ Everything on the wire is a model in this module, and every one of them is
 mirrored in ``ui/src/types.ts``.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Base64Bytes, BaseModel, Field
 
@@ -68,11 +68,36 @@ DEFAULT_SAMPLE_RATE_HZ = 16_000
 #: Bytes per audio frame at :data:`DEFAULT_SAMPLE_RATE_HZ` — mono, 16-bit.
 BYTES_PER_FRAME = 2
 
+#: The rates a speech model is worth pointing at. Below 8 kHz there is nothing
+#: to transcribe; above 48 kHz is a browser bug rather than a choice. Named
+#: because :class:`StartVoiceRequest` bounds the session by them *and*
+#: :data:`MAX_CHUNK_BYTES` is derived from the top of the range.
+MIN_SAMPLE_RATE_HZ = 8_000
+MAX_SAMPLE_RATE_HZ = 48_000
+
 #: How long one push-to-talk utterance may be. A ceiling rather than a
 #: preference: a held key that is never released must not grow a buffer without
 #: bound, and a user who really wants to dictate for three minutes is better
 #: served by two utterances they can each read before sending.
 MAX_UTTERANCE_S = 120.0
+
+#: How much audio one :class:`VoiceChunk` may carry, as a duration.
+#:
+#: The shipped capture sends 100 ms slices (``ui/src/voiceCapture.ts``), so a
+#: whole second is ten times what any client this repo ships would send, and
+#: still leaves room for one that batches a handful of slices per request.
+MAX_CHUNK_S = 1.0
+
+#: The same ceiling in **decoded** bytes, at the highest rate a session may be
+#: opened at: 96,000, against the 3,200 one real chunk carries at the default
+#: rate. Enforced by :attr:`VoiceChunk.audio` itself, which is the point — the
+#: per-utterance budget (:data:`MAX_UTTERANCE_S`) lives in the service, several
+#: layers past the parser, so without a bound here the only thing standing
+#: between one absurd body and the service is the machine's memory. What this
+#: does *not* claim: an ASGI server buffers a request body before any model is
+#: constructed, so this is the application's cap on what it will accept, not a
+#: transport-level one on what can be sent.
+MAX_CHUNK_BYTES = int(MAX_SAMPLE_RATE_HZ * MAX_CHUNK_S) * BYTES_PER_FRAME
 
 
 class VoiceCapabilities(BaseModel):
@@ -166,10 +191,12 @@ class VoiceTranscript(BaseModel):
 class StartVoiceRequest(BaseModel):
     """POST /api/voice/start."""
 
-    #: The rate the capture side will actually send at. Bounded to the range a
-    #: speech model is worth pointing at: below 8 kHz there is nothing to
-    #: transcribe, above 48 kHz is a browser bug rather than a choice.
-    sample_rate_hz: int = Field(default=DEFAULT_SAMPLE_RATE_HZ, ge=8_000, le=48_000)
+    #: The rate the capture side will actually send at, bounded to the range a
+    #: speech model is worth pointing at (:data:`MIN_SAMPLE_RATE_HZ` ..
+    #: :data:`MAX_SAMPLE_RATE_HZ`).
+    sample_rate_hz: int = Field(
+        default=DEFAULT_SAMPLE_RATE_HZ, ge=MIN_SAMPLE_RATE_HZ, le=MAX_SAMPLE_RATE_HZ
+    )
 
 
 class VoiceChunk(BaseModel):
@@ -181,8 +208,15 @@ class VoiceChunk(BaseModel):
     which is the only reason that trade is free.
     """
 
-    #: 0-based, in capture order. Carried so a backend that reorders or drops
-    #: can say so; the service itself only checks it advances.
+    #: 0-based, in capture order, and **enforced**: the service refuses a chunk
+    #: whose sequence does not advance past the audio already ingested, so a
+    #: duplicate or a slice that arrived behind one already fed is a 409 rather
+    #: than audio quietly spliced into the wrong place. It is also handed to the
+    #: backend, which is what lets a transcriber tell a *gap* (a slice the client
+    #: dropped) from a contiguous stream and insert silence rather than splice.
     sequence: int = Field(ge=0)
-    #: 16-bit little-endian PCM, mono, at the session's sample rate.
-    audio: Base64Bytes
+    #: 16-bit little-endian PCM, mono, at the session's sample rate, bounded at
+    #: :data:`MAX_CHUNK_BYTES` **decoded** — a body no capture could have
+    #: produced is refused by the schema, naming the cap, instead of travelling
+    #: as far as the service's per-utterance budget.
+    audio: Annotated[Base64Bytes, Field(max_length=MAX_CHUNK_BYTES)]

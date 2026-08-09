@@ -17,13 +17,17 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.voice import (
     BYTES_PER_FRAME,
     DEFAULT_SAMPLE_RATE_HZ,
+    MAX_CHUNK_BYTES,
+    MAX_SAMPLE_RATE_HZ,
     MAX_UTTERANCE_S,
+    VoiceChunk,
     VoiceSession,
     VoiceTranscript,
 )
@@ -111,8 +115,8 @@ def test_a_backend_that_is_not_ready_reports_its_own_reason() -> None:
             )
 
         async def start(self, session: VoiceSession) -> None: ...  # pragma: no cover
-        async def feed(self, voice_id: str, audio: bytes) -> str:  # pragma: no cover
-            return ""
+        async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str:
+            return ""  # pragma: no cover
 
         async def stop(self, voice_id: str) -> VoiceTranscript:  # pragma: no cover
             raise AssertionError("never reached")
@@ -282,10 +286,29 @@ async def test_shutdown_cancels_a_microphone_still_open() -> None:
 
 
 class _Broken:
-    """Every method fails or hangs, on request."""
+    """Fails or hangs on request — one flag per phase.
 
-    def __init__(self, *, hang: bool = False) -> None:
+    Separate flags rather than one "broken" switch because the interesting cases
+    are asymmetric: a backend whose `start` wedges while a model loads still
+    cancels fine, and a backend that cancels fine everywhere except on the way
+    out is exactly the one that hangs a server's shutdown.
+    """
+
+    def __init__(
+        self,
+        *,
+        hang: bool = False,
+        start_fails: bool = False,
+        start_hangs: bool = False,
+        cancel_hangs: bool = False,
+    ) -> None:
         self._hang = hang
+        self._start_fails = start_fails
+        self._start_hangs = start_hangs
+        self._cancel_hangs = cancel_hangs
+        #: Ids the service asked this backend to drop. Proves the buffer was
+        #: released even on the paths that swallow the outcome.
+        self.cancelled: list[str] = []
 
     def ready(self) -> bool:
         return True
@@ -294,9 +317,12 @@ class _Broken:
         return BackendReport(kind="local_whisper", model_present=True, detail="a broken stand-in")
 
     async def start(self, session: VoiceSession) -> None:
-        return None
+        if self._start_hangs:
+            await asyncio.sleep(3600)
+        if self._start_fails:
+            raise RuntimeError("the model would not load")
 
-    async def feed(self, voice_id: str, audio: bytes) -> str:
+    async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str:
         if self._hang:
             await asyncio.sleep(3600)
         raise RuntimeError("the model fell over")
@@ -307,7 +333,9 @@ class _Broken:
         raise RuntimeError("the model fell over")
 
     async def cancel(self, voice_id: str) -> None:
-        return None
+        self.cancelled.append(voice_id)
+        if self._cancel_hangs:
+            await asyncio.sleep(3600)
 
 
 async def test_a_backend_failure_settles_the_utterance() -> None:
@@ -345,6 +373,162 @@ async def test_backend_failures_map_to_502_and_504_over_http(tmp_path: Path) -> 
     assert res.status_code == 502
 
 
+# ---- opening an utterance is bounded too --------------------------------------
+#
+# `start` is the call a real backend is *most* likely to sit in — it is where a
+# whisper model gets loaded — and it is the one that holds a concurrency slot
+# while it runs. A failure there that kept the slot would take the machine's one
+# microphone out of service for everybody until a much later start reaped it.
+
+
+async def test_a_start_that_fails_frees_the_slot_it_took() -> None:
+    """The 429 lockout, head on: enough failing starts to exhaust the cap, and
+    then some. Every one is the backend's failure, never "no slot left"."""
+    backend = _Broken(start_fails=True)
+    service = VoiceService(backend)
+    for _ in range(MAX_ACTIVE_SESSIONS + 2):
+        with pytest.raises(VoiceBackendError) as excinfo:
+            await service.start(DEFAULT_SAMPLE_RATE_HZ)
+        # A backend failure, not the concurrency cap — the distinction is the bug.
+        assert not isinstance(excinfo.value, VoiceBackendTimeoutError)
+        assert "would not load" in str(excinfo.value)
+    assert service._sessions == {}
+    # And the half-opened utterance was handed back to the backend to drop,
+    # rather than left as a buffer nobody will ever claim.
+    assert len(backend.cancelled) == MAX_ACTIVE_SESSIONS + 2
+
+
+async def test_a_start_that_hangs_is_cancelled_by_this_services_own_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same lesson `feed` learned, on the call that loads the model."""
+    monkeypatch.setattr("workbench_server.services.voice.START_TIMEOUT_S", 0.05)
+    service = VoiceService(_Broken(start_hangs=True))
+    with pytest.raises(VoiceBackendTimeoutError):
+        await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    # Not held: a timeout that kept the session would leak the slot just as a
+    # raise would, only more quietly.
+    assert service._sessions == {}
+
+
+async def test_a_failing_start_is_502_and_a_hanging_one_504_over_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One vocabulary across the lifecycle: /start answers like /chunk and /stop
+    rather than letting a backend failure out as an unhandled 500."""
+    app = create_app(Settings(workspace_root=tmp_path))
+    transport = ASGITransport(app=app)
+
+    app.state.voice = VoiceService(_Broken(start_fails=True))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.post("/api/voice/start", json={})).status_code == 502
+
+    monkeypatch.setattr("workbench_server.services.voice.START_TIMEOUT_S", 0.05)
+    app.state.voice = VoiceService(_Broken(start_hangs=True))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.post("/api/voice/start", json={})).status_code == 504
+
+
+async def test_shutdown_is_not_blocked_by_a_backend_that_wedges_on_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`main.py`'s lifespan awaits this. A cancel that never returns would be a
+    server that never exits — with the microphone still open, which is the one
+    state this call exists to prevent."""
+    monkeypatch.setattr("workbench_server.services.voice.CANCEL_TIMEOUT_S", 0.05)
+    backend = _Broken(cancel_hangs=True)
+    service = VoiceService(backend)
+    session = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    # The ceiling, not patience: unbounded, the backend sleeps for an hour here.
+    await asyncio.wait_for(service.shutdown(), 5)
+    assert backend.cancelled == [session.voice_id]
+    assert service._sessions == {}
+
+
+# ---- chunks arrive in order, or they do not arrive ---------------------------
+
+
+async def test_a_chunk_that_does_not_advance_is_refused_not_miscounted() -> None:
+    """A duplicate or a slice that lost its race is audio for the wrong moment.
+    Splicing it in produces a transcript nobody can tell is wrong — so it is a
+    refusal, and the utterance goes on recording."""
+    service = fake_service()
+    session = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    await service.feed(session.voice_id, 0, CHUNK)
+    await service.feed(session.voice_id, 1, CHUNK)
+
+    with pytest.raises(VoiceStateError) as excinfo:
+        await service.feed(session.voice_id, 1, CHUNK)
+    assert "does not advance" in str(excinfo.value)
+    with pytest.raises(VoiceStateError):
+        await service.feed(session.voice_id, 0, CHUNK)
+
+    # Still recording: one confused slice is not a reason to drop the sentence.
+    resumed = await service.feed(session.voice_id, 2, CHUNK)
+    assert resumed.chunks == 3
+    assert resumed.interim == " ".join(FAKE_SCRIPT[:3])
+
+
+async def test_a_replayed_chunk_is_a_409_over_http(voice_client: AsyncClient) -> None:
+    voice_id = (await voice_client.post("/api/voice/start", json={})).json()["voice_id"]
+    body = {"sequence": 0, "audio": CHUNK_B64}
+    assert (await voice_client.post(f"/api/voice/{voice_id}/chunk", json=body)).status_code == 200
+    replay = await voice_client.post(f"/api/voice/{voice_id}/chunk", json=body)
+    assert replay.status_code == 409
+
+
+async def test_the_backend_is_told_where_each_chunk_sat_in_capture_order() -> None:
+    """A gap is allowed and *visible*: a client that dropped slices jumps the
+    number, and a transcriber splicing PCM needs to know to insert silence there
+    rather than butt two unrelated moments together."""
+    backend = _Recording()
+    service = VoiceService(backend)
+    session = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    await service.feed(session.voice_id, 0, CHUNK)
+    # Four slices lost on the way. Allowed — but the watermark moves with it.
+    await service.feed(session.voice_id, 5, CHUNK)
+    assert backend.sequences == [0, 5]
+    with pytest.raises(VoiceStateError):
+        await service.feed(session.voice_id, 5, CHUNK)
+    assert backend.sequences == [0, 5]
+
+
+# ---- one chunk cannot be arbitrarily large ------------------------------------
+
+
+def test_the_chunk_ceiling_is_generous_against_what_capture_really_sends() -> None:
+    """The cap is a refusal of the absurd, not a constraint on the plausible: a
+    whole second at the highest rate a session may open at, against the 100 ms
+    slices `ui/src/voiceCapture.ts` actually produces."""
+    assert MAX_CHUNK_BYTES == MAX_SAMPLE_RATE_HZ * BYTES_PER_FRAME
+    assert len(CHUNK) * 10 < MAX_CHUNK_BYTES
+
+
+def test_an_oversized_chunk_is_refused_by_the_schema_itself() -> None:
+    """Before the service, before the per-utterance budget: the model will not
+    even hold a body no capture could have produced."""
+    at_the_cap = base64.b64encode(bytes(MAX_CHUNK_BYTES)).decode("ascii")
+    assert len(VoiceChunk(sequence=0, audio=at_the_cap).audio) == MAX_CHUNK_BYTES
+    over = base64.b64encode(bytes(MAX_CHUNK_BYTES + 1)).decode("ascii")
+    with pytest.raises(ValidationError):
+        VoiceChunk(sequence=0, audio=over)
+
+
+async def test_an_oversized_chunk_is_a_422_over_http(voice_client: AsyncClient) -> None:
+    voice_id = (await voice_client.post("/api/voice/start", json={})).json()["voice_id"]
+    over = base64.b64encode(bytes(MAX_CHUNK_BYTES + 1)).decode("ascii")
+    res = await voice_client.post(
+        f"/api/voice/{voice_id}/chunk", json={"sequence": 0, "audio": over}
+    )
+    assert res.status_code == 422
+    # Refused, and the utterance is untouched — a rejected body is not a reason
+    # to throw away a sentence somebody is still speaking.
+    ok = await voice_client.post(
+        f"/api/voice/{voice_id}/chunk", json={"sequence": 0, "audio": CHUNK_B64}
+    )
+    assert ok.status_code == 200
+
+
 # ---- the privacy properties ---------------------------------------------------
 
 
@@ -354,6 +538,7 @@ class _Recording:
 
     def __init__(self) -> None:
         self.received: list[bytes] = []
+        self.sequences: list[int] = []
 
     def ready(self) -> bool:
         return True
@@ -364,8 +549,9 @@ class _Recording:
     async def start(self, session: VoiceSession) -> None:
         return None
 
-    async def feed(self, voice_id: str, audio: bytes) -> str:
+    async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str:
         self.received.append(audio)
+        self.sequences.append(sequence)
         return "heard"
 
     async def stop(self, voice_id: str) -> VoiceTranscript:

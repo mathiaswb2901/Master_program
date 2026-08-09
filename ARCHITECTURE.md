@@ -1242,11 +1242,27 @@ the router, not the composer. The fake is never chosen implicitly.
 **The service holds no audio.** Chunks go straight to the backend and only their size
 is remembered, which is both the privacy property (nothing is buffered here to leak or
 log) and the memory bound (a held key costs a counter). The lifecycle is bounded at
-every edge that can run away: a per-utterance ceiling (`MAX_UTTERANCE_S`, enforced on
-total bytes and cancelling rather than truncating), a concurrency cap whose refusal
-names itself, a reaper for utterances nobody released, and this service's own timeout
-around every backend call — the office host's lesson, that an implementation which
-forgets to bound itself hangs the request that started it.
+every edge that can run away: a per-chunk ceiling on the wire (`MAX_CHUNK_BYTES`, so an
+absurd body is refused by the schema and never reaches the service), a per-utterance
+ceiling (`MAX_UTTERANCE_S`, enforced on total bytes and cancelling rather than
+truncating), a concurrency cap whose refusal names itself, a reaper for utterances
+nobody released, and this service's own timeout around **every** backend call —
+`start`, `feed`, `stop` and `cancel` each have one. That is the office host's lesson,
+that an implementation which forgets to bound itself hangs the request that started it,
+and it has two edges worth naming. `start` holds a concurrency slot while it runs, so a
+backend that fails or wedges there frees the slot on the way out; four transient
+failures must not 429-lock the machine's one microphone. `cancel` runs on the shutdown
+path, where a call that never returns is a process that never exits with the microphone
+still open — so it is bounded and never raises, the audio being gone from this service
+either way.
+
+**Chunks arrive in order, or they do not arrive.** `VoiceChunk.sequence` is enforced,
+not decorative: a slice that does not advance past the audio already ingested is a 409
+rather than PCM spliced into the wrong moment, because a transcript nobody can tell is
+wrong is worse than a chunk refused out loud. Gaps *are* allowed and are passed through
+to the backend, which is what lets a real transcriber insert silence where the client
+dropped a slice instead of butting two unrelated moments together. `voice.tsx`
+serialises its chunk POSTs on one chain, so the shipped client never trips this.
 
 **No WebSocket, deliberately.** Interim text rides the chunk *response* rather than
 `/ws/events`. A half-spoken sentence is not app-wide state: it belongs to the one

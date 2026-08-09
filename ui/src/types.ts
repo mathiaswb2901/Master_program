@@ -1770,6 +1770,13 @@ export interface StartVoiceRequest {
 /** POST /api/voice/{voice_id}/chunk — one slice of 16-bit little-endian PCM,
  * mono, base64-encoded because every payload here is a JSON model. */
 export interface VoiceChunk {
+  /** 0-based, in capture order, and the server enforces it: a sequence that
+   * does not advance past the audio already ingested is a 409, not a slice
+   * spliced into the wrong place. This is why `voice.tsx` serialises its chunk
+   * POSTs on one chain instead of firing them off in parallel. */
   sequence: number;
+  /** Base64 PCM. The server bounds the *decoded* size (`MAX_CHUNK_BYTES`, one
+   * second at the highest rate a session may open at); the shipped capture
+   * sends 100 ms slices, so this has room to spare. */
   audio: string;
 }
