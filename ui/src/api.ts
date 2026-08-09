@@ -47,6 +47,7 @@ import type {
   SessionsResponse,
   SettingsState,
   SetupStatus,
+  StartVoiceRequest,
   SetObjectiveRequest,
   ShortcutsState,
   SwitchWorkspaceRequest,
@@ -58,6 +59,10 @@ import type {
   ValidationResult,
   ValidationResults,
   ValidationSpec,
+  VoiceCapabilities,
+  VoiceChunk,
+  VoiceSession,
+  VoiceTranscript,
   WorkbenchSettings,
   WorkspaceState,
   WorktreePool,
@@ -334,6 +339,34 @@ export const getSettings = (): Promise<SettingsState> => request("/api/settings"
  * surfaces an override or a pending restart without a second call. */
 export const putSettings = (body: WorkbenchSettings): Promise<SettingsState> =>
   request("/api/settings", jsonInit("PUT", body));
+
+// ---- voice input (M7 §3) ----------------------------------------------------
+// Push-to-talk dictation, transcribed on this machine. There is no WebSocket
+// here on purpose: interim text comes back on the chunk response, because a
+// half-spoken sentence belongs to the one composer whose microphone is open and
+// has no business being broadcast to every window on this server.
+
+/** Can this machine dictate right now, and why not when it cannot. The composer
+ * offers a microphone from this answer, never from a guess. */
+export const getVoiceCapabilities = (): Promise<VoiceCapabilities> =>
+  request("/api/voice/capabilities");
+
+/** Press: begin one utterance. 503 when voice is unavailable (the detail says
+ * why); 429 when too many utterances are already in flight. */
+export const startVoice = (body: StartVoiceRequest): Promise<VoiceSession> =>
+  request("/api/voice/start", jsonInit("POST", body));
+
+/** Speaking: one slice of audio in, the utterance's interim text out. */
+export const sendVoiceChunk = (voiceId: string, body: VoiceChunk): Promise<VoiceSession> =>
+  request(`/api/voice/${encodeURIComponent(voiceId)}/chunk`, jsonInit("POST", body));
+
+/** Release: the final transcript, for the human to read and edit. Never sent. */
+export const stopVoice = (voiceId: string): Promise<VoiceTranscript> =>
+  request(`/api/voice/${encodeURIComponent(voiceId)}/stop`, { method: "POST" });
+
+/** Escape: throw the audio away. No transcript is ever produced. */
+export const cancelVoice = (voiceId: string): Promise<VoiceSession> =>
+  request(`/api/voice/${encodeURIComponent(voiceId)}/cancel`, { method: "POST" });
 
 export const openOfficeHost = (body: OpenHostRequest): Promise<OfficeHostInfo> =>
   request("/api/office/host", jsonInit("POST", body));

@@ -7,6 +7,7 @@ import type { WorkbenchTool } from "../registry";
 import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
 import type { SessionInfo, SessionState } from "../types";
+import { ensureVoice, toggleDictation, voiceBlocker } from "../voice";
 import { Chat, dotClass, statusVisual, TranscriptView } from "./Chat";
 import { revealPane } from "./Panes";
 import { planCommands, planShortcuts } from "./PlanCard";
@@ -77,9 +78,11 @@ function recentSessions(): SessionInfo[] {
 /** The ones a pane can be bound to: a pane is somewhere you work. */
 const liveSessions = (): SessionInfo[] => recentSessions().filter((session) => session.live);
 
-/** The session the detach command acts on: the focused agent *pane* if there is
- * one, else the browser's active chat. Null when neither names a session. */
-function detachTargetSessionId(): string | null {
+/** The session a composer-level command acts on: the focused agent *pane* if
+ * there is one, else the browser's active chat. Null when neither names a
+ * session. Detach and dictation both mean "the conversation I am talking to",
+ * so they ask the same question rather than each inventing an answer. */
+function focusedSessionId(): string | null {
   const dock = dockApiHandle();
   const panelId = dock?.activeGroup?.activePanel?.id ?? dock?.activePanel?.id;
   if (panelId !== undefined) {
@@ -97,7 +100,7 @@ function detachTargetSessionId(): string | null {
  * becomes its own Resume tombstone.
  */
 function detachFocusedSession(): void {
-  const sessionId = detachTargetSessionId();
+  const sessionId = focusedSessionId();
   if (sessionId === null) {
     useStore.getState().pushToast("warn", "Focus an agent session to detach it.");
     return;
@@ -619,15 +622,40 @@ export const agentTool: WorkbenchTool = {
       id: "session.detach",
       title: "Detach this session",
       detail: () => "keeps it running; reattach from Detached",
-      when: () => detachTargetSessionId() !== null,
+      when: () => focusedSessionId() !== null,
       run: detachFocusedSession,
+    },
+    {
+      // Push-to-talk into the focused composer (M7 §3). It belongs to this tool
+      // rather than to a voice tool of its own for the same reason the plan
+      // card's commands do: voice has no panel — it fills *the session you are
+      // talking to*, which is this capability's own question (`focusedSessionId`).
+      id: "voice.dictate",
+      title: "Dictate into the composer",
+      // The QuickBar row is where the honest "why not" surfaces when the
+      // microphone is not offered. `ensureVoice()` is idempotent and memoised —
+      // the probe runs at most once per page, and this is the path that starts
+      // it on a machine where no composer ever rendered a button.
+      detail: () => {
+        void ensureVoice();
+        return (
+          voiceBlocker() ??
+          "hold Alt+V to talk, or press it to toggle — transcribed on this machine"
+        );
+      },
+      when: () => focusedSessionId() !== null,
+      run: () => toggleDictation(focusedSessionId()),
     },
     ...sessionJumps,
     // The plan card lives inside this panel's chat, so its commands are this
     // capability's — not a second tool for a thing with no panel of its own.
     ...planCommands,
   ],
-  shortcuts: { ...jumpChords, ...planShortcuts },
+  // Alt+V earns its chord: dictation is a reflex reach mid-sentence, and the
+  // gesture it replaces (find the button, hold it) is the one a keyboard cannot
+  // do. It *toggles* rather than holds — see `voice.tsx` on why holding a key
+  // is an accessibility trap.
+  shortcuts: { ...jumpChords, ...planShortcuts, "voice.dictate": ["Alt+V"] },
   statusContributions: [
     { region: "center", component: SessionChips },
     { region: "right", component: SessionCounts },

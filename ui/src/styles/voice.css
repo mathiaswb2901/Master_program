@@ -1,0 +1,79 @@
+/* ==========================================================================
+   Voice input — the push-to-talk control in the agent composer (M7 §3)
+
+   Its own sheet, like every other capability's, because the surface it sits in
+   belongs to another lane (`agent.css`, ANVIL V5) and a capability's chrome
+   lives beside its own code.
+
+   The one colour decision, stated once: **the recording state spends
+   `--accent`, and nothing else in this file does.** DESIGN.md §2.4 allows the
+   amber for "this is changing right now", and an open microphone is the purest
+   example the app has — true for exactly as long as a finger is on the button,
+   and it retracts by itself the moment it is not. Idle, the control is an
+   achromatic outline button like every other one in the row. There is no
+   standing amber here, and `ui/e2e/voiceChrome.test.ts` fails the build if one
+   appears.
+
+   Motion: the live mark carries `.u-agent-pulse` from `tokens.css` — the app's
+   single keyframe, stopped in one place under `prefers-reduced-motion` (§5.6).
+   This sheet declares no animation and no transition of its own; the button's
+   hover feel is `.wb-btn`'s (instant in, eased out, §5.1.5) and re-stating it
+   here would be a second opinion about one control.
+   ========================================================================== */
+
+.wb-voice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  /* Pushes send/interrupt to the far edge of the composer's action row:
+     dictating is where a sentence starts, sending is where it ends. */
+  margin-right: auto;
+  min-width: 0;
+}
+
+/* Shrinkable, because an agent pane can be narrow: `.wb-btn` is `nowrap`, so
+   without this the control keeps its full width in a 180px composer and rides
+   over *Send*. The microphone glyph is the part that must survive — the label
+   truncates, and the accessible name never does. */
+.wb-voice-btn {
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.wb-voice-label {
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Recording. The one amber in this file — see the header. */
+.wb-voice-btn.is-recording {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+/* The live mark: a dot that exists only while the microphone is open. Its own
+   class rather than a sixth `.wb-dot.is-*`, because §2.6's five-state table is
+   about *agents* and adding to it would blur what those five mean. */
+.wb-voice-live {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  flex: none;
+}
+
+/* Said in words as well as in hue and motion (§7). Tertiary and small: it is a
+   running commentary on a state the button already carries. */
+.wb-voice-note {
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}

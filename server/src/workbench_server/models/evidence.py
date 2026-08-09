@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from workbench_server.models.gates import GateLog
 from workbench_server.models.reconciliation import ReconciliationReport
+from workbench_server.models.review import ReviewReport
 from workbench_server.models.validation import EvidenceKind
 
 
@@ -51,4 +52,8 @@ class EvidencePayload(BaseModel):
     reconciliation: ReconciliationReport | None = None
     #: Set for ``kind == "gate"``: one gate's bounded head+tail log.
     gate_log: GateLog | None = None
-    # PR 2 appends exactly one field here: review: ReviewReport | None
+    #: Set for ``kind == "diff"``: one adversarial review's findings (PR 2).
+    #: The one field PR 2 said it would append, appended — the envelope's whole
+    #: design claim, which was that adding a kind costs one optional field here
+    #: and one narrowing branch in the router.
+    review: ReviewReport | None = None

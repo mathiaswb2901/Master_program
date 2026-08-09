@@ -4,6 +4,7 @@ import { Markdown } from "../markdown";
 import { useStore, type ChatItem, type SessionFlags } from "../store";
 import { toolTargetPath } from "../toolTarget";
 import type { SessionState } from "../types";
+import { VoiceButton } from "../voice";
 import { PlanCard } from "./PlanCard";
 
 /**
@@ -257,6 +258,7 @@ export function Chat({ sessionId }: { sessionId: string }) {
   const draft = useStore((s) => s.chatDrafts[sessionId] ?? "");
   const setDraft = (text: string): void => useStore.getState().setChatDraft(sessionId, text);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const stickToBottom = useRef(true);
 
   useEffect(() => {
@@ -311,6 +313,7 @@ export function Chat({ sessionId }: { sessionId: string }) {
       </div>
       <div className="wb-chat-input">
         <textarea
+          ref={inputRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
@@ -319,6 +322,15 @@ export function Chat({ sessionId }: { sessionId: string }) {
           spellCheck={false}
         />
         <div className="wb-chat-input-actions">
+          {/* Push-to-talk (M7 §3). Renders nothing where dictation is
+              unavailable; the reason lives on the QuickBar's *Dictate* row. The
+              transcript lands in this draft and is never sent for you. */}
+          <VoiceButton
+            target={sessionId}
+            draft={draft}
+            setDraft={setDraft}
+            focusComposer={() => inputRef.current?.focus()}
+          />
           {state === "working" && (
             <button
               type="button"
