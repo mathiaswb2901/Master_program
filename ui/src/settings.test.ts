@@ -19,6 +19,23 @@
  * same bug wearing a GET: a read already in flight when a write is issued must
  * not land on top of it.
  *
+ * Serializing the writes closes those, and opens a second family: with one PUT
+ * outstanding at a time, the question stops being "which reply wins" and
+ * becomes **what happens to the document queued behind the one in flight**.
+ * Three ways to lose it, one test each, all of them a click the user made and
+ * was never told about:
+ *
+ *  - **a refusal that refuses more than its own body.** A failed PUT that
+ *    clears the queue drops the newer document with it — never sent, never
+ *    retried, and the caller's `save()` resolved on the shared drain as if it
+ *    had worked.
+ *  - **a reply rendered after it was superseded.** Applying the answer to a
+ *    body that a queued document already replaced repaints the panel, and the
+ *    window's palette, through a value from a round trip ago.
+ *  - **a teardown that cancels instead of silencing.** The dock going away must
+ *    stop the answers from landing, not stop the writes from happening: the
+ *    settings document outlives the panel.
+ *
  * The panel body's rendering is `panels/Settings.test.tsx`; the journey through
  * a real server is `e2e/settings.spec.ts`. This file is only about ordering.
  */
@@ -96,8 +113,10 @@ const server = vi.hoisted(() => {
   return fake;
 });
 
-/** The window's palette, so a theme actually applied is observable. */
-const window_ = vi.hoisted(() => ({ theme: "dark" }));
+/** The window's palette, so a theme actually applied is observable — and every
+ * palette it was ever put into, so a repaint *through* a superseded value is
+ * observable too, which the end state alone cannot show. */
+const window_ = vi.hoisted(() => ({ theme: "dark", worn: [] as string[] }));
 
 vi.mock("./api", () => ({
   getSettings: () => server.get(),
@@ -113,13 +132,14 @@ vi.mock("./store", () => ({
     getState: () => ({
       setTheme: (theme: string) => {
         window_.theme = theme;
+        window_.worn.push(theme);
       },
     }),
     subscribe: () => () => undefined,
   }),
 }));
 
-const { refresh, save, useSettings } = await import("./settings");
+const { refresh, save, settingsTool, useSettings } = await import("./settings");
 
 /** What the panel's controls are showing. */
 const shown = (): WorkbenchSettings | undefined => useSettings.getState().state?.stored;
@@ -133,6 +153,7 @@ beforeEach(async () => {
   useSettings.setState({ state: null, error: null });
   await refresh();
   expect(shown()).toEqual(DEFAULTS);
+  window_.worn = []; // the arrange is not the act
 });
 
 describe("two changes inside one round trip", () => {
@@ -211,5 +232,99 @@ describe("a write that fails", () => {
     expect(useSettings.getState().error).toBe("access is denied");
     expect(shown()).toEqual(DEFAULTS);
     boom.mockRestore();
+  });
+
+  it("does not swallow the change queued behind it", async () => {
+    // The user clicks theme, then voice, inside one round trip; the first PUT
+    // fails. Only one PUT is ever outstanding, so the voice click is sitting in
+    // the queue when the refusal arrives — and clearing the queue there drops it
+    // for good: never sent, never retried, and `save()` resolved on the shared
+    // drain as though it had worked.
+    const boom = vi.spyOn(server, "put").mockRejectedValueOnce(new Error("access is denied"));
+
+    await Promise.all([save({ theme: "light" }), save({ voice_input: true })]);
+    boom.mockRestore();
+
+    const both: WorkbenchSettings = { theme: "light", office_native: "auto", voice_input: true };
+    // The queued document carries the refused body's fields too (every patch
+    // merges onto `desired`), so sending it recovers both clicks — which is why
+    // there is nothing left to report.
+    expect(onDisk()).toEqual(both);
+    expect(shown()).toEqual(both);
+    expect(useSettings.getState().error).toBeNull();
+  });
+
+  it("shows what did land when the failure is the second write of a burst", async () => {
+    // The mirror image: the first PUT lands, the one queued behind it does not.
+    // The panel may not go on showing the document from before the burst — the
+    // file has moved, and a stale panel misreports it as confidently as any race.
+    //
+    // The one test here that is a guard rather than a repro. Rendering every
+    // reply used to give this away for free; withholding the superseded ones is
+    // what puts it at risk, so it is pinned before the next reader is tempted to
+    // drop a held answer instead of showing it.
+    server.putDelay = [20, 0];
+    const real = server.put;
+    let turn = 0;
+    const boom = vi.spyOn(server, "put").mockImplementation(async (body) => {
+      turn += 1;
+      if (turn === 2) throw new Error("access is denied");
+      return real(body);
+    });
+
+    await Promise.all([save({ theme: "light" }), save({ voice_input: true })]);
+    boom.mockRestore();
+
+    expect(useSettings.getState().error).toBe("access is denied");
+    expect(shown()).toEqual({ theme: "light", office_native: "auto", voice_input: false });
+    expect(window_.theme).toBe("light");
+  });
+});
+
+describe("a reply that a queued document already replaced", () => {
+  it("is not rendered on the way to the one that won", async () => {
+    server.putDelay = [30, 0];
+    const seen: (WorkbenchSettings | null)[] = [];
+    const stop = useSettings.subscribe((next) => seen.push(next.state?.stored ?? null));
+
+    // Dark is what the window is already wearing, so light -> dark is a burst
+    // whose *end state* is indistinguishable from having done nothing. What it
+    // must not do is go through light on the way.
+    await Promise.all([save({ theme: "light" }), save({ theme: "dark" })]);
+    stop();
+
+    expect(shown()?.theme).toBe("dark");
+    expect(window_.theme).toBe("dark");
+    expect(window_.worn).toEqual([]); // never repainted, not repainted twice
+    expect(seen.some((stored) => stored?.theme === "light")).toBe(false);
+  });
+});
+
+describe("the dock going away", () => {
+  it("silences the answers without cancelling the writes", async () => {
+    server.putDelay = [30, 0];
+    const writes = Promise.all([save({ theme: "light" }), save({ voice_input: true })]);
+
+    // Teardown with one PUT in flight and one document queued behind it. The
+    // queued one is the user's change; `settings.json` outlives the panel.
+    settingsTool.onDockReady?.(null);
+    await writes;
+
+    expect(onDisk()).toEqual({ theme: "light", office_native: "auto", voice_input: true });
+    expect(useSettings.getState().state).toBeNull(); // and nothing landed on the reset store
+  });
+
+  it("does not leave the panel that comes back waiting on it", async () => {
+    server.putDelay = [30, 0];
+    const writes = Promise.all([save({ theme: "light" }), save({ voice_input: true })]);
+    settingsTool.onDockReady?.(null);
+
+    // A read stands down behind a drain that will paint the store. This one
+    // will not — it lost its ticket — so standing behind it is "Loading…" for
+    // good. It waits for the drain and then reads, never across it.
+    await refresh();
+    await writes;
+
+    expect(shown()).toEqual({ theme: "light", office_native: "auto", voice_input: true });
   });
 });
