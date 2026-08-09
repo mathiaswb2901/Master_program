@@ -437,6 +437,55 @@ pub(super) fn subtree(root: HWND, depth: usize) -> Vec<(usize, String)> {
     lines
 }
 
+/// A hop to the thread that owns the hosted windows: [`super::main_thread::on_main`]
+/// in the shell, a nominated thread in the tests.
+///
+/// **Only [`paint_control`] needs one, because only [`paint_control`] writes.**
+/// Everything else in this module reads — `GetWindow`, `GetWindowRect`,
+/// `WindowFromPoint`, `GetPixel` — and a read touches no window's state.
+/// `ShowWindow` does, and it is *not* exempt from the module rule in
+/// [`super::main_thread`] on the grounds of being asynchronous: it is not
+/// asynchronous. `ShowWindowAsync` exists precisely because the plain call on a
+/// window owned by another thread waits on that thread's message queue, so
+/// making it from a background thread can park that thread behind whatever the
+/// owner is already doing — a cold Word being embedded, say. That is the
+/// main-thread stall #121 was merged to remove from the close path, and a
+/// diagnostic is the last place worth reintroducing it.
+///
+/// Boxed rather than generic so the seam can be a plain `&dyn Fn` the caller
+/// supplies twice — hide, then restore — and so a test can nominate a thread of
+/// its own without a Tauri app.
+#[cfg(debug_assertions)]
+pub(super) type OnOwningThread<'a> = &'a dyn Fn(
+    Box<dyn FnOnce() -> Result<(), HostError> + Send + 'static>,
+) -> Result<(), HostError>;
+
+/// Show or hide `windows` on the thread that owns them.
+///
+/// `WindowId` rather than `HWND` for the reason the type exists (see
+/// [`super::WindowId`]): a raw handle is neither `Send` nor `Sync`, so the
+/// integer crosses the thread boundary and the handle is rebuilt at the call
+/// site.
+#[cfg(debug_assertions)]
+fn set_visibility(
+    on_owning_thread: OnOwningThread<'_>,
+    windows: Vec<WindowId>,
+    visible: bool,
+) -> Result<(), HostError> {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNA};
+
+    on_owning_thread(Box::new(move || {
+        for window in windows {
+            // SAFETY: `ShowWindow` validates the handle and fails rather than
+            // faults, and this runs on the thread that owns the window.
+            // `SW_SHOWNA` so restoring does not steal activation, for the same
+            // reason [`super::class::set_visible`] uses it.
+            let _ = unsafe { ShowWindow(window.hwnd(), if visible { SW_SHOWNA } else { SW_HIDE }) };
+        }
+        Ok(())
+    }))
+}
+
 /// **The control for the painting half**, and the only way to tell two very
 /// different failures apart.
 ///
@@ -449,41 +498,62 @@ pub(super) fn subtree(root: HWND, depth: usize) -> Vec<(usize, String)> {
 /// along and something above it was winning; if it does not, the panel is not
 /// painting at all.
 ///
-/// Hides every child of `top_level` that is neither the panel nor inside it,
-/// samples, and puts them back — a flicker in a debug demo, and the only
-/// non-destructive way to ask.
+/// Hides every *visible* child of `top_level` that is neither the panel nor
+/// inside it, samples, and puts them back — a flicker in a debug demo, and the
+/// only non-destructive way to ask. Already-hidden siblings are left alone:
+/// "restoring" one with `SW_SHOWNA` would leave the shell in a state the control
+/// invented rather than the state it found.
+///
+/// **The one function in this module that writes, so it is the one that takes a
+/// thread seam** — see [`OnOwningThread`]. Everything else here reads.
 #[cfg(debug_assertions)]
-pub(super) fn paint_control(tag: &str, top_level: HWND, panel: HWND, point: (i32, i32)) {
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNA};
-
+pub(super) fn paint_control(
+    on_owning_thread: OnOwningThread<'_>,
+    tag: &str,
+    top_level: HWND,
+    panel: HWND,
+    point: (i32, i32),
+) {
     let log = |line: String| crate::backend::log(&format!("office host zorder [{tag}]: {line}"));
-    let others: Vec<HWND> = children_top_first(top_level)
+    let others: Vec<WindowId> = children_top_first(top_level)
         .iter()
-        .map(|sibling| sibling.window.hwnd())
-        .filter(|window| {
+        .filter(|sibling| {
+            let window = sibling.window.hwnd();
             // SAFETY: `IsChild` validates both handles itself.
-            *window != panel && !unsafe { IsChild(panel, *window) }.as_bool()
+            sibling.visible && window != panel && !unsafe { IsChild(panel, window) }.as_bool()
         })
+        .map(|sibling| sibling.window)
         .collect();
     if others.is_empty() {
-        log("paint control: the panel has no siblings to hide".to_string());
+        log("paint control: the panel has no visible siblings to hide".to_string());
         return;
     }
+    let count = others.len();
+    let mut restore = others.clone();
+    restore.reverse();
 
     let before = pixel_at(point);
-    for window in &others {
-        // SAFETY: `ShowWindow` validates the handle and fails rather than faults.
-        let _ = unsafe { ShowWindow(*window, SW_HIDE) };
+    if let Err(err) = set_visibility(on_owning_thread, others, false) {
+        log(format!(
+            "paint control: the siblings were never hidden ({err}), so the reading below is \
+             not a control at all"
+        ));
     }
     std::thread::sleep(std::time::Duration::from_millis(600));
     let hidden = pixel_at(point);
-    for window in others.iter().rev() {
-        // SAFETY: as above. `SW_SHOWNA` so restoring does not steal activation.
-        let _ = unsafe { ShowWindow(*window, SW_SHOWNA) };
+    if let Err(err) = set_visibility(on_owning_thread, restore, true) {
+        // The one failure here that a user would see, so it says what happens
+        // next rather than leaving "the webview vanished" as the last word: a
+        // timeout does not cancel the work (see
+        // [`super::main_thread::dispatch_within`]), so the restore is still
+        // queued and still runs when the owning thread answers.
+        log(format!(
+            "paint control: the restore has not completed yet ({err}); it stays queued for \
+             the thread that owns the windows and the siblings come back when it answers"
+        ));
     }
     log(format!(
-        "paint control: {} sibling(s) hidden - the pixel went {before:x?} -> {hidden:x?}",
-        others.len()
+        "paint control: {count} sibling(s) hidden - the pixel went {before:x?} -> {hidden:x?}"
     ));
     match (before, hidden) {
         (Some(before), Some(hidden)) if before == hidden => log(

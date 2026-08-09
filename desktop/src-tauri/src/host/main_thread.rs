@@ -28,6 +28,15 @@
 //! [`dispatch_within`] is the routing underneath both, factored out so the
 //! discipline can be *measured* — a test nominates a thread, drains the queue on
 //! it, and checks the work ran there and not on the caller.
+//!
+//! A third caller exists in debug builds only: the host demo's z-order paint
+//! control, which hides the panel's siblings, samples a pixel and puts them
+//! back. `ShowWindow` is a window write like any other and gets no exemption for
+//! being "asynchronous" — it is not. `ShowWindowAsync` is the call documented
+//! for *posting* a show/hide to a window owned by another thread precisely
+//! because the plain one waits on that thread's message queue, which is the
+//! stall this seam exists to keep out of the shell. See
+//! [`super::zorder::OnOwningThread`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;

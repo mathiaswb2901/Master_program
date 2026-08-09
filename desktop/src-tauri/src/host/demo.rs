@@ -31,7 +31,8 @@ use tauri::{AppHandle, Manager};
 
 use super::commands;
 use super::geometry::CssRect;
-use super::{zorder, HostGeometry, WindowId};
+use super::main_thread;
+use super::{zorder, HostError, HostGeometry, WindowId};
 
 /// Panel id the demo hosts under.
 const DEMO_HOST_ID: &str = "demo";
@@ -205,7 +206,7 @@ fn run(app: &AppHandle, which: Which) {
     }
     let _ = commands::host_set_bounds(app.clone(), window.clone(), DEMO_HOST_ID.to_string(), rect);
 
-    probe_z_order(&window, docked.window);
+    probe_z_order(app, &window, docked.window);
 
     if hang {
         thread::sleep(HANG_AFTER);
@@ -231,13 +232,21 @@ fn run(app: &AppHandle, which: Which) {
 /// #127's verification note asked for: hit test and screen pixel, side by side,
 /// with the sibling chain that explains either answer.
 ///
-/// Runs on the demo's own thread, which is allowed because none of it *owns* a
-/// window: the queries (`GetWindow`, `GetWindowRect`, `WindowFromPoint`,
-/// `GetPixel`) are read-only, `ShowWindow` on a window belonging to another
-/// thread is documented as asynchronous rather than forbidden, and the resize
-/// goes through Tauri, which marshals it. Nothing here creates or destroys a
-/// window — that is still the main thread's, and only the main thread's.
-fn probe_z_order(window: &tauri::Window, panel: WindowId) {
+/// Runs on the demo's own thread, and every call it makes from there is one of
+/// three kinds. The queries (`GetWindow`, `GetWindowRect`, `WindowFromPoint`,
+/// `GetPixel`) are reads and touch no window's state. The resize goes through
+/// Tauri, which marshals it. And the one call that *writes* — `ShowWindow`, in
+/// the paint control — is handed to [`super::main_thread::on_main`] like every
+/// other window write in the shell.
+///
+/// **`ShowWindow` is not exempt on the grounds of being asynchronous.** It is
+/// not asynchronous: `ShowWindowAsync` exists precisely because the plain call
+/// on a window owned by another thread waits on that thread's message queue, so
+/// making it from here could park this thread behind whatever the main thread is
+/// already doing — embedding a cold Word, say — which is the stall #121 was
+/// merged to remove. Nothing here creates or destroys a window either; that is
+/// still the main thread's, and only the main thread's.
+fn probe_z_order(app: &AppHandle, window: &tauri::Window, panel: WindowId) {
     let Ok(top_level) = window.hwnd() else {
         crate::backend::log("office host demo: no HWND to probe against");
         return;
@@ -257,7 +266,11 @@ fn probe_z_order(window: &tauri::Window, panel: WindowId) {
     // would be a Z-order problem at all.
     {
         let rect = zorder::screen_rect_of(panel.hwnd());
+        let on_owning_thread = |work: Box<
+            dyn FnOnce() -> Result<(), HostError> + Send + 'static,
+        >| { main_thread::on_main(app, work) };
         zorder::paint_control(
+            &on_owning_thread,
             "docked",
             top_level,
             panel.hwnd(),

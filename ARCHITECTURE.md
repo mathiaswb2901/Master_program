@@ -1243,7 +1243,14 @@ module answers both and a diagnosis quotes both: `WindowFromPoint` for "where
 would a real click go" (desktop-wide, and therefore the wrong probe in a test —
 `ChildWindowFromPointEx` is scoped to one window's tree), a screen-pixel read for
 "what is actually there", and a control that hides the sibling to tell "the panel
-is not painting" apart from "the panel is painting and losing". Verified in the
+is not painting" apart from "the panel is painting and losing". Every probe there
+is a *read* except that control, which hides a window and puts it back — so it
+takes the thread seam and the rest do not. `ShowWindow` gets no exemption for
+being "asynchronous", because it is not: `ShowWindowAsync` exists precisely
+because the plain call on another thread's window waits on that thread's message
+queue, which is the same stall the close paths below were fixed to avoid. The
+demo probe runs on its own thread and hands those two calls to
+`main_thread::on_main` like every other window write in the shell. Verified in the
 shell against a real Word (`WORKBENCH_HOST_DEMO=word:<path>` docks one through
 the same launch/find/embed the Python service drives): before, the panel was
 `#2 of 2` children, the hit test answered `Chrome_RenderWidgetHostHWND` and the
