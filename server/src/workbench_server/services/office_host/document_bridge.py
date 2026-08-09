@@ -213,10 +213,18 @@ class DocumentBridge(Protocol):
         """Two whole columns as ``(timestamp, value)`` pairs, typed, from
         ``start_row`` down to the sheet's last used row.
 
-        Trailing rows where both columns are empty are dropped, so the result
-        matches what the disk reader produces for the same workbook. ``max_rows``
-        is a hard ceiling on the rows read; a taller column is cut there, which
-        can only ever surface as an unmatched expectation (an alignment gap) and
-        never as a pass — truncation must not be able to manufacture agreement.
+        **The window verbatim, blank rows included.** A bridge is a transport
+        here and decides nothing about where the column's data ends — that is one
+        rule, applied once, by the reconciliation reader seam
+        (``services/reconciliation.py``'s ``column_data_rows``) to whichever
+        bridge answered. It has to be one rule because the disk reader applies it
+        too: a bridge that trimmed on its own would make the same workbook
+        reconcile a different set of rows docked than undocked, which is the
+        provenance promise ``ReadSource`` exists to make.
+
+        ``max_rows`` is a hard ceiling on the rows read; a taller column is cut
+        there, which can only ever surface as an unmatched expectation (an
+        alignment gap) and never as a pass — truncation must not be able to
+        manufacture agreement.
         """
         ...

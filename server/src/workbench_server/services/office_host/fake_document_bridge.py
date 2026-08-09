@@ -356,13 +356,13 @@ class FakeDocumentBridge:
             raise RangeInvalidError(f"bad column: {error}") from error
         rows, _ = used_dims({key: "x" for key in grid})
         last = min(rows, start_row - 1 + max_rows)
-        pairs = [
+        # The window, verbatim — blank rows included, exactly as the real bridge
+        # returns it. Where the data *ends* is the reconciliation seam's one
+        # rule, not something each bridge decides for itself.
+        return [
             (grid.get((row, ts_col)), grid.get((row, value_col)))
             for row in range(start_row - 1, last)
         ]
-        while pairs and pairs[-1] == (None, None):
-            pairs.pop()
-        return pairs
 
     def _values(self, handle: HostHandle, sheet: str | None) -> ValueGrid:
         """The typed grid for a sheet — or the refusal a bridge that cannot do a

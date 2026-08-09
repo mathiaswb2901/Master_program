@@ -190,19 +190,19 @@ class ShellDocumentBridge:
             values = office_com.excel_range_values(
                 worksheet, f"{value_column}{start_row}:{value_column}{end}"
             )
-            pairs = [
+            # The window, verbatim — blank rows included. Where the *data* ends
+            # is not this layer's call: the reconciliation seam applies one rule
+            # (`column_data_rows`) to whichever bridge answered, so a live read
+            # and a read of the same file on disk cover the same rows. A bridge
+            # that trimmed on its own would be a second copy of that rule, and
+            # two copies is what let a live read keep rows disk had dropped.
+            return [
                 (
                     stamps[row][0] if row < len(stamps) and stamps[row] else None,
                     values[row][0] if row < len(values) and values[row] else None,
                 )
                 for row in range(end - start_row + 1)
             ]
-            # Match the disk reader, which stops at the first row where both
-            # columns are empty: the used range can extend past the data (a
-            # stray format, a cleared cell), and trailing blanks are not rows.
-            while pairs and pairs[-1] == (None, None):
-                pairs.pop()
-            return pairs
 
         return await self._com(handle, work)
 

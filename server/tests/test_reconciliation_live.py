@@ -313,6 +313,143 @@ class TestReadersAgree:
         assert live.source.kind == "live"
         assert disk.source.kind == "file"
 
+    async def test_a_blank_row_ends_the_column_for_both_readers(self, tmp_path: Path) -> None:
+        """The reproduction: **one blank row used to mean two different workbooks.**
+
+        A metering or dispatch export with a gap in it — row 3 empty, more hours
+        below — is ordinary, not exotic. The disk reader has always treated a
+        fully-blank row as the end of the column. The live readers read the whole
+        used range and only trimmed the *tail*, so the rows after the gap came
+        back as data. Same file, same spec, two comparison sets: 02:00 reconciled
+        when the workbook happened to be docked and reported an alignment gap
+        when it was not.
+
+        That is not a rare edge: the front gate's own table prefers the live
+        reader for a docked-and-clean workbook, which is the everyday case. And
+        it hollows out the provenance the whole PR is about — ``kind='live'`` vs
+        ``kind='file'`` is only worth printing if the two read the same rows.
+        """
+        gapped = tmp_path / "hours.xlsx"
+        make_workbook(
+            gapped,
+            {
+                "A1": "ts",
+                "B1": "mwh",
+                "A2": datetime(2024, 1, 1, 0),
+                "B2": 10.0,
+                # row 3 deliberately blank — the gap
+                "A4": datetime(2024, 1, 1, 2),
+                "B4": 30.0,
+            },
+        )
+        spec = ReconciliationSpec(
+            workbook="hours.xlsx",
+            default_tolerance=Tolerance(rel=0.001),
+            timezone="Europe/Oslo",
+            time_index=TimeIndexSpec(
+                timestamp_column="A",
+                value_column="B",
+                start_row=2,
+                expectations=[
+                    TimeExpectation(timestamp="2024-01-01T00:00:00", expected=10.0),
+                    TimeExpectation(timestamp="2024-01-01T02:00:00", expected=30.0),
+                ],
+            ),
+        )
+        # What a bridge hands back: the window verbatim, blank row included. The
+        # rule about where the data ends lives at the reader seam, so this is the
+        # honest input to test the seam with.
+        window: list[tuple[Any, Any]] = [
+            (datetime(2024, 1, 1, 0), 10.0),
+            (None, None),
+            (datetime(2024, 1, 1, 2), 30.0),
+        ]
+
+        live_service, live_result = await run_recon(
+            tmp_path, spec, StubHost(saved=True, columns=window)
+        )
+        disk_service, disk_result = await run_recon(tmp_path, spec, StubHost(docked=False))
+        live = report_of(live_service, live_result)
+        disk = report_of(disk_service, disk_result)
+
+        assert live.source.kind == "live"
+        assert disk.source.kind == "file"
+        # The claim: identical comparisons, and therefore an identical verdict.
+        assert live.comparisons == disk.comparisons
+        assert live_result.risk == disk_result.risk
+        # And the rule is the disk reader's own, unchanged: the gap ends the
+        # column, so 02:00 is an alignment gap on *both* sides rather than a pass
+        # on one of them.
+        rows = {c.cell: c for c in live.comparisons}
+        assert rows["2024-01-01T00:00:00"].outcome == "pass"
+        assert rows["2024-01-01T02:00:00"].outcome == "fail"
+        assert "alignment gap" in (rows["2024-01-01T02:00:00"].reason or "")
+
+    async def test_the_two_readers_return_the_same_column_pairs(self, tmp_path: Path) -> None:
+        """The same claim one level down, at the seam itself — so a future reader
+        that never reaches ``ReconciliationCheck`` still has the rule asserted."""
+        gapped = tmp_path / "hours.xlsx"
+        make_workbook(
+            gapped,
+            {
+                "A2": datetime(2024, 1, 1, 0),
+                "B2": 10.0,
+                "A4": datetime(2024, 1, 1, 2),
+                "B4": 30.0,
+            },
+        )
+        spec = ReconciliationSpec(
+            workbook="hours.xlsx",
+            default_tolerance=Tolerance(rel=0.001),
+            timezone="Europe/Oslo",
+            time_index=TimeIndexSpec(
+                timestamp_column="A",
+                value_column="B",
+                start_row=2,
+                expectations=[TimeExpectation(timestamp="2024-01-01T00:00:00", expected=10.0)],
+            ),
+        )
+        host = StubHost(
+            columns=[
+                (datetime(2024, 1, 1, 0), 10.0),
+                (None, None),
+                (datetime(2024, 1, 1, 2), 30.0),
+            ]
+        )
+        live = await LiveComWorkbookReader.load(
+            host, "hours.xlsx", spec, host.status, datetime(2026, 8, 9, 14, 0)
+        )
+        disk = DiskWorkbookReader(gapped, datetime(2026, 8, 9, 14, 0))
+        try:
+            assert live.column_pairs(None, "A", "B", 2) == disk.column_pairs(None, "A", "B", 2)
+            assert live.column_pairs(None, "A", "B", 2) == [(datetime(2024, 1, 1, 0), 10.0)]
+        finally:
+            disk.close()
+            live.close()
+
+    async def test_the_bridge_is_a_transport_and_does_not_decide_where_data_ends(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half of "one rule, one place": a bridge hands back the window
+        it was asked for, blank rows and all.
+
+        If a bridge trimmed on its own the rule would exist twice, and the two
+        copies are exactly what drifted. Driven on the fake because the real one
+        needs COM — but the rule is not in either of them any more, which is the
+        structural reason the real one cannot diverge.
+        """
+        name = "hours.xlsx"
+        make_workbook(tmp_path / name, {"B2": 1.0})
+        service = await _docked_service(tmp_path, name)
+        # Clear both cells of one interior row through the write seam an agent
+        # uses — the fake's `Hours` sheet is 25 contiguous rows until this.
+        await service.write_document(name, content="", sheet="Hours", cell="A4")
+        await service.write_document(name, content="", sheet="Hours", cell="B4")
+
+        window = await service.read_workbook_columns(name, "Hours", "A", "B", 2, 1000)
+        assert window[2] == (None, None), window[:4]
+        assert len(window) > 3  # the rows below the gap are still in the window
+
     async def test_disk_reader_reports_a_workbook_with_no_cached_values(
         self, tmp_path: Path
     ) -> None:

@@ -58,7 +58,7 @@ via :meth:`ValidationContext.store_payload` — the table never rides the result
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -240,6 +240,36 @@ def within_tolerance(expected: float, actual: float, tol: Tolerance) -> bool:
     return tol.rel is not None and delta <= tol.rel * abs(expected)
 
 
+def column_data_rows(rows: Iterable[tuple[object, object]]) -> list[tuple[object, object]]:
+    """Where a time-index column's data ends: every row before the first one whose
+    **both** cells are empty.
+
+    **The single statement of that rule**, and it is called by both
+    implementations of :class:`WorkbookReader` — the disk reader over a lazy row
+    generator (so it still stops reading rather than scanning a sheet it would
+    throw away) and the live reader over the window a bridge handed back. One
+    function rather than one rule per reader, because two copies is exactly what
+    drifted: the live path used to keep the whole used range and trim only the
+    *tail*, so a workbook with a blank row 3 and more hours at row 4 reconciled
+    three rows live and one row from disk. Same file, same spec, two comparison
+    sets — decided by whether the workbook happened to be docked when the check
+    ran. That hollows out the provenance this module exists to print: naming
+    ``live`` or ``file`` is only worth something when the two read the same rows.
+
+    The rule kept is the disk reader's, unchanged, and the choice is not
+    arbitrary. Cutting at the gap can only ever *lose* rows, and a lost row
+    surfaces as an unmatched expectation ("alignment gap") — the same property
+    that makes :data:`MAX_LIVE_ROWS` safe. It can never manufacture agreement,
+    which is the one thing a validation gate must not do.
+    """
+    out: list[tuple[object, object]] = []
+    for pair in rows:
+        if pair == (None, None):
+            break
+        out.append(pair)
+    return out
+
+
 class WorkbookReader(Protocol):
     """The seam the disk reader and the live COM reader both satisfy.
 
@@ -258,6 +288,11 @@ class WorkbookReader(Protocol):
     :class:`OffsetNotAllowed` protecting the case it was written for — an
     offset-bearing *string* in the workbook — instead of firing on every row of a
     live read.
+
+    **And both end a column in the same place.** :meth:`column_pairs` returns the
+    rows :func:`column_data_rows` keeps, never a per-reader notion of where the
+    data stops — a reader that decided that for itself would make the same
+    workbook reconcile differently docked and undocked.
     """
 
     def cell_value(self, sheet: str | None, cell: str) -> object: ...
@@ -324,16 +359,26 @@ class DiskWorkbookReader:
         self, sheet: str | None, ts_column: str, value_column: str, start_row: int
     ) -> list[tuple[object, object]]:
         ws = self._sheet(sheet)
-        pairs: list[tuple[object, object]] = []
-        row = start_row
-        while True:
-            ts = ws[f"{ts_column}{row}"].value  # type: ignore[index]
-            val = ws[f"{value_column}{row}"].value  # type: ignore[index]
-            if ts is None and val is None:
-                break
+
+        def rows() -> Iterator[tuple[object, object]]:
+            """Rows from ``start_row`` down, one at a time and for ever.
+
+            Lazy on purpose: :func:`column_data_rows` stops pulling at the first
+            blank row, so this reads exactly the cells the old inline loop read —
+            the shared rule costs nothing, and a sheet whose data ends at row 40
+            is still not scanned to row 1,048,576.
+            """
+            row = start_row
+            while True:
+                yield (
+                    ws[f"{ts_column}{row}"].value,  # type: ignore[index]
+                    ws[f"{value_column}{row}"].value,  # type: ignore[index]
+                )
+                row += 1
+
+        pairs = column_data_rows(rows())
+        if pairs:
             self._saw_value = True
-            pairs.append((ts, val))
-            row += 1
         return pairs
 
 
@@ -383,6 +428,12 @@ class LiveComWorkbookReader:
     tz-aware datetime — which real COM returns, with an offset that is *not* this
     machine's zone — becomes the naive local wall clock the rest of the module is
     written in, and never reaches ``_as_local_datetime``'s offset refusal.
+
+    **And cut at this seam.** A bridge returns the window it was asked for and
+    decides nothing about it; :func:`column_data_rows` — the disk reader's own
+    rule, called here — says where the column's data ends. Putting it here rather
+    than in each bridge is what makes it structurally impossible for a *future*
+    bridge to reconcile a different set of rows than the file would.
     """
 
     def __init__(
@@ -428,9 +479,11 @@ class LiveComWorkbookReader:
                 ti.start_row,
                 MAX_LIVE_ROWS,
             )
-            columns[(ti.sheet, ti.timestamp_column, ti.value_column, ti.start_row)] = [
-                (naive_local(ts), naive_local(value)) for ts, value in pairs
-            ]
+            # The bridge hands back the window it was asked for, verbatim; where
+            # the *data* ends is this seam's decision and the disk reader's rule.
+            columns[(ti.sheet, ti.timestamp_column, ti.value_column, ti.start_row)] = (
+                column_data_rows((naive_local(ts), naive_local(value)) for ts, value in pairs)
+            )
         return cls(
             cells,
             columns,
