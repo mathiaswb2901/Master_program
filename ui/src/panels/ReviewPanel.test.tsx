@@ -185,11 +185,14 @@ describe("RiskBadge", () => {
 
 describe("OutcomePill", () => {
   it("renders each outcome with a colour and a label", () => {
+    // Exhaustive by type: a new CheckOutcome member fails to compile here until
+    // it has a pill, which is how `blocked` arrived with one.
     const cases: Record<CheckOutcome, string> = {
       pass: "Pass",
       warn: "Warn",
       fail: "Fail",
       skipped: "Skipped",
+      blocked: "Blocked",
     };
     for (const [outcome, label] of Object.entries(cases)) {
       expect(html(<OutcomePill outcome={outcome as CheckOutcome} />)).toContain(label);
@@ -264,6 +267,14 @@ describe("EvidenceGallery", () => {
               matched: 39,
               mismatched: 1,
               total: 40,
+              source: {
+                kind: "live",
+                read_at: "2026-08-09T14:02:11",
+                calculation: "done",
+                saved: false,
+                mtime: null,
+                cached_values: null,
+              },
               comparisons: [
                 {
                   cell: "Sheet1!D14",
@@ -285,6 +296,11 @@ describe("EvidenceGallery", () => {
     expect(table).toContain("Sheet1!D14");
     expect(table).toContain("outside tolerance");
     expect(table).toContain('data-outcome="fail"');
+    // …and it says which of the two workbooks these numbers are: the live one,
+    // with the user's unsaved edits in it. A table that cannot answer that is a
+    // colour rather than proof.
+    expect(table).toContain("Read live from the docked workbook at 14:02:11");
+    expect(table).toContain("workbook unsaved");
 
     // A bounded LRU dropping a log is the expected end of its life, so it is its
     // own state — never a spinner that never resolves.

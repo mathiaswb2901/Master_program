@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from workbench_server.config import Settings
 from workbench_server.main import create_app
 from workbench_server.models.gates import GateLog
-from workbench_server.models.reconciliation import CellComparison, ReconciliationReport
+from workbench_server.models.reconciliation import CellComparison, ReadSource, ReconciliationReport
 from workbench_server.models.validation import (
     EvidenceItem,
     EvidenceTruncation,
@@ -204,6 +204,9 @@ def test_a_missing_directory_loads_as_nothing_rather_than_raising(tmp_path: Path
 def _big_report(rows: int) -> ReconciliationReport:
     return ReconciliationReport(
         workbook="models/se3-dispatch.xlsx",
+        # Every report says where its numbers came from (PR-A). A disk read is
+        # what these fixtures are: no Excel is involved anywhere in this suite.
+        source=ReadSource(kind="file", read_at=NOW.replace(tzinfo=None), cached_values=True),
         matched=rows,
         mismatched=0,
         total=rows,

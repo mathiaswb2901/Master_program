@@ -195,6 +195,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # after the settings document, because how long that record is kept is a
     # *machine* preference read from it — asked for per sweep rather than
     # captured, so changing it does not need a restart to mean something.
+    #
+    # The reconciliation gate is registered further down, once the Office host
+    # exists: it needs that host as its live-workbook seam, so it can refuse to
+    # reconcile a docked workbook's stale file instead of quietly passing it.
     validation_service = ValidationService(
         workspace.root,
         event_bus,
@@ -202,11 +206,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             days=settings_service.effective().validation_retention_days
         ),
     )
-    # M6 PR2: the first *domain* check. It reads the addressed .xlsx cells directly
-    # with openpyxl (deterministic, no Office), comparing code-computed numbers
-    # against the workbook unit- and DST-aware. Additive registration — the frame
-    # dispatches to it when a spec names its id ("reconciliation").
-    validation_service.register(ReconciliationCheck())
     # Native Office hosting, constructed before the session manager because a
     # session reads the live docked document through it (narrowed to
     # OfficeDocumentReader in the SDK factory). The backend is None on any
@@ -238,6 +237,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fake=settings.office_fake,
         channel=host_channel,
     )
+    # M6 PR2: the first *domain* check, and the wedge — do the numbers the agent
+    # computed agree with the numbers the workbook actually contains? Registered
+    # *here* rather than beside the service it plugs into, because it takes the
+    # Office host as its live-workbook seam (narrowed to `LiveWorkbookHost` in
+    # the check). That is what makes the front gate possible: a workbook this
+    # process is holding open with unsaved edits is one whose `.xlsx` on disk is
+    # a different workbook, and reconciling the file there would report **pass**
+    # about numbers nobody read. Handed `None` — a server with no host at all —
+    # the check reads disk exactly as it did before.
+    validation_service.register(ReconciliationCheck(office_host_service))
     # Mission Control's second half. Built before the session manager because
     # the client factory needs it (an orchestrator session's toolset is created
     # with the client), and handed the manager through `bind` a few lines below.

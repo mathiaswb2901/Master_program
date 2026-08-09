@@ -76,13 +76,20 @@ MAX_PAYLOADS_PER_KIND = 500
 MAX_EVIDENCE = 100
 
 #: outcome → the risk that outcome contributes. The whole result's risk is the
-#: max severity over its evidence through this table (``blocked`` is handled
-#: separately: it is the *absence* of judgeable evidence, not any one outcome).
+#: max severity over its evidence through this table.
+#:
+#: An empty evidence list is *also* ``blocked`` (see :func:`derive_risk`) — that
+#: is the absence of judgeable evidence rather than any one outcome — but a check
+#: may now say ``blocked`` on the record instead, which is strictly better: the
+#: refusal arrives with the sentence that names the remedy. Both routes land on
+#: the same badge, and the badge is the point: ``low`` is something a reader
+#: scrolls past, ``blocked`` is something that stops them.
 _OUTCOME_RISK: dict[CheckOutcome, RiskLevel] = {
     "pass": "pass",
     "skipped": "low",
     "warn": "medium",
     "fail": "high",
+    "blocked": "blocked",
 }
 
 #: Least-to-most severe. ``blocked`` sorts highest: a validation that could not
@@ -119,7 +126,12 @@ def _summarize(risk: RiskLevel, evidence: list[EvidenceItem]) -> str:
     counts: dict[CheckOutcome, int] = {}
     for item in evidence:
         counts[item.outcome] = counts.get(item.outcome, 0) + 1
-    parts = [f"{counts[o]} {o}" for o in ("fail", "warn", "skipped", "pass") if counts.get(o)]
+    # Most severe first, so the sentence opens with what stops the reader.
+    # ``blocked`` leads: a check that refused to judge outranks one that judged
+    # and disagreed (_OUTCOME_RISK, and RiskLevel's own ordering).
+    parts = [
+        f"{counts[o]} {o}" for o in ("blocked", "fail", "warn", "skipped", "pass") if counts.get(o)
+    ]
     return f"{risk}: {len(evidence)} checks ({', '.join(parts)})."
 
 

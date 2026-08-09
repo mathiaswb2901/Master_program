@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
-from workbench_server.models.reconciliation import CellComparison, ReconciliationReport
+from workbench_server.models.reconciliation import CellComparison, ReadSource, ReconciliationReport
 from workbench_server.models.validation import (
     EvidenceItem,
     EvidenceTruncation,
@@ -110,6 +110,11 @@ def test_the_workbook_is_named_and_digested_from_the_reconciliation_payload(
         "numeric",
         ReconciliationReport(
             workbook="models/se3-dispatch.xlsx",
+            # Every report says where its numbers came from (PR-A); this one is a
+            # plain disk read, which is what the export renders as provenance.
+            source=ReadSource(
+                kind="file", read_at=datetime(2026, 8, 9, 14, 2, 11), cached_values=True
+            ),
             matched=1,
             mismatched=0,
             total=1,
