@@ -30,12 +30,14 @@ chain of ``isinstance`` checks and a new failure mode cannot arrive without
 naming itself.
 """
 
-from typing import Literal, Protocol
+from collections.abc import Sequence
+from typing import Any, Literal, Protocol
 
 from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
     DocStructure,
+    LiveWorkbookStatus,
     WordEdit,
     WordText,
 )
@@ -156,5 +158,65 @@ class DocumentBridge(Protocol):
         the cell. Raises :class:`RangeInvalidError` for an unknown sheet or a
         malformed cell address, and :class:`DocGoneError` if the instance has
         closed.
+        """
+        ...
+
+    # ---- the value-typed read (the reconciliation seam) ---------------------
+    #
+    # Three methods that exist for one caller: the workbook↔code reconciliation
+    # gate (``services/reconciliation.py``), which needs *numbers* rather than
+    # the text the three reads above return. They are deliberately separate from
+    # ``read_excel``: that one renders a window a person looks at, and its
+    # ``Grid`` is ``str`` all the way down. Reconciling parsed-back strings would
+    # throw away the precision a tolerance band is about.
+    #
+    # ``workbook_status`` is cheap and answered first, on purpose. It is two
+    # property reads with no range in them, so a *bulk* read that fails — a
+    # modal, a timeout, a range the sheet does not have — can still be told
+    # apart from "the workbook is clean and the file will do". That distinction
+    # is the whole front gate: on a dirty workbook a failed live read must be a
+    # refusal, never a quiet fall back to disk.
+
+    async def workbook_status(self, handle: HostHandle) -> LiveWorkbookStatus:
+        """Whether the live workbook has unsaved edits, and whether Excel has
+        finished calculating.
+
+        Raises :class:`DocNotReadableError` when this bridge cannot answer at
+        all, :class:`DocGoneError` if the instance has closed. It never guesses:
+        a status nobody could read is a refusal, because the caller's only other
+        option is to trust a file that may be stale.
+        """
+        ...
+
+    async def read_cells(
+        self, handle: HostHandle, sheet: str | None, cells: Sequence[str]
+    ) -> list[Any]:
+        """The **typed** values of the named A1 cells, in the order asked.
+
+        ``sheet`` is ``None`` for the active sheet, matching the disk reader's
+        own convention. A blank cell is ``None``; a number stays a number and a
+        date stays a naive ``datetime`` (the COM side drops the offset it
+        attaches — ``office_com.naive_local``). Raises
+        :class:`RangeInvalidError` for an unknown sheet or a malformed address.
+        """
+        ...
+
+    async def read_columns(
+        self,
+        handle: HostHandle,
+        sheet: str | None,
+        ts_column: str,
+        value_column: str,
+        start_row: int,
+        max_rows: int,
+    ) -> list[tuple[Any, Any]]:
+        """Two whole columns as ``(timestamp, value)`` pairs, typed, from
+        ``start_row`` down to the sheet's last used row.
+
+        Trailing rows where both columns are empty are dropped, so the result
+        matches what the disk reader produces for the same workbook. ``max_rows``
+        is a hard ceiling on the rows read; a taller column is cut there, which
+        can only ever surface as an unmatched expectation (an alignment gap) and
+        never as a pass — truncation must not be able to manufacture agreement.
         """
         ...

@@ -74,11 +74,13 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from workbench_server.models.office_bridge import CalculationState
 from workbench_server.models.office_host import HostAppKind
 
 log = structlog.get_logger()
@@ -968,6 +970,104 @@ def excel_grid(worksheet: Any) -> dict[tuple[int, int], str]:
             if text:
                 grid[(base_row + row_offset, base_col + col_offset)] = text
     return grid
+
+
+def naive_local(value: Any) -> Any:
+    """Strip the UTC offset COM attaches to a datetime, keeping the wall clock.
+
+    **Drop it, never honour it.** Measured on Windows 11 in ``W. Europe Standard
+    Time`` with pywin32 311 (``scripts/dev/probe_live_com.py`` reproduces it):
+    a cell holding the naive local ``2024-10-27 02:00`` comes back as
+    ``pywintypes.datetime(2024, 10, 27, 2, 0, tzinfo=TimeZoneInfo('GMT Standard
+    Time', True))`` — an offset that is **not** this machine's zone and carries
+    no information about the value. The digits are already the wall clock the
+    user typed, so::
+
+        .replace(tzinfo=None)      -> 2024-10-27 02:00   correct
+        .astimezone().replace(...) -> 2024-10-27 03:00   WRONG BY AN HOUR
+
+    and it is wrong on precisely the fall-back date the DST gate exists for.
+    ``.astimezone`` is the plausible-looking "normalisation" that silently moves
+    every hourly row of an autumn day; this function is here so that mistake has
+    one place it cannot be made.
+
+    Applied at the COM boundary, so no tz-aware value ever leaves this module.
+    Anything that is not a ``datetime`` is returned untouched — a float stays a
+    float, and that is the whole point of the value-typed read path (a tolerance
+    band is about precision ``str()`` throws away).
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def excel_range_values(worksheet: Any, a1_range: str) -> list[list[Any]]:
+    """One A1 range as a rectangle of **typed** values — never text.
+
+    The value-preserving sibling of :func:`excel_grid`, added rather than folded
+    into it because ``office_read`` is a shipped contract whose shape does not
+    move: that function runs every cell through :func:`_cell_text`, so ``1234.5``
+    arrives as ``"1234.5"``, an integral float loses its ``.0`` and a date
+    becomes a string. Reconciling parsed-back strings would throw away exactly
+    the precision a tolerance band is about, and would hand the numeric gate a
+    date it has to re-parse — which is how a naive local timestamp becomes a
+    value the offset refusal has to judge.
+
+    Read in one ``Value`` call (a rectangle, not a cell at a time), normalised
+    through :func:`naive_local` so nothing tz-aware crosses this seam, and
+    shaped by :func:`_as_matrix` so a single cell and an 8,760-row column come
+    back as the same list-of-rows.
+
+    Raises whatever COM raises for a malformed range; the bridge above maps it to
+    the shared ``range_invalid`` refusal.
+    """
+    target = _com_call(worksheet.Range, a1_range)
+    return [
+        [naive_local(value) for value in row]
+        for row in _as_matrix(_com_call(getattr, target, "Value"))
+    ]
+
+
+def excel_used_rows(worksheet: Any) -> int:
+    """The last row of the worksheet's used range, 1-based (``0`` when blank).
+
+    Bounds a column read: asking for ``A2:B1048576`` would make Excel hand back
+    a million mostly-empty rows, and the used range is the sheet's own answer to
+    "where does the data stop".
+    """
+    used = _com_call(getattr, worksheet, "UsedRange")
+    first = int(_com_call(getattr, used, "Row"))
+    count = int(_com_call(getattr, _com_call(getattr, used, "Rows"), "Count"))
+    return first + count - 1 if count else 0
+
+
+def workbook_saved(instance: OfficeInstance) -> bool:
+    """``Workbook.Saved`` — False when the live instance holds unsaved edits.
+
+    The whole front gate of the reconciliation check turns on this one boolean:
+    False means the ``.xlsx`` on disk is **not** the workbook the user is
+    looking at, so a gate that read the file would report about numbers that
+    have already changed.
+    """
+    return bool(_com_call(getattr, instance.document, "Saved"))
+
+
+#: ``Application.CalculationState`` → the state name. Excel's own enum:
+#: ``xlDone`` 0, ``xlCalculating`` 1, ``xlPending`` 2.
+_CALCULATION_STATES: dict[int, CalculationState] = {0: "done", 1: "calculating", 2: "pending"}
+
+
+def calculation_state(instance: OfficeInstance) -> CalculationState:
+    """Whether Excel has finished calculating, or is still mid-flight.
+
+    An unknown value is reported as ``pending`` rather than ``done``: the
+    conservative reading is the only safe default here, since ``done`` is the
+    one answer that lets a reconciliation proceed.
+    """
+    raw = int(
+        _com_call(getattr, _com_call(getattr, instance.document, "Application"), "CalculationState")
+    )
+    return _CALCULATION_STATES.get(raw, "pending")
 
 
 def set_excel_cell(worksheet: Any, row: int, col: int, value: str) -> None:

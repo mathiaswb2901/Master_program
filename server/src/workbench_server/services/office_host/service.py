@@ -45,6 +45,7 @@ from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
     DocStructure,
+    LiveWorkbookStatus,
     WordEdit,
     WordText,
 )
@@ -821,6 +822,90 @@ class OfficeHostService:
         if sheet is None or cell is None:
             raise RangeInvalidError("name a sheet and a cell to write in an Excel document")
         return await self._guarded_op(bridge.write_excel(handle, sheet, cell, content))
+
+    # ---- the live workbook seam (the reconciliation front gate) -------------
+    #
+    # Four narrow methods for one caller: `services/reconciliation.py`, which
+    # must never reconcile the file on disk against a workbook this service is
+    # holding open with unsaved edits in it. They are public and typed rather
+    # than that module reaching for `_live_host_for`, so the check never imports
+    # the office host at all — it declares the shape it needs and this satisfies
+    # it, the same `SlotLocator` posture the gates check already uses.
+
+    def docked_workbook(self, path: str) -> str | None:
+        """The docked host's own path string for the workbook at ``path``, or
+        ``None`` when Workbench is not holding that document open.
+
+        Matched by **resolved absolute path**, not by string equality: the host
+        was opened with whatever the file tree handed it and the reconciliation
+        spec carries whatever the analyst typed, so ``models/se3.xlsx`` and
+        ``models\\se3.xlsx`` have to name the same workbook or the gate would
+        wave through the very case it exists for. The host's *own* string is
+        what comes back, because that is the key every other method here takes.
+        """
+        target = self._resolved(path)
+        if target is None:
+            return None
+        return next(
+            (
+                host.lifecycle.path
+                for host in self._hosts.values()
+                if not host.lifecycle.terminal and self._resolved(host.lifecycle.path) == target
+            ),
+            None,
+        )
+
+    def _resolved(self, path: str) -> Path | None:
+        """A workspace-relative path as an absolute one, or ``None`` when it does
+        not resolve inside the workspace. A path that cannot be resolved cannot
+        match anything, which is the honest answer to "is this docked?"."""
+        try:
+            return self._workspace.safe_path(path)
+        except Exception as error:
+            log.debug("office_host.path_unresolved", path=path, error=str(error))
+            return None
+
+    async def workbook_status(self, path: str) -> LiveWorkbookStatus:
+        """Whether the live workbook at ``path`` has unsaved edits, and whether
+        Excel has finished calculating.
+
+        The cheap question, asked first and on purpose: it is two property reads
+        with no range in them, so it can still be answered when a bulk value read
+        cannot. Raises the same
+        :class:`~...document_bridge.DocumentBridgeError` refusals the other
+        reads do — and a status nobody could read is a refusal the caller must
+        treat as "assume nothing", never as "assume clean".
+        """
+        _, bridge, handle = self._live_document(path, "reading")
+        return await self._guarded_op(bridge.workbook_status(handle))
+
+    async def read_workbook_cells(
+        self, path: str, sheet: str | None, cells: Sequence[str]
+    ) -> list[object]:
+        """The **typed** values of the named A1 cells of the live workbook.
+
+        Numbers stay numbers and dates stay naive ``datetime``s — the difference
+        between this and ``read_document`` is the whole reason the reconciliation
+        gate cannot reuse the text window (``office_com.excel_range_values``).
+        """
+        _, bridge, handle = self._live_document(path, "reading")
+        return await self._guarded_op(bridge.read_cells(handle, sheet, cells))
+
+    async def read_workbook_columns(
+        self,
+        path: str,
+        sheet: str | None,
+        ts_column: str,
+        value_column: str,
+        start_row: int,
+        max_rows: int,
+    ) -> list[tuple[object, object]]:
+        """Two whole columns of the live workbook as typed ``(timestamp, value)``
+        pairs, bounded by ``max_rows``."""
+        _, bridge, handle = self._live_document(path, "reading")
+        return await self._guarded_op(
+            bridge.read_columns(handle, sheet, ts_column, value_column, start_row, max_rows)
+        )
 
     def _live_document(self, path: str, gerund: str) -> tuple[_Host, DocumentBridge, HostHandle]:
         """The host, its bridge and its owned handle — or the refusal that says
