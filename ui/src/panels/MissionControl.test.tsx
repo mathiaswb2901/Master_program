@@ -321,6 +321,38 @@ describe("four workers", () => {
   });
 });
 
+// ---- the kind badge -----------------------------------------------------------
+
+describe("the kind badge", () => {
+  it("labels a reviewer and gives it its own class, not a worker's", () => {
+    // The bug this guards: a reviewer card fell through the old binary ternary
+    // and rendered the "Worker" label with an `is-reviewer` class the stylesheet
+    // did not define — mislabelled and unstyled at once. It must read "Reviewer".
+    const html = board([card("r", { kind: "reviewer" })]);
+    expect(html).toContain("is-reviewer");
+    expect(html).toContain("Reviewer");
+    expect(html).not.toContain("is-worker");
+    expect(html).not.toContain("Worker");
+  });
+
+  it("wears no badge on an ordinary chat session", () => {
+    // `chat` is every session's default; a badge on all of them is noise.
+    expect(board([card("c", { kind: "chat" })])).not.toContain("wb-mission-kind");
+  });
+
+  it("fails safe to no badge for a kind the union does not know", () => {
+    // `card.kind` is a wire value with no runtime validation, so a rolling deploy
+    // that leaves this bundle behind the server can hand it a kind outside the
+    // compiled-in union. The map lookup is `undefined` there, not `null`, and an
+    // unguarded ternary would paint a garbled `title="…a undefined"` half-badge on
+    // an `is-<unknown>` class no stylesheet defines. It must draw nothing instead.
+    const html = board([card("f", { kind: "future-kind" as SessionKind })]);
+    expect(html).not.toContain("wb-mission-kind");
+    expect(html).not.toContain("undefined");
+    expect(html).not.toContain("is-future-kind");
+  });
+});
+
 // ---- the card in isolation ----------------------------------------------------
 
 describe("one card", () => {

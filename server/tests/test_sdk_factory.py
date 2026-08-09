@@ -326,6 +326,50 @@ class TestTheBuiltinToolsAreGatedBothWays:
         assert {"Read", "Edit", "Write", "Glob", "Grep"} <= set(options.allowed_tools)
         assert options.disallowed_tools == []
 
+    def test_a_reviewer_auto_allows_no_skill(self) -> None:
+        """The fourth builtin auto-allow list, and the one the PR 2 rewrite left
+        ungated: ``_AUTO_ALLOWED_SKILLS`` was appended whenever the bundled
+        plugin loaded, with no ``kind`` check. A whole-tool ``Skill(...)`` entry
+        is pre-approved *ahead of* ``can_use_tool`` — so a reviewer carried
+        ``Skill(workbench:remember)`` pre-approved despite being read-only and
+        despite answering its own permissions with a denial, and ``remember``'s
+        own trigger ("at the start of work in an unfamiliar workspace") fits every
+        reviewer, burning a turn from the review's tight ceiling on a skill whose
+        Edit workflow its stripped context cannot complete.
+
+        ``Settings()`` defaults ``bundled_skills`` to True, so ``plugins`` is
+        populated and the auto-allow really is reachable — which is why the chat
+        control below asserts the two skills *are* present: without it this test
+        would pass vacuously if the plugin ever stopped loading. On master both
+        assertions hold for chat and this one fails for the reviewer.
+        """
+        reviewer_skills = [t for t in _options("reviewer").allowed_tools if t.startswith("Skill(")]
+        assert reviewer_skills == []
+        # Control: the same construction *does* auto-allow the two bundled skills
+        # for an attended kind, so the empty list above is the kind gate at work,
+        # not an empty plugin set.
+        chat_skills = [t for t in _options("chat").allowed_tools if t.startswith("Skill(")]
+        assert chat_skills == [
+            "Skill(workbench:plan-visual)",
+            "Skill(workbench:remember)",
+        ]
+        # …and so do the other two attended kinds. The gate is ``not
+        # is_unattended(kind)``, which withholds the skills from the *reviewer
+        # alone*; a later refactor that folds ``worker`` into an unattended set for
+        # an unrelated reason, or swaps the gate for a bare ``kind == "chat"``,
+        # would silently strip these pre-approved skills from worker and
+        # orchestrator sessions and reopen the permission-dialog regression the
+        # auto-allow exists to prevent. Nothing else in the suite checks skills for
+        # these two, so it is asserted here rather than assumed.
+        for attended in ("worker", "orchestrator"):
+            attended_skills = [
+                t for t in _options(attended).allowed_tools if t.startswith("Skill(")
+            ]
+            assert attended_skills == [
+                "Skill(workbench:plan-visual)",
+                "Skill(workbench:remember)",
+            ], attended
+
     def test_the_reviewer_gets_its_ceilings(self) -> None:
         """``max_turns`` and ``max_budget_usd`` — both unused in this codebase
         until now. A check that spends without a ceiling is one nobody leaves
