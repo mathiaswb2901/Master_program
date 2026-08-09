@@ -210,7 +210,18 @@ test("with two overlays open, Escape closes only the topmost", async ({ page }) 
     // On master both listeners ran: the confirmation was cancelled *and* the
     // palette closed. The dialog on top owns the key; the palette stays.
     await expect(confirmClose).toBeHidden();
-    await expect(palette(page)).toBeVisible();
+
+    // "Still open" is asserted by *using* it, not by looking at it. The overlay
+    // is held on screen for `--motion-exit-ms` after it closes (`usePresence`),
+    // so a bare `toBeVisible()` here passes against the broken build by winning
+    // a race with the exit animation — it did, the first time this was written.
+    // A click has to land on something that is really there and really
+    // interactive (`.is-leaving` is `pointer-events: none`), and the rows have
+    // to still answer a query.
+    const input = palette(page).locator(".wb-qb-input");
+    await input.click();
+    await input.fill(">terminal");
+    await expect(palette(page).locator(".wb-qb-row").first()).toBeVisible();
 
     // …and the next Escape is the palette's, now that it is on top again.
     await page.keyboard.press("Escape");
@@ -222,8 +233,11 @@ test("with two overlays open, Escape closes only the topmost", async ({ page }) 
   await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(1);
 
   await test.step("confirmation first, palette on top — Escape answers the palette", async () => {
-    // The other order, reached with a mouse: the tab's × is clickable because
-    // no scrim is over it yet.
+    // The other order, reached with a mouse: no scrim is over the tab strip
+    // yet. The × is `display: none` until the tab is hovered (`editor.css`) —
+    // on a dirty tab it is where the dot was — so the hover is part of the
+    // gesture rather than a concession to the harness.
+    await page.locator(".wb-editor-tab.is-dirty").hover();
     await page.getByRole("button", { name: `Close ${NOTES_FILE}`, exact: true }).click();
     await expect(confirmClose).toBeVisible();
 
