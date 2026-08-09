@@ -25,6 +25,7 @@ from workbench_server.routers import (
     files,
     health,
     layouts,
+    notebook,
     office,
     office_host,
     orchestrator,
@@ -465,6 +466,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(terminal.router)
     app.include_router(files.router)
+    # Reads `.ipynb` through the same `app.state.workspace` jail `files` uses, so
+    # it needs no service of its own in the wiring above and nothing to re-root
+    # when the workspace switches.
+    app.include_router(notebook.router)
     app.include_router(events.router)
     app.include_router(commands.router)
     app.include_router(agents.router)

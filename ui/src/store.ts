@@ -12,6 +12,7 @@ import {
 import { defineWorkbenchTheme, disposeModel, setModelContent } from "./monaco";
 import { withoutTransitions } from "./motion";
 import { chatNeedsHydration, transcriptToChatItems } from "./liveTranscript";
+import { isNotebookPath } from "./notebook";
 import { isOfficePath, preloadDocsApi } from "./office";
 import {
   notePermission,
@@ -59,8 +60,18 @@ import { ReconnectingSocket } from "./ws";
 export interface OpenFile {
   path: string;
   name: string;
-  /** "text" renders in Monaco; "office" in the OnlyOffice document panel. */
-  kind: "text" | "office";
+  /**
+   * Which registered document view renders this buffer — `documentViewFor`
+   * takes exactly this (`registry.ts`). "text" is the absence of one: Monaco.
+   *
+   * The kind is decided from the *path* here rather than by asking the registry,
+   * because it is decided before anything is fetched: an office file and a
+   * notebook are both opened without a content request, by different views, and
+   * a buffer that has to be loaded before it can say what would render it would
+   * pay for the fetch it exists to avoid. Each predicate lives in the tool's own
+   * module (`isOfficePath`, `isNotebookPath`).
+   */
+  kind: "text" | "office" | "notebook";
   buffer: string;
   /** Content last synced with disk — dirty when buffer differs. */
   savedContent: string;
@@ -404,7 +415,10 @@ interface WorkbenchStore {
    * `orphanedPaths`.
    */
   adoptWorkspace: () => Promise<void>;
-  openFile: (path: string) => Promise<void>;
+  /** Open a workspace file. `asText` forces the plain Monaco buffer even when a
+   * document view claims the kind — the escape hatch a view offers a file it
+   * cannot read (the notebook's degraded card). */
+  openFile: (path: string, asText?: boolean) => Promise<void>;
   /** Guarded close: dirty buffers get a confirm modal instead of silent discard. */
   requestCloseFile: (path: string) => void;
   resolvePendingClose: (action: "save" | "discard" | "cancel") => Promise<void>;
@@ -971,24 +985,41 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       ]);
     },
 
-    openFile: async (path) => {
+    openFile: async (path, asText = false) => {
       // Opening it IS seeing it: half of the acknowledge rule (the other half
       // is dismissing the bar). Fires even for an already-open tab, because
       // clicking a marked file in the tree is exactly how a user attends to it.
       get().acknowledgeProvenance(path);
-      if (get().openFiles.some((f) => f.path === path)) {
-        set({ activePath: path });
-        return;
+      const already = get().openFiles.find((f) => f.path === path);
+      if (already !== undefined) {
+        // `asText` asked for the *text* of a file a document view is holding —
+        // the escape hatch a view owes a file it cannot read (a notebook that
+        // will not parse). Drop that buffer and fall through to the plain open;
+        // it is never dirty, because no document view edits through `buffer`.
+        if (!asText || already.kind === "text") {
+          set({ activePath: path });
+          return;
+        }
+        get().closeFile(path);
       }
       if (loadingPaths.has(path)) return;
       const name = path.split("/").pop() ?? path;
-      if (isOfficePath(path)) {
+      if (!asText && isOfficePath(path)) {
         // No content fetch — the OnlyOffice panel pulls its own editor config.
         set((s) => ({
           openFiles: [...s.openFiles, emptyFile(path, name, "office", null)],
           activePath: path,
         }));
         void get().ensureOfficeStatus();
+        return;
+      }
+      if (!asText && isNotebookPath(path)) {
+        // Likewise: the notebook panel fetches its own parsed document from
+        // `GET /api/notebook`, so the raw JSON is never pulled into a buffer.
+        set((s) => ({
+          openFiles: [...s.openFiles, emptyFile(path, name, "notebook", null)],
+          activePath: path,
+        }));
         return;
       }
       loadingPaths.add(path);
@@ -1209,6 +1240,13 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
         }
         return;
       }
+      if (file.kind === "notebook") {
+        // A read-only view, so there is nothing to save — and nothing that
+        // *could* be saved: `buffer` is empty because the raw JSON was never
+        // fetched (the panel reads `GET /api/notebook` instead), so falling
+        // through would write an empty file over the user's notebook.
+        return;
+      }
       const content = file.buffer;
       try {
         const res = await api.putFileContent({
@@ -1273,6 +1311,12 @@ export const useStore = create<WorkbenchStore>()((set, get) => {
       if (file.kind === "office") {
         // Coalesce, then ask the server whose save this was (see checkOfficeChange).
         scheduleOfficeCheck(event.path, event.hash);
+        return;
+      }
+      if (file.kind === "notebook") {
+        // The notebook store watches its own paths on the same socket and
+        // re-reads the parsed document (`notebook.ts`). Syncing a text buffer
+        // here would fetch the raw JSON nothing is going to render.
         return;
       }
       if (event.hash !== null && event.hash === file.hash) return; // echo of our own save
