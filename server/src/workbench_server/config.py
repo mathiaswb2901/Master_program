@@ -56,6 +56,29 @@ class Settings(BaseSettings):
     # worse lie than a panel that fails.
     office_fake: bool = False
 
+    # Voice input (M7 §3): push-to-talk dictation into the agent composer.
+    # "auto" uses whatever transcriber is actually registered and reports
+    # honestly when there is none; "off" refuses whatever is configured.
+    #
+    # The privacy posture is not a setting: every backend that may be registered
+    # here transcribes **on this machine**. The browser's SpeechRecognition API
+    # was rejected as a path precisely because it streams the microphone to a
+    # cloud service (M7 plan §3), so there is no knob here that would turn one
+    # on — offering a non-local transcriber some day means flipping
+    # `VoiceCapabilities.local_only` on the wire, visibly.
+    voice: Literal["auto", "off"] = "auto"
+    # Which registered backend to use, by name (services/voice.py's registry).
+    # None = the single registered real backend if there is exactly one, else
+    # none at all — voice is simply not offered, and `capabilities` says so.
+    voice_backend: str | None = None
+    # Replace the transcriber with the scripted stand-in in services/voice.py:
+    # the whole lifecycle — start, audio chunks, interim text, a final
+    # transcript — with no microphone, no model and no audio hardware. Same
+    # precedent as fake_agent and office_fake: off by default and loudly logged
+    # when on, because a composer that looks like it is listening while the
+    # words are canned would be a worse lie than no microphone button at all.
+    voice_fake: bool = False
+
     def resolved_public_base_url(self) -> str:
         return self.public_base_url or f"http://{self.host}:{self.port}"
 
@@ -144,6 +167,31 @@ class Settings(BaseSettings):
     # WORKBENCH_OFFICE_FAKE posture — off by default, loudly logged when on — and
     # it is what lets CI prove the whole flow with no real toolchain run.
     gate_fake: bool = False
+
+    # Staged review (M6, PR2): the adversarial review. A fresh-context reviewer
+    # session over the subject session's diff, refute-first, read-only.
+    #
+    # Three ceilings, because this is the second capability in the app that can
+    # spend money with no human answering each step (the first is Mission
+    # Control's crew). Turns and dollars bound what the reviewer *does* and ride
+    # `ClaudeAgentOptions`; the timeout bounds how long the validation that
+    # started it will wait. Every refusal names the one that bit — a cap a user
+    # cannot see the way out of is the dead button the pane rules forbid.
+    #
+    # These two are **hard ceilings, not defaults**. A caller may put its own
+    # `max_turns`/`max_budget_usd` in `ValidationSpec.params`, and
+    # `services/review.py` clamps them to these — a review starts with no
+    # per-run human approval, so an unclamped spec could take one API call to
+    # the schema's own 100-turn/$100 bound and spend fifty times what was set
+    # here. A spec asking for less is honoured, and a clamp is stated on the
+    # evidence line rather than applied quietly.
+    #
+    # There is no setting here through which a prompt, a path or a command
+    # reaches the reviewer: the brief is server-owned (`services/review.py`) and
+    # the checkout is resolved from the subject session's own slot.
+    review_timeout_s: float = Field(default=600.0, gt=0.0)
+    review_max_turns: int = Field(default=24, ge=1, le=100)
+    review_max_budget_usd: float = Field(default=2.0, gt=0.0, le=100.0)
 
     # Local-API security hardening (M5 item 8 / OSS-bar item 1). The server
     # binds loopback, but the attacker is remote web content (drive-by/CSRF and

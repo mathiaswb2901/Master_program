@@ -22,6 +22,9 @@
  * enforcement is on, so a tokenless POST would 401.
  */
 
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { expect, test, type Page } from "@playwright/test";
 
 import type { LayoutsResponse } from "../src/types";
@@ -239,7 +242,7 @@ const SPAWN_PROMPT = "spawn workers please";
 interface Roster {
   orchestrators: {
     orchestrator_id: string;
-    workers: { worker_id: string; slot: string | null }[];
+    workers: { worker_id: string; slot: string | null; path: string }[];
   }[];
 }
 
@@ -428,6 +431,161 @@ test("a toolchain gate proves a worker's checkout, and its log opens in the pane
     // borrow for an hour, and `mission.spec.ts` is where reaping *from the
     // board* is the assertion. `REAP_PROMPT` is the agent-driven equivalent and
     // is exercised there too.
+    const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
+    for (const crew of roster.orchestrators) {
+      await page.request.post(`/api/orchestrator/sessions/${crew.orchestrator_id}/stop`);
+    }
+    await expect
+      .poll(
+        async () => {
+          const pool = (await (await page.request.get("/api/worktrees")).json()) as {
+            slots: { state: string }[];
+          };
+          return pool.slots.filter((slot) => slot.state === "leased").length;
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(0);
+  });
+});
+
+/**
+ * The adversarial review (M6 staged review PR2), end to end in a real browser.
+ *
+ * The half no unit test can claim is the same one PR 1's leg claims for the
+ * gate: **the findings open in the panel**, redeemed through
+ * `GET /api/validation/payload/diff/{ref}` — the payload route, carrying a
+ * second shape.
+ *
+ * Two things make this journey worth its runtime rather than a duplicate of the
+ * unit suite:
+ *
+ * 1. **The diff is built from an untracked file.** The worker's slot is a fresh
+ *    checkout, so `git diff` against its lease base is empty; this journey writes
+ *    a brand-new file into that slot and nothing else. If `build_diff` did not
+ *    read `git ls-files --others`, the review would report "nothing to review"
+ *    and this test would fail — which is the silent-green trap the plan named,
+ *    caught in the one place it would really happen.
+ * 2. **A must_fix review is still awaiting a human.** The reviewer found a
+ *    blocking problem and the result is `high` with no approval on it. A check
+ *    that could clear its own subject would make this step pass by approving
+ *    itself, so asserting the *absence* here is the point.
+ *
+ * `WORKBENCH_FAKE_AGENT=1` scripts what the reviewer reports; everything around
+ * it is production — the spawn seam, the slot lookup, the diff builder, the real
+ * `report_findings` handler, the grouped evidence, `derive_risk`, and the panel.
+ */
+test("an adversarial review reads a worker's new file and its findings open in the panel", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await test.step("the pool is really there — or this journey tests a refusal", async () => {
+    const pool = (await (await page.request.get("/api/worktrees")).json()) as {
+      problem: string | null;
+    };
+    expect(pool.problem, `the E2E workspace is not a git repository: ${String(pool.problem)}`).toBe(
+      null,
+    );
+  });
+
+  const orchestratorId = await test.step("an orchestrator spawns a worker", async () => {
+    await openBoard(page);
+    const before = new Set(await orchestratorSessionIds(page));
+    await page.keyboard.press("Control+Shift+P");
+    const quickbar = page.getByRole("dialog", { name: "Quick open" });
+    await quickbar.locator(".wb-qb-input").fill(">new orchestrator");
+    await quickbar.locator(".wb-qb-row", { hasText: "New orchestrator session" }).first().click();
+
+    let mine = "";
+    await expect
+      .poll(
+        async () => {
+          mine = (await orchestratorSessionIds(page)).filter((id) => !before.has(id))[0] ?? "";
+          return mine;
+        },
+        { timeout: 15_000 },
+      )
+      .not.toBe("");
+    await sendToOrchestrator(page, mine, SPAWN_PROMPT);
+    await expect.poll(async () => workerCount(page, mine), { timeout: 30_000 }).toBeGreaterThan(0);
+    return mine;
+  });
+
+  const workerId = await test.step("the worker writes a brand-new file in its slot", async () => {
+    const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
+    const crews = roster.orchestrators.filter((crew) => crew.orchestrator_id === orchestratorId);
+    expect(crews, "the orchestrator this journey started left the roster").toHaveLength(1);
+    const worker = crews[0].workers[0];
+    expect(worker, "the orchestrator spawned no worker").toBeDefined();
+    expect(worker.slot).not.toBeNull();
+
+    // The file git has never heard of. Written here rather than by the fake
+    // agent because it must land in the *worker's own slot*, which is a pooled
+    // checkout outside the workspace — and because "a new file is invisible to
+    // git diff" is precisely the condition under test.
+    await writeFile(
+      join(worker.path, "brand_new_module.py"),
+      "def settle(mwh: float) -> float:\n    return mwh * PRICE\n",
+      "utf-8",
+    );
+    return worker.worker_id;
+  });
+
+  const validationId = await test.step("the review runs over that slot's diff", async () => {
+    // `checks: ["review"]` alone: an empty `checks` would also run the
+    // reconciliation gate and the toolchain gate, whose evidence belongs to
+    // other journeys' assertions.
+    const id = await seedValidation(
+      page,
+      { kind: "session_output", ref: workerId, label: "Worker review" },
+      ["review"],
+    );
+    expect(id).toMatch(/^val_/);
+    return id;
+  });
+
+  await test.step("one grouped diff line, and it is a Fail", async () => {
+    await openReviewPanel(page);
+    await page.locator(".wb-review-row", { hasText: "Worker review" }).click();
+    const body = page.locator(`.wb-review-body[data-validation="${validationId}"]`);
+    await expect(body).toBeVisible();
+    // **One** grouped line, not one per finding — the opposite of the gate's
+    // shape, and the design decision made visible rather than only unit-tested.
+    await expect(body.locator('.wb-evidence[data-kind="diff"]')).toHaveCount(1);
+    const line = body.locator('.wb-evidence[data-kind="diff"]');
+    await expect(line).toHaveAttribute("data-outcome", "fail");
+    await expect(line.locator(".wb-evidence-detail")).toContainText("3 finding(s)");
+    await expect(line.locator(".wb-evidence-detail")).toContainText("1 must_fix");
+    await expect(body.locator(".wb-review-head .wb-pill")).toContainText("High risk");
+  });
+
+  await test.step("the payload route carries findings, refutation and all", async () => {
+    const body = page.locator(`.wb-review-body[data-validation="${validationId}"]`);
+    const line = body.locator('.wb-evidence[data-kind="diff"]');
+    // Lazily fetched: nothing loads until the expander is opened.
+    await expect(line.locator(".wb-evidence-rows")).toHaveCount(0);
+    await line.locator("summary").click();
+    const rows = line.locator(".wb-evidence-rows li");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.first()).toContainText("must fix");
+    // The refutation — the reason to believe the claim — is on screen, not
+    // hidden behind a second expander.
+    await expect(rows.first()).toContainText("Breaks when:");
+    await expect(rows.first()).toContainText("DST");
+  });
+
+  await test.step("the review never approves: a must_fix result still awaits a human", async () => {
+    const body = page.locator(`.wb-review-body[data-validation="${validationId}"]`);
+    // The assertion is the *absence* of an approval. A check that could clear
+    // its own subject would quietly become its own merge queue.
+    await expect(body.locator(".wb-review-approved")).toHaveCount(0);
+    await expect(body.locator(".wb-review-awaiting")).toContainText("Awaiting approval");
+    await body.locator(".wb-review-approve").click();
+    await expect(body.locator(".wb-review-approved")).toContainText("Approved by you");
+  });
+
+  await test.step("cleanup: the crew is reaped and its slots go back", async () => {
     const roster = (await (await page.request.get("/api/orchestrator")).json()) as Roster;
     for (const crew of roster.orchestrators) {
       await page.request.post(`/api/orchestrator/sessions/${crew.orchestrator_id}/stop`);
