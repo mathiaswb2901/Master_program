@@ -1415,6 +1415,18 @@ manager's own re-rooting then re-announces the sessions that are still running
 with the labels it just derived. Reversed, the announcements land in a service
 about to drop them and Mission Control goes blank until the next tool call.
 
+**A root borrowed from another service is asked for, not copied.** The sync
+rootables all run before the first async one, so a sync service that re-derives
+its state from an *async* service inside its own `set_workspace_root` reads that
+service's **old** root — it has not moved yet. The fleet feed is the live case:
+it names the worktree pool root so a Mission Control worker's row reads
+`slot-01/…` instead of `(outside the workspace)`, and that root is keyed on the
+workspace, so it moves on every switch. It holds a provider (`extra_roots`,
+`main.py`) that it asks per call rather than a copy it would have to remember to
+refresh — no ordering to get wrong, and nothing for the next switch to forget.
+The same shape is the right answer for any root one service owns and another
+merely reads.
+
 **And that whole sequence is held under one lock.** `WorkspaceService.switch`
 writes the jail synchronously and then *awaits* the watcher and the pool, so
 without serialization two switches interleave — both jail writes land, then both

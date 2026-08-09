@@ -338,9 +338,11 @@ def test_the_feed_asks_for_its_named_roots_rather_than_remembering_them(tmp_path
     same staleness as the jail, one indirection out. Asked for per call, it
     cannot go stale and no re-rooting order has to be got right.
     """
+    # Outside the workspace, like the real pool root: a slot *inside* it would
+    # be named by the jail and prove nothing about the named roots.
     pool = tmp_path / "pool-alpha"
     named = [("", pool)]
-    svc, _ = service(tmp_path, extra_roots=lambda: named)
+    svc, _ = service(tmp_path / "ws", extra_roots=lambda: named)
 
     def summary_for(call_id: str, path: Path) -> str:
         svc.note_tool_started(
@@ -721,9 +723,13 @@ def test_a_switch_does_not_reshuffle_the_fleet_that_survives_it(tmp_path: Path) 
     assert [row.session_id for row in svc.snapshot().sessions] == ["busy", "idle"]
 
     svc.set_workspace_root(elsewhere)
-    svc.note_session(session_id="idle", title="idle for hours", folder="")
+    # Re-announced in the *opposite* order, which is the whole point: the
+    # session manager iterates its own map, and nothing makes that order agree
+    # with how recently each session did something.
     svc.note_session(session_id="busy", title="just worked", folder="")
-    assert [row.session_id for row in svc.snapshot().sessions] == ["busy", "idle"]
+    svc.note_session(session_id="idle", title="idle for hours", folder="")
+    order = [row.session_id for row in svc.snapshot().sessions]
+    assert order == ["busy", "idle"], "re-ordered by when the announcements arrived"
 
 
 def test_a_worker_row_still_names_its_slot_after_a_switch(
@@ -779,9 +785,8 @@ def test_a_worker_row_still_names_its_slot_after_a_switch(
         # nameable by a stale copy of itself.
         assert app.state.worktrees.root != pool_before
 
-        assert (
-            worker_reads("w2", "c2") == "Read: slot-01/server/main.py"
-        ), "the feed is still naming the pool of the workspace the user left"
+        named = worker_reads("w2", "c2")
+        assert named == "Read: slot-01/server/main.py", "naming the pool the user left"
 
 
 def test_a_switch_re_jails_the_feed_against_the_new_workspace(tmp_path: Path) -> None:
