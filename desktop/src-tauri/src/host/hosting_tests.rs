@@ -358,7 +358,7 @@ fn a_pptframeclass_frame_docks_the_way_the_other_two_do() {
     // caption and resize frame, exactly as Word's OpusApp is.
     let mut fixture = Fixture::with_class((820, 560), 0, "PPTFrameClass");
     assert_eq!(
-        guest::find_window(fixture.guest_process.pid(), "PPTFrameClass"),
+        guest::find_window(fixture.process().pid(), "PPTFrameClass"),
         Some(fixture.guest_window),
         "the PPTFrameClass frame was not found by its own class and pid",
     );
