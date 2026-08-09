@@ -49,6 +49,9 @@ class FakePosix:
         self.closed = 0
         self.reaps = 0
         self.slept: list[float] = []
+        #: Which thread each reap-poll sleep ran on. A blocking wait belongs on
+        #: a worker; on the event-loop thread it is the whole server stalling.
+        self.slept_on: list[int] = []
         self.exit_status: int | None = None
         self.write_limit: int | None = None
         self.forked: tuple[list[str], Path, dict[str, str]] | None = None
@@ -110,6 +113,42 @@ class FakePosix:
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
+        self.slept_on.append(threading.get_ident())
+
+
+class WedgedChild(FakePosix):
+    """SIGKILLed but stuck in uninterruptible I/O — never becomes reapable.
+
+    The one case `REAP_TIMEOUT_S` exists for, and the only one in which a
+    release blocks long enough for *where* it blocks to matter.
+    """
+
+    def reap(self, pid: int) -> int | None:
+        self.reaps += 1
+        return None
+
+
+class InLockstep(WedgedChild):
+    """A wedged child whose first reap-poll waits for its siblings' at a barrier.
+
+    `met_the_others` is False when it was the only one there — which is exactly
+    what a serial shutdown looks like from inside one child's reap.
+    """
+
+    def __init__(self, barrier: threading.Barrier, pid: int) -> None:
+        super().__init__(pid=pid)
+        self._barrier = barrier
+        self.met_the_others: bool | None = None
+
+    def sleep(self, seconds: float) -> None:
+        super().sleep(seconds)
+        if self.met_the_others is None:
+            try:
+                self._barrier.wait(timeout=5)
+            except threading.BrokenBarrierError:
+                self.met_the_others = False
+            else:
+                self.met_the_others = True
 
 
 def posix_pty(fake: FakePosix) -> PosixPty:
@@ -159,7 +198,7 @@ class TestTheSeam:
         backend = _spawn_backend(Path.cwd(), 24, 80)
         assert isinstance(backend, PosixPty)
 
-    def test_the_manager_tracks_and_releases_whatever_the_factory_returned(
+    async def test_the_manager_tracks_and_releases_whatever_the_factory_returned(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The manager is platform-blind — the seam's whole point."""
@@ -171,7 +210,7 @@ class TestTheSeam:
         manager = PtyManager()
         session = manager.spawn(Path.cwd())
         assert manager._sessions == {session.session_id: session}
-        manager.shutdown()
+        await manager.shutdown()
         assert manager._sessions == {}
         assert fake.groups == [(fake.pid, True)]  # force-killed, as on Windows
 
@@ -872,6 +911,51 @@ class TestAWedgedChildCannotFreezeTheServer:
         assert fake.closed == 1  # the fd is released even though the child is not
         assert proc.exit_status is None
 
+    async def test_a_wedged_child_reaps_on_a_worker_thread_not_the_caller_s(self) -> None:
+        """`release_async` is the only release an event loop may call.
+
+        The assertion is which thread the poll sleeps on: `release` blocks for
+        `REAP_TIMEOUT_S`, and uvicorn serves every other socket from the thread
+        that would otherwise be doing the waiting.
+        """
+        fake = WedgedChild()
+        manager = PtyManager()
+        session = PtySession(1, posix_pty(fake))
+        manager._sessions[session.session_id] = session
+
+        await manager.release_async(session)
+
+        assert fake.slept_on, "the wedged child never reached the polling reap"
+        assert threading.get_ident() not in fake.slept_on
+        assert manager._sessions == {}
+
+    async def test_shutdown_reaps_every_wedged_terminal_at_once_not_one_by_one(self) -> None:
+        """N wedged children must cost one `REAP_TIMEOUT_S`, not N of them.
+
+        The barrier *is* the assertion, and it is what makes this deterministic
+        rather than a wall-clock guess: three reaps can only get through a
+        3-party barrier if all three are in flight at the same moment. A
+        shutdown that releases sessions in a `for` loop leaves the first one
+        waiting there alone until the barrier times out and breaks.
+        """
+        parties = 3
+        barrier = threading.Barrier(parties)
+        fakes = [InLockstep(barrier, pid=100 + i) for i in range(parties)]
+        manager = PtyManager()
+        for fake in fakes:
+            session = PtySession(fake.pid, posix_pty(fake))
+            manager._sessions[session.session_id] = session
+
+        await manager.shutdown()
+
+        assert all(f.met_the_others for f in fakes), "the reaps ran one after another"
+        # Every child was force-killed — via its group, which is the delivery a
+        # healthy fake takes; the pid path is the fallback and is not wanted here.
+        assert all(f.groups == [(f.pid, True)] for f in fakes)
+        assert all(f.signals == [] for f in fakes)
+        assert threading.get_ident() not in [t for f in fakes for t in f.slept_on]
+        assert manager._sessions == {}
+
     def test_a_child_that_dies_late_is_reaped_by_the_next_spawn(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -893,6 +977,147 @@ class TestAWedgedChildCannotFreezeTheServer:
         monkeypatch.setenv("SHELL", "/bin/sh")
         pty_posix.spawn(Path.cwd(), syscalls=FakePosix())
         assert pty_posix._UNREAPED == []
+
+
+class HeldInTerminate(FakePosix):
+    """A child whose kill parks until the test lets go, counting its company.
+
+    The window every test below needs open: while one release is inside the
+    signal, a second one has every chance to arrive. `most_at_once` above 1
+    means two OS threads were signalling and reap-polling one pid together.
+
+    The park is on `killpg` rather than `kill` because that is where a healthy
+    child's signal is actually delivered: `_signal` reaches the bare pid only
+    when it has no group it may signal, which a default `FakePosix` — its own
+    session and group leader, like anything out of `pty.fork()` — never hits.
+    Parking on `kill` here would hold a call nothing makes, and every test below
+    would sail past a window that was never open.
+    """
+
+    def __init__(self, pid: int = 4242) -> None:
+        super().__init__(pid=pid)
+        #: Set once some thread is inside the signal — what a test waits on
+        #: instead of sleeping and hoping.
+        self.entered = threading.Event()
+        self.may_finish = threading.Event()
+        self.most_at_once = 0
+        self._inside = 0
+        self._tally = threading.Lock()
+
+    def killpg(self, pgid: int, *, force: bool) -> None:
+        with self._tally:
+            self._inside += 1
+            self.most_at_once = max(self.most_at_once, self._inside)
+        self.entered.set()
+        # Longer than any `wait_for` below, so a test fails on its own assertion
+        # rather than on this timeout quietly rescuing the racer.
+        self.may_finish.wait(timeout=5)
+        with self._tally:
+            self._inside -= 1
+        super().killpg(pgid, force=force)
+
+
+class TestOneChildIsHandedBackOnce:
+    """Two callers race to release every session, and they always did.
+
+    The socket handler's `finally:` releases the session it owns; `shutdown()`
+    snapshots `_sessions` and releases everything still in it. A drop landing as
+    the server is asked to stop — a deploy with terminals open — is both of them
+    on the same session. What changed is that `release` used to be synchronous
+    and awaited nothing, so the one loop thread serialized any two calls to it
+    for free; on a real teardown pool that is gone, and the dict has to be the
+    claim instead.
+    """
+
+    async def test_a_second_concurrent_release_signals_nothing(self) -> None:
+        fake = HeldInTerminate()
+        manager = PtyManager()
+        session = PtySession(fake.pid, posix_pty(fake))
+        manager._sessions[session.session_id] = session
+
+        winner = asyncio.create_task(manager.release_async(session))
+        assert await asyncio.to_thread(fake.entered.wait, 5), "no release reached the child"
+        # Created while the winner is parked in the signal, so it cannot help
+        # but overlap. It must come straight back having touched no process;
+        # unguarded it queued behind `may_finish` inside the same kill and this
+        # is the await that hung.
+        loser = asyncio.create_task(manager.release_async(session))
+        await asyncio.wait_for(loser, timeout=2)
+
+        fake.may_finish.set()
+        await winner
+
+        assert fake.most_at_once == 1, "two threads signalled the same pid"
+        assert fake.groups == [(fake.pid, True)]  # ...and it was killed exactly once
+        assert manager._sessions == {}
+
+    async def test_shutdown_leaves_a_release_already_in_flight_alone(self) -> None:
+        """The finding's own sequence: the socket drops, then the server stops."""
+        fake = HeldInTerminate()
+        manager = PtyManager()
+        session = PtySession(fake.pid, posix_pty(fake))
+        manager._sessions[session.session_id] = session
+
+        handler = asyncio.create_task(manager.release_async(session))  # the peer vanished
+        assert await asyncio.to_thread(fake.entered.wait, 5)
+
+        # While that is still running, the lifespan's teardown arrives. It used
+        # to find the session still listed — nothing was popped until after the
+        # terminate returned — and queue a second independent release for the
+        # same pid, so this await sat behind the parked child instead of
+        # finding nothing left to do.
+        await asyncio.wait_for(manager.shutdown(), timeout=2)
+
+        fake.may_finish.set()
+        await handler
+
+        assert fake.most_at_once == 1
+        assert fake.groups == [(fake.pid, True)]
+        assert manager._sessions == {}
+
+    async def test_releasing_the_same_session_twice_in_a_row_is_a_no_op(self) -> None:
+        """The uncontended half of the same rule, and the cheap one to keep."""
+        fake = FakePosix()
+        manager = PtyManager()
+        session = PtySession(fake.pid, posix_pty(fake))
+        manager._sessions[session.session_id] = session
+
+        await manager.release_async(session)
+        await manager.release_async(session)
+
+        assert fake.groups == [(fake.pid, True)]
+
+    async def test_one_release_that_raises_does_not_abandon_the_others(self) -> None:
+        """`shutdown` is awaited from the lifespan, and it is not the last line.
+
+        A bare `gather` propagates the first failure and drops the rest, which
+        here meant a sibling terminal never signalled *and* everything the
+        lifespan still owed after this call — closing the shared HTTP client,
+        logging that the server stopped — silently skipped.
+        """
+
+        class Exploding(FakePosix):
+            """Failing some way `PtySession.terminate`'s `except OSError` misses.
+
+            On `killpg` because that is the call a healthy child's signal goes
+            through, and `RuntimeError` because `_killpg` swallows `OSError` by
+            design — a kernel refusing one group is a degradation it recovers
+            from, not the unhandled backend failure this test is about.
+            """
+
+            def killpg(self, pgid: int, *, force: bool) -> None:
+                raise RuntimeError("the backend came apart")
+
+        bad, good = Exploding(pid=101), FakePosix(pid=102)
+        manager = PtyManager()
+        for fake in (bad, good):
+            manager._sessions[fake.pid] = PtySession(fake.pid, posix_pty(fake))
+
+        await manager.shutdown()  # must not raise
+
+        assert good.groups == [(good.pid, True)], "a sibling's failure took this release with it"
+        assert bad.groups == []  # it did fail — that is the point of the fixture
+        assert manager._sessions == {}  # and a failed release still clears the registry
 
 
 # --- the real fork, on the legs that have one ---------------------------------
@@ -1044,7 +1269,7 @@ class TestAJobDoesNotOutliveItsTerminal:
         finally:
             proc.terminate(force=True)
 
-    def test_a_running_job_does_not_outlive_the_terminal_that_started_it(
+    async def test_a_running_job_does_not_outlive_the_terminal_that_started_it(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """The bug, assembled the way a user assembles it.
@@ -1055,8 +1280,14 @@ class TestAJobDoesNotOutliveItsTerminal:
         one process that ignores SIGHUP is left running with no terminal and no
         parent. An orphaned build, `ssh` or dev server, for the life of the box.
 
-        The teardown is the real one: `PtyManager.release`, which is what
-        `routers/terminal.py` calls from its `finally:` when the WebSocket goes.
+        The teardown is the real one, and it is the *whole* real one:
+        `release_async`, which is what `routers/terminal.py` awaits in its
+        `finally:` when the WebSocket goes, and which runs the group-signalling
+        `terminate` on the teardown pool rather than on the loop thread. Driving
+        it from here is what proves the two halves compose — a job kill that
+        reads `TIOCGPGRP` through the borrow-guarded fd is doing that from a
+        pool thread, and the fd guard, not the caller's thread, is what makes
+        that safe.
         """
         monkeypatch.setenv("SHELL", "/bin/sh")
         script = tmp_path / "job.sh"
@@ -1079,7 +1310,7 @@ class TestAJobDoesNotOutliveItsTerminal:
             assert _sid(grandchild) == shell.pid
             job_group, shell_group = _pgid(grandchild), _pgid(shell.pid)
 
-            manager.release(session)
+            await manager.release_async(session)
 
             assert _gone_within(grandchild), (
                 f"pid {grandchild} outlived its terminal: job group {job_group}, "
@@ -1091,7 +1322,7 @@ class TestAJobDoesNotOutliveItsTerminal:
                 )
             )
         finally:
-            manager.shutdown()
+            await manager.shutdown()
             if grandchild:
                 with contextlib.suppress(OSError):
                     os.kill(grandchild, 9)  # SIGKILL, spelled without the posix-only name
