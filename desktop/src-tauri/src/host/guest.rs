@@ -69,6 +69,14 @@ pub const SYNTHETIC_GUEST_HANDSHAKE: &str = "guest-hwnd ";
 /// How often to look for the guest's window while it is starting.
 const FIND_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How long [`GuestProcess::reap`] waits for a condemned guest to actually go.
+///
+/// Termination through a job object is asynchronous, so without a wait `reap`
+/// would return while the instance is still on screen. Two seconds is a bound,
+/// not an expectation: a synthetic guest goes in single-digit milliseconds and a
+/// real Office instance mid-save is what the far end of it is for.
+const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// A launched instance: the process, and the top-level window it produced.
 pub struct LaunchedGuest {
     pub process: GuestProcess,
@@ -106,16 +114,37 @@ impl GuestProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Close the job — which terminates every process in it — and collect the
-    /// child so it does not linger as a zombie handle.
+    /// Condemn the instance: close the job, which terminates every process in
+    /// it.
+    ///
+    /// **Instant, and that is the point.** Closing the handle is a
+    /// `CloseHandle`; the termination it triggers is the kernel's business and
+    /// happens after we return. So the *decision* to kill can stay wherever it
+    /// belongs — including on the main thread, in the middle of closing a panel
+    /// — while the waiting for it goes elsewhere ([`super::reaper`]).
     ///
     /// Safe to call twice: the second call has no job left to close.
-    pub fn reap(&mut self) {
+    pub fn kill(&mut self) {
         drop(self.job.take());
-        // The kill is asynchronous; a bounded wait keeps `reap` from returning
-        // while the process is still on screen, without ever blocking forever
-        // on one that refuses to die.
-        let deadline = Instant::now() + Duration::from_secs(2);
+    }
+
+    /// Kill it and wait until it is really gone.
+    ///
+    /// **Never from the thread that owns hosted windows.** The wait runs up to
+    /// [`REAP_TIMEOUT`], and a UI thread spending that here is a window frozen
+    /// for two seconds per closed panel — which is exactly the bug
+    /// [`super::reaper`] exists to keep out of `host_close`. Everything on the
+    /// shell's side reaches this through there; the tests call it directly
+    /// because a test thread is allowed to wait.
+    pub fn reap(&mut self) {
+        self.reap_within(REAP_TIMEOUT);
+    }
+
+    /// [`Self::reap`] with the bound named, so a test can measure that the wait
+    /// is real without spending the production timeout to do it.
+    pub(super) fn reap_within(&mut self, timeout: Duration) {
+        self.kill();
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             match self.child.try_wait() {
                 Ok(Some(_)) | Err(_) => return,
@@ -127,11 +156,31 @@ impl GuestProcess {
             self.pid
         ));
     }
+
+    /// Test-only: take the job object away, so nothing this process does can
+    /// kill the guest and its `reap` runs to the full bound.
+    ///
+    /// That is the **slow-dying instance** — a real Office busy enough not to go
+    /// at once — made deterministic, without having to find one. The returned
+    /// guard still closes the job when it is dropped, so a test cannot leave a
+    /// guest behind on the desktop.
+    #[cfg(test)]
+    #[must_use = "dropping the guard is the only thing left that can kill the guest"]
+    pub(super) fn detach_job_for_test(&mut self) -> Box<dyn Send> {
+        Box::new(self.job.take())
+    }
 }
 
 impl Drop for GuestProcess {
+    /// The kill, never the wait.
+    ///
+    /// A `GuestProcess` is dropped wherever its owner happens to be — a failed
+    /// launch, a registry entry going away — and that is often the main thread.
+    /// A drop that waited would reintroduce, silently and everywhere, the freeze
+    /// [`Self::reap`] is kept off that thread to avoid. Whoever needs certainty
+    /// that the instance is gone asks [`super::reaper`] for it.
     fn drop(&mut self) {
-        self.reap();
+        self.kill();
     }
 }
 
