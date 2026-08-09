@@ -1824,6 +1824,94 @@ export interface SetupStatus {
   all_ok: boolean;
 }
 
+// ---- voice input (M7 §3) ----------------------------------------------------
+// Mirrors server/models/voice.py. Push-to-talk dictation into the agent
+// composer, and — this is the part the types carry rather than a comment —
+// **local transcription only**: audio is turned into text on this machine and
+// never leaves it. The browser's `SpeechRecognition` API was rejected as a path
+// precisely because it streams the microphone to a cloud service, so
+// `local_only` is a field the UI renders rather than a promise in prose.
+//
+// What ships is the seam: the whole lifecycle below is walked by the fake
+// backend (`WORKBENCH_VOICE_FAKE=1`) with no microphone and no model.
+
+/** Which implementation is answering. `local_whisper` is reserved for the
+ * owner-gated real one; nothing in this repo registers it yet. */
+export type VoiceBackendKind = "none" | "fake" | "local_whisper";
+
+/** Why voice is unavailable. `model_missing` matters: a package installed is
+ * not a model downloaded, and the difference must never be a silent failure. */
+export type VoiceUnavailableReason = "no_backend" | "model_missing" | "disabled";
+
+/** `WORKBENCH_VOICE`. `off` refuses whatever is configured. */
+export type VoiceMode = "auto" | "off";
+
+/** The lifecycle of one push-to-talk utterance. `cancelled` discards the audio
+ * and never produces text. */
+export type VoiceState = "recording" | "transcribing" | "final" | "cancelled" | "failed";
+
+/** GET /api/voice/capabilities — what this machine can do, and why not when it
+ * cannot. The composer offers a microphone from this and never from a guess —
+ * the same contract as `OfficeCapabilities`. */
+export interface VoiceCapabilities {
+  /** Can an utterance start right now (policy AND a usable backend). */
+  available: boolean;
+  backend: VoiceBackendKind;
+  mode: VoiceMode;
+  /** The scripted stand-in is answering — the UI must say the words are canned. */
+  fake_backend: boolean;
+  /** A local model is present. False under the fake: there is none. */
+  model_present: boolean;
+  /** Audio is transcribed on this machine and never leaves it. */
+  local_only: boolean;
+  reason: VoiceUnavailableReason | null;
+  /** One line the human reads. */
+  detail: string;
+  sample_rate_hz: number;
+  max_utterance_s: number;
+}
+
+/** One push-to-talk utterance. `interim` is the transcript *so far* — the whole
+ * utterance as heard to this point, never a delta, so the composer replaces
+ * rather than stitches. */
+export interface VoiceSession {
+  voice_id: string;
+  state: VoiceState;
+  started_at: number;
+  sample_rate_hz: number;
+  /** Audio ingested so far. A count: the server keeps no audio. */
+  audio_bytes: number;
+  chunks: number;
+  interim: string;
+}
+
+/** What was heard. Lands in the composer as editable text — never auto-sent. */
+export interface VoiceTranscript {
+  text: string;
+  confidence: number;
+  duration_s: number;
+  final: boolean;
+}
+
+/** POST /api/voice/start. */
+export interface StartVoiceRequest {
+  sample_rate_hz: number;
+}
+
+/** POST /api/voice/{voice_id}/chunk — one slice of 16-bit little-endian PCM,
+ * mono, base64-encoded because every payload here is a JSON model. */
+export interface VoiceChunk {
+  /** 0-based, in capture order, and the server enforces it: a sequence that
+   * does not advance past the audio already ingested is a 409, not a slice
+   * spliced into the wrong place. This is why `voice.tsx` serialises its chunk
+   * POSTs on one chain instead of firing them off in parallel. */
+  sequence: number;
+  /** Base64 PCM. The server bounds the *decoded* size (`MAX_CHUNK_BYTES`, one
+   * second at the highest rate a session may open at); the shipped capture
+   * sends 100 ms slices, so this has room to spare. */
+  audio: string;
+}
+
 // ---- settings (M7 V8) -------------------------------------------------------
 // Mirrors server/models/settings.py. The knobs that used to be environment
 // variables, in one small document under the machine's app-data dir — never in
