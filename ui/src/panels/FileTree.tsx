@@ -13,6 +13,7 @@ import {
 import { newDocumentFlow } from "../documents";
 import { FileTypeIcon } from "../fileIcons";
 import { type TreeRow, joinPath, parentPath, visibleRows } from "../filetree";
+import { useOverlayKeys } from "../overlays";
 import type { WorkbenchTool } from "../registry";
 import { useStore } from "../store";
 
@@ -209,41 +210,49 @@ interface MenuItem {
 function ContextMenu({ items, x, y, onClose }: { items: MenuItem[]; x: number; y: number; onClose: () => void }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
+  const buttons = useCallback(
+    (): HTMLButtonElement[] =>
+      Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []),
+    [],
+  );
+
+  useEffect(() => {
+    buttons()[0]?.focus();
+  }, [buttons]);
+
   // DESIGN.md §7: menus fully keyboard-operable. Roving focus with wrap on
   // Arrow keys, Home/End jumps, and Tab contained inside the menu — it must
   // never escape into the page behind the open menu.
-  useEffect(() => {
-    const buttons = (): HTMLButtonElement[] =>
-      Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
-    buttons()[0]?.focus();
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        onClose();
-        return;
-      }
-      const list = buttons();
-      if (list.length === 0) return;
-      const index = list.indexOf(document.activeElement as HTMLButtonElement);
-      const focusAt = (target: number): void => {
-        e.preventDefault();
-        e.stopPropagation();
-        list[(target + list.length) % list.length]?.focus();
-      };
-      if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
-        focusAt(index + 1); // index -1 (focus elsewhere) lands on the first item
-      } else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
-        focusAt(index === -1 ? list.length - 1 : index - 1);
-      } else if (e.key === "Home") {
-        focusAt(0);
-      } else if (e.key === "End") {
-        focusAt(list.length - 1);
-      }
+  //
+  // Through `useOverlayKeys` for the same reason the palette and the confirm
+  // modals are: these are all window-level capture listeners on one target, so
+  // `stopPropagation` cannot decide between them and only the top layer may act
+  // (`overlays.ts`). A menu left open under a dialog must not answer its Escape.
+  useOverlayKeys(true, (e: KeyboardEvent): void => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    const list = buttons();
+    if (list.length === 0) return;
+    const index = list.indexOf(document.activeElement as HTMLButtonElement);
+    const focusAt = (target: number): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      list[(target + list.length) % list.length]?.focus();
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+    if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
+      focusAt(index + 1); // index -1 (focus elsewhere) lands on the first item
+    } else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
+      focusAt(index === -1 ? list.length - 1 : index - 1);
+    } else if (e.key === "Home") {
+      focusAt(0);
+    } else if (e.key === "End") {
+      focusAt(list.length - 1);
+    }
+  });
 
   // Keep the menu inside the viewport.
   const left = Math.min(x, window.innerWidth - 200);
