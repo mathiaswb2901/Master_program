@@ -22,7 +22,7 @@
  * recently active session.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { newSession, openApp, sendChat, treeMenu, typeInEditor, workspaceReady } from "./app";
 import { readWorkspaceFile, writeWorkspaceFile } from "./workspace";
@@ -33,6 +33,29 @@ const WRITTEN = "written-by-agent.md";
 const REFUSED = "refused-by-agent.md";
 /** A file only the user ever touches. */
 const USER_FILE = "src/user-typed.md";
+
+/**
+ * `Ctrl+S`, and wait for the save to be *observably* over.
+ *
+ * The dirty flag is the app's own answer, and it has to be read from both sides
+ * to mean anything. `store.saveFile` clears `dirty` only once
+ * `PUT /api/files/content` has resolved, and the server writes the bytes
+ * (tmp file + `os.replace`) before it answers — so a tab that *was* dirty and is
+ * not any more is proof that the content is on disk, and the read that follows
+ * needs no polling at all.
+ *
+ * Asserting only the second half is what made this flaky. "No dirty tab" is
+ * equally true of an editor that never received the keystrokes, so a run where
+ * the typing did not land sailed past that assertion and then sat out the full
+ * 15 s poll waiting for bytes nobody had asked anyone to write — a timeout whose
+ * message points at the filesystem and not at the missing keystroke.
+ */
+async function saveActiveEditor(page: Page): Promise<void> {
+  const dirty = page.locator(".wb-editor-tab.is-dirty");
+  await expect(dirty, "the keystrokes reached the buffer").toHaveCount(1);
+  await page.keyboard.press("Control+s");
+  await expect(dirty, "the save round-trip completed").toHaveCount(0);
+}
 
 const SESSION_PROMPT = "write file please and note the provenance";
 /** A second conversation, so the link has somewhere to come back from. */
@@ -125,9 +148,8 @@ test("an agent's file change is attributed, reviewable and acknowledged", async 
     await nameInput.fill("user-typed.md");
     await nameInput.press("Enter");
     await typeInEditor(page, "the user typed this");
-    await page.keyboard.press("Control+s");
-    await expect(page.locator(".wb-editor-tab.is-dirty")).toHaveCount(0);
-    await expect.poll(() => readWorkspaceFile(USER_FILE)).toContain("the user typed this");
+    await saveActiveEditor(page);
+    expect(readWorkspaceFile(USER_FILE)).toContain("the user typed this");
 
     await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
     await expect(page.locator(".wb-tree-agent-dot")).toHaveCount(0);
@@ -137,7 +159,7 @@ test("an agent's file change is attributed, reviewable and acknowledged", async 
     await marked.click();
     await expect(page.locator(".wb-provenance-bar")).toBeVisible();
     await typeInEditor(page, "and then the user edited it\n");
-    await page.keyboard.press("Control+s");
+    await saveActiveEditor(page);
     // The claim is retracted, not merely acknowledged: the bar goes with it.
     await expect(page.locator(".wb-provenance-bar")).toHaveCount(0);
     await expect(page.locator(".wb-tree-agent-dot")).toHaveCount(0);

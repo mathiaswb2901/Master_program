@@ -23,8 +23,12 @@ report into ``ui/src/types.ts``.
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
+from workbench_server.models.office_bridge import CalculationState
 from workbench_server.models.validation import CheckOutcome, EvidenceTruncation
 
 
@@ -160,6 +164,47 @@ class ReconciliationSpec(BaseModel):
     time_index: TimeIndexSpec | None = None
 
 
+class ReadSource(BaseModel):
+    """Where the numbers in a report actually came from.
+
+    Once there are two places a workbook's values can be read — the ``.xlsx`` on
+    disk and the live Excel that has it open — a badge that does not say which
+    is not proof, it is a colour. Every report carries this, and the grouped
+    evidence line ends with it in words.
+
+    **The two shapes are deliberately different**, because what makes each one
+    trustworthy is different. A live read is trustworthy when the instance had
+    finished calculating (:attr:`calculation`), and its relationship to the file
+    is the interesting fact (:attr:`saved`). A file read is trustworthy when the
+    file is the newest thing there is (:attr:`mtime`) and when Excel had
+    actually cached values into it (:attr:`cached_values`) — a workbook written
+    by a script and never opened has formulas and no numbers, which reads as a
+    column of empties rather than as a disagreement.
+    """
+
+    #: ``live`` = read out of the running Excel that has the workbook open;
+    #: ``file`` = read from the ``.xlsx`` on disk with openpyxl.
+    kind: Literal["live", "file"]
+    #: When the read happened, as **naive local wall clock** — the module's own
+    #: contract for every timestamp, and server-minted. Never taken from a COM
+    #: object: those arrive tz-aware with an offset that is not this machine's
+    #: zone (``office_com.naive_local``).
+    read_at: datetime
+    #: Live only: whether Excel had finished calculating when the values were
+    #: taken. Anything but ``done`` means the numbers were still moving.
+    calculation: CalculationState | None = None
+    #: Live only: ``Workbook.Saved`` at read time. ``False`` says the workbook
+    #: had edits the file on disk did not — which is exactly the case a disk read
+    #: would have got wrong.
+    saved: bool | None = None
+    #: File only: the file's modification time, naive local.
+    mtime: datetime | None = None
+    #: File only, and load-bearing: whether any addressed cell actually held a
+    #: cached value. ``False`` means openpyxl saw an empty workbook — usually one
+    #: no Excel has ever opened — rather than a workbook full of zeros.
+    cached_values: bool | None = None
+
+
 class CellComparison(BaseModel):
     """One expected-vs-actual verdict — the row an analyst reads in the table."""
 
@@ -193,5 +238,9 @@ class ReconciliationReport(BaseModel):
     matched: int
     mismatched: int
     total: int
+    #: Which of the two readers produced the numbers above, and what made it
+    #: trustworthy. Required, not optional: a report that cannot say where its
+    #: values came from is the thing this field exists to make impossible.
+    source: ReadSource
     comparisons: list[CellComparison] = Field(default_factory=list)
     truncated: EvidenceTruncation | None = None
