@@ -980,6 +980,13 @@ def test_session_status_reaches_the_events_websocket(
         _settings: Any = None,
         _orchestrator: Any = None,
         _session_cost: Any = None,
+        # M6 staged review PR2: the adversarial review's `FindingsReceiver` and
+        # the reviewer's per-session ceilings. Mirrored explicitly rather than
+        # swallowed by a `**kwargs`, because this stub standing in for the real
+        # signature is exactly what makes it *notice* when the wiring changes —
+        # which is how this test caught PR 2's new arguments.
+        _findings: Any = None,
+        _reviewer_caps: Any = None,
     ) -> Any:
         return factory
 

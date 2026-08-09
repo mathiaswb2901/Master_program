@@ -418,6 +418,8 @@ in-process calls where the model and the user dominate.
 | `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn and per-session cost; in-memory only |
 | `services/orchestrator.py` | Mission Control's crews: spawn/read/send/stop workers in pooled worktrees, the budget that binds, the reaping |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
+| `services/voice.py` | push-to-talk dictation: the `VoiceBackend` Protocol, the `register_backend` plug-in point, `FakeVoiceBackend` (scripted, no audio hardware), and the bounded lifecycle. Holds no audio |
+| `routers/voice.py` | `GET /api/voice/capabilities`, `POST /api/voice/start`, `.../{id}/chunk`, `.../{id}/stop`, `.../{id}/cancel` |
 
 ## The file tree
 
@@ -1234,6 +1236,72 @@ content hash so external changes (e.g. agent edits) force a reopen instead of se
 a stale cached copy. Absent OnlyOffice, documents degrade to read-only preview +
 "Open in Word".
 
+## Voice input (the seam, and the privacy posture)
+
+Push-to-talk dictation into the agent composer. **What ships is the seam, not the
+voice**: the lifecycle is complete and tested end to end, and the transcriber behind it
+is owner-gated.
+
+**Audio never leaves the machine, and the wire says so.** The browser's
+`SpeechRecognition` API is the cheap path and it is rejected outright — in
+Chrome/WebView2 it streams the microphone to a cloud service, which is exactly what
+this app's local-first claim says never happens. So `VoiceCapabilities.local_only` is a
+field the UI renders rather than a promise in prose, and a non-local transcriber could
+only arrive by flipping it, visibly. There is no setting that turns one on.
+
+Three layers, each with a stand-in so the whole journey runs on a headless runner:
+
+| Layer | Real | Stand-in |
+|---|---|---|
+| Transcriber (`services/voice.py`) | a local model, **owner-gated** — not written here | `FakeVoiceBackend`, `WORKBENCH_VOICE_FAKE=1`: one scripted word per chunk |
+| Capture (`ui/src/voiceCapture.ts`) | `getUserMedia` + an `AudioWorklet`, **owner-gated** — the named UI seam | `scripted`: 100 ms slices of silence on a timer, no device touched |
+| Gesture (`ui/src/voice.tsx`) | — | — (the real thing, both ways) |
+
+`VoiceBackend` is `ready` / `report` / `start` / `feed` / `stop` / `cancel`, and
+`register_backend(name, factory)` is the plug-in point: a real backend is one module
+that registers itself, selected by `WORKBENCH_VOICE_BACKEND` or by being the only real
+one registered. Nothing above the seam changes when it lands — not the wire types, not
+the router, not the composer. The fake is never chosen implicitly.
+
+**The service holds no audio.** Chunks go straight to the backend and only their size
+is remembered, which is both the privacy property (nothing is buffered here to leak or
+log) and the memory bound (a held key costs a counter). The lifecycle is bounded at
+every edge that can run away: a per-chunk ceiling on the wire (`MAX_CHUNK_BYTES`, so an
+absurd body is refused by the schema and never reaches the service), a per-utterance
+ceiling (`MAX_UTTERANCE_S`, enforced on total bytes and cancelling rather than
+truncating), a concurrency cap whose refusal names itself, a reaper for utterances
+nobody released, and this service's own timeout around **every** backend call —
+`start`, `feed`, `stop` and `cancel` each have one. That is the office host's lesson,
+that an implementation which forgets to bound itself hangs the request that started it,
+and it has two edges worth naming. `start` holds a concurrency slot while it runs, so a
+backend that fails or wedges there frees the slot on the way out; four transient
+failures must not 429-lock the machine's one microphone. `cancel` runs on the shutdown
+path, where a call that never returns is a process that never exits with the microphone
+still open — so it is bounded and never raises, the audio being gone from this service
+either way.
+
+**Chunks arrive in order, or they do not arrive.** `VoiceChunk.sequence` is enforced,
+not decorative: a slice that does not advance past the audio already ingested is a 409
+rather than PCM spliced into the wrong moment, because a transcript nobody can tell is
+wrong is worse than a chunk refused out loud. Gaps *are* allowed and are passed through
+to the backend, which is what lets a real transcriber insert silence where the client
+dropped a slice instead of butting two unrelated moments together. `voice.tsx`
+serialises its chunk POSTs on one chain, so the shipped client never trips this.
+
+**No WebSocket, deliberately.** Interim text rides the chunk *response* rather than
+`/ws/events`. A half-spoken sentence is not app-wide state: it belongs to the one
+composer whose microphone is open, and broadcasting it would put a partial utterance in
+every window attached to this server for no reader's benefit.
+
+**In the UI** voice is a card-on-input, not a panel: it registers no tool and takes no
+line in `tools.ts`. The composer renders `VoiceButton`; the command (`voice.dictate`)
+and its chord (`Alt+V`) belong to the **Agent** tool, because "which conversation am I
+talking to" is that capability's question. The pointer *holds*; the keyboard *toggles*,
+because holding a key down is an accessibility trap. There is one microphone, so one
+utterance at a time — `active.target` names which composer holds it, and starting
+elsewhere cancels rather than mixes. The final transcript lands as an editable draft and
+**is never sent**.
+
 ## Mission Control (the board, and the orchestrator seam)
 
 Two halves, separable on purpose: a **board** that renders the fleet, and an
@@ -1418,11 +1486,36 @@ them at once and none can be left behind by not being told.
 
 **Everything that copied the root owes a `set_workspace_root`, and the list of
 them lives in exactly one place.** `create_app` hands `WorkspaceService` the
-services that kept their own copy — shortcuts, layouts, provenance, the session
-manager (sync), then the watcher and the worktree pool (async, because they
-restart something). A service added later that copies the root and is not on
-that list is one that keeps serving the project the user left, and the symptom
-is data from the wrong workspace rather than a crash.
+services that kept their own copy — shortcuts, layouts, provenance, validation,
+the fleet feed, the session manager, the conversation browser (sync), then the
+watcher and the worktree pool (async, because they restart something). A service
+added later that copies the root and is not on that list is one that keeps
+serving the project the user left, and the symptom is data from the wrong
+workspace rather than a crash. That is not hypothetical: the activity feed
+shipped without either half and answered `(outside the workspace)` for every tool
+call made after a switch, for the rest of the process. The claim is now asserted
+rather than reviewed — `test_no_service_the_app_built_still_holds_the_root_the_user_left`
+walks what the factory actually built and fails on any service still holding the
+previous root.
+
+**Two of those entries are ordered, and the order is written down where it is
+enforced.** The fleet feed is re-rooted *before* the session manager: it forgets
+a fleet whose every row was jailed against the workspace being left, and the
+manager's own re-rooting then re-announces the sessions that are still running
+with the labels it just derived. Reversed, the announcements land in a service
+about to drop them and Mission Control goes blank until the next tool call.
+
+**A root borrowed from another service is asked for, not copied.** The sync
+rootables all run before the first async one, so a sync service that re-derives
+its state from an *async* service inside its own `set_workspace_root` reads that
+service's **old** root — it has not moved yet. The fleet feed is the live case:
+it names the worktree pool root so a Mission Control worker's row reads
+`slot-01/…` instead of `(outside the workspace)`, and that root is keyed on the
+workspace, so it moves on every switch. It holds a provider (`extra_roots`,
+`main.py`) that it asks per call rather than a copy it would have to remember to
+refresh — no ordering to get wrong, and nothing for the next switch to forget.
+The same shape is the right answer for any root one service owns and another
+merely reads.
 
 **And that whole sequence is held under one lock.** `WorkspaceService.switch`
 writes the jail synchronously and then *awaits* the watcher and the pool, so
