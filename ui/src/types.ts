@@ -1037,10 +1037,11 @@ export type AgentServerMessage =
 // A *real* Word/Excel window docked into a panel. Types only for now: the panel
 // lands once the tool registry exists and it can register itself.
 
-/** The program that hosts a document. `powerpoint` is a real kind the UI must be
- * able to name, but it is not hostable in v1: PowerPoint is single-instance and
- * offers no way to prove a window is one Workbench launched, so it stays
- * preview-only. The server's `hostable_kinds` (below) is the authority. */
+/** The program that hosts a document. All three dock for real — but PowerPoint
+ * only when Workbench started the process: it is genuinely single-instance, so a
+ * launch made while one is running would bind to the user's own. The server's
+ * `hostable_kinds` (below) is the authority, and `kind_notes` says why a kind is
+ * missing from it right now. */
 export type HostAppKind = "word" | "excel" | "powerpoint";
 
 /** launching -> embedding -> embedded is the happy path; `detached` is live (the
@@ -1067,7 +1068,16 @@ export type HostReason =
   | "backend_timeout"
   | "process_exited"
   | "document_open_elsewhere"
-  | "powerpoint_preview_only"
+  /** PowerPoint was already running, so the instance a launch would get is the
+   * user's own. Distinct from `document_open_elsewhere`: it is not this document
+   * that is in use, it is the application — and the fix is different. */
+  | "powerpoint_already_running"
+  /** The running PowerPoint is the one Workbench is hosting itself, so there is
+   * no separate window for the user to close — the deck is docked in a panel,
+   * possibly behind another tab. Same mechanism as
+   * `powerpoint_already_running`, different owner, and the only actionable
+   * sentence is a different one. */
+  | "powerpoint_hosted_here"
   | "unsupported_file"
   | "native_hosting_disabled";
 
@@ -1173,7 +1183,14 @@ export interface OfficeCapabilities {
    * native window to host into, which is why this is reported and not guessed
    * from a user agent. */
   shell_attached: boolean;
+  /** What can be docked *right now*. A kind this build supports but cannot host
+   * at this moment is absent here and explained in `kind_notes`, so the UI never
+   * has to combine the two to answer "can I dock this file". */
   hostable_kinds: HostAppKind[];
+  /** Why a supported kind is missing from `hostable_kinds`, one sentence per
+   * kind. Empty when everything is available, and empty when hosting is off
+   * entirely — `detail` already carries that one reason for all of them. */
+  kind_notes: Partial<Record<HostAppKind, string>>;
   onlyoffice: boolean;
   fallback: "native" | "onlyoffice" | "preview";
   detail: string;

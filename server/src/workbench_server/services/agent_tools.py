@@ -50,6 +50,7 @@ from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
     DocStructure,
+    SlideText,
     WordEdit,
     WordText,
 )
@@ -399,7 +400,8 @@ class OfficeDocumentReader(Protocol):
         sheet: str | None = None,
         a1_range: str | None = None,
         start_paragraph: int = 0,
-    ) -> WordText | CellWindow: ...
+        start_slide: int = 1,
+    ) -> WordText | CellWindow | SlideText: ...
 
 
 OFFICE_READ = AgentToolSpec(
@@ -410,9 +412,10 @@ OFFICE_READ = AgentToolSpec(
         "body windowed by start_paragraph and max_chars, with a 'paragraphs X-Y "
         "of N' footer. Excel: a TSV grid with an A1 corner header and a 'rows X-Y "
         "of N, cols A-H of Z; pass range=A1:H50 for more' footer; omit sheet to "
-        "list the sheets, or pass range to pick a corner. An empty document says "
-        "so. Reads include unsaved on-screen edits. If the document is not docked, "
-        "it says so and how to open it."
+        "list the sheets, or pass range to pick a corner. PowerPoint: whole slides "
+        "from start_slide, each headed 'Slide N: title', read-only. An empty "
+        "document says so. Reads include unsaved on-screen edits. If the document "
+        "is not docked, it says so and how to open it."
     ),
     # Text, not JSON: an Excel range is list-heavy, and a TSV grid the model can
     # read directly is cheaper than the same cells wrapped in JSON arrays — the
@@ -447,10 +450,15 @@ OFFICE_READ = AgentToolSpec(
                 "minimum": 0,
                 "description": "Word only: zero-based first paragraph to read.",
             },
+            "start_slide": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "PowerPoint only: one-based first slide to read.",
+            },
             "max_chars": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Word only: cap on characters returned (bounded server-side).",
+                "description": "Word/PowerPoint: cap on characters returned (bounded server-side).",
             },
         },
         "required": ["path"],
@@ -491,7 +499,8 @@ OFFICE_WRITE = AgentToolSpec(
         "only in documents Workbench opened, named by workspace-relative path. "
         "Word: pass paragraph (zero-based) and content to replace that "
         "paragraph's whole text. Excel: pass sheet, cell (e.g. B2) and content to "
-        "set one cell; empty content clears it. The edit applies to what is on "
+        "set one cell; empty content clears it. PowerPoint decks are read-only. "
+        "The edit applies to what is on "
         "screen, including unsaved changes, so the user can undo it. Returns the "
         "address written and the character count; an empty or out-of-range target "
         "says so, and if the document is not docked it says so and how to open it. "
@@ -675,6 +684,19 @@ def _format_word(word: WordText, path: str) -> str:
     return f"{word.text}\n\n{footer}"
 
 
+def _format_slides(slides: SlideText, path: str) -> str:
+    """Slide blocks plus a 'slides X-Y of N' footer, or an explicit 'empty'."""
+    if slides.total_slides == 0:
+        return f"{path} (PowerPoint) is empty — it has no slides."
+    end = slides.start_slide + slides.returned_slides - 1
+    shown = f"slides {slides.start_slide}-{end} of {slides.total_slides}"
+    if end < slides.total_slides:
+        footer = f"[{shown}; pass start_slide={end + 1} for the next, or a larger max_chars.]"
+    else:
+        footer = f"[{shown} — end of deck.]"
+    return f"{slides.text}\n\n{footer}"
+
+
 def _format_sheet_list(structure: DocStructure, path: str) -> str:
     """The 'omit sheet to list the sheets' answer (AXI shape 3: what to do next)."""
     sheets = structure.sheets or []
@@ -728,6 +750,8 @@ async def handle_office_read(reader: OfficeDocumentReader, args: dict[str, Any])
     a1_range = args.get("range") if isinstance(args.get("range"), str) else None
     raw_start = args.get("start_paragraph", 0)
     start_paragraph = raw_start if isinstance(raw_start, int) and raw_start >= 0 else 0
+    raw_slide = args.get("start_slide", 1)
+    start_slide = raw_slide if isinstance(raw_slide, int) and raw_slide >= 1 else 1
     raw_max = args.get("max_chars")
     max_chars = (
         min(raw_max, OFFICE_READ_MAX_CHARS)
@@ -745,12 +769,16 @@ async def handle_office_read(reader: OfficeDocumentReader, args: dict[str, Any])
             sheet=sheet,
             a1_range=a1_range,
             start_paragraph=start_paragraph,
+            start_slide=start_slide,
         )
     except DocumentBridgeError as error:
         return error_result(_office_read_refusal(error, path))
-    text = (
-        _format_word(result, path) if isinstance(result, WordText) else _format_excel(result, path)
-    )
+    if isinstance(result, WordText):
+        text = _format_word(result, path)
+    elif isinstance(result, SlideText):
+        text = _format_slides(result, path)
+    else:
+        text = _format_excel(result, path)
     # The two server-side caps bound the window's *shape* (characters of Word body,
     # count of Excel cells), not its byte size: non-ASCII body (Norwegian æ/ø/å,
     # denser diacritics or emoji) runs to several bytes per character, so a full
