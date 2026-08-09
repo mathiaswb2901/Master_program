@@ -556,6 +556,14 @@ export function removeOutsideWorkspace(): void {
  * condition into a hard failure. `removeOutsideWorkspace` above already got this
  * right for a watch handle; this is the same answer for the same reason, in the
  * one place every spec can reach it.
+ *
+ * **This tolerates the condition; it does not fix it.** The same sharing window
+ * is open to a *user* deleting a file through the tree, and
+ * `DELETE /api/files/content` has no handler for it — the narrow production race
+ * is recorded under **Deferred ideas** in `ROADMAP.md` (2026-08-09), with the
+ * `FILE_SHARE_DELETE` fix named, so it outlives this comment and the PR that
+ * wrote it. A harness that retries is right either way: a transient OS condition
+ * is not a product failure and must not redden a suite.
  */
 export function removeWorkspaceFile(relative: string): void {
   fs.rmSync(workspacePath(relative), {

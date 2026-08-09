@@ -31,6 +31,11 @@
  * This file names no capability, which is what lets a third greeting be added
  * without editing it: a surface declares its own `order` next to the rest of its
  * descriptor, exactly as it declares `defaultLocation`.
+ *
+ * **Which surface ends up in front is a product decision, not a consequence of
+ * this mechanism.** It is stated in `DESIGN.md` §6.13.1 — the shipped orders,
+ * why Setup holds the front, and what a third greeting must do to take it. This
+ * module only guarantees the answer is the same every launch.
  */
 
 import type { DockviewApi } from "dockview";
@@ -48,9 +53,14 @@ export interface FirstRunSurface {
    * them opens, so no surface's answer can depend on another's side effects.
    * This is also where a surface records what it learned (its dismissal flag),
    * because that is true whether or not it ends up opening.
+   *
+   * **Throwing counts as "no", and costs nobody else their greeting.** A
+   * surface may leave its own errors uncaught; what it may not do is decide for
+   * the others, which is the one rule this whole module exists to hold.
    */
   wanted: () => Promise<boolean>;
-  /** Put it on screen. Only ever called when nothing will restore over it. */
+  /** Put it on screen. Only ever called when nothing will restore over it, and
+   * likewise contained: a surface that throws here loses its own tab only. */
   open: () => Promise<void> | void;
 }
 
@@ -95,7 +105,15 @@ async function greet(
   surfaces: readonly FirstRunSurface[],
 ): Promise<void> {
   if (mine === null || surfaces.length === 0) return;
-  const answers = await Promise.all(surfaces.map((surface) => surface.wanted()));
+  // Isolated per surface, and that is the same rule as everything above rather
+  // than an extra: this is one `Promise.all` behind a `void greet(...)`, so a
+  // single rejecting `wanted()` would reject the lot, throw past an unhandled
+  // rejection, and cancel the greeting for **every** surface — including the
+  // ones that answered. One surface silently deciding another's fate is the bug
+  // this module was written to kill; it may not come back through the error
+  // path. A surface that cannot answer can only remove itself.
+  // (`registry.ts::notifyWorkspaceChanged` holds the same line for tools.)
+  const answers = await Promise.all(surfaces.map(asked));
   const wanted = surfaces.filter((_, index) => answers[index]);
   // Nobody is greeting, so the arrangement is nobody's business: a returning
   // user still pays for their own dismissal check and not one byte more, which
@@ -114,6 +132,39 @@ async function greet(
   // point of this module, so it may not be left to whichever `open()` resolves
   // first — one of them loads a chunk and the other does not.
   for (const surface of [...wanted].sort((a, b) => a.order - b.order)) {
-    await surface.open();
+    // Isolated for the same reason, one step later: these are awaited in
+    // sequence *because* the order is the point, and a sequence is exactly
+    // where one throw takes the rest of the queue with it. A surface that
+    // cannot open loses its own tab, not everybody else's.
+    try {
+      await surface.open();
+    } catch (error) {
+      failed(surface, "open", error);
+    }
   }
+}
+
+/**
+ * Ask one surface whether it wants to greet, and contain the answer's failure.
+ *
+ * `try`/`catch` around the `await` rather than a `.catch()` on the returned
+ * promise: `wanted` is only *typed* as returning one, so a surface that throws
+ * synchronously would blow up inside `.map()` — before there is a promise to
+ * attach anything to — and take the whole `Promise.all` with it. Both shapes
+ * land here.
+ */
+async function asked(surface: FirstRunSurface): Promise<boolean> {
+  try {
+    return await surface.wanted();
+  } catch (error) {
+    failed(surface, "answer", error);
+    return false;
+  }
+}
+
+/** One surface's failure, reported rather than swallowed. Identified by its
+ * `order`, because this module names no capability and so has no better label
+ * — which is exactly the property that lets a third greeting be added. */
+function failed(surface: FirstRunSurface, what: string, error: unknown): void {
+  console.error(`first-run surface (order ${surface.order}) failed to ${what}`, error);
 }

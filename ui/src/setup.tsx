@@ -149,6 +149,11 @@ const setupFirstRun: FirstRunSurface = {
    * "Claude is not signed in, run `claude /login`" — and it carries a *Show the
    * welcome card* button, so the window basics are one click away from inside
    * it. Nothing is hidden either way: both are centre tabs.
+   *
+   * That is a **product decision, and it is written down** rather than implied
+   * by this number: `DESIGN.md` §6.13.1 is the binding statement of the two-
+   * surface ordering, including what a third greeting has to do to take the
+   * front position. Change one and change the other.
    */
   order: 20,
   wanted: async () => {

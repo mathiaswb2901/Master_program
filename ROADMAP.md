@@ -1605,6 +1605,27 @@ freeze above.
 - Folder-level rollup for provenance markers, and provenance surviving a restart.
 - Plan artifacts persisted to `.workbench/` and re-rendered when resuming a transcript.
 
+- 2026-08-09 — **Known defect, not an idea: the watcher's hash read blocks a delete for
+  ~100–500 ms after every change** (Windows). `services/watcher.py::_hash_of` reads each
+  changed file with `Path.read_bytes()` to put a `hash` on its `FileChangedEvent`, and
+  CPython opens **without `FILE_SHARE_DELETE`** — so for as long as that read is open,
+  Windows refuses to unlink the file. A user who deletes a file through the tree inside
+  that window gets a sharing violation out of `DELETE /api/files/content`
+  (`routers/files.py`), which has no handler for it, so it surfaces as a raw 500 rather
+  than as anything the UI can explain. Measured rather than assumed: with the read
+  artificially widened to 400 ms, an unlink lands `EBUSY` across exactly the predicted
+  band and succeeds on either side of it; at the real sub-millisecond read it bites on a
+  loaded box and never on an idle one, which is why it showed up on CI first.
+  **What is fixed and what is not.** PR #129 hardened only the E2E harness against it
+  (`removeWorkspaceFile` in `ui/e2e/workspace.ts`, retrying the way `fs.rmSync` is
+  designed to) — the harness *should* tolerate a transient OS condition regardless. The
+  production path is untouched and this entry is the reason it is not forgotten: the real
+  fix is opening the watcher's read with `FILE_SHARE_DELETE`, which needs
+  `ctypes`/`CreateFileW` since CPython's `open()` cannot ask for it — a real change to a
+  hot path, worth doing deliberately rather than inside a test-hardening PR. A cheaper
+  half, if the read is not worth touching: make the delete endpoint retry the sharing
+  violation briefly and return a named error instead of a 500 when it persists.
+
 - 2026-08-06 — **The scope freeze is reopened once, on its own terms** (owner: new
   document types). The freeze entry above allows exactly two grounds for reopening — a
   defect, or a decision the owner makes — and this is the second. Recorded rather than

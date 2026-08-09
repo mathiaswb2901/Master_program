@@ -143,4 +143,81 @@ describe("the first-run greeting", () => {
     // live dock may put anything on screen.
     expect(log.filter((entry) => entry.startsWith("open:"))).toEqual(["open:setup"]);
   });
+
+  /**
+   * The same rule as everything above, at the error layer.
+   *
+   * The module advertises itself as open for extension — a third greeting adds
+   * an `order` and edits nothing here — so the surfaces it collects are code it
+   * has never seen. Both shipped ones swallow their own errors; the next one
+   * may not. What must hold regardless is the module's one promise: no surface
+   * decides another's fate. Without the containment in `greet`, the first two
+   * cases below reject the shared `Promise.all` behind a `void greet(...)` and
+   * the greeting vanishes for everybody, unhandled and silent.
+   */
+  describe("contains a surface that throws", () => {
+    /** Quiet, and asserted on: a contained failure is still reported. */
+    let reported: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => reported.mockRestore());
+
+    it("still greets the others when one rejects its answer", async () => {
+      const log: string[] = [];
+      greetFirstRun(dockA, {
+        order: 10,
+        wanted: () => Promise.reject(new Error("capability forgot its try/catch")),
+        open: () => {
+          log.push("open:welcome");
+        },
+      });
+      greetFirstRun(dockA, surface(log, "setup", 20));
+      await settle();
+
+      expect(log.filter((entry) => entry.startsWith("open:"))).toEqual(["open:setup"]);
+      expect(reported).toHaveBeenCalledTimes(1);
+    });
+
+    it("still greets the others when one throws its answer synchronously", async () => {
+      // `wanted` is only *typed* as returning a promise. A surface that is not
+      // an `async` function throws before there is one to attach a handler to —
+      // which is why the containment is a `try` around the `await` and not a
+      // `.catch()` on the result.
+      const log: string[] = [];
+      greetFirstRun(dockA, {
+        order: 10,
+        wanted: (): Promise<boolean> => {
+          throw new Error("threw before returning a promise");
+        },
+        open: () => {
+          log.push("open:welcome");
+        },
+      });
+      greetFirstRun(dockA, surface(log, "setup", 20));
+      await settle();
+
+      expect(log.filter((entry) => entry.startsWith("open:"))).toEqual(["open:setup"]);
+      expect(reported).toHaveBeenCalledTimes(1);
+    });
+
+    it("still opens the surfaces behind one that fails to open", async () => {
+      // The opens are awaited in sequence *because* the order is the point, and
+      // a sequence is where one throw takes the rest of the queue with it. The
+      // surface that lands in front must not be a casualty of the one below it.
+      const log: string[] = [];
+      greetFirstRun(dockA, {
+        order: 10,
+        wanted: () => Promise.resolve(true),
+        open: () => {
+          throw new Error("panel chunk never arrived");
+        },
+      });
+      greetFirstRun(dockA, surface(log, "setup", 20));
+      await settle();
+
+      expect(log.filter((entry) => entry.startsWith("open:"))).toEqual(["open:setup"]);
+      expect(reported).toHaveBeenCalledTimes(1);
+    });
+  });
 });

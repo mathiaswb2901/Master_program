@@ -164,7 +164,8 @@ function showWelcome(): void {
 const welcomeFirstRun: FirstRunSurface = {
   /** Opens **first**, so the Setup walkthrough (order 20) lands in front of it:
    * Setup is the actionable half and it carries a button back to this card.
-   * Beside it, never behind a modal — both are centre tabs. */
+   * Beside it, never behind a modal — both are centre tabs. The rule these two
+   * numbers encode is `DESIGN.md` §6.13.1, which is where it is argued. */
   order: 10,
   wanted: async () => {
     const dismissed = await readDismissed();
