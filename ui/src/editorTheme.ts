@@ -69,7 +69,18 @@ interface SyntaxRule {
   token: string;
   /** The design token its foreground comes from. */
   from: string;
-  fontStyle?: "italic" | "bold";
+  /**
+   * `"italic"` and nothing else, on purpose.
+   *
+   * Monaco's rule parser takes `bold`, `italic` and `underline`, and `bold`
+   * renders as `font-weight: 700` on the matched spans — DESIGN.md §3 ends
+   * "Never 700+", and there is no way to ask Monaco for the 600 the ladder
+   * actually allows. So the weight is not available to a rule at all rather
+   * than available and forbidden: the type is the enforcement, and
+   * `monacoTheme.test.ts` re-checks the built object in case a cast ever gets
+   * around it.
+   */
+  fontStyle?: "italic";
 }
 
 /**
@@ -124,12 +135,15 @@ const SYNTAX: readonly SyntaxRule[] = [
   { token: "metatag.content", from: "--text-primary" },
   { token: "attribute.name", from: "--ansi-blue" },
   { token: "attribute.value", from: "--ansi-green" },
-  // Markdown's own emphasis. `bold` is what `inherit: true` used to supply from
-  // the built-in theme, so this is the shipped behaviour restated rather than a
-  // new weight: DESIGN.md §3's ladder governs the chrome's typography, and this
-  // is the author's `**` rendered in the buffer.
+  // Markdown's own emphasis. `emphasis` keeps its italic; `strong` does not get
+  // a weight, because Monaco's only word for one is `bold` — 700 on the span —
+  // and DESIGN.md §3 ends "Never 700+" without carving out the buffer. Both
+  // markers still read: they are the brightest foreground the palette has
+  // (`--text-primary`) against a body of ANSI-coloured tokens, which is the
+  // same non-colour-only distinction §7 asks for. Inheriting the built-in bold
+  // is not an option either — `inherit: false` is the substance of this theme.
   { token: "emphasis", from: "--text-primary", fontStyle: "italic" },
-  { token: "strong", from: "--text-primary", fontStyle: "bold" },
+  { token: "strong", from: "--text-primary" },
 
   // Wrong.
   { token: "invalid", from: "--ansi-red" },

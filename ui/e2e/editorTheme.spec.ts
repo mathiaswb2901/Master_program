@@ -24,6 +24,13 @@
  * Every expected colour is resolved from `tokens.css` **inside the page**, at
  * the moment of the assertion. A hard-coded `rgb(198, 139, 245)` here would be
  * the parallel palette this whole change exists to refuse, one directory over.
+ *
+ * The second test owns what `defineTheme` has no slot for — radius, elevation
+ * and motion, which are CSS — and it has to be a browser journey rather than a
+ * stylesheet check for one reason: those rules only work if they *win the
+ * cascade against Monaco's own stylesheet*, and Monaco's arrives at runtime,
+ * after the entry CSS, when the editor chunk lands. Nothing short of the built
+ * app with a file open can see that. It shipped broken once, exactly there.
  */
 
 import { expect, request, test, type Page } from "@playwright/test";
@@ -52,6 +59,27 @@ function token(page: Page, name: string): Promise<string> {
     probe.remove();
     return value;
   }, name);
+}
+
+/**
+ * The same trick as {@link token}, for a property that is not a colour: set
+ * `var(--x)` on a probe and read back what the browser computed. Lets a shadow
+ * and a radius be compared against `tokens.css` without either being written
+ * down here — and puts both sides of the assertion in the one serialisation
+ * the browser uses, which for `box-shadow` means colour-first.
+ */
+function styleToken(page: Page, property: string, name: string): Promise<string> {
+  return page.evaluate(
+    ([property, name]) => {
+      const probe = document.createElement("span");
+      probe.style.setProperty(property, `var(${name})`);
+      document.body.append(probe);
+      const value = getComputedStyle(probe).getPropertyValue(property);
+      probe.remove();
+      return value;
+    },
+    [property, name] as const,
+  );
 }
 
 /**
@@ -230,5 +258,81 @@ test("the buffer, its syntax and every pane of it follow the design tokens", asy
     });
     expect(numbers, "line numbers are metadata, not a mark").not.toBe(accent);
     expect(numbers).toBe(await token(page, "--text-tertiary"));
+  });
+});
+
+test("the find widget wears our geometry and elevation, and honours reduced motion", async ({
+  page,
+}) => {
+  // Order-independent: the journey above leaves a split and a flipped theme
+  // behind, and neither should decide what this one measures. Every expectation
+  // is resolved from the tokens on screen, so whichever theme it lands in is
+  // the right one to assert against.
+  await page.request.put("/api/layouts", {
+    data: { current: null, current_name: null, saved: [] },
+  });
+  // Emulated before the first paint, the way a user's OS setting actually
+  // arrives: the rule under test lives in a media query, and a preference
+  // applied afterwards would not prove it was ever consulted at load.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openApp(page);
+
+  const editor = page.locator(".wb-editor-body .monaco-editor").first();
+  await treeItem(page, NOTES_FILE).click();
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await page.keyboard.press("Control+f");
+  // Scoped to the pane, not to the window: `.find-widget` is pane-internal, and
+  // this file has already established that two editors is the normal case.
+  const widget = editor.locator(".find-widget");
+  await expect(widget).toBeVisible();
+
+  await test.step("the corners and the shadow are ours, not the vendor's", async () => {
+    // This is the assertion that fails without the fix, and the reason the
+    // whole test is a browser journey. `styles/editor.css` is entry CSS;
+    // Monaco's stylesheet is injected when the editor chunk lands, so it is
+    // always later, and on `.monaco-editor .find-widget` the two are the same
+    // 0-2-0 specificity. Before the fix the widget shipped with Monaco's 4px
+    // corners and Monaco's `var(--vscode-widget-shadow)` — which the theme sets
+    // fully transparent on purpose, so this file could own elevation. The
+    // measured result was a floating panel with no elevation at all.
+    const shadow = await styleToken(page, "box-shadow", "--shadow-2");
+    const radius = await styleToken(page, "border-radius", "--radius-md");
+    expect(shadow, "--shadow-2 resolved to a real shadow").toMatch(/rgba?\(/);
+    expect(radius, "--radius-md resolved to a real length").toMatch(/px/);
+
+    const geometry = await widget.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        boxShadow: style.boxShadow,
+        top: style.borderTopLeftRadius,
+        bottom: style.borderBottomLeftRadius,
+      };
+    });
+    expect(geometry.boxShadow, "DESIGN.md §4: shadow-2, and only ours").toBe(shadow);
+    // The widget hangs off the top edge, so only the lower corners are rounded
+    // (§4) — which also makes this fail loudly if the shorthand ever stops
+    // reaching the longhands Monaco writes.
+    expect(geometry.bottom, "the lower corners are rounded").toBe(radius);
+    expect(geometry.top, "the upper corners stay square against the frame").toBe("0px");
+  });
+
+  await test.step("the 200 ms slide is gone while the preference is on", async () => {
+    // §5.6, and the reason a media query alone was not enough: it adds no
+    // specificity, so the override lost the same tie and the panel kept
+    // travelling across the screen for a user who had asked the OS to stop
+    // exactly that.
+    await expect
+      .poll(() => widget.evaluate((element) => getComputedStyle(element).transitionDuration))
+      .toBe("0s");
+
+    // And it is gone *because of the preference*, not because the transition was
+    // deleted: with the setting off, Monaco's own slide is back. A fix that
+    // zeroed it unconditionally would pass the assertion above and quietly cost
+    // every other user the motion §5.6 says to keep.
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await expect
+      .poll(() => widget.evaluate((element) => getComputedStyle(element).transitionDuration))
+      .not.toBe("0s");
   });
 });

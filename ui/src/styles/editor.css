@@ -258,7 +258,32 @@
 
    Selectors are class-based and therefore per-instance: two editor panes are
    two `.monaco-editor` roots, and each dresses its own widgets. Nothing here
-   assumes there is one editor in the window. */
+   assumes there is one editor in the window.
+
+   **Every declaration below is `!important`, and it is load order that makes it
+   necessary.** This file is entry CSS — `main.tsx` imports it, so it ships in
+   `dist/assets/index-*.css`, linked from `index.html`. Monaco's own stylesheet
+   is not linked at all: it rides the chunk behind the single dynamic `import()`
+   in `monaco.ts`, and Vite appends its `<link>` to `<head>` at the moment a user
+   opens their first file. So the vendor sheet is *always* the later one, and
+   every selector here that Monaco also writes — `.monaco-editor .find-widget`,
+   `.monaco-editor .suggest-widget`, `.monaco-editor .monaco-hover`, all 0-2-0 on
+   both sides — loses the tie to it.
+
+   That is not theoretical: measured in the built app, the find widget shipped
+   wearing Monaco's 4px corners instead of `--radius-md`, and Monaco's
+   `box-shadow: 0 0 8px 2px var(--vscode-widget-shadow)` instead of `--shadow-2`
+   — and since the theme deliberately zeroes `widget.shadow` so this file can own
+   elevation, that left the widget with **no elevation at all**, which is the
+   opposite of what suppressing the vendor shadow was for.
+
+   Marking the whole section rather than only today's collisions is deliberate:
+   the load order is permanent, so a Monaco upgrade that adds one declaration
+   would otherwise delete one of these rules in silence. `tokens.css` gives the
+   same reason for the theme-switch rule — an override that must beat an author
+   rule "whatever its specificity". `ui/e2e/editorTheme.spec.ts` reads radius,
+   shadow and transition back out of a running find widget so this cannot
+   quietly come undone again. */
 
 .monaco-editor .find-widget,
 .monaco-editor .suggest-widget,
@@ -267,16 +292,16 @@
 .monaco-editor .parameter-hints-widget,
 .monaco-editor .quick-input-widget,
 .monaco-menu-container {
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-2);
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-2) !important;
 }
 
 /* The find widget hangs from the top edge of the buffer and slides down out of
    it, so only its lower corners are ever off the edge — rounding all four makes
    it look detached from the frame it is docked to. */
 .monaco-editor .find-widget {
-  border-top: none;
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  border-top: none !important;
+  border-radius: 0 0 var(--radius-md) var(--radius-md) !important;
 }
 
 /* Chrome inside the buffer is chrome: it reads in the UI face, not in the
@@ -285,7 +310,7 @@
 .monaco-editor .find-widget,
 .monaco-editor .quick-input-widget,
 .monaco-menu-container {
-  font-family: var(--font-ui);
+  font-family: var(--font-ui) !important;
 }
 
 /* Inputs and their toggles take the app's control radius (§4). Monaco paints
@@ -294,20 +319,27 @@
 .monaco-editor .find-widget .monaco-inputbox,
 .monaco-editor .find-widget .monaco-findInput,
 .monaco-editor .quick-input-widget .monaco-inputbox {
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm) !important;
 }
 
 .monaco-editor .find-widget .monaco-custom-toggle {
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-xs) !important;
 }
 
 /* Reduced motion zeroes travel and keeps tint (§5.6). Monaco ships this same
    override behind a `.monaco-workbench.reduce-motion` class the standalone
    editor never wears, so the widget's 200 ms slide survives the setting unless
    we say otherwise — and a panel sliding across the screen is exactly the
-   movement the preference is about. */
+   movement the preference is about.
+
+   `!important` for the load-order reason above, and it is the one rule here
+   where the reason is not merely visual: a media query adds no specificity, so
+   without it this loses the same 0-2-0 tie to Monaco's unconditional
+   `transition: transform .2s linear` and a user who has asked the OS to stop
+   moving things still gets the slide. `tokens.css` marks `.wb-chevron` the same
+   way, in the same media query, for the same reason. */
 @media (prefers-reduced-motion: reduce) {
   .monaco-editor .find-widget {
-    transition-duration: 0s;
+    transition-duration: 0s !important;
   }
 }

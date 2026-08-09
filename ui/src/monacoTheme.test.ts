@@ -119,6 +119,28 @@ describe("the workbench Monaco theme", () => {
     expect(colors["widget.shadow"].slice(7)).toBe("00");
   });
 
+  it("asks Monaco for no weight, because its only weight is 700", () => {
+    // DESIGN.md §3: "Weights: 400 body, 500 emphasis/labels, 600 headings/active
+    // states. Never 700+." A rule's `fontStyle: "bold"` renders as
+    // `font-weight: 700` on every matched span, and Monaco has no vocabulary for
+    // 600 — so markdown's `**strong**` was the one place in the window painting
+    // a weight the ladder forbids. `SyntaxRule` no longer types `"bold"` at all;
+    // this checks the object that is actually handed to `defineTheme`, which a
+    // cast could still reach.
+    for (const theme of ["dark", "light"] as const) {
+      for (const rule of workbenchThemeData(theme).rules) {
+        expect(rule.fontStyle ?? "", `${theme}: \`${rule.token}\``).not.toMatch(/bold/);
+      }
+    }
+    // And the italic that is allowed is still there, so this cannot pass by the
+    // styles having been dropped wholesale.
+    const styled = workbenchThemeData("dark").rules.filter(
+      (rule) => rule.fontStyle === "italic",
+    );
+    expect(styled.map((rule) => rule.token)).toContain("emphasis");
+    expect(styled.map((rule) => rule.token)).toContain("comment");
+  });
+
   it("colours the roles the shipped languages actually emit", () => {
     // `monacoBundle.ts` ships 21 grammars plus the JSON service. These are the
     // token types they produce that a reader distinguishes at a glance; a rule
