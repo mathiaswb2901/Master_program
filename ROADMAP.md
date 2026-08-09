@@ -747,8 +747,10 @@ because other sections and five running lanes reference these numbers.
    `activeTerminalId` and `activePath` as app-global singletons that no longer have a
    justification; `AgentPanel` is simultaneously the session list and the chat, so ten
    agents in a grid cannot be expressed; `Terminal` and `EditorArea` each own a tab strip
-   that should be panes; `monaco.disposeModel(path)` pulls a model out from under a
-   second pane on the same file; `registry.test.ts` pins the singleton as truth and gets
+   that should be panes; ~~`monaco.disposeModel(path)` pulls a model out from under a
+   second pane on the same file~~ (**done** — `monaco.ts` owns model lifetime through a
+   refcounted registry and every `<Editor>` keeps its model; `ui/e2e/editorPanes.spec.ts`);
+   `registry.test.ts` pins the singleton as truth and gets
    rewritten, not deleted; and the E2E helpers use unscoped selectors that would pass
    against a broken plural app. `docs/tools.md` and `ARCHITECTURE.md` write the singleton
    down as a *rule* ("exactly Editor / Files / Agent / Terminal", "`id` equal to
