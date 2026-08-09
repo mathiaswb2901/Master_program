@@ -532,7 +532,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # process to be reaped.
         await worktree_service.stop()
         await watcher.stop()
-        pty_manager.shutdown()
+        # Awaited, and concurrent inside: every terminal is force-killed, and a
+        # child wedged in uninterruptible I/O takes up to a second to become
+        # reapable. Serially on this thread that was N seconds of a server that
+        # answers nothing before the process could exit.
+        await pty_manager.shutdown()
         await app.state.http.aclose()
         log.info("workbench.stopped")
 

@@ -417,6 +417,7 @@ in-process calls where the model and the user dominate.
 | `services/pty_manager.py` | PTY sessions: the `PtyLike` seam, the per-platform factory, ConPTY (Windows) |
 | `services/pty_posix.py` | the POSIX PTY backend — stdlib `pty.fork`, behind an injectable syscall surface |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
+| `services/ws_lifecycle.py` | the teardown rules both live sockets share: a pump that never raises, a drain that can never skip the release |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/notebook.py` | reading a notebook: nbformat `reads(as_version=4)` (which migrates an nbformat-3 file rather than calling it corrupt) + `validate` (non-fatal), the MIME-bundle choice, the caps, ANSI out of tracebacks. No kernel, no execution, no write path |
 | `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
