@@ -134,9 +134,9 @@ UnitState = Literal[
     "discovered",   # the leader found it; nobody is on it
     "queued",       # on the work queue, awaiting a free slot/cap
     "assigned",     # a worker holds it (worker_id set)
-    "summarised",   # a worker wrote back a fresh digest; awaiting accept/review
+    "summarised",   # a worker wrote back a fresh digest; awaiting review
     "reviewed",     # the reviewer produced evidence (a ValidationResult ref)
-    "accepted",     # the leader (or a human) accepted it
+    "accepted",     # a human approved its evidence — the only path in
     "stale",        # an upstream unit it depends on changed after it was accepted
     "blocked",      # it cannot proceed; reason names why
 ]
@@ -212,6 +212,35 @@ tools, each honouring the byte budget + three shapes:
   the dependency edges), truncated worst-first with the argument that widens it, so the
   leader can re-orient in one call rather than reading 20 files.
 
+### Reconciling a worker that never settles
+
+A worker dispatched onto a unit (`assigned`, `worker_id` set) does not always settle
+cleanly. It can **hang** — never emit `turn_done` or `agent_error` — or be **silently
+reaped** by the worktree pool when its idle lease expires (`services/worktrees.py`'s
+`owner_pid` + `expires_at` reaper). Left unhandled, that unit stays `assigned` to a
+dangling `worker_id` forever: invisibly excluded from the work queue, and silently
+under-reported in the overview with no named recovery path — exactly the stranded-resource
+bug the pane-tombstone discipline (CLAUDE.md pane rule 3) exists to rule out elsewhere.
+
+So `ConductorService` runs a **reconciliation pass** — on every wave tick and on each
+worker-outcome signal it already subscribes to (`OrchestratorService._pump` calls
+`note_failed` on `agent_error`/`turn_done`; `list_workers`/`read_worker` observe the
+roster). For every `assigned` unit it reads the live `WorkerInfo` and resolves it to a
+state that always names a next step, never a dead `assigned`:
+
+- worker `outcome == failed` → the unit moves to **`blocked`**, its `WorkerInfo.detail`
+  copied in as the reason — a named tombstone, not a dead slot;
+- worker **gone from the roster** (reaped by the pool, or absent from `list_workers`) →
+  the unit moves back to **`queued`** and its `worker_id` is cleared, so the next wave
+  redispatches it;
+- worker still present and running → the unit is untouched.
+
+This is the tombstone-with-one-recovery-action pattern the house rules require for stale
+panes, applied to units: a stranded unit resolves to `queued` (redispatch) or `blocked`
+(reason shown, mirroring how a `SpawnRefusal` names its cap), never to a permanent
+`assigned` behind a worker that is gone. The reconciliation is `ConductorService`'s own
+polling, not a new agent tool — no chat or conductor session pays a schema for it.
+
 ## 2. Delegation and honest scaling
 
 The leader assigns workers per unit; workers get isolated worktrees (#46) and do focused
@@ -245,9 +274,9 @@ rather than a limitation to apologise for.
 
 ## 3. Reintegration
 
-A worker's output is summarised back into the overview and, optionally, passed through the
-fresh-context reviewer before the leader accepts it; **the human approval gate stays the
-decider for anything that matters.**
+A worker's output is summarised back into the overview and passed through the fresh-context
+reviewer, which produces the evidence a human then signs off; **the human approval gate is
+the decider of every acceptance, and the leader accepts nothing itself.**
 
 The sequence, all on seams that ship:
 
@@ -258,25 +287,40 @@ The sequence, all on seams that ship:
    (state → `summarised`). The digest *replaces* the unit's old `summary`, so the leader's
    awareness of a 20-unit project stays one paragraph per unit no matter how much the worker
    wrote. This is the whole context-budget point of the overview.
-3. **Optionally review.** The conductor runs the #82 `ValidationService` with the #126
-   review check against **the worker's own slot** — the checkout is resolved through the
-   existing `SlotLocator.slot_of(worker_id)` that `OrchestratorService` already implements
-   and that `services/gates.py` and `services/review.py` already consume, so the reviewer
-   reads exactly the tree the worker wrote and takes **no lease** on it. The review produces
-   a `ValidationResult` (evidence, never approval); its id lands in
-   `ProjectUnit.last_result_ref` and the unit moves to `reviewed`. The conductor commissions
-   the review; it does **not** gain a tool that lets a *worker* commission its own reviewer
-   — that door stays shut (#126's rule).
-4. **Accept.** The leader marks the unit `accepted` — but for anything that matters the
-   **human approval gate** (`POST /api/validation/{id}/approve`) is the decider: a
-   `medium`-or-worse `ValidationResult` is a subject awaiting human approval exactly as M6
-   defined, and an unattended conductor follows the objective-session **deny-and-log**
-   policy rather than auto-accepting a flagged unit. Acceptance of a clean, low-risk unit
-   the leader may do itself; acceptance over the reviewer's objection it may not.
+3. **Review — the precondition for acceptance.** The conductor runs the #82
+   `ValidationService` with the #126 review check against **the worker's own slot** — the
+   checkout is resolved through the existing `SlotLocator.slot_of(worker_id)` that
+   `OrchestratorService` already implements and that `services/gates.py` and
+   `services/review.py` already consume, so the reviewer reads exactly the tree the worker
+   wrote and takes **no lease** on it. The review produces a `ValidationResult` (evidence,
+   never approval); its id lands in `ProjectUnit.last_result_ref` and the unit moves to
+   `reviewed`. This step is not skippable on the way to acceptance: **`reviewed`, carrying a
+   `last_result_ref`, is the only doorway to `accepted`**, so a leader can never mark a unit
+   accepted with no `ValidationResult` and no evidence at all — evidence must exist before a
+   human can be asked to approve it. The conductor commissions the review; it does **not**
+   gain a tool that lets a *worker* commission its own reviewer — that door stays shut
+   (#126's rule).
+4. **Accept — only on a human approval, never on a risk level.** A unit's `accepted`
+   transition is gated on `last_result_ref` pointing to a `ValidationResult` that **carries
+   a human approval** (`approval is not None`), mirroring `services/sessions.py`'s
+   `derive_objective_status` and `ui/src/objectives.ts`'s `objectiveStatus` **exactly**:
+   there, `met` requires `latest.approval is not None`, and "a `pass`/`low` result with no
+   approval is still `open` — evidence exists, but 'done' waits on the human, never on
+   opinion." The conductor inherits that table with **no risk-level carve-out and no
+   leader-only fast path** — there is no precedent anywhere in the repo for an agent
+   auto-accepting even a clean, `low` result, so this plan invents none. The human approval
+   gate (`POST /api/validation/{id}/approve`) is the **sole** decider of `accepted`: a
+   `medium`-or-worse result awaits it, and a `pass`/`low` result awaits it *equally*. An
+   unattended conductor therefore accepts **nothing** itself; it follows the
+   objective-session **deny-and-log** policy and leaves every `reviewed` unit sitting for
+   the human. A run left alone over a 20-unit project ends with up to 20 units `reviewed`
+   and **zero** `accepted` — never a whole project accepted with no human ever in the loop,
+   which is precisely the auto-accept failure the M6 approval gate (#82) exists to prevent.
 
 Reintegration adds **no new authority**: the summary is the leader's, the evidence is the
-reviewer's, the approval is the human's, and the overview only records which of the three
-has happened.
+reviewer's, and the approval — and therefore the `accepted` transition itself — is the
+human's alone. The leader maps, summarises, dispatches and commissions a review; it cannot
+sign one off. The overview only records which of the three has happened.
 
 ## 4. Fluid and agnostic
 
@@ -318,11 +362,14 @@ parallel lanes never collide. PR 1 is the hard prerequisite; PR 2 depends on it.
   `ConductorEvent` to the event bus's typed union — the one shared-file line, exactly the
   addition `SessionActivityEvent` and `ValidationEvent` each made.
 - **Builds:** the overview models; `ConductorService` holding the overview, the work queue,
-  and the wave dispatcher — which **calls `OrchestratorService`** for spawn/read/stop and
-  **asks** its caps rather than duplicating any of them; the `map_project` / `update_unit` /
-  `assign_unit` / `next_unit` / `read_overview` tools honouring the byte budget + three
-  shapes; the REST surface (`GET /api/conductor` replay, and a thin stop/reset); the bus
-  event; persistence.
+  the wave dispatcher — which **calls `OrchestratorService`** for spawn/read/stop and
+  **asks** its caps rather than duplicating any of them — and the **reconciliation pass**
+  that moves a failed worker's unit to `blocked` (reason from `WorkerInfo.detail`) and a
+  reaped-or-vanished worker's unit back to `queued`, so no unit is stranded `assigned`; the
+  accept gate that refuses `accepted` unless `last_result_ref` carries a human approval; the
+  `map_project` / `update_unit` / `assign_unit` / `next_unit` / `read_overview` tools
+  honouring the byte budget + three shapes; the REST surface (`GET /api/conductor` replay,
+  and a thin stop/reset); the bus event; persistence.
 - **Composes with:** #63 (delegation substrate — reused, not rebuilt), #46 (the pool, via
   the orchestrator), #97 + the tree walk (discovery, already in the session toolset). Names
   the **M5 item 9 cap raise (`max_concurrent_sessions` 4→8) as its scaling prerequisite**,
@@ -332,10 +379,15 @@ parallel lanes never collide. PR 1 is the hard prerequisite; PR 2 depends on it.
   no tokens. `test_conductor.py` proves: mapping is idempotent by `ref`; the wave dispatcher
   never exceeds the cap (a 5-unit project at cap 2 runs in ≥3 waves, never >2 workers live);
   a settled worker's `update_unit` replaces the digest and the summary length stays bounded;
-  a `stale` cascade fires when a depended-on unit is re-summarised; `read_overview`
-  truncates with the stated size + widening argument and says "none" when the map is empty;
-  the overview round-trips through `.workbench/overview.json` across a simulated restart; a
-  corrupt file resolves to an empty overview.
+  a `stale` cascade fires when a depended-on unit is re-summarised; the reconciliation pass
+  moves a **failed** worker's unit to `blocked` with the reason and a **reaped/vanished**
+  worker's unit back to `queued`, and a unit is never left stranded `assigned` to a gone
+  worker; a unit **cannot reach `accepted` without a `ValidationResult` that carries a human
+  approval** — a `pass`/`low` result with no approval leaves it short of `accepted`, exactly
+  as the objective-status table derives; `read_overview` truncates with the stated size +
+  widening argument and says "none" when the map is empty; the overview round-trips through
+  `.workbench/overview.json` across a simulated restart; a corrupt file resolves to an empty
+  overview.
 
 ### PR 2 — worker reintegration + the reviewer hook + the Mission-Control overview surface (server hook + UI)
 
@@ -386,9 +438,12 @@ the map is legible from one pane.
   a dispatched worker's job under the leader's direction, a human decision at the gate — not
   an automatic edit.
 - **Fully-autonomous multi-wave runs without human checkpoints.** The #82 human approval
-  gate stays the decider for anything `medium`-or-worse, and an unattended conductor follows
-  the objective-session **deny-and-log** policy. A conductor that ran to completion accepting
-  its own reviewer's objections is explicitly **not** what this builds.
+  gate is the decider of **every** `accepted` transition — not only `medium`-or-worse but
+  `pass`/`low` too, mirroring the shipped objective-status table — and an unattended
+  conductor follows the objective-session **deny-and-log** policy, accepting nothing itself.
+  A conductor that ran to completion accepting units no human cleared — its own reviewer's
+  objections or a clean result alike — is explicitly **not** what this builds; a run left
+  alone ends with units `reviewed` and awaiting a human, never `accepted`.
 - **Auto-inferred dependencies.** v1 records `depends_on` as the leader maps and
   reintegrates; discovering "ch3 cites ch5's number" from content is a later pass.
 - **Multi-level hierarchy.** A worker that is itself a conductor is out of scope — one level,
