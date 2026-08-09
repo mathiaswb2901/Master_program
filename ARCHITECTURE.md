@@ -415,6 +415,8 @@ in-process calls where the model and the user dominate.
 | `services/usage.py` | plan limits from the SDK's rate-limit events; per-turn and per-session cost; in-memory only |
 | `services/orchestrator.py` | Mission Control's crews: spawn/read/send/stop workers in pooled worktrees, the budget that binds, the reaping |
 | `services/office_host/` | hosting real Office windows: `backend.py` (the Protocol the native implementation must satisfy), `fake_backend.py` (in-process stand-in), `state.py` (the lifecycle), `service.py` (hosts by id, events, reaping) |
+| `services/voice.py` | push-to-talk dictation: the `VoiceBackend` Protocol, the `register_backend` plug-in point, `FakeVoiceBackend` (scripted, no audio hardware), and the bounded lifecycle. Holds no audio |
+| `routers/voice.py` | `GET /api/voice/capabilities`, `POST /api/voice/start`, `.../{id}/chunk`, `.../{id}/stop`, `.../{id}/cancel` |
 
 ## The file tree
 
@@ -1209,6 +1211,56 @@ writes to disk and re-enters the normal watcher flow. `document.key` derives fro
 content hash so external changes (e.g. agent edits) force a reopen instead of serving
 a stale cached copy. Absent OnlyOffice, documents degrade to read-only preview +
 "Open in Word".
+
+## Voice input (the seam, and the privacy posture)
+
+Push-to-talk dictation into the agent composer. **What ships is the seam, not the
+voice**: the lifecycle is complete and tested end to end, and the transcriber behind it
+is owner-gated.
+
+**Audio never leaves the machine, and the wire says so.** The browser's
+`SpeechRecognition` API is the cheap path and it is rejected outright — in
+Chrome/WebView2 it streams the microphone to a cloud service, which is exactly what
+this app's local-first claim says never happens. So `VoiceCapabilities.local_only` is a
+field the UI renders rather than a promise in prose, and a non-local transcriber could
+only arrive by flipping it, visibly. There is no setting that turns one on.
+
+Three layers, each with a stand-in so the whole journey runs on a headless runner:
+
+| Layer | Real | Stand-in |
+|---|---|---|
+| Transcriber (`services/voice.py`) | a local model, **owner-gated** — not written here | `FakeVoiceBackend`, `WORKBENCH_VOICE_FAKE=1`: one scripted word per chunk |
+| Capture (`ui/src/voiceCapture.ts`) | `getUserMedia` + an `AudioWorklet`, **owner-gated** — the named UI seam | `scripted`: 100 ms slices of silence on a timer, no device touched |
+| Gesture (`ui/src/voice.tsx`) | — | — (the real thing, both ways) |
+
+`VoiceBackend` is `ready` / `report` / `start` / `feed` / `stop` / `cancel`, and
+`register_backend(name, factory)` is the plug-in point: a real backend is one module
+that registers itself, selected by `WORKBENCH_VOICE_BACKEND` or by being the only real
+one registered. Nothing above the seam changes when it lands — not the wire types, not
+the router, not the composer. The fake is never chosen implicitly.
+
+**The service holds no audio.** Chunks go straight to the backend and only their size
+is remembered, which is both the privacy property (nothing is buffered here to leak or
+log) and the memory bound (a held key costs a counter). The lifecycle is bounded at
+every edge that can run away: a per-utterance ceiling (`MAX_UTTERANCE_S`, enforced on
+total bytes and cancelling rather than truncating), a concurrency cap whose refusal
+names itself, a reaper for utterances nobody released, and this service's own timeout
+around every backend call — the office host's lesson, that an implementation which
+forgets to bound itself hangs the request that started it.
+
+**No WebSocket, deliberately.** Interim text rides the chunk *response* rather than
+`/ws/events`. A half-spoken sentence is not app-wide state: it belongs to the one
+composer whose microphone is open, and broadcasting it would put a partial utterance in
+every window attached to this server for no reader's benefit.
+
+**In the UI** voice is a card-on-input, not a panel: it registers no tool and takes no
+line in `tools.ts`. The composer renders `VoiceButton`; the command (`voice.dictate`)
+and its chord (`Alt+V`) belong to the **Agent** tool, because "which conversation am I
+talking to" is that capability's question. The pointer *holds*; the keyboard *toggles*,
+because holding a key down is an accessibility trap. There is one microphone, so one
+utterance at a time — `active.target` names which composer holds it, and starting
+elsewhere cancels rather than mixes. The final transcript lands as an editable draft and
+**is never sent**.
 
 ## Mission Control (the board, and the orchestrator seam)
 

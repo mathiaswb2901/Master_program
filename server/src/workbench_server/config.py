@@ -56,6 +56,29 @@ class Settings(BaseSettings):
     # worse lie than a panel that fails.
     office_fake: bool = False
 
+    # Voice input (M7 §3): push-to-talk dictation into the agent composer.
+    # "auto" uses whatever transcriber is actually registered and reports
+    # honestly when there is none; "off" refuses whatever is configured.
+    #
+    # The privacy posture is not a setting: every backend that may be registered
+    # here transcribes **on this machine**. The browser's SpeechRecognition API
+    # was rejected as a path precisely because it streams the microphone to a
+    # cloud service (M7 plan §3), so there is no knob here that would turn one
+    # on — offering a non-local transcriber some day means flipping
+    # `VoiceCapabilities.local_only` on the wire, visibly.
+    voice: Literal["auto", "off"] = "auto"
+    # Which registered backend to use, by name (services/voice.py's registry).
+    # None = the single registered real backend if there is exactly one, else
+    # none at all — voice is simply not offered, and `capabilities` says so.
+    voice_backend: str | None = None
+    # Replace the transcriber with the scripted stand-in in services/voice.py:
+    # the whole lifecycle — start, audio chunks, interim text, a final
+    # transcript — with no microphone, no model and no audio hardware. Same
+    # precedent as fake_agent and office_fake: off by default and loudly logged
+    # when on, because a composer that looks like it is listening while the
+    # words are canned would be a worse lie than no microphone button at all.
+    voice_fake: bool = False
+
     def resolved_public_base_url(self) -> str:
         return self.public_base_url or f"http://{self.host}:{self.port}"
 

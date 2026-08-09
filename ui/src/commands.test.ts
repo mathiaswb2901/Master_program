@@ -165,6 +165,9 @@ describe("command registry", () => {
       "editor.close",
       "session.new",
       "session.detach",
+      // Push-to-talk (M7 §3). The Agent tool's, because voice fills the session
+      // you are talking to — it contributes no panel and no line in `tools.ts`.
+      "voice.dictate",
       "session.jump.1",
       "session.jump.2",
       "session.jump.3",

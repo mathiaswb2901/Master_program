@@ -616,6 +616,10 @@ describe("the registered tools", () => {
       "Alt+8": "session.jump.8",
       "Alt+9": "session.jump.9",
       "Alt+A": "plan.annotate",
+      // Push-to-talk (M7 §3). It *toggles* rather than holds: holding a key is
+      // an accessibility trap (`voice.tsx`), so the chord and the pointer are
+      // deliberately different gestures onto the same state.
+      "Alt+V": "voice.dictate",
       "Alt+T": "terminal.new",
       // The pane system's keymap: `Alt` moves you, `Alt+Shift` moves the pane,
       // and the three letters are tmux's (split, cycle, close). Every one of

@@ -170,6 +170,14 @@ ruling it out.
   `WORKBENCH_ONLYOFFICE_JWT_SECRET` = `services.CoAuthoring.secret.session.string` from
   `C:\Program Files\ONLYOFFICE\DocumentServer\config\local.json` (native local install,
   services `Ds*Svc`, port 8880).
+  **Voice input** (push-to-talk in the agent composer, `Alt+V`) ships as a *seam*:
+  `WORKBENCH_VOICE_FAKE=1` walks the whole lifecycle with scripted words and no
+  microphone (it is what the E2E suite drives), `WORKBENCH_VOICE=off` refuses it,
+  and `GET /api/voice/capabilities` says why the microphone is not offered when it
+  is not. The real local transcriber and real microphone capture are **owner-gated**
+  and not in the tree; `services/voice.py`'s `register_backend` is where one plugs
+  in. **Audio never leaves the machine** — there is no cloud path and no setting
+  that would add one (ARCHITECTURE.md, "Voice input").
 
 ## Danger zones
 

@@ -36,6 +36,7 @@ from workbench_server.routers import (
     terminal,
     usage,
     validation,
+    voice,
     workspaces,
     worktrees,
 )
@@ -69,6 +70,8 @@ from workbench_server.services.setup import SetupService, detect_claude_login
 from workbench_server.services.shortcuts import ShortcutsService
 from workbench_server.services.usage import UsageService
 from workbench_server.services.validation import ValidationService
+from workbench_server.services.voice import VoiceService
+from workbench_server.services.voice import build_backend as build_voice_backend
 from workbench_server.services.watcher import Watcher
 from workbench_server.services.workspace import Workspace
 from workbench_server.services.workspaces import RecentsStore, WorkspaceService
@@ -286,6 +289,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else (lambda: detect_claude_login(Path.home(), os.environ))
         ),
     )
+    # Voice input (M7 §3). Deliberately workspace-agnostic — an utterance is
+    # about a microphone, not about a project — so it copies no root and owes no
+    # `set_workspace_root`. The backend is None on any machine with no
+    # transcriber registered, which is not an error: `GET /api/voice/capabilities`
+    # reports it and the composer simply offers no microphone.
+    voice_backend = build_voice_backend(
+        mode=settings.voice, fake=settings.voice_fake, name=settings.voice_backend
+    )
+    if settings.voice_fake and voice_backend is not None:
+        log.warning(
+            "voice.fake_mode_enabled",
+            detail="WORKBENCH_VOICE_FAKE is set: transcripts are scripted, nothing is heard",
+        )
+    voice_service = VoiceService(voice_backend, mode=settings.voice, fake=settings.voice_fake)
     # The workspace is no longer fixed at launch (M5 item 5). Everything above
     # that copied `workspace.root` into a field of its own is listed here, and
     # this list is the *only* place a switch is coordinated — a service added
@@ -346,6 +363,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Office instance nobody owns, still wearing our panel's chrome.
         await office_host_service.shutdown()
         await host_channel.close()
+        # A microphone still open must not outlive the server that was
+        # listening: every in-flight utterance is cancelled and its audio
+        # discarded, never transcribed on the way out.
+        await voice_service.shutdown()
         if isinstance(host_backend, ShellHostBackend):
             # Every instance has been reaped above; this only lets the COM
             # apartment thread go.
@@ -396,6 +417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.documents = document_service
     app.state.sessions = sessions_store
     app.state.setup = setup_service
+    app.state.voice = voice_service
     # Order matters, and Starlette inverts it: add_middleware inserts at the head
     # of the list, so the LAST middleware added is the OUTERMOST layer. We add
     # LocalAuth *first* and CORS *second* so CORS ends up outer — a request the
@@ -446,6 +468,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workspaces.router)
     app.include_router(sessions.router)
     app.include_router(setup.router)
+    app.include_router(voice.router)
 
     # Built frontend, when present (repo layout: <root>/ui/dist next to server/)
     ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"

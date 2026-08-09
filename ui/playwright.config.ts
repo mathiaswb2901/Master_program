@@ -152,6 +152,13 @@ export default defineConfig({
         // host lifecycle, its refusals and its fallbacks, with no Office, no
         // Rust and no native window anywhere near CI. Journey 7 drives it.
         WORKBENCH_OFFICE_FAKE: "1",
+        // The voice seam's counterpart to both of the above: the whole
+        // push-to-talk lifecycle — start, audio chunks, interim text, a final
+        // transcript — with no microphone, no model and no audio hardware.
+        // Journey `voice.spec.ts` drives it, and the browser side pairs it with
+        // the scripted capture in `ui/src/voiceCapture.ts` (silence on a timer),
+        // so a headless runner really can hold a push-to-talk button down.
+        WORKBENCH_VOICE_FAKE: "1",
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: E2E_WORKSPACE,
         // A *sibling* of the workspace, seeded by `e2e/workspace.ts`: pointing
