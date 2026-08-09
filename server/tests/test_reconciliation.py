@@ -22,6 +22,7 @@ spreadsheet diff:
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import openpyxl
 import pytest
@@ -39,11 +40,18 @@ from workbench_server.models.reconciliation import (
 )
 from workbench_server.models.validation import ValidationResult, ValidationSpec, ValidationSubject
 from workbench_server.services.event_bus import EventBus
+
+# `_align_time_rows` and `_OFFSET_REFUSAL` are reached by name on purpose: the former
+# is what consumes `WorkbookReader.column_pairs`, and is the only way to exercise a
+# tz-aware datetime *object* (openpyxl refuses to write one into an .xlsx); the latter
+# is the refusal text whose length has to fit the agent tool's reason clip.
 from workbench_server.services.reconciliation import (
+    _OFFSET_REFUSAL,
     MAX_DUPLICATE_LINES,
     CrossCurrency,
     ReconciliationCheck,
     UnitMismatch,
+    _align_time_rows,
     convert,
     within_tolerance,
 )
@@ -383,6 +391,213 @@ async def test_a_time_row_with_no_matching_wall_clock_is_a_fail(tmp_path: Path) 
     service, result = await run_recon(tmp_path, spec)
     assert result.risk == "high"
     assert "alignment gap" in (report_of(service, result).comparisons[0].reason or "")
+
+
+# ------------------------ the naive-local contract: an offset is refused, not stripped
+
+
+def test_offset_bearing_fold_expectations_are_named_fails_not_a_silent_pass(
+    tmp_path: Path,
+) -> None:
+    """The bug this test was written for, driven the way a user hits it: POST
+    /api/validation/run with the spec an agent submits.
+
+    ``2024-10-27T02:00:00+02:00`` and ``2024-10-27T02:00:00+01:00`` are the two
+    occurrences of the Europe/Oslo fall-back hour, told apart *only* by their UTC
+    offset — the idiomatic, DST-safe way a pandas or Python export writes them. The
+    gate used to strip the offset, so both collapsed to the same naive wall clock with
+    ``fold`` defaulting to 0, and therefore to the **same lookup key**: the genuine
+    fold-1 row (21.0) was never consulted and the second expectation was silently
+    scored against the fold-0 value (20.0).
+
+    Both expectations here claim 20.0, so before the fix this run came back ``risk
+    pass`` — a green light on numbers whose CET hour is wrong, the fold gate defeated
+    on the one day it exists to protect. Each must now be a *named* per-row fail that
+    teaches the fix, and neither may be scored against a row it did not address.
+    """
+    make_dst_workbook(tmp_path / "prices.xlsx")
+    params = {
+        "workbook": "prices.xlsx",
+        "timezone": "Europe/Oslo",
+        "default_tolerance": {"abs": 0.001},
+        "time_index": {
+            "timestamp_column": "A",
+            "value_column": "B",
+            "value_unit": "EUR/MWh",
+            "sheet": "Prices",
+            "expectations": [
+                {"timestamp": "2024-10-27T02:00:00+02:00", "expected": 20.0, "unit": "EUR/MWh"},
+                {"timestamp": "2024-10-27T02:00:00+01:00", "expected": 20.0, "unit": "EUR/MWh"},
+            ],
+        },
+    }
+    app = create_app(Settings(workspace_root=tmp_path, fake_agent=True))
+    with TestClient(app) as client:
+        posted = client.post(
+            "/api/validation/run",
+            json={
+                "subject": {"kind": "file", "ref": "prices.xlsx", "label": "prices.xlsx"},
+                "checks": ["reconciliation"],
+                "params": params,
+            },
+        ).json()
+        assert posted["risk"] == "high", posted["evidence"][0]["detail"]
+        ref = posted["evidence"][0]["payload_ref"]
+        assert ref is not None
+        report = app.state.validation.payload("numeric", ref)
+    assert isinstance(report, ReconciliationReport)
+    rows = {c.cell: c for c in report.comparisons}
+    assert set(rows) == {"2024-10-27T02:00:00+02:00", "2024-10-27T02:00:00+01:00"}
+    for row in rows.values():
+        assert row.outcome == "fail"
+        # Never scored against the fold-0 row it did not address — the silent pass.
+        assert row.actual is None
+        reason = row.reason or ""
+        assert "UTC offset" in reason
+        # It teaches the fix rather than only refusing.
+        assert "fold" in reason and "naive local wall clock" in reason
+        # And it is not mistaken for a malformed string: the value parses fine.
+        assert "unparseable" not in reason
+
+
+@pytest.mark.asyncio
+async def test_a_utc_z_timestamp_is_refused_by_the_same_rule(tmp_path: Path) -> None:
+    """``fromisoformat`` accepts a trailing ``Z`` on 3.11+, so a UTC-stamped
+    expectation would have been stripped to a naive *UTC* wall clock and then compared
+    as if it were local — an off-by-the-offset bug that is invisible on any hour, not
+    just the fall-back one."""
+    make_dst_workbook(tmp_path / "prices.xlsx")
+    spec = ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[
+                TimeExpectation(timestamp="2024-10-27T05:00:00Z", expected=5.0, unit="EUR/MWh")
+            ],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    row = report_of(service, result).comparisons[0]
+    assert row.outcome == "fail"
+    assert "UTC offset" in (row.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_unparseable_timestamp_still_says_unparseable(tmp_path: Path) -> None:
+    """The two refusals stay distinguishable: a string that is not a timestamp at all
+    gets the malformed-input message, not the offset lesson (which would send the
+    analyst looking for an offset that is not there)."""
+    make_dst_workbook(tmp_path / "prices.xlsx")
+    spec = ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[TimeExpectation(timestamp="hour 5", expected=5.0, unit="EUR/MWh")],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high"
+    reason = report_of(service, result).comparisons[0].reason or ""
+    assert "unparseable timestamp" in reason
+    assert "UTC offset" not in reason
+
+
+@pytest.mark.asyncio
+async def test_an_offset_bearing_timestamp_column_is_named_not_stripped(tmp_path: Path) -> None:
+    """The same refusal on the *workbook* side, where the offsets arrive as text —
+    what ``df.index.astype(str)`` writes for a tz-aware index (openpyxl cannot store a
+    tz-aware datetime at all).
+
+    Stripping them there is the same defect wearing the other hat: with the offset
+    gone, which of the two 02:00 rows is fold 0 is decided by **row order alone**, the
+    one thing ``_align_time_rows`` promises never to infer a fold from — so this
+    descending export would quietly swap the two hours. The rows are therefore not
+    indexed, and the finding says so by name: a bare "alignment gap" would send the
+    analyst hunting for rows that are sitting right there in the column.
+    """
+    path = tmp_path / "prices.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Prices"
+    ws["A1"] = "timestamp"
+    ws["B1"] = "price_eur_mwh"
+    # Newest-first, so order and offset disagree about which hour comes first.
+    ws["A2"], ws["B2"] = "2024-10-27T02:00:00+01:00", 21.0  # the CET hour
+    ws["A3"], ws["B3"] = "2024-10-27T02:00:00+02:00", 20.0  # the CEST hour
+    wb.save(path)
+    spec = ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[
+                TimeExpectation(
+                    timestamp="2024-10-27T02:00:00", expected=20.0, unit="EUR/MWh", fold=0
+                ),
+                TimeExpectation(
+                    timestamp="2024-10-27T02:00:00", expected=21.0, unit="EUR/MWh", fold=1
+                ),
+            ],
+        ),
+    )
+    service, result = await run_recon(tmp_path, spec)
+    assert result.risk == "high", result.summary
+    named = [e for e in result.evidence if "UTC offset" in e.detail]
+    assert named, [e.detail for e in result.evidence]
+    assert named[0].outcome == "fail"
+    detail = named[0].detail
+    assert "2 row(s) in column A" in detail
+    assert "2024-10-27T02:00:00+01:00" in detail  # the first offender, quoted back
+    assert "Europe/Oslo" in detail
+    assert "re-run" in detail  # AXI shape 3: what to do next
+    # One finding for the whole column, never one per row.
+    assert len([e for e in result.evidence if "UTC offset" in e.detail]) == 1
+    # The refused rows were not indexed, so neither fold was matched by position.
+    rows = {c.cell: c for c in report_of(service, result).comparisons}
+    assert rows["2024-10-27T02:00:00"].actual is None
+    assert rows["2024-10-27T02:00:00 (fold 1)"].actual is None
+
+
+def test_a_tz_aware_datetime_from_the_reader_seam_is_refused_too() -> None:
+    """The other shape an offset arrives in: a real ``datetime`` with a ``tzinfo``.
+
+    Driven at :func:`_align_time_rows` — the function that consumes
+    ``WorkbookReader.column_pairs`` — because it cannot be reached through an
+    ``.xlsx``: openpyxl refuses to *write* a tz-aware datetime ("Excel does not
+    support timezones in datetimes"). The live-Office COM reader that slots in behind
+    the same protocol hands back real values, so this is the branch that guards it.
+    """
+    zone = ZoneInfo("Europe/Oslo")
+    aware = datetime(2024, 10, 27, 2, tzinfo=zone)
+    aligned = _align_time_rows([(aware, 20.0), (datetime(2024, 10, 27, 3), 3.0)], zone)
+    assert aligned.offset_rows == 1
+    assert aligned.offset_sample is not None and "02:00" in aligned.offset_sample
+    # The aware row is refused, not stripped into the index; the naive one is kept.
+    assert list(aligned.values) == [(datetime(2024, 10, 27, 3), 0)]
+    assert aligned.duplicates == {}
+
+
+def test_the_offset_refusal_survives_the_agent_tools_reason_clip() -> None:
+    """``office_reconcile`` clips a comparison's ``reason`` to 140 characters to hold
+    its result inside the byte budget, so a lesson longer than that reaches the agent
+    with its fix cut off. The refusal is written to fit whole."""
+    assert len(_OFFSET_REFUSAL) <= 140
+    assert "fold" in _OFFSET_REFUSAL
 
 
 # ------------------------------------------- duplicated rows are not a silent fold

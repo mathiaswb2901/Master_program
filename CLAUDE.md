@@ -165,6 +165,14 @@ ruling it out.
   `GET /api/office/capabilities` says why when it is not available.
   `WORKBENCH_OFFICE_NATIVE=off` turns it off; `WORKBENCH_OFFICE_FAKE=1` walks the
   whole lifecycle with no Office and no window (it is what the E2E suite drives).
+  **Toolchain gates** (M6 staged review): `POST /api/validation/run` with
+  `checks: ["gates"]` runs the configured gate commands *in the checkout the
+  subject session is writing in* — a session with no pool slot is refused, never
+  run against the live workspace. The catalog is server-owned and selected by id
+  (`WORKBENCH_GATES=ruff,mypy`, `WORKBENCH_GATE_TIMEOUT_S`); a per-workspace
+  `.workbench/gates.json` is deliberately refused. `WORKBENCH_GATE_FAKE=1`
+  scripts the exit codes and the output, the `WORKBENCH_OFFICE_FAKE` posture, and
+  is what the E2E suite drives.
   OnlyOffice stays the preview/diff/fallback path and needs env:
   `WORKBENCH_ONLYOFFICE_URL=http://localhost:8880` and
   `WORKBENCH_ONLYOFFICE_JWT_SECRET` = `services.CoAuthoring.secret.session.string` from
