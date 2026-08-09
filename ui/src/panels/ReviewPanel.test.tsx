@@ -60,6 +60,7 @@ const { resetValidationStoreForTests, useValidationStore } = await import("../va
 const {
   ApprovalGate,
   EvidenceGallery,
+  EvidencePayloadView,
   OutcomePill,
   ReviewPanel,
   ReviewView,
@@ -195,10 +196,101 @@ describe("EvidenceGallery", () => {
     expect(markup).toContain("u-tabular");
   });
 
+  it("the redeemed payload renders a gate log, a table, and an honest eviction", () => {
+    // The gap #82 left, closed (M6 staged review PR1): every state the expander
+    // can be in renders as *something a reader can act on*.
+    const log = html(
+      <EvidencePayloadView
+        state={{
+          phase: "ready",
+          payload: {
+            kind: "gate",
+            ref: "gate_abc",
+            reconciliation: null,
+            gate_log: {
+              gate: "pytest",
+              argv: ["uv", "run", "pytest", "-q"],
+              exit_code: 1,
+              duration_ms: 12_400,
+              text: "1 failed, 118 passed",
+              truncated: { shown: 8192, total: 41000, detail: "…pass log_bytes to widen" },
+            },
+          },
+        }}
+      />,
+    );
+    expect(log).toContain("uv run pytest -q");
+    expect(log).toContain("exit 1");
+    expect(log).toContain("1 failed, 118 passed");
+    expect(log).toContain("pass log_bytes to widen");
+
+    const table = html(
+      <EvidencePayloadView
+        state={{
+          phase: "ready",
+          payload: {
+            kind: "numeric",
+            ref: "numeric_1",
+            gate_log: null,
+            reconciliation: {
+              workbook: "revenue.xlsx",
+              matched: 39,
+              mismatched: 1,
+              total: 40,
+              comparisons: [
+                {
+                  cell: "Sheet1!D14",
+                  label: null,
+                  expected: 5,
+                  actual: 5000,
+                  unit: "MWh",
+                  delta: 4995,
+                  outcome: "fail",
+                  reason: "outside tolerance",
+                },
+              ],
+              truncated: null,
+            },
+          },
+        }}
+      />,
+    );
+    expect(table).toContain("Sheet1!D14");
+    expect(table).toContain("outside tolerance");
+    expect(table).toContain('data-outcome="fail"');
+
+    // A bounded LRU dropping a log is the expected end of its life, so it is its
+    // own state — never a spinner that never resolves.
+    const evicted = html(<EvidencePayloadView state={{ phase: "evicted" }} />);
+    expect(evicted).toContain("evicted");
+    expect(html(<EvidencePayloadView state={{ phase: "loading" }} />)).toContain("Loading");
+    expect(html(<EvidencePayloadView state={{ phase: "idle" }} />)).toBe("");
+  });
+
   it("an empty gallery says so — never blankness (AXI shape 2)", () => {
     const markup = html(<EvidenceGallery result={result("v1", { risk: "blocked" })} />);
     expect(markup).toContain("wb-review-none");
     expect(markup).toContain("No evidence");
+  });
+
+  it("a row with a payload_ref offers an expander; one without does not", () => {
+    const withRef = html(
+      <EvidenceGallery
+        result={result("v1", {
+          evidence: [evidence({ kind: "gate", label: "pytest -q", payload_ref: "gate_abc" })],
+        })}
+      />,
+    );
+    expect(withRef).toContain("wb-evidence-expand");
+    // Lazy: nothing is fetched (or rendered) until the expander is opened, so a
+    // hundred-result index is not a hundred round trips for detail nobody asked
+    // to see.
+    expect(withRef).not.toContain("wb-evidence-log");
+
+    const withoutRef = html(
+      <EvidenceGallery result={result("v1", { evidence: [evidence({ payload_ref: null })] })} />,
+    );
+    expect(withoutRef).not.toContain("wb-evidence-expand");
   });
 
   it("a truncated evidence list names the cut and how to widen it (AXI shape 1)", () => {
@@ -209,12 +301,6 @@ describe("EvidenceGallery", () => {
     expect(html(<EvidenceGallery result={r} />)).toContain("showing 1 of 5");
   });
 
-  it("an item with a payload_ref offers an expand that names the deferred payload", () => {
-    const r = result("v1", { evidence: [evidence({ payload_ref: "numeric_abc", kind: "numeric" })] });
-    const markup = html(<EvidenceGallery result={r} />);
-    expect(markup).toContain("numeric_abc");
-    expect(markup).toContain("deferred");
-  });
 });
 
 // ---- the whole review, and the approval gate -------------------------------

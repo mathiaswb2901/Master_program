@@ -140,6 +140,26 @@ export interface DocumentViewContribution {
    * a tab switch must not be a teardown.
    */
   keepMounted?: boolean;
+  /**
+   * Which ground this view draws on — and therefore whether the editor frame
+   * around it becomes a **mat** (`is-document`, DESIGN.md §6.1).
+   *
+   * `"paper"` (the default, so nothing already registered changes) is for a
+   * canvas we do **not** draw: the OnlyOffice iframe, the real Word window. The
+   * paper doctrine exists precisely because we cannot theme those — DESIGN.md
+   * §2.8 says never to dark-skin the document — so the frame is built to make a
+   * white page read as a sheet laid on a grey mat rather than a hole in the
+   * window.
+   *
+   * `"app"` is for a document this app renders itself, with its own tokens, in
+   * whichever theme the window is in. Monaco is the precedent (§2.8: the buffer
+   * is `--surface-code` in both themes, not paper), and the notebook view is the
+   * first document view to say so. Wrapping it in a mat would put a mid-grey
+   * surround around a surface that is already the app's, and paint the tab strip
+   * at mat value above a dark code well — two unrelated greys meeting, which is
+   * the exact failure the mat exists to prevent.
+   */
+  surface?: "paper" | "app";
 }
 
 /**

@@ -17,6 +17,8 @@ import type {
   CreateSessionRequest,
   DirListing,
   DocEditorConfig,
+  EvidenceKind,
+  EvidencePayload,
   FileContent,
   FolderSessions,
   LayoutsResponse,
@@ -34,6 +36,7 @@ import type {
   PermissionAnswer,
   PermissionsSnapshot,
   NamedSession,
+  NotebookDocument,
   ObjectiveView,
   ProvenanceMap,
   RenameRequest,
@@ -138,6 +141,11 @@ export const getFileContent = (path: string): Promise<FileContent> =>
 export const putFileContent = (body: WriteRequest): Promise<WriteResponse> =>
   request("/api/files/content", jsonInit("PUT", body));
 
+/** One `.ipynb`, parsed server-side by nbformat. Read-only: there is no run
+ * endpoint to pair this with, by design (ROADMAP M4). */
+export const getNotebook = (path: string): Promise<NotebookDocument> =>
+  request(`/api/notebook?path=${encodeURIComponent(path)}`);
+
 export const createEntry = (body: CreateRequest): Promise<OkResponse> =>
   request("/api/files/create", jsonInit("POST", body));
 
@@ -176,6 +184,15 @@ export const approveValidation = (
   body: ApproveRequest,
 ): Promise<ValidationResult> =>
   request(`/api/validation/${encodeURIComponent(validationId)}/approve`, jsonInit("POST", body));
+
+/** Redeem an `EvidenceItem.payload_ref` — the bounded detail behind one evidence
+ * line (a captured gate log, a reconciliation table). **404 once the per-kind LRU
+ * has dropped it** (`ApiError.status`), which the Review expander renders as
+ * "evicted" rather than a spinner that never resolves. */
+export const getEvidencePayload = (kind: EvidenceKind, ref: string): Promise<EvidencePayload> =>
+  request(
+    `/api/validation/payload/${encodeURIComponent(kind)}/${encodeURIComponent(ref)}`,
+  );
 
 export const getUsage = (): Promise<UsageSnapshot> => request("/api/usage");
 

@@ -159,6 +159,11 @@ export default defineConfig({
         // the scripted capture in `ui/src/voiceCapture.ts` (silence on a timer),
         // so a headless runner really can hold a push-to-talk button down.
         WORKBENCH_VOICE_FAKE: "1",
+        // The fourth of the same family (M6 staged review PR1): the toolchain
+        // gate's whole flow — slot resolution, the fingerprint, the bounded log,
+        // the payload route and the expander — with no ruff, no pytest and no
+        // npm anywhere near CI. Journey `review.spec.ts` drives it.
+        WORKBENCH_GATE_FAKE: "1",
         WORKBENCH_PORT: String(SERVER_PORT),
         WORKBENCH_WORKSPACE_ROOT: E2E_WORKSPACE,
         // A *sibling* of the workspace, seeded by `e2e/workspace.ts`: pointing

@@ -148,6 +148,26 @@ class Settings(BaseSettings):
     orchestrator_fleet_turns: int = Field(default=200, ge=1)
     orchestrator_fleet_cost_usd: float = Field(default=20.0, gt=0.0)
 
+    # Staged review (M6, PR1): the toolchain gate. Which of the built-in gates
+    # run, how long each may take, and whether they really run at all.
+    #
+    # `gates` is a comma-separated list of catalog ids ("ruff,mypy") — empty is
+    # the whole default set. It selects from a **server-owned** catalog
+    # (services/gates.py); there is no setting anywhere here through which an
+    # argv, a cwd or a path reaches a process, and a per-workspace
+    # `.workbench/gates.json` is deliberately refused: opening a folder must
+    # never be enough to run that folder's commands.
+    gates: str = ""
+    # One ceiling for every gate, in seconds. None keeps each catalog entry's own
+    # default (ruff 180s, mypy 600s, pytest 1800s, npm-test 900s) — one number a
+    # user can reason about beats four they must keep consistent.
+    gate_timeout_s: float | None = Field(default=None, gt=0.0)
+    # Replace the gate runner with the scripted stand-in in services/gates.py:
+    # canned exit codes and canned output, no process anywhere. The
+    # WORKBENCH_OFFICE_FAKE posture — off by default, loudly logged when on — and
+    # it is what lets CI prove the whole flow with no real toolchain run.
+    gate_fake: bool = False
+
     # Local-API security hardening (M5 item 8 / OSS-bar item 1). The server
     # binds loopback, but the attacker is remote web content (drive-by/CSRF and
     # DNS-rebinding) that can still send REST/WS requests to 127.0.0.1. Two
