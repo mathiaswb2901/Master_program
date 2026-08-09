@@ -102,9 +102,20 @@ export function editor(page: Page): Locator {
   return page.locator(".wb-editor-body .monaco-editor").first();
 }
 
-/** Type into Monaco: focus it first, exactly as a user would. */
+/**
+ * Type into Monaco: focus it first, exactly as a user would.
+ *
+ * The click is not the end of focusing. Monaco routes every keystroke through a
+ * hidden `textarea.inputarea`, and a click that lands while the editor is still
+ * attaching (a fresh tab, a model swap) leaves the caret nowhere — the keys then
+ * go to the document and the buffer never changes. That is silent: the spec
+ * carries on and fails later, at whatever it asserted about the *result* of
+ * typing, naming none of this. So the wait is on the app's own signal that it is
+ * ready to receive input, which is that textarea holding focus.
+ */
 export async function typeInEditor(page: Page, text: string): Promise<void> {
   await editor(page).click();
+  await expect(editor(page).locator("textarea.inputarea")).toBeFocused();
   await page.keyboard.type(text);
 }
 

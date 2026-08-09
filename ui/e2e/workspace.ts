@@ -536,6 +536,36 @@ export function removeOutsideWorkspace(): void {
   fs.rmSync(OUTSIDE_WORKSPACE, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
+/**
+ * Remove a file this run created — the Windows-safe way.
+ *
+ * A spec that cleans up after itself is deleting a file the **server** may still
+ * have open. `services/watcher.py` hashes every changed file to put a `hash` on
+ * its `FileChangedEvent`, and it does that with a plain `Path.read_bytes()`;
+ * Python opens without `FILE_SHARE_DELETE`, and Windows refuses to unlink a file
+ * that anybody has open that way. The harness then gets
+ * `EBUSY: resource busy or locked, unlink` out of an `afterAll` — a red suite
+ * caused by nothing that is wrong with the product. Measured: with the watcher's
+ * read artificially widened to 400 ms, an unlink lands EBUSY for the whole
+ * ~100–500 ms band after the file changed and succeeds on either side of it.
+ *
+ * `fs.rmSync` already knows what to do about this — `maxRetries`/`retryDelay`
+ * exist for exactly the `EBUSY`/`EPERM` a Windows sharing window produces — but
+ * node **ignores both options unless `recursive` is set**, which is why the
+ * plain `{ force: true }` calls this replaces turned a transient, expected
+ * condition into a hard failure. `removeOutsideWorkspace` above already got this
+ * right for a watch handle; this is the same answer for the same reason, in the
+ * one place every spec can reach it.
+ */
+export function removeWorkspaceFile(relative: string): void {
+  fs.rmSync(workspacePath(relative), {
+    force: true,
+    recursive: true,
+    maxRetries: 20,
+    retryDelay: 50,
+  });
+}
+
 /** Only in the second workspace — the file tree assertion, both ways. */
 export const SECOND_FILE = "only-in-second.md";
 /** Only in the second workspace's `.workbench/shortcuts.md`. */

@@ -21,15 +21,16 @@ import fs from "node:fs";
 import { expect, test } from "@playwright/test";
 
 import { editor, openApp, treeItem, treeMenu } from "./app";
-import { readWorkspaceFile, workspacePath } from "./workspace";
+import { readWorkspaceFile, removeWorkspaceFile, workspacePath } from "./workspace";
 
 const MD_FILE = "newdoc-notes.md";
 const PPTX_FILE = "src/newdoc-deck.pptx";
 
+// Both files were written seconds ago, so the watcher may still be hashing them
+// — and on Windows that read is enough to make a plain unlink fail EBUSY. See
+// `removeWorkspaceFile`.
 test.afterAll(() => {
-  for (const relative of [MD_FILE, PPTX_FILE]) {
-    fs.rmSync(workspacePath(relative), { force: true });
-  }
+  for (const relative of [MD_FILE, PPTX_FILE]) removeWorkspaceFile(relative);
 });
 
 test("New document via the QuickBar: pick a kind by name, name it, open it", async ({ page }) => {

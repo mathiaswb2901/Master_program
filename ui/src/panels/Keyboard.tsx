@@ -47,6 +47,7 @@ import { create } from "zustand";
 import * as api from "../api";
 import { allCommands, type Command } from "../commands";
 import { openPanel } from "../dock";
+import { forgetFirstRun, greetFirstRun, type FirstRunSurface } from "../firstRun";
 import {
   chordFor,
   filterKeyReference,
@@ -145,41 +146,41 @@ function showWelcome(): void {
 }
 
 /**
- * Open the panel on a window that has never been arranged and never dismissed
- * the welcome.
+ * The welcome card's half of the first-run greeting.
  *
- * The second condition is what makes this **deterministic** rather than a race
- * with the layout system. Both this and `Layouts.tsx` start with a request:
- * theirs restores the arrangement with `fromJSON`, which removes any panel the
- * saved arrangement does not name — including one this function had just added.
- * So the rule is the one that cannot collide: if a saved arrangement exists, it
- * is the truth about which panels are open and this does nothing; if it does
- * not, nothing will restore over us. A window the user has arranged but never
+ * The gate on *no saved arrangement* is still what keeps this from colliding
+ * with the layout system — a restore's `fromJSON` removes any panel the saved
+ * arrangement does not name, including one just added — but that question is no
+ * longer asked here. It is shared with the Setup walkthrough and asked once by
+ * `firstRun.ts`: opening either panel is itself a layout change, so whichever
+ * opened first used to flip the answer for the other, and the second surface
+ * silently declined to greet anybody. A window the user has arranged but never
  * seen the welcome in can still ask for it — "Show the welcome" is a command.
  *
- * The layouts request is made only on a workspace that has *not* dismissed the
- * welcome, so a returning user pays for one small `GET` of a file that is
+ * The shared arrangement request is still made only when somebody actually
+ * wants to greet, so a returning user pays for one small `GET` of a file that is
  * usually a 404 and nothing else.
  */
-async function openIfFirstRun(): Promise<void> {
-  const dismissed = await readDismissed();
-  useWelcome.setState({ dismissed });
-  if (dismissed) return;
-  try {
-    if ((await api.getLayouts()).state.current !== null) return;
-  } catch {
-    // Layouts unavailable: the arrangement will not be restored either, so
-    // there is nothing that can remove the panel we are about to open.
-  }
-  openPanel(TOOL_ID);
-}
+const welcomeFirstRun: FirstRunSurface = {
+  /** Opens **first**, so the Setup walkthrough (order 20) lands in front of it:
+   * Setup is the actionable half and it carries a button back to this card.
+   * Beside it, never behind a modal — both are centre tabs. */
+  order: 10,
+  wanted: async () => {
+    const dismissed = await readDismissed();
+    useWelcome.setState({ dismissed });
+    return !dismissed;
+  },
+  open: () => openPanel(TOOL_ID),
+};
 
 function onDockReady(dock: DockviewApi | null): void {
   if (dock === null) {
     useWelcome.setState({ dismissed: null });
+    forgetFirstRun();
     return;
   }
-  void openIfFirstRun();
+  greetFirstRun(dock, welcomeFirstRun);
 }
 
 // ---- glyphs -----------------------------------------------------------------
