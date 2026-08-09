@@ -59,6 +59,14 @@
 //! own and asks for the teardown rather than performing it (see
 //! [`commands::shutdown`]).
 //!
+//! **What a docked window costs the keyboard.** A guest owns its own window
+//! procedure, so from the moment the user clicks into it every keystroke is
+//! Word's — the webview's `keydown` listeners, and with them the entire keymap,
+//! are simply not in the delivery path. Nothing in `ui/` can answer that. The
+//! only mechanism that still reaches us is a system-level hotkey, and [`escape`]
+//! is it: `Ctrl+Alt+Home`, registered while a document is docked and released
+//! with the last one.
+//!
 //! **What the guest process costs us.** A guest is launched into a Windows Job
 //! Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and reaped by closing that
 //! job, never by asking politely. This is not belt-and-braces: the spike that
@@ -79,6 +87,7 @@ pub mod commands;
 #[cfg(debug_assertions)]
 mod demo;
 mod embed;
+mod escape;
 pub mod focus;
 pub mod geometry;
 pub mod guest;

@@ -1200,6 +1200,24 @@ now a test in `host/hosting_tests.rs`:
 | `SetFocus` across processes needs `AttachThreadInput` | It does not, for a parent/child pair: that relationship already attaches the input queues. No `AttachThreadInput` call exists in this crate |
 | `SWP_ASYNCWINDOWPOS` keeps a hung guest from stalling the host | **It does not**, for the same reason: the flag only posts when the two threads are on *different* input queues, and being our child put them on the same one. `DeferWindowPos` also rejects the flag outright (`ERROR_INVALID_PARAMETER`), so our own two windows are batched and the guest is moved separately |
 
+**A docked window is also a keyboard trap, and that needed an escape of its own**
+(`host/escape.rs`). The click-to-focus row above cuts both ways: the guest focuses
+itself and the keyboard follows, which is what a user wants — and from that moment
+the guest's window procedure receives *every* keystroke, so the webview's `keydown`
+listeners, and with them the whole keymap (DESIGN.md §6.8), stop firing. Nothing in
+`ui/` can reach that: the DOM is not in the delivery path. The only mechanism that
+still is is a **system hotkey**, matched by the system before a keystroke is
+dispatched to any window — so it survives even a guest that has stopped pumping,
+which every other candidate (a hook chained through the guest, asking it politely)
+would be waiting on. `Ctrl+Alt+Home` is registered with `RegisterHotKey` on a
+message-only window of our own, since seeing `WM_HOTKEY` means owning a window
+procedure and subclassing `tao`'s to read one message is a poor trade. It is armed
+by the embed that creates the trap and released with the last docked document,
+because the chord is taken from the *whole machine* while it is held. The handler is
+one call to the existing `focus::focus` seam; measured in the running shell, that
+lands the keyboard on `Chrome_WidgetWin_1` — the WebView2 widget — so the page, and
+therefore the keymap, really is where the keys go next.
+
 **Hang isolation was the open risk. It is now contained, and measured after the
 fix** (`host/mover.rs`). A wedged guest still leaves the host window pumping its
 own messages (50/50 posted messages dispatched), painting, and not judged hung

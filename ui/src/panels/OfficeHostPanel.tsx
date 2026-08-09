@@ -45,6 +45,18 @@ const APP_NAMES: Record<HostAppKind, string> = {
   powerpoint: "Microsoft PowerPoint",
 };
 
+/** The chord that takes the keyboard back out of a docked document.
+ *
+ * Registered by the shell with Win32 `RegisterHotKey`
+ * (`desktop/src-tauri/src/host/escape.rs`, which is where the choice is argued),
+ * because once a real Word window has the focus **no DOM listener ever fires** —
+ * the keystroke is delivered to Word's own window procedure and the page is not
+ * in the delivery path. It is quoted here, in DESIGN.md §6.8 and in that module;
+ * those three move together. */
+const ESCAPE_CHORD = "Ctrl+Alt+Home";
+/** The same chord in ARIA's spelling, which names modifiers in full. */
+const ESCAPE_KEYSHORTCUTS = "Control+Alt+Home";
+
 /** States in which a real native window is docked into the pane (or on its way
  * in) and so cannot follow it out of the main window. `detached` is not one of
  * them — that window is already on the desktop — and neither are the terminal
@@ -273,6 +285,56 @@ function sameRect(a: PanelRect, b: PanelRect): boolean {
 }
 
 /**
+ * The way out of a docked document, said where the document is.
+ *
+ * A docked window is the one surface in the app a keystroke cannot leave on its
+ * own: it owns its window procedure, so the entire keymap — `Ctrl+K`, every
+ * `Alt` pane chord, `Alt+M` — stops existing the moment the user clicks into it.
+ * DESIGN.md §6.8 asks for both halves of the way out, and this line is both: it
+ * **names the chord** (the keyboard path, an OS-level hotkey the shell
+ * registers) and carries a **focusable button** (the pointer path), so the
+ * escape is neither only-by-chord nor only-by-mouse.
+ *
+ * It sits in the chrome below the body, next to the identity line, for the
+ * reason stated there: a real Word window covers the whole page rectangle, so an
+ * affordance drawn on the surface — the `wb-office-hosted` badge included — is
+ * behind a native window and unclickable. The mat is the only place in this
+ * panel a control is actually reachable.
+ *
+ * Clicking is what returns the keyboard: the click lands on the webview, which
+ * takes the Win32 focus off the guest. Moving DOM focus onto the button
+ * afterwards is not decoration — it is what leaves the keymap with a live anchor
+ * instead of relying on the platform's click-to-focus behaviour for buttons.
+ *
+ * Rendered only against a **real** host. With `WORKBENCH_OFFICE_FAKE` a document
+ * reaches `embedded` with no window behind it, nothing has taken the keyboard,
+ * and no chord is registered — so the caller gates this on the backend being the
+ * real one rather than saying something untrue about the user's keyboard.
+ */
+function KeyboardEscapeLine({ file }: { file: OpenFile }) {
+  const state = useOfficeHostStore((s) => s.hosts[file.path]?.state);
+  if (state !== "embedded") return null;
+  return (
+    <div className="wb-office-identity">
+      <span className="wb-office-identity-msg u-truncate">
+        This document has the keyboard — {ESCAPE_CHORD} brings it back to Workbench.
+      </span>
+      <button
+        type="button"
+        className="wb-office-btn"
+        aria-keyshortcuts={ESCAPE_KEYSHORTCUTS}
+        title={`Take the keyboard out of the document (${ESCAPE_CHORD})`}
+        onClick={(event) => {
+          event.currentTarget.focus();
+        }}
+      >
+        Return to Workbench
+      </button>
+    </div>
+  );
+}
+
+/**
  * The one quiet line about the machine's Office sign-in, at the foot of the doc
  * panel's chrome (a real Word window would cover an overlay on the surface, so
  * this sits in the mat, not on the page).
@@ -352,6 +414,7 @@ export function OfficeDocument({ file }: { file: OpenFile }) {
         </div>
       )}
       <NativeHost file={file} kind={kind} onFallback={setFallback} />
+      {!capabilities.fake_backend && <KeyboardEscapeLine file={file} />}
       <OfficeIdentityLine />
     </div>
   );

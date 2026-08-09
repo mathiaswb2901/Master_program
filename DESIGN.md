@@ -763,12 +763,28 @@ commands and their default chords on its tool descriptor (`docs/tools.md`), and
 | `Alt+X` | Close this pane |
 | `Alt+A` | Annotate the plan card — point at part of an artifact (§6.3) |
 | `Alt+K` | Keyboard reference — every command, grouped by tool (§6.13) |
+| `Ctrl+Alt+Home` | Take the keyboard out of a docked Office document — an OS hotkey, not a registry binding (below) |
 
 **Pass-through:** inside xterm and Monaco — both full keyboard applications — only
 chords carrying `Alt` or `Ctrl+Shift` are intercepted; everything else reaches the
 surface (`Ctrl+K` kills a line, `Ctrl+P` walks shell history). Plain keys are never
 intercepted anywhere. Hence the Alt twins above: they are the ones that work from
 inside a terminal or editor.
+
+**A docked Office window is not a surface — it is another application.** xterm and
+Monaco pass keys through *inside* the page; a real Word or Excel window docked in a
+panel (§6.1) is outside it. Its own window procedure receives every keystroke and no
+DOM listener fires, so no amount of JavaScript can make the rule above hold there —
+the whole keymap stops existing while the caret is in the document, and without a way
+out that is a keyboard trap. The one binding that still arrives is a *system* hotkey:
+`Ctrl+Alt+Home`, registered by the shell (`desktop/src-tauri/src/host/escape.rs`)
+while a document is docked, released with the last one, and handled by handing the
+keyboard back to the webview. It is the single exception to "every binding lives in
+the command registry", for the reason that makes it necessary — a registry binding is
+a DOM listener, and a DOM listener is exactly what is missing. The invariant it exists
+to keep is the first one in this section: the docked panel states the chord in its
+chrome *and* carries a focusable **Return to Workbench** button, so the way out is
+neither only-by-chord nor only-by-mouse.
 
 **User chords** (`shortcuts.md`, `docs/shortcuts.md`) must carry `Alt`. Everywhere but
 xterm and Monaco the app intercepts *any* `Ctrl` chord and preventDefaults it, so a
