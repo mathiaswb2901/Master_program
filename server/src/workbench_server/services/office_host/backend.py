@@ -104,6 +104,18 @@ class DocumentOpenElsewhereError(HostBackendError):
     reason: HostReason = "document_open_elsewhere"
 
 
+class InstanceBusyError(HostBackendError):
+    """The application is already running and only runs one of itself.
+
+    PowerPoint's COM server is multi-use, so a launch made while one is running
+    would bind to the user's own instance rather than start ours. Refused as its
+    own reason because the fix is different from every other refusal here: close
+    PowerPoint, not the document.
+    """
+
+    reason: HostReason = "powerpoint_already_running"
+
+
 class HostBackend(Protocol):
     """What the native implementation must provide, and nothing more."""
 
@@ -126,8 +138,8 @@ class HostBackend(Protocol):
         whatever registry the native side keeps. It is not an ownership token:
         that is the pid in the returned handle.
 
-        Raises :class:`LaunchFailedError`, :class:`LaunchTimeoutError`, or
-        :class:`DocumentOpenElsewhereError`.
+        Raises :class:`LaunchFailedError`, :class:`LaunchTimeoutError`,
+        :class:`DocumentOpenElsewhereError`, or :class:`InstanceBusyError`.
         """
         ...
 

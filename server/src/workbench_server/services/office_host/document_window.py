@@ -14,13 +14,29 @@ the plain structures below — a ``list[str]`` of paragraph text, a sparse
 Nothing here touches COM or mints anything; it is pure and runs in CI.
 """
 
-from workbench_server.models.office_bridge import CellWindow, WordText
+from dataclasses import dataclass, field
+
+from workbench_server.models.office_bridge import CellWindow, SlideDim, SlideText, WordText
 from workbench_server.services.office_host.a1 import cell_ref, parse_cell, parse_range
 from workbench_server.services.office_host.document_bridge import RangeInvalidError
 
 #: One worksheet as a sparse ``(row, col) -> text`` map, zero-based and anchored
 #: at A1 — the intermediate both bridges build before windowing.
 Grid = dict[tuple[int, int], str]
+
+
+@dataclass
+class SlideContent:
+    """One slide's readable content — the PowerPoint intermediate.
+
+    The counterpart of :data:`Grid` and of Word's ``list[str]``: what both
+    bridges build before windowing, so the fake and the COM reader produce the
+    identical shape. ``texts`` holds the text of each shape that had any, in
+    shape order; a slide with none is legitimately empty.
+    """
+
+    title: str | None = None
+    texts: list[str] = field(default_factory=list)
 
 
 def used_dims(grid: Grid) -> tuple[int, int]:
@@ -102,6 +118,74 @@ def window_word(paragraphs: list[str], start_paragraph: int, max_chars: int) -> 
         start_paragraph=start_paragraph,
         returned_chars=len(text),
         total_paragraphs=total,
+        text=text,
+    )
+
+
+def slide_dims(slides: list[SlideContent]) -> list[SlideDim]:
+    """The deck's structure: one :class:`SlideDim` per slide, one-based."""
+    return [
+        SlideDim(index=index, title=slide.title, shapes=len(slide.texts))
+        for index, slide in enumerate(slides, start=1)
+    ]
+
+
+def render_slide(index: int, slide: SlideContent) -> str:
+    """One slide as the block a reader sees.
+
+    A heading that always names the slide by its one-based number — so a window
+    starting at slide 12 is self-locating without counting — and the shape text
+    beneath it. A slide with no text says so rather than rendering as a bare
+    heading a model could read as a truncation.
+    """
+    heading = f"Slide {index}" + (f": {slide.title}" if slide.title else "")
+    if not slide.texts:
+        return f"{heading}\n(no text)"
+    return "\n".join([heading, *slide.texts])
+
+
+def window_slides(slides: list[SlideContent], start_slide: int, max_chars: int) -> SlideText:
+    """A window onto ``slides`` from ``start_slide`` (one-based), up to ``max_chars``.
+
+    The PowerPoint mirror of :func:`window_word`, and deliberately the same
+    algorithm: whole slides joined by blank lines, stopping before ``max_chars``
+    is exceeded, with a lone oversized first slide truncated so a read is never
+    empty when there is text to show. The slide is the unit because it is what
+    the caller can address on the next call.
+
+    Raises :class:`RangeInvalidError` when ``start_slide`` is past the end of a
+    non-empty deck, or is below one — the deck is one-based everywhere the user
+    and PowerPoint see it, so a zero here is a caller error worth naming rather
+    than quietly treating as the first slide.
+    """
+    total = len(slides)
+    if total == 0:
+        return SlideText(
+            start_slide=1, returned_slides=0, returned_chars=0, total_slides=0, text=""
+        )
+    if start_slide < 1:
+        raise RangeInvalidError(f"slides are numbered from 1; {start_slide} is not a slide")
+    if start_slide > total:
+        raise RangeInvalidError(f"start_slide {start_slide} is past the last slide ({total})")
+    chunks: list[str] = []
+    length = 0
+    separator = "\n\n"
+    for offset, slide in enumerate(slides[start_slide - 1 :]):
+        block = render_slide(start_slide + offset, slide)
+        added = (len(separator) if chunks else 0) + len(block)
+        if not chunks and len(block) > max_chars:
+            chunks.append(block[:max_chars])
+            break
+        if chunks and length + added > max_chars:
+            break
+        chunks.append(block)
+        length += added
+    text = separator.join(chunks)
+    return SlideText(
+        start_slide=start_slide,
+        returned_slides=len(chunks),
+        returned_chars=len(text),
+        total_slides=total,
         text=text,
     )
 

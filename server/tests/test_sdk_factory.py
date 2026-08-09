@@ -115,6 +115,7 @@ class _Reader:
         sheet: str | None = None,
         a1_range: str | None = None,
         start_paragraph: int = 0,
+        start_slide: int = 1,
     ) -> Any:  # pragma: no cover - never called here
         raise AssertionError("not exercised in option-building tests")
 

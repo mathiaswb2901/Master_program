@@ -26,6 +26,7 @@ from workbench_server.models.office_bridge import (
     CellWindow,
     DocStructure,
     SheetDim,
+    SlideText,
     WordEdit,
     WordText,
 )
@@ -130,7 +131,7 @@ class _Reader:
     def __init__(
         self,
         structure: DocStructure,
-        result: WordText | CellWindow | None = None,
+        result: WordText | CellWindow | SlideText | None = None,
         edit: WordEdit | CellEdit | None = None,
     ) -> None:
         self._structure = structure
@@ -149,7 +150,8 @@ class _Reader:
         sheet: str | None = None,
         a1_range: str | None = None,
         start_paragraph: int = 0,
-    ) -> WordText | CellWindow:
+        start_slide: int = 1,
+    ) -> WordText | CellWindow | SlideText:
         assert self._result is not None
         return self._result
 

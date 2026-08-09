@@ -4,15 +4,21 @@
  * This is the tool that claims the `office` open-file kind, and the OnlyOffice
  * panel is now what it falls back *to* rather than what it replaces. Every path
  * that cannot end in a native window ends in a working editor instead: no
- * shell (a browser tab), no Office installed, hosting switched off, PowerPoint,
+ * shell (a browser tab), no Office installed, hosting switched off, a PowerPoint
+ * the user already has running, a deck already docked in another Workbench tab,
  * a document already open somewhere else, a launch that failed, an embed that
  * was refused. There is no state in which this renders a broken panel.
  *
  * **Refusals are explanations, not errors.** "This document is already open in
  * another Word window" is the server keeping a promise — Workbench never
  * reparents a window it did not start — so it reads as a sentence about the
- * user's document, with the preview path one click away. The same for
- * PowerPoint, which is preview-only in v1 for a reason the card states.
+ * user's document, with the preview path one click away. The same for a
+ * PowerPoint that cannot dock: the card names the one action that changes the
+ * answer, and *which* action that is depends on whose instance is in the way —
+ * "close PowerPoint" for the user's own, "close that tab" for the deck Workbench
+ * is hosting, which has no separate window to go and find. The note above the
+ * fallback comes from the server's `kind_notes` rather than being re-derived
+ * here.
  *
  * **The rectangle is reported, never assumed.** A hosted window is not laid out
  * by CSS: something has to measure this element every frame it might have moved
@@ -28,6 +34,7 @@ import { ApiError } from "../api";
 import {
   fileNameOf,
   hostAppKind,
+  hostIsLive,
   identityLine,
   physicalRect,
   useOfficeHostStore,
@@ -60,9 +67,17 @@ const REFUSALS: Record<HostReason, { title: string; hint: string }> = {
     title: "Already open somewhere else",
     hint: "Workbench only docks a window it started itself, so it will not take over the copy you already have open. Close it there and try again, or read it here.",
   },
-  powerpoint_preview_only: {
-    title: "PowerPoint opens as a preview",
-    hint: "PowerPoint runs one instance for the whole machine and offers no way to prove a window is ours, so docking it could hijack your own slides. Word and Excel dock for real.",
+  powerpoint_already_running: {
+    title: "PowerPoint is already open",
+    hint: "PowerPoint runs one instance for the whole session, so Workbench cannot start its own alongside yours — and it will not take over the one you are working in. Close PowerPoint and reopen this file to dock it, or read it here.",
+  },
+  // Same mechanism as the one above, and deliberately not the same sentence.
+  // The instance in the way is the one Workbench is hosting, so "close
+  // PowerPoint" would send the user looking for a window that does not exist on
+  // their desktop — the deck is docked in a panel, possibly behind another tab.
+  powerpoint_hosted_here: {
+    title: "Another deck is docked here",
+    hint: "PowerPoint runs one instance for the whole session, and Workbench is already showing a deck in it. Close that tab and reopen this file to dock it, or read it here.",
   },
   launch_failed: {
     title: "The application would not start",
@@ -307,6 +322,12 @@ export function IdentityLineView({ line }: { line: IdentityLine | null }) {
  */
 export function OfficeDocument({ file }: { file: OpenFile }) {
   const capabilities = useOfficeHostStore((s) => s.capabilities);
+  // Whether *this* document already has a window. `hostable_kinds` answers a
+  // different question — can a **new** instance be started — and for PowerPoint
+  // the answer goes false the moment the first deck docks. Without this, the
+  // pane that just docked would read its own success as "not hostable", fall
+  // back to the preview, and close the window it is showing on the way out.
+  const hosted = useOfficeHostStore((s) => hostIsLive(s.hosts[file.path]));
   const [fallback, setFallback] = useState<string | null>(null);
 
   useEffect(() => {
@@ -325,16 +346,23 @@ export function OfficeDocument({ file }: { file: OpenFile }) {
   }
 
   const hostable =
-    kind !== null && capabilities.native_hosting && capabilities.hostable_kinds.includes(kind);
+    kind !== null &&
+    capabilities.native_hosting &&
+    (capabilities.hostable_kinds.includes(kind) || hosted);
+
+  // Why this kind is not dockable at this moment, when the server has a reason
+  // specific to it (a PowerPoint already running, or the deck Workbench is
+  // already showing) rather than the machine-wide one already in
+  // `capabilities.detail`. Read from the server, never re-derived here: the
+  // condition is a fact about the user's machine, not a UI rule.
+  const kindNote = kind !== null ? (capabilities.kind_notes[kind] ?? null) : null;
 
   if (fallback !== null || !hostable) {
     return (
       <div className="wb-office-fallback">
-        {kind === "powerpoint" && capabilities.native_hosting && (
+        {kindNote !== null && capabilities.native_hosting && (
           <div className="wb-office-note">
-            <span className="wb-office-note-msg u-truncate">
-              {REFUSALS.powerpoint_preview_only.hint}
-            </span>
+            <span className="wb-office-note-msg u-truncate">{kindNote}</span>
           </div>
         )}
         <OfficePanel file={file} />
