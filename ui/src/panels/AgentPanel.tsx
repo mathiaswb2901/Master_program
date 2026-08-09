@@ -7,10 +7,20 @@ import type { WorkbenchTool } from "../registry";
 import { relativeTime } from "../relativeTime";
 import { useStore } from "../store";
 import type { SessionInfo, SessionState } from "../types";
-import { Chat, statusVisual, TranscriptView } from "./Chat";
+import { Chat, dotClass, statusVisual, TranscriptView } from "./Chat";
 import { revealPane } from "./Panes";
 import { planCommands, planShortcuts } from "./PlanCard";
 
+/**
+ * One row of the picker (DESIGN.md §6.12): a status dot, the title, and either
+ * what the session is *doing* or when it last did anything.
+ *
+ * The state is said in words as well as in hue, because that is what turns four
+ * rows into a fleet you can read at a glance — and because §7 will not take a
+ * colour as the only signal. It takes the timestamp's place rather than a
+ * column of its own: a session that is working has answered the more useful of
+ * the two questions, and the row's geometry does not move (§1.9).
+ */
 function SessionRow({ session }: { session: SessionInfo }) {
   const state = useStore((s) => s.sessionStates[session.session_id] ?? session.state);
   const flags = useStore((s) => s.sessionFlags[session.session_id]);
@@ -20,25 +30,32 @@ function SessionRow({ session }: { session: SessionInfo }) {
       s.transcriptView?.session.session_id === session.session_id,
   );
   const v = statusVisual(state, flags);
+  // Idle is the quiet default and says nothing; every other state does.
+  const busy = session.live && v.tone !== "idle";
   return (
     <button
       type="button"
       className={"wb-session-row" + (selected ? " is-selected" : "")}
       onClick={() => useStore.getState().openSession(session)}
-      title={session.title}
+      title={session.live ? `${session.title} — ${v.label}` : session.title}
     >
       {session.live ? (
+        // Hidden from the accessible name when the word beside it says the same
+        // thing — a row that reads "Working / new session / Working" is the dot
+        // and the label both claiming the same slot.
         <span
-          className={"wb-dot" + (v.pulse ? " u-agent-pulse" : "")}
-          style={{ background: v.color }}
-          role="img"
-          aria-label={v.label}
+          className={dotClass(v)}
+          {...(busy ? { "aria-hidden": true } : { role: "img", "aria-label": v.label })}
         />
       ) : (
         <span className="wb-dot wb-dot-disk" aria-hidden="true" />
       )}
       <span className="wb-session-title u-truncate">{session.title}</span>
-      <span className="wb-session-time u-tabular">{relativeTime(session.updated_at)}</span>
+      {busy ? (
+        <span className="wb-session-state">{v.label}</span>
+      ) : (
+        <span className="wb-session-time u-tabular">{relativeTime(session.updated_at)}</span>
+      )}
     </button>
   );
 }
@@ -303,6 +320,26 @@ function DetachedSessions() {
   );
 }
 
+/**
+ * The ceiling, on screen, when *New session* is refused.
+ *
+ * DESIGN.md §6.5's disabled-row rule is about the QuickBar, but the sentence it
+ * asks for is the same one a disabled button owes: the cap that is hit and the
+ * setting that raises it. It used to live in a `title` attribute, which is the
+ * same silence as hiding the row — the reason arrives only if you happen to
+ * rest a pointer on a control you have already been told not to press.
+ */
+function SessionCap() {
+  const limits = useStore((s) => s.sessionLimits);
+  if (limits === null) return null;
+  return (
+    <p className="wb-sessions-cap" role="note">
+      {`${String(limits.active)} of ${String(limits.max_concurrent)} sessions busy — raise `}
+      <code>WORKBENCH_MAX_CONCURRENT_SESSIONS</code>
+    </p>
+  );
+}
+
 function AgentBrowser() {
   const folders = useStore((s) => s.folders);
   const detached = useStore((s) => s.detachedSessions);
@@ -313,6 +350,13 @@ function AgentBrowser() {
   const full = useStore(
     (s) => s.sessionLimits !== null && s.sessionLimits.active >= s.sessionLimits.max_concurrent,
   );
+  // The fleet, counted off the listing the picker is already rendering. Derived
+  // in the body rather than in a selector: a selector returning a `.filter()`
+  // hands `useSyncExternalStore` a fresh array every call and loops.
+  const live = folders.reduce(
+    (total, group) => total + group.sessions.filter((session) => session.live).length,
+    0,
+  );
 
   const newSession = (): void => {
     void useStore.getState().createSessionIn(activeFolder());
@@ -322,19 +366,32 @@ function AgentBrowser() {
     <div className="wb-agent">
       <div className="wb-sessions">
         <div className="wb-sessions-header">
-          <span className="u-label">Sessions</span>
+          <span className="u-label wb-sessions-label">Sessions</span>
+          {/* The fleet as a number, and absent at zero — the status bar's
+              quiet-bar doctrine (§6.7) applied to the picker's own header. */}
+          {live > 0 && (
+            <span className="wb-sessions-count u-tabular">{String(live)} live</span>
+          )}
           <button
             type="button"
             className="wb-btn wb-btn-sm wb-btn-outline"
             disabled={full}
-            title={full ? newSessionRow().detail : undefined}
             onClick={newSession}
           >
             New session
           </button>
         </div>
+        {full && <SessionCap />}
         <div className="wb-sessions-list">
-          {folders.length === 0 && <div className="wb-sessions-none">No sessions yet</div>}
+          {folders.length === 0 && (
+            <div className="wb-sessions-none">
+              <div className="wb-sessions-none-title">No sessions yet</div>
+              <div className="wb-sessions-none-hint">
+                <span className="wb-keycap">Ctrl</span> <span className="wb-keycap">K</span> → New
+                agent session here
+              </div>
+            </div>
+          )}
           <DetachedSessions />
           {folders.map((group) => {
             // A detached session lives in its own section above, not here — one
@@ -390,12 +447,7 @@ function SessionChip({ session }: { session: SessionInfo }) {
       title={`${session.title} — ${v.label}`}
       onClick={() => useStore.getState().openSession(session)}
     >
-      <span
-        className={"wb-dot" + (v.pulse ? " u-agent-pulse" : "")}
-        style={{ background: v.color }}
-        role="img"
-        aria-label={v.label}
-      />
+      <span className={dotClass(v)} role="img" aria-label={v.label} />
       <span className="wb-status-chip-title u-truncate">{session.title}</span>
     </button>
   );
@@ -435,20 +487,14 @@ function SessionCounts() {
     <>
       {attention > 0 && (
         <span className="wb-status-count" title={`${attention} sessions need attention`}>
-          <span
-            className="wb-dot"
-            style={{ background: "var(--agent-attention)" }}
-            role="img"
-            aria-label="Needs attention"
-          />
+          <span className="wb-dot is-attention" role="img" aria-label="Needs attention" />
           <span className="u-tabular">{attention}</span>
         </span>
       )}
       {working > 0 && (
         <span className="wb-status-count" title={`${working} sessions working`}>
           <span
-            className="wb-dot u-agent-pulse"
-            style={{ background: "var(--agent-working)" }}
+            className="wb-dot is-working u-agent-pulse"
             role="img"
             aria-label="Working"
           />

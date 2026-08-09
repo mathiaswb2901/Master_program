@@ -6,49 +6,103 @@ import { toolTargetPath } from "../toolTarget";
 import type { SessionState } from "../types";
 import { PlanCard } from "./PlanCard";
 
+/**
+ * The five states of DESIGN.md §2.6, as names rather than colours.
+ *
+ * `agent.css` owns what each one looks like (`.wb-dot.is-<tone>`,
+ * `.wb-badge.is-<tone>`), so there is exactly one table of the vocabulary and a
+ * component never writes a colour. The `color`/`bg` token strings below stay
+ * for the two panels that paint their own marks from them (`ActivityPanel`,
+ * `MissionControl`) — additive, so neither had to change to land this.
+ */
+export type AgentTone = "working" | "attention" | "idle" | "done" | "error";
+
 export interface StatusVisual {
   color: string;
   bg: string;
   pulse: boolean;
   label: string;
+  tone: AgentTone;
 }
 
 /** Maps server state + unseen-result flags to DESIGN.md §2.6 agent-status tokens. */
 export function statusVisual(state: SessionState, flags: SessionFlags | undefined): StatusVisual {
   if (state === "working") {
-    return { color: "var(--agent-working)", bg: "var(--agent-working-bg)", pulse: true, label: "Working" };
+    return {
+      color: "var(--agent-working)",
+      bg: "var(--agent-working-bg)",
+      pulse: true,
+      label: "Working",
+      tone: "working",
+    };
   }
   if (state === "needs_attention") {
-    return { color: "var(--agent-attention)", bg: "var(--agent-attention-bg)", pulse: false, label: "Needs attention" };
+    return {
+      color: "var(--agent-attention)",
+      bg: "var(--agent-attention-bg)",
+      pulse: false,
+      label: "Needs attention",
+      tone: "attention",
+    };
   }
   if (flags?.error) {
-    return { color: "var(--agent-error)", bg: "var(--agent-error-bg)", pulse: false, label: "Error" };
+    return {
+      color: "var(--agent-error)",
+      bg: "var(--agent-error-bg)",
+      pulse: false,
+      label: "Error",
+      tone: "error",
+    };
   }
   if (flags?.done) {
-    return { color: "var(--agent-done)", bg: "var(--agent-done-bg)", pulse: false, label: "Done" };
+    return {
+      color: "var(--agent-done)",
+      bg: "var(--agent-done-bg)",
+      pulse: false,
+      label: "Done",
+      tone: "done",
+    };
   }
-  return { color: "var(--agent-idle)", bg: "var(--agent-idle-bg)", pulse: false, label: "Idle" };
+  return {
+    color: "var(--agent-idle)",
+    bg: "var(--agent-idle-bg)",
+    pulse: false,
+    label: "Idle",
+    tone: "idle",
+  };
+}
+
+/** The §2.6 dot for a state: the state's name, plus the pulse the one live
+ * state gets. The colour lives in `agent.css` — see `statusVisual` above. */
+export function dotClass(v: StatusVisual): string {
+  return `wb-dot is-${v.tone}` + (v.pulse ? " u-agent-pulse" : "");
 }
 
 export function StatusBadge({ state, flags }: { state: SessionState; flags?: SessionFlags }) {
   const v = statusVisual(state, flags);
   return (
-    <span className="wb-badge" style={{ background: v.bg, color: v.color }}>
-      <span
-        className={"wb-dot" + (v.pulse ? " u-agent-pulse" : "")}
-        style={{ background: v.color }}
-        aria-hidden="true"
-      />
+    <span className={`wb-badge is-${v.tone}`}>
+      <span className={dotClass(v)} aria-hidden="true" />
       {v.label}
     </span>
   );
 }
 
+/**
+ * The one thing the app is blocked on (DESIGN.md §6.3).
+ *
+ * Warn-rimmed while it is a question and neutral once it is answered: a card
+ * that keeps its alarm after you have decided is a standing warning about
+ * something that already happened, which is the §2.4 mistake one hue over.
+ */
 function PermissionCard({ item }: { item: Extract<ChatItem, { kind: "permission" }> }) {
   const decide = (allow: boolean): void => useStore.getState().decidePermission(item.requestId, allow);
+  const decided = item.decision !== null;
   return (
-    <div className="wb-perm-card">
-      <div className="wb-perm-head">Permission: {item.tool}</div>
+    <div className={"wb-perm-card" + (decided ? " is-decided" : "")}>
+      <div className="wb-perm-head">
+        Permission: <span className="wb-perm-tool">{item.tool}</span>
+      </div>
       <div className="wb-perm-body">{item.description}</div>
       {item.decision === null ? (
         <div className="wb-perm-actions">
@@ -64,7 +118,15 @@ function PermissionCard({ item }: { item: Extract<ChatItem, { kind: "permission"
           </button>
         </div>
       ) : (
-        <div className="wb-perm-decision">{item.decision === "allow" ? "Allowed" : "Denied"}</div>
+        <div className="wb-perm-decision">
+          {/* The word is the reading; the dot doubles it, because colour is
+              never the only signal (§7). */}
+          <span
+            className={"wb-dot " + (item.decision === "allow" ? "is-allow" : "is-deny")}
+            aria-hidden="true"
+          />
+          {item.decision === "allow" ? "Allowed" : "Denied"}
+        </div>
       )}
     </div>
   );
@@ -76,6 +138,17 @@ function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
   const target = useMemo(() => toolTargetPath(item.summary, tree), [item.summary, tree]);
   const [expanded, setExpanded] = useState(false);
   const hasOutput = item.output !== "";
+  // Running / succeeded / failed, said out loud. DESIGN.md §6.3 puts the pulse
+  // on the dot and keeps the 2px edge steady, and §7 will not take a colour as
+  // the only signal — the edge cannot carry an accessible name, this can.
+  const status = item.settled ? (item.settledError ? "Failed" : "Succeeded") : "Running";
+  // The server's summary reads on its own ("Read: notes.md") because it also
+  // goes to places with no column beside it; here the tool's name is that
+  // column, and the row was rendering "Read  Read: notes.md". Display only —
+  // `toolTargetPath` above still resolves the file from the whole string.
+  const detail = item.summary.startsWith(`${item.tool}: `)
+    ? item.summary.slice(item.tool.length + 2)
+    : item.summary;
   return (
     <div className="wb-tool">
       <div
@@ -83,6 +156,12 @@ function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
           "wb-tool-row" + (item.settled ? (item.settledError ? " is-failed" : " is-settled") : "")
         }
       >
+        <span
+          className={"wb-dot" + (item.settled ? "" : " u-agent-pulse")}
+          role="img"
+          aria-label={status}
+          title={status}
+        />
         {hasOutput ? (
           <button
             type="button"
@@ -104,10 +183,10 @@ function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
             title={`Open ${target}`}
             onClick={() => void useStore.getState().openFile(target)}
           >
-            {item.summary}
+            {detail}
           </button>
         ) : (
-          <span className="wb-tool-summary u-truncate">{item.summary}</span>
+          <span className="wb-tool-summary u-truncate">{detail}</span>
         )}
       </div>
       {expanded && hasOutput && <pre className="wb-tool-output">{item.output}</pre>}
@@ -196,7 +275,14 @@ export function Chat({ sessionId }: { sessionId: string }) {
       >
         <div className="wb-chat-col">
           {items.length === 0 && (
-            <div className="wb-empty-hint">Send a message to start the conversation.</div>
+            <div className="wb-chat-empty">
+              <div className="wb-empty-title">Nothing said yet</div>
+              <div className="wb-empty-hint">
+                Type below and press <span className="wb-keycap">Enter</span>.{" "}
+                <span className="wb-keycap">Shift</span> <span className="wb-keycap">Enter</span>{" "}
+                starts a new line.
+              </div>
+            </div>
           )}
           {items.map((item, i) => (
             <ChatItemView key={i} item={item} />
