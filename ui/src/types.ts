@@ -1937,12 +1937,31 @@ export interface SearchResponse {
 // and a CommandInvokeEvent on /ws/events carries the request back to the window,
 // which runs it and POSTs the result. Mirrors `models/commands.py`.
 
-/** One command the window will run on request. `takes_params` is advisory —
- * today's commands run parameterless. */
+/** One argument a parameterised command takes. Strings only, deliberately —
+ * see `ui/src/commandParams.ts` and `models/commands.py`. */
+export interface CommandParamSpec {
+  name: string;
+  type: "string";
+  required: boolean;
+  /** Cap on the value's length; null means the server's MAX_PARAM_CHARS. */
+  max_length: number | null;
+  detail: string;
+}
+
+/** The whole argument shape of one parameterised command, published by the
+ * window and validated against by the relay before it touches the bus. */
+export interface CommandParamsSchema {
+  params: CommandParamSpec[];
+}
+
+/** One command the window will run on request. `takes_params` says whether the
+ * id expects arguments; `params_schema` says what they are (null for the
+ * parameterless majority, which is what keeps the manifest small). */
 export interface CommandManifestItem {
   id: string;
   title: string;
   takes_params: boolean;
+  params_schema?: CommandParamsSchema | null;
 }
 
 /** PUT /api/commands/manifest (what the window publishes) and GET /api/commands

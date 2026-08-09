@@ -167,6 +167,10 @@ describe("command registry", () => {
       // reading a file in the centre of the window (ROADMAP M4 tail).
       "notebook.open",
       "session.new",
+      // The parameterised sibling (PR-E): the CLI/agent way to start a session
+      // on a prompt. Next to `session.new` because it is the same act with an
+      // argument, and the palette row says so rather than duplicating it.
+      "session.start",
       "session.detach",
       // Push-to-talk (M7 §3). The Agent tool's, because voice fills the session
       // you are talking to — it contributes no panel and no line in `tools.ts`.
@@ -228,6 +232,9 @@ describe("command registry", () => {
       // they join in `allCommands`, after everything static.
       "layout.focus",
       "layout.save",
+      // The one id a script names an arrangement through (PR-E), as against the
+      // dynamic `layout.apply.*` rows the picker offers.
+      "layout.switch",
       "panel.files",
       "panel.editors",
       "panel.agent",

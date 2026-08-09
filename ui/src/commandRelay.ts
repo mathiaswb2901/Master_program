@@ -16,10 +16,20 @@
  *     execution path — then reports success or failure back.
  *
  * Safety is not this module inventing a policy: the manifest is exactly the
- * static built-in commands that pass `isBindableFromFile` — the bar item 4 set
- * for untrusted input, which an external caller is a case of — so a command that
- * re-points the path jail (`workspace.open`) is neither published nor runnable
- * here, and an id absent from that set is refused even if it reached us.
+ * static built-in commands that pass `isRelayInvocable` — `isBindableFromFile`'s
+ * bar (item 4's, for untrusted input, which an external caller is a case of),
+ * plus the one narrowing addition PR-E adds. A command that re-points the path
+ * jail is still refused *as a gesture*; `workspace.open{path}` is admitted only
+ * because the parameters are what narrow it, and this module enforces that by
+ * refusing an argument-less invoke of one (`executeCommandById`). An id absent
+ * from the published set is refused even if it reached us.
+ *
+ * **`params` reaches `run()` here, and until PR-E it did not.** The relay has
+ * always carried a `params` object; `executeCommandById` called `command.run()`
+ * with no arguments, so it was dropped on the floor at this end while
+ * `buildManifest` hardcoded `takes_params: false` at the other. Both ends are
+ * now real: the manifest publishes the schema a command declares, and a
+ * validated object is handed to `run`.
  *
  * The command list is reached through a dynamic `import("./commands")` at
  * runtime, never a static import: `commands.ts` imports the tool registry, so a
@@ -37,35 +47,51 @@
  */
 
 import { publishCommandManifest, reportCommandResult } from "./api";
+import { paramsSchema, validateParams } from "./commandParams";
 import type { Command } from "./commands";
-import { isBindableFromFile } from "./registry";
+import { isRelayInvocable } from "./registry";
 import type { WorkbenchTool } from "./registry";
-import type { CommandInvokeEvent, CommandManifest, WorkspaceEvent } from "./types";
+import type {
+  CommandInvokeEvent,
+  CommandManifest,
+  CommandManifestItem,
+  WorkspaceEvent,
+} from "./types";
 import { ReconnectingSocket } from "./ws";
 
 /**
  * The commands this window will run on request: the ones that pass the
  * untrusted-input bar. Dynamic commands (one per saved layout, per recent
  * workspace) are excluded upstream — the caller passes `builtinCommands()`, the
- * static set — and the two families that reach a filesystem path are exactly the
- * ones `isBindableFromFile` blocks.
+ * static set — and the families that reach a filesystem path are exactly the
+ * ones `isBindableFromFile` blocks and `isRelayInvocable` re-admits only in
+ * their parameterised form.
  */
-export function invocableCommands(commands: readonly Command[]): { id: string; title: string }[] {
-  return commands
-    .filter((command) => isBindableFromFile(command))
-    .map((command) => ({ id: command.id, title: command.title }));
+export function invocableCommands(commands: readonly Command[]): Command[] {
+  return commands.filter((command) => isRelayInvocable(command));
 }
 
-/** The manifest published on connect. `takes_params` is false for every command
- * today — they run parameterless — and is here so a parameterised one can say so
- * later without a wire change. */
+/**
+ * The manifest published on connect.
+ *
+ * A command that declares `params` publishes its schema and says
+ * `takes_params: true`; every other one publishes neither, and that asymmetry is
+ * a budget rather than a style. The whole manifest is what an agent gets back
+ * from a `run_command` discovery call, which is capped at
+ * `RUN_COMMAND.max_result_bytes` (2,560, ~2,250 already spent on `id :: title`
+ * rows) — a schema on every row would not fit, and three compact hints do.
+ */
 export function buildManifest(commands: readonly Command[]): CommandManifest {
   return {
-    commands: invocableCommands(commands).map(({ id, title }) => ({
-      id,
-      title,
-      takes_params: false,
-    })),
+    commands: invocableCommands(commands).map((command): CommandManifestItem => {
+      const declared = command.params;
+      return {
+        id: command.id,
+        title: command.title,
+        takes_params: declared !== undefined,
+        ...(declared === undefined ? {} : { params_schema: paramsSchema(declared) }),
+      };
+    }),
   };
 }
 
@@ -78,21 +104,60 @@ export interface CommandOutcome {
  * Run one command by id through the registry's own dispatch, or say why not.
  *
  * Resolved against the same list the manifest is built from, so what is runnable
- * is exactly what was published. Re-checks the safety bar and the command's live
- * `when()` here too: the manifest was a snapshot at connect, and this is the
- * moment the command actually runs.
+ * is exactly what was published. Re-checks the safety bar, the command's live
+ * `when()` and its arguments here too: the manifest was a snapshot at connect,
+ * and this is the moment the command actually runs.
+ *
+ * The refusal for a command whose *only* admission is its parameters — the
+ * `relayRequiresParams` case — is where that flag stops being a claim and starts
+ * being enforced. An empty `params` on one of those is the bare gesture wearing
+ * a schema, and it is refused here, not narrowed later.
+ *
+ * **That refusal reads the flag itself**, not `isBindableFromFile`. The two
+ * happen to select the same two commands today — both of PR-E's
+ * `relayRequiresParams` declarations are also denied by the from-file bar — but
+ * they are logically independent, and testing the wrong one is a refusal that
+ * evaporates the moment a command is both safe enough to be bindable from a
+ * file *and* declares that the relay may only invoke it with arguments. Such a
+ * command would fall straight through to `validateParams`, which passes an empty
+ * object whenever every field is optional, and `run({})` would be the bare
+ * gesture the flag exists to forbid. Reading `declared.relayRequiresParams` is
+ * strictly wider than the old check — anything not bindable from file has
+ * already been refused above by `isRelayInvocable` unless it set the flag — so
+ * nothing that was refused becomes runnable.
  */
-export function executeCommandById(id: string, commands: readonly Command[]): CommandOutcome {
+export function executeCommandById(
+  id: string,
+  commands: readonly Command[],
+  params: Record<string, unknown> = {},
+): CommandOutcome {
   const command = commands.find((candidate) => candidate.id === id);
   if (command === undefined) return { ok: false, detail: `no command “${id}”` };
-  if (!isBindableFromFile(command)) {
+  if (!isRelayInvocable(command)) {
     return { ok: false, detail: `“${id}” cannot be invoked from outside the window` };
   }
   if (command.when?.() === false) {
     return { ok: false, detail: `“${id}” is not available right now` };
   }
+  const declared = command.params;
+  if (declared === undefined) {
+    const extra = Object.keys(params);
+    if (extra.length > 0) {
+      return { ok: false, detail: `“${id}” takes no parameters (got ${extra.sort().join(", ")})` };
+    }
+  }
+  let values: Record<string, string> | undefined;
+  if (declared !== undefined) {
+    if (Object.keys(params).length === 0 && declared.relayRequiresParams === true) {
+      const names = declared.fields.map((field) => field.name).join(", ");
+      return { ok: false, detail: `“${id}” may only be invoked from outside with: ${names}` };
+    }
+    const outcome = validateParams(declared, params);
+    if (!outcome.ok) return { ok: false, detail: `“${id}”: ${outcome.detail}` };
+    values = outcome.values;
+  }
   try {
-    command.run();
+    command.run(values);
     return { ok: true, detail: command.title };
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
@@ -110,7 +175,7 @@ async function publish(): Promise<void> {
 }
 
 async function handleInvoke(event: CommandInvokeEvent): Promise<void> {
-  const outcome = executeCommandById(event.command_id, await builtins());
+  const outcome = executeCommandById(event.command_id, await builtins(), event.params);
   await reportCommandResult({
     invocation_id: event.invocation_id,
     ok: outcome.ok,
