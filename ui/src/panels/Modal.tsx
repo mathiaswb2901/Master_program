@@ -3,6 +3,7 @@
 
 import { useEffect, useRef } from "react";
 
+import { useOverlayKeys } from "../overlays";
 import { useStore } from "../store";
 
 export interface ModalAction {
@@ -26,17 +27,21 @@ export function ConfirmModal({
 
   useEffect(() => {
     primaryRef.current?.focus();
-    // Capture phase so Esc wins over Monaco/xterm handlers underneath.
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        onDismiss();
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onDismiss]);
+  }, []);
+
+  // Capture phase so Esc wins over Monaco/xterm handlers underneath, and
+  // through `useOverlayKeys` so it wins over — or yields to — the other
+  // overlays that listen the same way. `stopPropagation` cannot arbitrate
+  // between listeners on one target, which is how a single Escape used to close
+  // an open QuickBar *and* answer "cancel" to this dialog on top of it
+  // (`overlays.ts`). A modal is always its own top layer while it is mounted:
+  // the two callers below render nothing until they have something to ask.
+  useOverlayKeys(true, (e: KeyboardEvent): void => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    onDismiss();
+  });
 
   return (
     <>

@@ -46,6 +46,8 @@ from typing import Any
 
 import structlog
 
+from workbench_server.models.agents import SessionKind
+
 log = structlog.get_logger()
 
 # The tools that start a shell. ``Bash`` is the POSIX launcher; ``PowerShell``
@@ -107,14 +109,44 @@ AskPermission = Callable[[str, dict[str, Any]], Awaitable[bool]]
 PreToolUseHook = Callable[[dict[str, Any], str | None, Any], Awaitable[dict[str, Any]]]
 
 
-def build_pre_tool_use_hook(ask_permission: AskPermission, session_id: str) -> PreToolUseHook:
+#: Kinds that run with **no human watching**, and so may never escalate.
+#:
+#: Kept here rather than imported from ``sdk_factory`` (which is the module that
+#: would want to own it) because this one is deliberately SDK-free and must stay
+#: importable without ``claude_agent_sdk``. ``test_sdk_factory.py`` asserts the
+#: two agree, so the duplication cannot drift into a reviewer that is unattended
+#: on one path and not the other.
+UNATTENDED_KINDS = frozenset({"reviewer"})
+
+#: What an unattended session is told when it asks for a brokered tool. Matches
+#: the ``can_use_tool`` denial in ``sdk_factory`` in substance: a tool it cannot
+#: have is a finding to make, not a permission to wait for.
+UNATTENDED_DENY_REASON = (
+    "Read-only review session: shell tools are unavailable and no human is "
+    "watching to approve one. Report it as a finding instead."
+)
+
+
+def build_pre_tool_use_hook(
+    ask_permission: AskPermission, session_id: str, kind: SessionKind = "chat"
+) -> PreToolUseHook:
     """A ``PreToolUse`` callback that escalates shell requests to the board.
 
     ``ask_permission`` is :meth:`AgentSession.ask_permission` — the same future
     the chat card and ``POST /api/agents/sessions/{id}/permission`` resolve, so a
     brokered shell request is answered by the doors that already exist rather
     than by a second mechanism.
+
+    ``kind`` exists because that future is the *second* door to the user's
+    screen, not a redundant one. M6 PR 2 gives a reviewer session a deny-and-log
+    answer in ``can_use_tool``; short-circuiting only there would leave this hook
+    still escalating a reviewer's ``Bash`` request to the board, since a hook is
+    dispatched for every tool call regardless of what the callback would have
+    said. An unattended kind is therefore denied **here too, before the await** —
+    the whole point being that no future is created and nobody is woken.
     """
+
+    unattended = kind in UNATTENDED_KINDS
 
     async def pre_tool_use(
         input_data: dict[str, Any], tool_use_id: str | None, context: Any
@@ -124,6 +156,21 @@ def build_pre_tool_use_hook(ask_permission: AskPermission, session_id: str) -> P
             return no_decision()
         raw_input = input_data.get("tool_input")
         tool_input: dict[str, Any] = raw_input if isinstance(raw_input, dict) else {}
+        if unattended:
+            log.info(
+                "agent.unattended_shell_denied",
+                session=session_id,
+                kind=kind,
+                tool=tool_name,
+                agent_id=input_data.get("agent_id"),
+            )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": _DENY,
+                    "permissionDecisionReason": UNATTENDED_DENY_REASON,
+                }
+            }
         allowed = await ask_permission(tool_name, tool_input)
         log.info(
             "agent.shell_brokered",

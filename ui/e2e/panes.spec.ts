@@ -178,8 +178,11 @@ test("split a pane, put a second agent in it, and find it there after a reload",
     for (const row of ["Files", "Editor", "Agent", "Terminal", "Scratchpad", "New agent session", "New terminal"]) {
       await expect(dialog.locator(".wb-qb-row", { hasText: row }).first()).toBeVisible();
     }
-    // …and it filters by typing, like everything else in that overlay.
-    await dialog.getByRole("textbox").fill("termi");
+    // …and it filters by typing, like everything else in that overlay. The
+    // field is a `combobox` rather than a `textbox`: the palette implements the
+    // ARIA combobox pattern, so the explicit role replaces the input's implicit
+    // one (`QuickBar.tsx`, `quickbarA11y.spec.ts`).
+    await dialog.getByRole("combobox").fill("termi");
     await expect(dialog.locator(".wb-qb-row")).toHaveCount(2); // "Terminal", "New terminal"
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();

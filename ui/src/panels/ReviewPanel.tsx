@@ -36,6 +36,7 @@ import type {
   CheckOutcome,
   EvidenceItem,
   EvidencePayload,
+  ReviewSeverity,
   RiskLevel,
   ValidationResult,
 } from "../types";
@@ -103,6 +104,22 @@ export function OutcomePill({ outcome }: { outcome: CheckOutcome }) {
 
 // ---- the evidence gallery ----------------------------------------------------
 
+/** Severity → the outcome the row is tinted by, mirroring `SEVERITY_OUTCOME` in
+ * `models/review.py`. Kept as the *display* mapping only: the grouped evidence
+ * line's outcome is the server's, derived there and never recomputed here. */
+const SEVERITY_OUTCOME: Record<ReviewSeverity, CheckOutcome> = {
+  must_fix: "fail",
+  should_fix: "warn",
+  nit: "pass",
+};
+
+/** …and the word that leads each row, so colour is never the only signal. */
+const SEVERITY_LABEL: Record<ReviewSeverity, string> = {
+  must_fix: "must fix",
+  should_fix: "should fix",
+  nit: "nit",
+};
+
 /** What the expander is showing right now. `evicted` is its own state, not an
  * error: the payload store is a bounded LRU and being dropped from it is the
  * honest, expected end of a log's life — never a spinner that never resolves. */
@@ -142,7 +159,58 @@ export function EvidencePayloadView({ state }: { state: PayloadState }) {
   }
   if (state.phase === "idle") return null;
 
-  const { gate_log: log, reconciliation: report } = state.payload;
+  const { gate_log: log, reconciliation: report, review } = state.payload;
+  if (review !== null) {
+    return (
+      <div className="wb-evidence-payload">
+        <p className="u-tabular">
+          {review.files_reviewed} file(s), {(review.diff_bytes / 1024).toFixed(1)} KB of diff
+          against {review.base.slice(0, 12)} — {review.turns} turn(s), $
+          {review.cost_usd.toFixed(2)}
+        </p>
+        {review.findings.length === 0 ? (
+          // The explicit "none" (AXI shape 2). A review that found nothing and a
+          // review that never ran must never look alike, and this is the half a
+          // reader sees.
+          <p className="wb-review-none">
+            No findings — the reviewer read this change and could not break it.
+          </p>
+        ) : (
+          <ul className="wb-evidence-rows">
+            {review.findings.map((finding, index) => (
+              <li
+                key={`${finding.file ?? "change"}:${String(finding.line ?? index)}:${String(index)}`}
+                data-outcome={SEVERITY_OUTCOME[finding.severity]}
+              >
+                {/* The severity word leads the row, so colour is never the only
+                 * signal (DESIGN.md §7) — the tint only speeds up scanning. */}
+                <strong>{SEVERITY_LABEL[finding.severity]}</strong>
+                {finding.file === null ? (
+                  ""
+                ) : (
+                  <span className="u-tabular">
+                    {" "}
+                    {finding.file}
+                    {finding.line === null ? "" : `:${String(finding.line)}`}
+                  </span>
+                )}{" "}
+                — {finding.claim}
+                {/* The refutation is the reason to believe the claim, so it is
+                 * shown rather than hidden behind another expander: a finding a
+                 * reader cannot check is one they have to go and disprove. */}
+                <div className="wb-evidence-detail">
+                  Breaks when: {finding.refutation} ({finding.confidence})
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {review.truncated !== null && (
+          <p className="wb-evidence-truncation u-tabular">{review.truncated.detail}</p>
+        )}
+      </div>
+    );
+  }
   if (log !== null) {
     return (
       <div className="wb-evidence-payload">

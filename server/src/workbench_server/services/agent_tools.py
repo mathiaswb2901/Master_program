@@ -62,6 +62,10 @@ from workbench_server.models.orchestrator import (
 )
 from workbench_server.models.plans import PlanArtifact, plan_input_schema
 from workbench_server.models.reconciliation import ReconciliationReport, ReconciliationSpec
+from workbench_server.models.review import (
+    MAX_FINDINGS,
+    ReportFindingsRequest,
+)
 from workbench_server.models.search import (
     MAX_HITS,
     SearchRequest,
@@ -1663,6 +1667,130 @@ def _format_gates(result: ValidationResult, runner: ToolchainRunner, budget: int
     return "\n".join(lines)
 
 
+# ---- report_findings (the reviewer's only tool) ------------------------------
+#
+# The *whole* toolset of a ``reviewer`` session, and a separate tuple from
+# ``AGENT_TOOLS`` for the same reason the orchestrator's five are: a schema is
+# paid on every request of every session, so a tool one kind can never call must
+# not sit in another kind's context. Here the separation is also a **safety**
+# boundary rather than only a budget one — a reviewer that could see
+# ``office_write`` or ``run_command`` is not read-only, whatever the permission
+# layer answers afterwards.
+#
+# The ``present_plan`` shape, deliberately: an agent delivers a *typed artifact*
+# by calling a tool, and the server validates it. Parsing findings out of prose
+# would make the refutation requirement unenforceable — the one property that
+# separates a review from an opinion.
+
+
+class FindingsReceiver(Protocol):
+    """Where a reviewer's ``report_findings`` call lands.
+
+    Implemented by ``services/review.py``'s check, which is holding an awaitable
+    for exactly this while the reviewer session runs, and injected — so this
+    module never imports the review service, the ``CommandInvoker`` pattern once
+    more. ``session_id`` is the *reviewer's* own id, closed over by the bridge,
+    so a report can only ever settle the review that commissioned it.
+
+    Returns the sentence the reviewer reads back, or ``None`` when no review is
+    waiting on this session — which is a mistake worth naming rather than an
+    acknowledgement worth faking.
+    """
+
+    def receive_findings(self, session_id: str, report: ReportFindingsRequest) -> str | None: ...
+
+
+REPORT_FINDINGS = AgentToolSpec(
+    name="report_findings",
+    description=(
+        "Deliver your review as findings. Each needs severity (must_fix, "
+        "should_fix, nit), claim (what is wrong, one line) and refutation (the "
+        "input or state that breaks it) — a claim with no concrete failure path "
+        "is a nit, not a must_fix. Optional file, line, confidence (certain, "
+        "likely, possible) and a note about what you could not check. Call it "
+        "once, with an empty findings list if the change holds up; that is a "
+        "real answer and is recorded as one. You cannot approve or reject "
+        "anything — a human reads these."
+    ),
+    output_format="text",
+    # An acknowledgement: the count taken and one sentence. 256 covers it with
+    # room for the refusal wording, which is the longer of the two paths.
+    max_result_bytes=256,
+    # Measured at 1,096 bytes for the finding object's six properties and their
+    # enums. 1,400 leaves room to reword a field description without a seventh
+    # property arriving unmeasured — and this schema is paid on every request of
+    # a reviewer session, which is the only kind that carries it.
+    max_schema_bytes=1_400,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                # Declared, not merely enforced: a model that can see the cap
+                # files inside it, where one that cannot spends a turn finding out.
+                "maxItems": MAX_FINDINGS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {
+                            "type": "string",
+                            "enum": ["must_fix", "should_fix", "nit"],
+                        },
+                        "claim": {"type": "string", "description": "What is wrong, one line."},
+                        "refutation": {
+                            "type": "string",
+                            "description": "The input or state that breaks it. Required.",
+                        },
+                        "file": {"type": "string"},
+                        "line": {"type": "integer", "minimum": 1},
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["certain", "likely", "possible"],
+                        },
+                    },
+                    "required": ["severity", "claim", "refutation"],
+                },
+            },
+            "note": {"type": "string", "description": "What you could not check, if anything."},
+        },
+        "required": ["findings"],
+    },
+)
+
+
+def handle_report_findings(
+    receiver: FindingsReceiver | None, session_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """The report_findings tool body, free of SDK imports so it is testable.
+
+    Validation errors come back as tool *errors* rather than exceptions, so the
+    reviewer reads them and fixes its own arguments on the next call — which is
+    the path a missing ``refutation`` takes, and the reason that requirement is
+    enforceable at all.
+    """
+    if receiver is None:
+        # Not reachable from a wired server; said out loud anyway, because a
+        # reviewer that believes it filed a report it did not file is the one
+        # failure mode of this tool that could look like a clean review.
+        return error_result("no review is collecting findings in this server")
+    try:
+        report = ReportFindingsRequest.model_validate(args)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:6]
+        )
+        return error_result(
+            clamp_result(
+                f"Invalid findings — fix and retry: {problems}", REPORT_FINDINGS.max_result_bytes
+            )
+        )
+    acknowledged = receiver.receive_findings(session_id, report)
+    if acknowledged is None:
+        return error_result("no review is waiting on this session's findings")
+    return text_result(clamp_result(acknowledged, REPORT_FINDINGS.max_result_bytes))
+
+
 # ---- the registry -----------------------------------------------------------
 
 #: Every session's toolset — office_read and office_write included, so every
@@ -1689,16 +1817,34 @@ ORCHESTRATOR_TOOLS: tuple[AgentToolSpec, ...] = (
     STOP_WORKER,
 )
 
+#: The whole toolset a ``reviewer`` session carries: one tool, and it is an
+#: *output*. A reviewer reads with the builtin file tools and answers with this;
+#: it has no ``office_write``, no ``run_command`` and no ``workspace_search``,
+#: which is the difference between a session that is read-only and one that is
+#: merely asked to behave. ``services/sdk_factory.py`` is where that becomes
+#: true, and ``test_sdk_factory.py`` asserts the exposed names per kind.
+REVIEWER_TOOLS: tuple[AgentToolSpec, ...] = (REPORT_FINDINGS,)
+
 #: Everything the budget test must measure. One list, so a tool that ships in
-#: neither tuple is a tool that does not exist rather than one that dodged the
-#: ceiling.
-ALL_AGENT_TOOLS: tuple[AgentToolSpec, ...] = AGENT_TOOLS + ORCHESTRATOR_TOOLS
+#: none of the tuples is a tool that does not exist rather than one that dodged
+#: the ceiling.
+ALL_AGENT_TOOLS: tuple[AgentToolSpec, ...] = AGENT_TOOLS + ORCHESTRATOR_TOOLS + REVIEWER_TOOLS
 
 
 def tools_for(kind: SessionKind) -> tuple[AgentToolSpec, ...]:
-    """The toolset this kind of session gets. A worker gets the base set: a
-    worker that could spawn workers is a fork bomb with a budget attached."""
-    return AGENT_TOOLS + ORCHESTRATOR_TOOLS if kind == "orchestrator" else AGENT_TOOLS
+    """The toolset this kind of session gets.
+
+    A worker gets the base set: a worker that could spawn workers is a fork bomb
+    with a budget attached. A **reviewer replaces** the base set rather than
+    adding to it — the one arm of this function that subtracts, and the reason
+    ``build_context_bridge`` had to become a selection over this function instead
+    of a hardcoded list it only ever appended to.
+    """
+    if kind == "orchestrator":
+        return AGENT_TOOLS + ORCHESTRATOR_TOOLS
+    if kind == "reviewer":
+        return REVIEWER_TOOLS
+    return AGENT_TOOLS
 
 
 def allowed_tool_names(kind: SessionKind = "chat") -> list[str]:

@@ -36,6 +36,7 @@ from workbench_server.models.plans import (
     PlanArtifact,
     PlanResponse,
 )
+from workbench_server.models.review import MAX_FINDINGS
 from workbench_server.models.validation import (
     EvidenceItem,
     EvidenceKind,
@@ -55,12 +56,15 @@ from workbench_server.services.agent_tools import (
     OFFICE_WRITE,
     ORCHESTRATOR_TOOLS,
     PRESENT_PLAN,
+    REPORT_FINDINGS,
+    REVIEWER_TOOLS,
     RUN_GATES,
     allowed_tool_names,
     clamp_result,
     handle_office_read,
     handle_office_write,
     handle_present_plan,
+    handle_report_findings,
     handle_run_gates,
     workspace_state_result,
 )
@@ -267,8 +271,10 @@ class TestRegistry:
     def test_the_orchestrator_toolset_is_measured_like_every_other(self) -> None:
         """Mission Control's five tools are a *separate* tuple, so they could
         have shipped unmeasured. ``ALL_AGENT_TOOLS`` is what the budgets below
-        iterate, and this is what fails if a third tuple ever appears."""
-        assert ALL_AGENT_TOOLS == AGENT_TOOLS + ORCHESTRATOR_TOOLS
+        iterate, and this is what fails if a fourth tuple ever appears — as it
+        did when M6 PR 2 added ``REVIEWER_TOOLS``, which is exactly the catch
+        this assertion exists for."""
+        assert ALL_AGENT_TOOLS == AGENT_TOOLS + ORCHESTRATOR_TOOLS + REVIEWER_TOOLS
         for spec in ORCHESTRATOR_TOOLS:
             # Text, not JSON: these results are read by the model, not parsed —
             # an id and a sentence beats an object with three keys of quoting.
@@ -790,3 +796,105 @@ class TestRunGatesBudget:
         assert "3 more were not" in text
         assert "second call" in text
         assert len(text.encode()) <= RUN_GATES.max_result_bytes
+
+
+class TestReportFindings:
+    """The reviewer's only tool — M6 staged review PR 2.
+
+    The three ceilings every agent-facing tool owes, plus the one property that
+    separates a review from an opinion: a finding must name the input that
+    breaks the change, and the *schema* is where that stops being advice.
+    """
+
+    def test_the_three_ceilings_are_declared_and_met(self) -> None:
+        assert len(REPORT_FINDINGS.description) <= MAX_DESCRIPTION_CHARS
+        assert REPORT_FINDINGS.schema_bytes <= REPORT_FINDINGS.max_schema_bytes
+        assert REVIEWER_TOOLS == (REPORT_FINDINGS,)
+
+    def test_the_schema_requires_a_refutation(self) -> None:
+        """Declared to the model, not only enforced on the way in: a reviewer
+        that can *see* the requirement writes one, where one that cannot spends
+        a turn being told."""
+        item = REPORT_FINDINGS.input_schema["properties"]["findings"]["items"]
+        assert set(item["required"]) == {"severity", "claim", "refutation"}
+        assert item["properties"]["severity"]["enum"] == ["must_fix", "should_fix", "nit"]
+        assert REPORT_FINDINGS.input_schema["properties"]["findings"]["maxItems"] == MAX_FINDINGS
+
+    def test_a_representative_report_fits_its_result_budget(self) -> None:
+        """Sized from the measured payload: the acknowledgement is a count and
+        one sentence, and the budget fails the day it becomes an essay."""
+        receiver = _Findings()
+        result = handle_report_findings(
+            receiver,
+            "rev-1",
+            {
+                "findings": [
+                    {
+                        "severity": "must_fix",
+                        "file": "server/x.py",
+                        "line": 12,
+                        "claim": "Gate closure is compared in local time.",
+                        "refutation": "At 02:30 on the spring-forward date the naive "
+                        "stamp lands an hour early and the bid misses the window.",
+                        "confidence": "likely",
+                    }
+                ]
+            },
+        )
+        text = result_text(result)
+        assert "Recorded 1 finding(s)" in text
+        assert len(text.encode()) <= REPORT_FINDINGS.max_result_bytes
+        assert len(receiver.taken) == 1
+
+    def test_a_finding_with_no_refutation_is_a_tool_error_the_model_can_fix(self) -> None:
+        """Not an exception: the reviewer reads this and fixes its own arguments
+        on the next call, which is the whole reason the requirement is
+        enforceable at all."""
+        result = handle_report_findings(
+            _Findings(), "rev-1", {"findings": [{"severity": "must_fix", "claim": "bad"}]}
+        )
+        assert result["is_error"] is True
+        text = result_text(result)
+        assert "refutation" in text
+        assert len(text.encode()) <= REPORT_FINDINGS.max_result_bytes
+
+    def test_an_empty_report_is_a_real_answer(self) -> None:
+        """AXI shape 2 from the other side: "I found nothing" must be sayable,
+        and must be distinguishable from a reviewer that never answered."""
+        text = result_text(handle_report_findings(_Findings(), "rev-1", {"findings": []}))
+        assert "Recorded 0 finding(s)" in text
+
+    def test_findings_nobody_is_waiting_for_are_an_error_not_an_ack(self) -> None:
+        """A reviewer that believes it filed a report it did not file is the one
+        failure mode of this tool that could look like a clean review."""
+        result = handle_report_findings(_Unclaimed(), "rev-1", {"findings": []})
+        assert result["is_error"] is True
+
+    def test_the_tool_cannot_approve_anything(self) -> None:
+        """The description says so to the model, and the schema gives it no way
+        to try: no verdict field, no approval field, no severity above
+        ``must_fix``."""
+        properties = REPORT_FINDINGS.input_schema["properties"]
+        assert set(properties) == {"findings", "note"}
+        assert "approve" in REPORT_FINDINGS.description
+
+
+class _Findings:
+    """A ``FindingsReceiver`` that takes what it is given."""
+
+    def __init__(self) -> None:
+        self.taken: list[tuple[str, Any]] = []
+
+    def receive_findings(self, session_id: str, report: Any) -> str | None:
+        self.taken.append((session_id, report))
+        return (
+            f"Recorded {len(report.findings)} finding(s). A human reviews them and decides; "
+            "nothing is approved by this call. You are done — stop here."
+        )
+
+
+class _Unclaimed:
+    """A receiver with no review waiting — the mis-routed report."""
+
+    def receive_findings(self, session_id: str, report: Any) -> str | None:
+        return None
