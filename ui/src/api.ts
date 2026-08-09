@@ -36,6 +36,7 @@ import type {
   PermissionAnswer,
   PermissionsSnapshot,
   NamedSession,
+  NotebookDocument,
   ObjectiveView,
   ProvenanceMap,
   RenameRequest,
@@ -134,6 +135,11 @@ export const getFileContent = (path: string): Promise<FileContent> =>
 
 export const putFileContent = (body: WriteRequest): Promise<WriteResponse> =>
   request("/api/files/content", jsonInit("PUT", body));
+
+/** One `.ipynb`, parsed server-side by nbformat. Read-only: there is no run
+ * endpoint to pair this with, by design (ROADMAP M4). */
+export const getNotebook = (path: string): Promise<NotebookDocument> =>
+  request(`/api/notebook?path=${encodeURIComponent(path)}`);
 
 export const createEntry = (body: CreateRequest): Promise<OkResponse> =>
   request("/api/files/create", jsonInit("POST", body));
