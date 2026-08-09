@@ -1,6 +1,7 @@
 """Office integration tests: config signing, token binding, key semantics, and a
 full simulated Document-Server save round-trip (stub DS via httpx.MockTransport)."""
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -102,10 +103,20 @@ class TestService:
 class TestHttpFlow:
     """Full pipeline with a stub Document Server."""
 
-    def _client(self, settings: Settings) -> TestClient:
-        app = create_app(settings)
-        client = TestClient(app)
-        client.__enter__()  # run lifespan
+    @pytest.fixture
+    def http_client(self, office_settings: Settings) -> Iterator[TestClient]:
+        """The app under a stub Document Server, with lifespan run *and* stopped.
+
+        A fixture rather than a factory, because the factory this replaced called
+        `client.__enter__()` and nothing ever called `__exit__`: the lifespan
+        started and never finished, leaking the blocking portal's event loop
+        thread and, inside it, the file watcher — still polling for the rest of
+        the process. On glibc that is an abort at interpreter shutdown (the
+        watchfiles thread is killed inside its own extension), which is how it
+        surfaced: a suite where every test passed and the process exited 134 on
+        the ubuntu leg. A fixture also unwinds when an assertion fails.
+        """
+        app = create_app(office_settings)
         new_bytes = b"PK\x03\x04 edited by onlyoffice"
 
         def ds_handler(request: httpx.Request) -> httpx.Response:
@@ -115,12 +126,13 @@ class TestHttpFlow:
                 return httpx.Response(200, json={"error": 0})
             return httpx.Response(404)
 
-        app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(ds_handler))
-        return client
+        with TestClient(app) as client:
+            app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(ds_handler))
+            yield client
 
-    def test_full_save_round_trip(self, office_settings: Settings, tmp_path: Path) -> None:
+    def test_full_save_round_trip(self, http_client: TestClient, tmp_path: Path) -> None:
         (tmp_path / "report.docx").write_bytes(DOCX)
-        client = self._client(office_settings)
+        client = http_client
 
         status = client.get("/api/office/status").json()
         assert status == {"enabled": True, "server_url": "http://localhost:8880"}
@@ -164,21 +176,18 @@ class TestHttpFlow:
         assert never.json() == {"hash": None}
 
     def test_callback_with_unsigned_body_rejected(
-        self, office_settings: Settings, tmp_path: Path
+        self, http_client: TestClient, tmp_path: Path
     ) -> None:
         (tmp_path / "report.docx").write_bytes(DOCX)
-        client = self._client(office_settings)
+        client = http_client
         cfg = client.get("/api/office/config", params={"path": "report.docx"}).json()
         callback_token = cfg["editorConfig"]["callbackUrl"].rsplit("/", 1)[-1]
         body = {"status": 2, "url": "http://stub-ds/download/x"}  # no token
         assert client.post(f"/api/office/callback/{callback_token}", json=body).status_code == 401
         assert (tmp_path / "report.docx").read_bytes() == DOCX  # untouched
 
-    def test_file_endpoint_rejects_garbage_token(
-        self, office_settings: Settings, tmp_path: Path
-    ) -> None:
-        client = self._client(office_settings)
-        assert client.get("/api/office/files/not-a-jwt").status_code == 401
+    def test_file_endpoint_rejects_garbage_token(self, http_client: TestClient) -> None:
+        assert http_client.get("/api/office/files/not-a-jwt").status_code == 401
 
     def test_disabled_reports_and_503s(self, settings: Settings, tmp_path: Path) -> None:
         client = TestClient(create_app(settings))
