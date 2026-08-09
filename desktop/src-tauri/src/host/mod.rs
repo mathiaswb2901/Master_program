@@ -34,14 +34,30 @@
 //! documented claim that a synchronous `#[tauri::command]` already runs there —
 //! measures it: the first hop logs which path it took.
 //!
-//! **With exactly one deliberate exception: guest geometry** ([`mover`]).
-//! Because a reparented guest's input queue is attached to the main thread's, a
-//! wedged guest made every resize frame cost ~1 s. Moving it from a thread that
-//! owns *no* window in the chain — and so is attached to nothing — costs ~0.15
-//! ms instead. That worker touches no window of ours, creates none, and pumps
-//! nothing; it only ever posts `SetWindowPos` at a handle. See [`mover`] for the
-//! measurement and for the ordering guarantee that keeps a released window from
-//! being moved after it has gone back to the desktop.
+//! **With exactly two deliberate exceptions, and neither of them touches a
+//! window this thread owns.**
+//!
+//! *Guest geometry* ([`mover`]). Because a reparented guest's input queue is
+//! attached to the main thread's, a wedged guest made every resize frame cost
+//! ~1 s. Moving it from a thread that owns *no* window in the chain — and so is
+//! attached to nothing — costs ~0.15 ms instead. That worker touches no window
+//! of ours, creates none, and pumps nothing; it only ever posts `SetWindowPos`
+//! at a handle. See [`mover`] for the measurement and for the ordering guarantee
+//! that keeps a released window from being moved after it has gone back to the
+//! desktop.
+//!
+//! *Waiting for a killed instance* ([`reaper`]). Reaping a guest is a job handle
+//! closing — instant, and it stays on the main thread — followed by a poll until
+//! the process is really gone, which is bounded at two seconds and used to run
+//! inside `host_close`. Closing one docked document therefore froze the window
+//! for as long as the instance took to die. The wait moved; the window calls
+//! did not, and the one step that depends on the answer (handing the keyboard
+//! back) comes back through [`main_thread::on_main`] when it is known.
+//!
+//! Everything else runs on the main thread, and the paths that *end* the window
+//! are no exception: the close-ack watchdog in `lib.rs` runs on a thread of its
+//! own and asks for the teardown rather than performing it (see
+//! [`commands::shutdown`]).
 //!
 //! **What the guest process costs us.** A guest is launched into a Windows Job
 //! Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and reaped by closing that
@@ -71,6 +87,7 @@ mod hosting_tests;
 pub mod layout;
 mod main_thread;
 pub mod mover;
+mod reaper;
 mod watchdog;
 
 use std::collections::HashMap;
