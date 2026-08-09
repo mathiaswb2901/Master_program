@@ -86,8 +86,10 @@ the moat.
   every branch reachable in CI with no Office and no Rust, `OfficeHostEvent` on the
   existing `/ws/events` bus, `GET /api/office/capabilities` for honest degradation, and
   the ownership rule that **never adopts a process we did not launch**. Two owner
-  decisions are encoded there rather than left to reviewers: PowerPoint is
-  preview-only in v1 (single-instance, no `Application.Hwnd` to prove ownership) and
+  decisions are encoded there rather than left to reviewers: PowerPoint's hosting is
+  conditional on Workbench having started the process (it is genuinely
+  single-instance — see the 2026-08-09 entry, which superseded the original
+  preview-only decision) and
   `WORKBENCH_OFFICE_NATIVE=auto` resolves to *not* hosting natively until hang
   isolation is proven. The **Rust window hosting landed** too (PR 3,
   `desktop/src-tauri/src/host/`): a real child window from another process docked in a
@@ -108,7 +110,8 @@ the moat.
   channel for the window, because `SetParent` can only run in the shell), the
   self-registering **host panel** (one new module plus one line in `ui/src/tools.ts`),
   `set_visible` — a real window does not hide because a `div` did — and the fallback
-  chain: no shell, no Office, hosting off, PowerPoint, a document already open
+  chain: no shell, no Office, hosting off, a PowerPoint the user already has open, a
+  document already open
   elsewhere, a launch that failed, an embed that was refused all end in a working
   OnlyOffice editor or the degraded card, never a broken panel. **Hang isolation is
   proven and `auto` is on**: a wedged guest costs a resize frame ~19 µs instead of
@@ -1806,6 +1809,43 @@ Six of the seven are **done** as of 2026-08-09; the seventh is owner-gated.
   worth stating: an idea that arrives with a measurement behind it still waits, and the
   bar for reopening the list is a defect or a decision the owner makes, not a better
   idea. (The author of this entry is the party most likely to break it.)
+
+- 2026-08-09 — **PowerPoint hosting: the preview-only decision, reopened and measured
+  away.** The 2026-08-05 decision refused PowerPoint on two claims. One is true and one
+  is not, and the spike says which. **True: it is single-instance.** Its COM class
+  factory is multi-use, so `DispatchEx("PowerPoint.Application")` returns the PowerPoint
+  already running — measured against a *user-started* instance: 0.17 s, no new pid,
+  bound to theirs. Shelling `POWERPNT.EXE` twice merges into one process too (two frames,
+  one pid); there is no `/x`, the only switch its registration carries is the
+  `/AUTOMATION` COM itself passes, and `IgnoreRemoteRequests` does not exist on its
+  `Application`. So the Excel wall cannot be built. **Also true, and worth recording
+  because the type library disagrees: `Application.HWND` and `DocumentWindow.HWND` are
+  declared and both raise "member not found" when read** — late-bound *and* early-bound
+  through the generated wrapper. **Not true: that this makes hosting unsafe.** With no
+  PowerPoint running, `DispatchEx` starts a fresh process (~2.4 s) that is ours on
+  exactly Word's terms, and `Presentations.Open` opens into the frame the launch already
+  produced. So the decision becomes conditional rather than absolute: **host it when
+  Workbench started the process, refuse with `powerpoint_already_running` when it did
+  not** — a pre-flight (`GetActiveObject`, 0.000 s for "none", 0.14 s to find one) that
+  runs *before* any COM object exists, so the user's instance is not touched on the way
+  out and does not reach the `KILL_ON_JOB_CLOSE` job that reaps ours. A **check, not an
+  interlock**, and recorded as such: an instance appearing between that answer and the
+  `DispatchEx` is not excluded by it, which needs a PowerPoint that starts after the pid
+  snapshot *and* is a registered COM server microseconds later — and if that happened, two
+  new frames would appear and `_identify` refuses to choose between them rather than
+  guess. `capabilities().kind_notes` reports the condition before a launch is attempted,
+  so the UI opens the preview directly instead of failing first. Accepted limitations,
+  stated rather than hidden: **one deck at a time** (a second would share the first's
+  process, which the containment model does not refcount — so it is a `kind_note` read
+  from the live host map, because docking reparents the frame and a top-level window walk
+  can no longer see our own hosted deck; the sentence names the Workbench tab to close,
+  since there is no separate PowerPoint window for the user to find), a **read-only**
+  document bridge (slides and shape text; a slide has no single addressable write target
+  the way a paragraph or a cell does), and no defence against the user double-clicking a
+  `.pptx` into our instance — the wall Excel gets does not exist here. Rejected: shelling
+  `POWERPNT.EXE` and re-attaching through the ROT (does not produce a second process, so
+  it buys nothing); DCOM `AppID`/`RunAs` reconfiguration (changes machine-wide COM
+  settings for every application, to make Office behave in a way it is not built to).
 
 - 2026-08-07 — **Office account identity + multi-account switching** (owner; reopens the
   freeze on the owner-decision ground, like new-document types). The docked native Office is

@@ -9,12 +9,23 @@ Microsoft Office installed.
 Two owner decisions are encoded in the types themselves rather than left to a
 comment somewhere:
 
-* ``powerpoint`` is a legal :data:`HostAppKind` — the file type is real and the
-  UI must be able to name it — but it is **not** in :data:`HOSTABLE_KINDS`.
-  PowerPoint is single-instance and exposes no ``Application.Hwnd`` we could use
-  to prove the window we found is one we started, so hosting it risks
-  reparenting the user's own open presentation. It stays preview-only in v1 and
-  the service refuses it with :data:`HostReason` ``powerpoint_preview_only``.
+* ``powerpoint`` is in :data:`HOSTABLE_KINDS` — but **conditionally**, and the
+  condition is a measured fact rather than a preference. PowerPoint's COM class
+  factory is *multi-use*: ``DispatchEx("PowerPoint.Application")`` returns the
+  PowerPoint that is already running instead of starting a private one (measured
+  2026-08-09 — 0.17 s, no new pid, bound to a user-started instance). Word and
+  Excel each get their own process; PowerPoint cannot. So Workbench hosts
+  PowerPoint on exactly one condition — that *no* PowerPoint was running when the
+  launch began, which makes the process one we started and therefore one we may
+  contain and reap. When one is already running the host is refused with
+  :data:`HostReason` ``powerpoint_already_running``, because the alternative is
+  putting the user's own PowerPoint in a kill-on-close job object.
+  :attr:`OfficeCapabilities.kind_notes` reports that condition before a launch is
+  attempted, so the UI degrades to preview from a fact rather than a failure —
+  and the *most common* instance in the way is Workbench's own: a deck already
+  docked here occupies the one process, which is why hosting one deck at a time
+  is a stated limitation and why ``powerpoint_hosted_here`` is a reason of its
+  own rather than prose inside ``powerpoint_already_running``.
 * ``document_open_elsewhere`` exists as a first-class terminal reason because
   "the document is already open in an instance we did not launch" must be a
   visible refusal, never a silent takeover.
@@ -32,9 +43,18 @@ from workbench_server.models.office import EXTENSION_TYPES, DocumentType
 #: launched and reparented.
 HostAppKind = Literal["word", "excel", "powerpoint"]
 
-#: Applications this version will host. PowerPoint is deliberately absent; see
-#: the module docstring.
-HOSTABLE_KINDS: tuple[HostAppKind, ...] = ("word", "excel")
+#: Applications this build can host. PowerPoint's membership is *capability*,
+#: not availability: it can be hosted, on the condition the module docstring
+#: names (no PowerPoint already running). :attr:`OfficeCapabilities.kind_notes`
+#: carries the runtime answer.
+HOSTABLE_KINDS: tuple[HostAppKind, ...] = ("word", "excel", "powerpoint")
+
+#: Applications whose COM server is *multi-use*: a second activation returns the
+#: running instance rather than starting a private one. Hosting one of these is
+#: only safe when we started the process, so a launch is refused outright when an
+#: instance is already up (measured, see the module docstring). Word and Excel
+#: are single-use and are absent by measurement, not by assumption.
+SINGLE_INSTANCE_KINDS: frozenset[HostAppKind] = frozenset({"powerpoint"})
 
 _TYPE_KINDS: dict[DocumentType, HostAppKind] = {
     "word": "word",
@@ -79,7 +99,17 @@ HostReason = Literal[
     "backend_timeout",
     "process_exited",
     "document_open_elsewhere",
-    "powerpoint_preview_only",
+    # PowerPoint was already running, so the instance a launch would get is the
+    # user's own (its COM class factory is multi-use). Distinct from
+    # ``document_open_elsewhere``: it is not *this document* that is open, it is
+    # the application — and the fix the UI offers is different.
+    "powerpoint_already_running",
+    # The running PowerPoint is the one **Workbench itself** is hosting. Same
+    # mechanism, different owner, and the difference is the whole point: "close
+    # PowerPoint and try again" names a window the user cannot find, because the
+    # only one is docked in a Workbench panel — possibly behind another tab.
+    # The actionable sentence is "close that tab", so it is its own reason.
+    "powerpoint_hosted_here",
     "unsupported_file",
     "native_hosting_disabled",
 ]
@@ -246,8 +276,19 @@ class OfficeCapabilities(BaseModel):
     #: reparent a window, so without this there is nothing to host *into* —
     #: which is why it is reported rather than inferred from the user agent.
     shell_attached: bool = False
-    #: Applications that can be hosted right now; empty when hosting is off.
+    #: Applications that can be hosted right now; empty when hosting is off. A
+    #: kind this build supports but cannot host at this moment is *absent* here
+    #: and named in :attr:`kind_notes`, so a client never has to combine the two
+    #: to answer "can I dock this file".
     hostable_kinds: list[HostAppKind] = Field(default_factory=list)
+    #: Why a kind this build supports is missing from :attr:`hostable_kinds`
+    #: right now, one sentence per kind. Empty when every supported kind is
+    #: available — and empty when hosting is off entirely, because then
+    #: :attr:`detail` already carries the one reason that applies to all of them.
+    #: Today only PowerPoint can appear here (it is single-instance; see the
+    #: module docstring), but the shape is per-kind so the next application with
+    #: a condition of its own does not need a new field.
+    kind_notes: dict[HostAppKind, str] = Field(default_factory=dict)
     #: The OnlyOffice Document Server is configured and reachable-in-principle.
     onlyoffice: bool
     #: What a document should open in, given everything above.

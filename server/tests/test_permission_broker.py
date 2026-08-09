@@ -24,6 +24,7 @@ from workbench_server.models.office_bridge import (
     CellEdit,
     CellWindow,
     DocStructure,
+    SlideText,
     WordEdit,
     WordText,
 )
@@ -71,7 +72,8 @@ class StubReader:
         sheet: str | None = None,
         a1_range: str | None = None,
         start_paragraph: int = 0,
-    ) -> WordText | CellWindow:
+        start_slide: int = 1,
+    ) -> WordText | CellWindow | SlideText:
         raise DocNotHostedError(path)
 
     async def write_document(  # pragma: no cover

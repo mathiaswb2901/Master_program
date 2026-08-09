@@ -16,20 +16,24 @@
  *     else" is Workbench keeping its promise never to take over a window it did
  *     not start — and one click reads the document anyway.
  *  3. An embed that fails ends in a working editor, not a broken panel.
- *  4. PowerPoint is preview-only and says why, in a sentence rather than an
- *     error.
+ *  4. All three applications dock — and a PowerPoint that cannot says so in a
+ *     sentence naming the fix rather than an error, with the *right* fix for
+ *     whose instance is in the way: the user's own, or the deck Workbench is
+ *     already holding in the one process PowerPoint gives out.
  *  5. The degraded card is still the floor under all of it, on paper colors
  *     (DESIGN.md §2.8/§6.1).
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { openApp, treeItem } from "./app";
 import {
   DOCX_ALREADY_OPEN,
   DOCX_FILE,
   DOCX_REFUSES_EMBED,
+  PPTX_APP_RUNNING,
   PPTX_FILE,
+  PPTX_SECOND,
   XLSX_FILE,
   XLSX_REFUSES_EMBED,
 } from "./workspace";
@@ -119,18 +123,101 @@ test("an embed that is refused ends in an editor, never a broken panel", async (
   await expect(page.locator(".wb-office-card-title")).toHaveText(DEGRADED);
 });
 
-test("PowerPoint is preview-only, on paper, and says why", async ({ page }) => {
-  await openApp(page);
-  await treeItem(page, PPTX_FILE).click();
+// The three PowerPoint journeys share one server, and PowerPoint is the one
+// application whose *previous* journey changes the next one's answer: it runs a
+// single instance for the whole session, so a deck left docked is still docked
+// when the next test's page loads. Two habits keep that from turning into
+// order-dependence. The refusal about the user's *own* PowerPoint is asked
+// first, while Workbench is holding nothing; and every journey that docks a deck
+// closes its tab on the way out, which is what a user does and what gives the
+// window back. (`workers: 1` / `fullyParallel: false` in `playwright.config.ts`
+// is what makes "first" mean anything.)
 
-  // Straight to the preview path — no launch is attempted at all — with the
-  // reason above the document rather than an error in place of it.
-  await expect(page.locator(".wb-office-note")).toContainText("PowerPoint runs one instance");
+/** Close an editor tab the way the user does, and wait for the pane to go. The
+ * unmount is what fires the host's `close`, so this is also how a journey hands
+ * the single PowerPoint process back to the one after it. */
+async function closeTab(page: Page, name: string): Promise<void> {
+  await page.getByRole("button", { name: `Close ${name}` }).click();
+  await expect(page.locator(".wb-editor-tab").filter({ hasText: name })).toHaveCount(0);
+}
+
+test("a deck refused because PowerPoint is open explains itself, on paper", async ({ page }) => {
+  await openApp(page);
+  await treeItem(page, PPTX_APP_RUNNING).click();
+
+  // The one refusal unique to PowerPoint: it runs a single instance per session,
+  // so Workbench will not start its own alongside the user's — and will not take
+  // over theirs. A sentence with the action that changes the answer, not an error.
   const card = page.locator(".wb-office-card");
+  await expect(card.locator(".wb-office-card-title")).toHaveText("PowerPoint is already open");
+  await expect(card.locator(".wb-office-card-hint")).toContainText(
+    "will not take over the one you are working in",
+  );
+  await expect(card.locator(".wb-office-card-file")).toHaveText(PPTX_APP_RUNNING);
+
+  // And it is not a dead end: the preview path is one click away.
+  await card.getByRole("button", { name: "Open a preview here" }).click();
   await expect(card.locator(".wb-office-card-title")).toHaveText(DEGRADED);
-  await expect(card.locator(".wb-office-card-file")).toHaveText(PPTX_FILE);
-  await expect(card.getByRole("button", { name: "Copy full path" })).toBeVisible();
   await expect
     .poll(() => card.evaluate((el) => getComputedStyle(el).backgroundColor))
     .toBe(PAPER);
+});
+
+test("a .pptx docks, and the panel names Microsoft PowerPoint", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+
+  await openApp(page);
+  await treeItem(page, PPTX_FILE).click();
+
+  // The third application walks the same launching -> embedding -> embedded the
+  // Word and Excel paths do. PPTFrameClass is not a special case in the panel:
+  // it resolves through `hostable_kinds` like the other two.
+  await expect(page.locator(".wb-office-hosted")).toHaveText(/Microsoft PowerPoint/i);
+  await expect(page.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+  await expect(page.locator(".wb-office-note")).toContainText("Simulated host");
+
+  await expect(page.locator(".wb-editor-tab").filter({ hasText: PPTX_FILE })).toBeVisible();
+  expect(consoleErrors).toEqual([]);
+
+  // Hand the one PowerPoint instance back before the next journey asks for it.
+  await closeTab(page, PPTX_FILE);
+});
+
+test("a second deck opens as a preview and names the tab holding PowerPoint", async ({ page }) => {
+  await openApp(page);
+
+  // Two office documents are open by the end of this, and an office view is
+  // `keepMounted` — both panes stay in the DOM and the inactive one is only
+  // `display: none`. So every assertion below is scoped to the pane on screen;
+  // an unscoped `.wb-office-note` would match the docked deck's "Simulated host"
+  // line as happily as the one this journey is about.
+  const pane = page.locator(".wb-office-host:not(.is-hidden)");
+
+  // One deck docked — the ordinary case, and the thing that consumes the single
+  // PowerPoint process for as long as the tab is open. Waited for through the
+  // status bar as well as the pane: the capabilities re-read that the *next*
+  // click depends on is fired by the host's first event, so a checkpoint two
+  // events later is what makes "the answer has changed by now" a fact rather
+  // than a hope.
+  await treeItem(page, PPTX_FILE).click();
+  await expect(pane.locator(".wb-office-native")).toHaveAttribute("data-state", "embedded");
+  await expect(page.locator(".wb-status-item", { hasText: "1 document docked" })).toBeVisible();
+
+  // Now the second. It must not attempt a launch it cannot win: the server has
+  // taken `powerpoint` out of `hostable_kinds` — an answer it reads from its own
+  // hosts, because docking reparents the frame and a top-level window walk can
+  // no longer see it — so this lands straight on the preview, with a note naming
+  // the tab to close rather than a PowerPoint window that is not on the desktop.
+  await treeItem(page, PPTX_SECOND).click();
+
+  const note = pane.locator(".wb-office-note");
+  await expect(note).toContainText(PPTX_FILE);
+  await expect(note).toContainText("Close that tab");
+  await expect(pane.locator(".wb-office-card-title")).toHaveText(DEGRADED);
+  // No launch was made, so there is no docking surface in this pane at all.
+  await expect(pane.locator(".wb-office-native")).toHaveCount(0);
+
+  await closeTab(page, PPTX_SECOND);
+  await closeTab(page, PPTX_FILE);
 });
