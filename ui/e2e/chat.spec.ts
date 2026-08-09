@@ -107,6 +107,14 @@ test("streamed markdown reply and an individually settling tool row", async ({ p
     // While it is a question: the warn rim §6.3 specifies.
     expect(await settledStyle(card, "border-top-color")).toBe(await tokenColor(page, "--warn"));
 
+    // …and the picker says so in words, not only in the card. A question is the
+    // one state that must reach a user looking at another pane, so the row it
+    // belongs to answers "what is this session doing" with the answer that
+    // matters (§6.12, §7) — driven here by a real blocked turn rather than by a
+    // hand-set state.
+    const asking = pane.locator(".wb-session-row.is-selected");
+    await expect(asking.locator(".wb-session-state")).toHaveText("Needs attention");
+
     await card.getByRole("button", { name: "Allow" }).click();
     await expect(card.locator(".wb-perm-decision")).toHaveText("Allowed");
 
@@ -120,6 +128,11 @@ test("streamed markdown reply and an individually settling tool row", async ({ p
     expect(
       await settledStyle(card.locator(".wb-perm-decision .wb-dot"), "background-color"),
     ).toBe(await tokenColor(page, "--success"));
+    // The row lets go of it too, on its own: an answered question that left the
+    // picker reading "Needs attention" would be the same standing alarm the rim
+    // above just dropped, one column over.
+    await expect(asking.locator(".wb-session-state")).toHaveCount(0);
+    await expect(asking.locator(".wb-session-time")).toBeVisible();
   });
 
   await test.step("the picker says what a session is doing, in words (§6.12, §7)", async () => {
