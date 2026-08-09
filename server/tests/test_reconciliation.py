@@ -19,7 +19,8 @@ spreadsheet diff:
   its id runs a real reconciliation.
 """
 
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,6 +28,7 @@ from zoneinfo import ZoneInfo
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl.worksheet._read_only import ReadOnlyWorksheet
 
 from workbench_server.config import Settings
 from workbench_server.main import create_app
@@ -39,6 +41,7 @@ from workbench_server.models.reconciliation import (
     Tolerance,
 )
 from workbench_server.models.validation import ValidationResult, ValidationSpec, ValidationSubject
+from workbench_server.services import reconciliation
 from workbench_server.services.event_bus import EventBus
 
 # `_align_time_rows` and `_OFFSET_REFUSAL` are reached by name on purpose: the former
@@ -1032,3 +1035,159 @@ def test_a_mismatch_through_the_endpoint_is_high(tmp_path: Path) -> None:
         }
         posted = client.post("/api/validation/run", json=body).json()
     assert posted["risk"] == "high"
+
+
+# ------------------------------------------------- the scale of a real price series
+#
+# The workload this gate exists for is an electricity time series: 8,760 rows for a
+# year of hours, 35,040 for a year of quarter-hours, more for multi-year. Reading one
+# used to be quadratic — `ReadOnlyWorksheet` has no random access, so each `ws["A7"]`
+# re-opened the sheet's zip member and re-ran the SAX parse from row 1, and the reader
+# asked for two addresses per data row. Measured in this repo's venv before the fix
+# and after it:
+#
+#     rows        before      after
+#      250        1.23 s     0.010 s
+#      500        4.28 s     0.023 s
+#    1,000       17.53 s     0.017 s
+#    2,000       55.11 s     0.032 s
+#   10,000    ~23 min (4x per doubling)   0.147 s
+#   35,040    hours                       0.483 s
+#
+# so a save-triggered reconciliation of an annual hourly model never finished in any
+# time a person would wait. Both budgets below describe the same defect; the parse
+# count is the one that cannot flake, and the wall clock is here because what a user
+# reports is a wall clock.
+
+#: Rows in the scale fixture. Above an annual hourly series (8,760) so the budget
+#: covers the real workload, and low enough that building the fixture stays a couple
+#: of seconds.
+SCALE_ROWS = 10_000
+
+#: One-sided wall-clock ceiling on reconciling that series end to end.
+#:
+#: `test_perf_budgets.py` is right that a millisecond ceiling on a shared runner is a
+#: budget that gets ignored — but this is not a millisecond ceiling. Measured at 0.3 s
+#: for the whole check on the author's machine, so 30 s is ~100x headroom for the
+#: slowest runner imaginable, and the defect it catches is ~4,000x. There is no
+#: machine on which those two numbers meet.
+SCALE_SECONDS = 30.0
+
+#: Ceiling on full sheet parses for one column read. A streamed pass is exactly 1;
+#: the per-address loop was two per data row (20,002 at `SCALE_ROWS`). The slack is
+#: for a direct-cell expectation in the same spec, which still addresses one cell at
+#: a time.
+SCALE_PARSES = 4
+
+
+@pytest.fixture(scope="module")
+def hourly_series(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A workspace holding one `SCALE_ROWS`-hour price series.
+
+    Naive local wall clock stepped by one hour, which is a continuous index with no
+    repeats — the DST fold behaviour has its own fixtures, and mixing it in here
+    would make a scale budget fail for a domain reason.
+    """
+    root = tmp_path_factory.mktemp("scale")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Prices"
+    ws["A1"] = "timestamp"
+    ws["B1"] = "EUR/MWh"
+    start = datetime(2024, 1, 1)
+    for i in range(SCALE_ROWS):
+        ws.cell(row=2 + i, column=1, value=start + timedelta(hours=i))
+        ws.cell(row=2 + i, column=2, value=float(i))
+    wb.save(root / "prices.xlsx")
+    return root
+
+
+def scale_spec() -> ReconciliationSpec:
+    """Expectations at the first, middle and **last** row of the series.
+
+    The last one is what proves the whole column was really read rather than a
+    prefix of it: a reader that stopped early would report an alignment gap there.
+    """
+    return ReconciliationSpec(
+        workbook="prices.xlsx",
+        timezone="Europe/Oslo",
+        default_tolerance=Tolerance(abs=0.001),
+        time_index=TimeIndexSpec(
+            timestamp_column="A",
+            value_column="B",
+            value_unit="EUR/MWh",
+            sheet="Prices",
+            expectations=[
+                TimeExpectation(
+                    timestamp=(datetime(2024, 1, 1) + timedelta(hours=hour)).isoformat(),
+                    expected=float(hour),
+                    unit="EUR/MWh",
+                )
+                for hour in (0, SCALE_ROWS // 2, SCALE_ROWS - 1)
+            ],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(180)
+async def test_an_annual_hourly_series_reconciles_in_one_streamed_pass(
+    hourly_series: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repro, at the scale a user hits it, through the whole check.
+
+    Both halves of the budget come from one run: the work done (sheet parses) and
+    the wall clock. On master this does not fail fast — it fails after twenty-odd
+    minutes, which is precisely the report.
+    """
+    parses: list[str] = []
+    original = ReadOnlyWorksheet._cells_by_row
+
+    def counted(self: ReadOnlyWorksheet, *args: Any, **kwargs: Any) -> Any:
+        # `_cells_by_row` is the single funnel every read-only read goes through —
+        # `iter_rows` and `ws["A7"]` alike — and each call re-opens the sheet's zip
+        # member for one more SAX pass. Counting calls counts the work, and a count
+        # cannot flake the way a millisecond can.
+        parses.append(str(self.title))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "_cells_by_row", counted)
+
+    started = time.perf_counter()
+    service, result = await run_recon(hourly_series, scale_spec())
+    elapsed = time.perf_counter() - started
+
+    assert result.risk == "pass", result.evidence[0].detail
+    report = report_of(service, result)
+    assert report.total == 3
+    # The last hour of the series matched, so the read reached the end of the column.
+    by_cell = {c.cell: c for c in report.comparisons}
+    last = (datetime(2024, 1, 1) + timedelta(hours=SCALE_ROWS - 1)).isoformat()
+    assert by_cell[last].actual == pytest.approx(float(SCALE_ROWS - 1))
+    assert len(parses) <= SCALE_PARSES, (
+        f"{SCALE_ROWS} rows cost {len(parses)} full sheet parses; a streamed read is 1, "
+        "and the per-address loop it replaced was two per data row"
+    )
+    assert elapsed < SCALE_SECONDS, f"reconciling {SCALE_ROWS} rows took {elapsed:.1f}s"
+
+
+def test_the_disk_read_is_bounded_by_the_same_row_cap_as_the_live_read(
+    hourly_series: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`MAX_COLUMN_ROWS` bounds the **read**, on disk as well as over COM.
+
+    It was the live reader's cap alone, so a column taller than it reconciled one
+    set of rows docked and a different set undocked — the defect `column_data_rows`
+    exists to prevent, one level up. Driven by lowering the cap rather than by
+    building a 50,001-row fixture: the property is the cap, not the number.
+    """
+    monkeypatch.setattr(reconciliation, "MAX_COLUMN_ROWS", 5)
+    reader = reconciliation.DiskWorkbookReader(
+        hourly_series / "prices.xlsx", datetime(2026, 8, 9, 14, 0)
+    )
+    try:
+        pairs = reader.column_pairs("Prices", "A", "B", 2)
+    finally:
+        reader.close()
+    assert len(pairs) == 5
+    assert pairs[0] == (datetime(2024, 1, 1), 0.0)
