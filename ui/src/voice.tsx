@@ -98,7 +98,18 @@ const composers = new Map<string, { current: ComposerHandle }>();
 export function registerComposer(target: string, entry: { current: ComposerHandle }): () => void {
   composers.set(target, entry);
   return () => {
-    if (composers.get(target) === entry) composers.delete(target);
+    // A newer mount for this target already owns the slot — leave it, and leave
+    // any microphone it holds alone.
+    if (composers.get(target) !== entry) return;
+    composers.delete(target);
+    // This composer is going away — its pane closed, or {@link VoiceButton}'s
+    // registration effect is re-keying to a new target. If it still holds the
+    // microphone, let the gesture go now rather than leaving the capture and its
+    // chunk POSTs running until the server reaps the utterance minutes later. It
+    // is `cancel`, not `stop`: there is no composer left to receive a final
+    // transcript, so the audio is discarded rather than transcribed into nothing.
+    const active = useVoice.getState().active;
+    if (active !== null && active.target === target) void releaseDictation("cancel");
   };
 }
 
@@ -150,13 +161,25 @@ export function voiceBlocker(): string | null {
  */
 interface Gesture {
   target: string;
-  /** What the composer held when the microphone opened; spoken text is appended
-   * to this, so a cancel restores it exactly. */
+  /** The text spoken words are appended to. **Self-healing**: it starts as what
+   * the composer held when the microphone opened, but every write reconciles it
+   * against the composer's live draft first (see {@link healBase}), so a hand
+   * typed edit made *while dictating* survives instead of being clobbered by the
+   * next interim. A cancel restores exactly this. */
   base: string;
+  /** The exact string this gesture last set into the composer. The witness that
+   * lets {@link healBase} tell "the human typed" (`draft !== written`) from "the
+   * draft is still ours to overwrite", and the base {@link recoverBase} diffs the
+   * live draft against to locate the edit structurally. */
+  written: string;
   capture: VoiceCapture | null;
   voiceId: string | null;
   sequence: number;
-  /** The transcript so far, as the last chunk response reported it. */
+  /** The transcript so far, as the last chunk response reported it — also the
+   * exact interim suffix this gesture contributed to {@link written}. Its
+   * *length* is the boundary {@link recoverBase} uses to keep the human's base
+   * apart from this gesture's own words; it is never matched as a trailing
+   * substring, so a hand-typed word equal to it is not mistaken for it. */
   interim: string;
   /** A release that beat the server's answer, remembered until it can be acted on. */
   pendingRelease: "stop" | "cancel" | null;
@@ -175,8 +198,92 @@ export function joinDraft(base: string, spoken: string): string {
   return `${base.replace(/\s+$/, "")} ${spoken}`;
 }
 
+/**
+ * Recover the human's text from a draft this gesture last wrote as `written`,
+ * whose final `interim.length` characters were this gesture's own spoken interim.
+ *
+ * **Loss-free by construction — a character the human typed is never discarded**;
+ * at worst a spoken word is duplicated for them to trim. That is the promise, and
+ * it is why this is a structural diff against `written` (common prefix and
+ * suffix) rather than a `live.endsWith(interim)` match: a hand-typed word that
+ * merely *equals* the interim (they type "hello" the moment the ASR also guesses
+ * "hello") must not be read as the interim and stripped out from under them.
+ *
+ * The boundary between the human's base and this gesture's interim is
+ * `boundary = written.length - interim.length`. There are exactly three cases,
+ * and the interim is removed only in the two where doing so is *provably* safe:
+ *
+ *  1. **The base region is untouched** (`prefix >= boundary`): the first
+ *     `boundary` characters of `live` and `written` are identical, so the human
+ *     edited only the spoken tail — which the next interim rewrites regardless.
+ *     Keep the base exactly.
+ *  2. **A pure insertion into the base** (`prefix + suffix === written.length`,
+ *     so nothing of `written` was deleted): all of `written` survives in `live`,
+ *     which means the interim is still intact at `live`'s tail. Strip exactly it.
+ *  3. **Anything else** — the human deleted or replaced part of what this gesture
+ *     wrote, so the surviving tail *could* be their own coincidental text rather
+ *     than the interim. Keep the whole draft: duplication, never loss. The
+ *     no-base case (`boundary <= 0`, the interim is the whole of what was
+ *     written) falls here too — there is nothing to anchor a strip to.
+ */
+export function recoverBase(live: string, written: string, interim: string): string {
+  const boundary = written.length - interim.length;
+
+  let prefix = 0;
+  const maxPrefix = Math.min(written.length, live.length);
+  while (prefix < maxPrefix && written[prefix] === live[prefix]) prefix += 1;
+  if (boundary > 0 && prefix >= boundary) {
+    // Case 1: base region byte-identical; drop the (soon-rewritten) spoken tail.
+    return written.slice(0, boundary).replace(/\s+$/, "");
+  }
+
+  let suffix = 0;
+  const maxSuffix = Math.min(written.length - prefix, live.length - prefix);
+  while (
+    suffix < maxSuffix &&
+    written[written.length - 1 - suffix] === live[live.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  if (boundary > 0 && prefix + suffix === written.length) {
+    // Case 2: nothing of `written` was removed, so its interim suffix is still at
+    // `live`'s tail. The insertion sits in the base region (prefix < boundary).
+    return live.slice(0, live.length - interim.length).replace(/\s+$/, "");
+  }
+
+  // Case 3: cannot prove the tail is ours — keep every character the human has.
+  return live;
+}
+
 function handleFor(target: string): ComposerHandle | null {
   return composers.get(target)?.current ?? null;
+}
+
+/**
+ * Reconcile a gesture's base with a hand-typed edit before it writes again.
+ *
+ * The composer's live draft is the source of truth, not a value captured once at
+ * `startDictation`. When it no longer matches what this gesture last set
+ * (`draft !== written`), a human edited it while dictating — the whole point of
+ * the toggle gesture is to free the hands to do exactly that — so their text is
+ * kept (its own interim stripped) as the new base, rather than the next interim
+ * rewriting the draft from a stale base and discarding the edit.
+ */
+function healBase(mine: Gesture): void {
+  const live = handleFor(mine.target)?.draft;
+  if (live !== undefined && live !== mine.written) {
+    mine.base = recoverBase(live, mine.written, mine.interim);
+  }
+}
+
+/** Lay this gesture's interim into the composer, self-healing the base first, and
+ * remember exactly what was written so the next edit can be spotted. */
+function composeInterim(mine: Gesture, interim: string): void {
+  healBase(mine);
+  const next = joinDraft(mine.base, interim);
+  handleFor(mine.target)?.setDraft(next);
+  mine.written = next;
+  mine.interim = interim;
 }
 
 function toast(kind: "error" | "warn" | "info", message: string): void {
@@ -218,6 +325,9 @@ export function startDictation(target: string): Promise<void> {
     // not the interim words it is one tick away from taking back. Reading the
     // live draft here instead would transcribe the same sentence twice.
     base: previous !== null && previous.target === target ? previous.base : handle.draft,
+    // Nothing written yet, so the base *is* what this gesture last "set": the
+    // first `healBase` sees an unchanged draft and does not mistake it for an edit.
+    written: previous !== null && previous.target === target ? previous.base : handle.draft,
     capture: null,
     voiceId: null,
     sequence: 0,
@@ -287,7 +397,6 @@ async function sendChunk(mine: Gesture, audio: string): Promise<void> {
   try {
     const session = await api.sendVoiceChunk(mine.voiceId, { sequence, audio });
     if (mine.closed || gesture !== mine) return;
-    mine.interim = session.interim;
     useVoice.setState({
       active: {
         target: mine.target,
@@ -297,12 +406,14 @@ async function sendChunk(mine: Gesture, audio: string): Promise<void> {
       },
     });
     // Interim is the utterance *so far*, so the composer replaces rather than
-    // stitches — the reason the server sends the whole thing every time.
-    handleFor(mine.target)?.setDraft(joinDraft(mine.base, session.interim));
+    // stitches — the reason the server sends the whole thing every time. It
+    // replaces only the spoken part, never a hand-typed edit (see composeInterim).
+    composeInterim(mine, session.interim);
   } catch (err) {
     if (mine.closed || gesture !== mine) return;
     mine.closed = true;
     mine.capture?.stop();
+    healBase(mine);
     handleFor(mine.target)?.setDraft(mine.base);
     forget(mine);
     toast("error", `Dictation stopped: ${errorText(err)}`);
@@ -336,6 +447,10 @@ async function endGesture(mine: Gesture, mode: "stop" | "cancel"): Promise<void>
 
   if (mode === "cancel") {
     forget(mine);
+    // Discard the spoken audio, but keep a hand-typed edit made while dictating:
+    // healBase strips only this gesture's own interim, so what the human typed
+    // stays rather than being reverted along with the words nobody wanted.
+    healBase(mine);
     handle?.setDraft(mine.base);
     await api.cancelVoice(voiceId).catch(() => undefined);
     return;
@@ -351,11 +466,16 @@ async function endGesture(mine: Gesture, mode: "stop" | "cancel"): Promise<void>
   await mine.chain.catch(() => undefined);
   try {
     const transcript = await api.stopVoice(voiceId);
+    // Reconcile once more: text typed by hand between the last interim and the
+    // release must survive the final transcript landing, exactly as it does
+    // between interims.
+    healBase(mine);
     handle?.setDraft(joinDraft(mine.base, transcript.text));
     // Focus the composer, not the microphone: the whole point is that the words
     // land as a draft the human reads before pressing Enter themselves.
     handle?.focus();
   } catch (err) {
+    healBase(mine);
     handle?.setDraft(mine.base);
     toast("error", `Could not transcribe: ${errorText(err)}`);
   } finally {
