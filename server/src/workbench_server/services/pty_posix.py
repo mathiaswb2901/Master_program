@@ -32,6 +32,34 @@ reason: an unset `TERM` makes readline and every curses program degrade.
   (`winpty.PtyProcess.terminate` is signals plus bounded sleeps), and this keeps
   the two backends honest about the same worst case.
 
+* **The master fd has exactly one owner, and it is claimed under a lock.** This
+  class is driven from *two* threads: `read` blocks in a worker thread
+  (`PtySession.read` -> `asyncio.to_thread`) while `terminate`, `write` and
+  `setwinsize` run on the event loop thread. Both close paths converge on
+  `_close_fd` — the reader when the fd hits EOF/EIO, the loop when the session is
+  released — and on POSIX an fd number freed by the first `close` is handed
+  straight back out by the *next* `open` anywhere in the process (the kernel
+  gives out the lowest free descriptor). A second `close` of that number, or any
+  syscall still holding it, therefore does not fail: it lands on whatever the fd
+  has since become — another terminal's master, a WebSocket, the workspace lock.
+  Cross-session corruption, not a crash, and invisible where it happens.
+
+  So the number is never touched by anyone who has not claimed it:
+
+  - `_close_fd` **swaps `_fd` to -1 under `_fd_lock`** and only the thread that
+    took the real number closes it; every later caller claims -1 and is a no-op.
+    (Same idiom as the pool lock in `services/worktrees.py`, which needs no lock
+    because only the loop thread touches it.)
+  - Every syscall borrows the fd through `_borrow_fd`, which counts users while
+    they are inside the call. A close that arrives with a borrower in flight
+    publishes -1 (so no *new* borrower can get the number) and hands the actual
+    `close` to the last one out. That is what keeps the reader from being blocked
+    in `os.read` on a number that has already been recycled onto another session.
+
+  The failure mode of the deferral is one fd held open until the process exits,
+  if a reader never wakes at all — which is the safe direction, because an fd
+  that is still open cannot be recycled onto anything.
+
 Every kernel call goes through `PosixSyscalls`, which is what lets the whole
 class be exercised on the Windows box this is developed on (the stdlib `pty`,
 `fcntl` and `termios` modules do not exist there) — the same stand-in shape
@@ -44,7 +72,10 @@ import codecs
 import os
 import struct
 import sys
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
@@ -167,24 +198,71 @@ class PosixPty:
 
     def __init__(self, pid: int, fd: int, syscalls: PosixSyscalls) -> None:
         self.pid = pid
-        self._fd = fd
         self._sys = syscalls
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._exit_status: int | None = None
-        self._fd_open = True
+        #: Guards the fd's *lifetime* — the three fields below are read and
+        #: written from the reader thread and the event loop thread both. It is
+        #: never held across a syscall on the fd itself.
+        self._fd_lock = threading.Lock()
+        #: The master fd, or -1 once a close has claimed it. -1 is the published
+        #: "there is no fd" and is what every borrower checks; it is deliberately
+        #: not a valid descriptor, so a caller that ignores the check gets EBADF
+        #: rather than somebody else's session.
+        self._fd = fd
+        #: How many threads are inside a syscall on `_fd` right now.
+        self._fd_users = 0
+        #: An fd whose close is waiting for the last borrower to come out, else -1.
+        self._pending_close = -1
 
     @property
     def exit_status(self) -> int | None:
         """The child's wait status once reaped, else None."""
         return self._exit_status
 
+    @contextmanager
+    def _borrow_fd(self) -> Iterator[int]:
+        """Hold the master fd open for the duration of one syscall.
+
+        Yields the descriptor, or -1 once it has been released — which every
+        caller treats as "this terminal is over". While a borrow is out the
+        number cannot be closed, so it cannot be recycled onto another session
+        underneath a call that is already in flight.
+        """
+        with self._fd_lock:
+            fd = self._fd
+            if fd == -1:
+                borrowed = False
+            else:
+                self._fd_users += 1
+                borrowed = True
+        if not borrowed:
+            yield -1
+            return
+        try:
+            yield fd
+        finally:
+            self._release_borrow()
+
+    def _release_borrow(self) -> None:
+        """Give the fd back, and close it if this was the last user of a doomed one."""
+        with self._fd_lock:
+            self._fd_users -= 1
+            if self._fd_users or self._pending_close == -1:
+                return
+            fd, self._pending_close = self._pending_close, -1
+        self._close_now(fd)
+
     def read(self, length: int) -> str:
         """Block for the next chunk of output; `""` only at end of stream."""
-        while self._fd_open:
-            try:
-                raw = self._sys.read(self._fd, length)
-            except OSError:  # EIO on Linux once the slave side is gone
-                raw = b""
+        while True:
+            with self._borrow_fd() as fd:
+                if fd == -1:  # terminated from the loop thread while we were away
+                    return ""
+                try:
+                    raw = self._sys.read(fd, length)
+                except OSError:  # EIO on Linux once the slave side is gone
+                    raw = b""
             if not raw:
                 self._close_fd()
                 return self._decoder.decode(b"", final=True)
@@ -193,25 +271,35 @@ class PosixPty:
                 return text
             # Decoded to nothing: a multibyte character straddles this read and
             # the next. Returning "" here would be read as EOF — keep reading.
-        return ""
 
     def write(self, data: str) -> int:
+        """Send keystrokes; a write to an ended terminal is dropped, not an error.
+
+        The fd is borrowed for the whole short-write loop: a partial write must
+        finish on the descriptor it started on, not on whatever the number became
+        halfway through.
+        """
         payload = data.encode("utf-8")
         sent = 0
-        while sent < len(payload):
-            written = self._sys.write(self._fd, payload[sent:])
-            if written <= 0:  # pragma: no cover - os.write raises instead
-                break
-            sent += written
+        with self._borrow_fd() as fd:
+            if fd == -1:
+                log.debug("pty.posix_write_after_close", pid=self.pid)
+                return len(data)
+            while sent < len(payload):
+                written = self._sys.write(fd, payload[sent:])
+                if written <= 0:  # pragma: no cover - os.write raises instead
+                    break
+                sent += written
         return len(data)
 
     def setwinsize(self, rows: int, cols: int) -> None:
-        if not self._fd_open:
-            return
-        try:
-            self._sys.set_winsize(self._fd, rows, cols)
-        except OSError:
-            log.debug("pty.posix_resize_race", pid=self.pid)
+        with self._borrow_fd() as fd:
+            if fd == -1:
+                return
+            try:
+                self._sys.set_winsize(fd, rows, cols)
+            except OSError:
+                log.debug("pty.posix_resize_race", pid=self.pid)
 
     def isalive(self) -> bool:
         if self._exit_status is not None:
@@ -262,12 +350,33 @@ class PosixPty:
             delay = min(delay * 2, REAP_POLL_MAX_S)
 
     def _close_fd(self) -> None:
-        if not self._fd_open:
+        """Release the master fd, exactly once, from whichever thread gets here.
+
+        Both callers race for real: the reader thread arrives via EOF/EIO, the
+        event loop thread via `terminate`. The swap under the lock is the claim —
+        one thread leaves with the descriptor and every other leaves with -1 — so
+        the number is closed once and cannot be closed again after the OS has
+        handed it to somebody else.
+        """
+        with self._fd_lock:
+            fd, self._fd = self._fd, -1
+            if fd == -1:
+                return  # another thread already claimed it
+            # Somebody inside a syscall on this number would have it recycled
+            # under them by a close now; the last one out does it instead.
+            users = self._fd_users
+            if users:
+                self._pending_close = fd
+        if users:
+            log.debug("pty.posix_close_deferred", pid=self.pid, users=users)
             return
-        self._fd_open = False
+        self._close_now(fd)
+
+    def _close_now(self, fd: int) -> None:
+        """The actual syscall — never under `_fd_lock`, and never twice on one fd."""
         try:
-            self._sys.close(self._fd)
-        except OSError:  # pragma: no cover - already closed
+            self._sys.close(fd)
+        except OSError:  # pragma: no cover - the OS refused a descriptor we owned
             log.debug("pty.posix_close_race", pid=self.pid)
 
 
