@@ -70,12 +70,13 @@ import contextlib
 import hashlib
 import os
 import shutil
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 from pydantic import ValidationError
@@ -93,6 +94,10 @@ from workbench_server.models.gates import (
 from workbench_server.models.validation import EvidenceItem, EvidenceTruncation
 from workbench_server.services.validation import ValidationContext
 from workbench_server.services.worktrees import GIT_TIMEOUT_S, GitError, GitRunner, run_git
+
+if sys.platform == "win32":  # pragma: no cover - import-time platform split
+    import win32api
+    import win32job
 
 log = structlog.get_logger()
 
@@ -173,6 +178,19 @@ WORKSPACE_GATES_FILE = Path(".workbench") / "gates.json"
 #: prints continuously is bounded promptly, large enough not to be a syscall
 #: per line.
 _READ_CHUNK = 8_192
+
+#: Win32 access rights :func:`_contain` needs to put a gate process in a job and
+#: to end it. Spelled numerically rather than pulled from ``win32con`` so a
+#: Windows-only import of two integers does not have to happen on POSIX.
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
+
+#: How long :meth:`SubprocessGateRunner._reap` waits for a killed gate to be
+#: reaped before it lets the cancellation unwind. The tree kill frees the
+#: resource *synchronously*; this only bounds the ``proc.wait()`` that follows,
+#: so a stdout pipe a descendant somehow still holds open can never turn a single
+#: ordinary cancel into a hang up to the gate's own ceiling (1800 s for pytest).
+_REAP_WAIT_CEILING_S = 10.0
 
 #: Env the settings knob names, quoted in every refusal that it would fix.
 SETTING_GATES = "WORKBENCH_GATES"
@@ -273,6 +291,108 @@ class _BoundedCapture:
         )
 
 
+# ---- killing the whole tree, not the launcher ---------------------------------
+#
+# Every catalog entry is a *launcher*, never the tool: ``uv run pytest`` is
+# ``uv.exe`` spawning pytest as a child, and ``npm.cmd`` is ``cmd.exe`` spawning
+# node — Windows has no ``exec()`` to collapse the two into one process. So the
+# pid ``create_subprocess_exec`` hands back is the wrapper, and the process
+# actually holding the file locks, the DB connections and the stdout pipe is a
+# *grandchild* that ``proc.kill()`` (a bare ``TerminateProcess`` on that one pid)
+# never touches. This is #112's lesson — "signal the group, not the pid"
+# (``services/pty_posix.py``) — recurring one module over. The tree is contained
+# at spawn and killed as a unit: a Job Object on Windows (the ``office_com.py``
+# precedent), the child's own process group on POSIX.
+
+
+def _spawn_kwargs() -> dict[str, Any]:
+    """Spawn flags that make the gate's whole tree killable as one thing.
+
+    POSIX: ``start_new_session`` runs ``setsid()`` in the child, so the launcher
+    leads a fresh process group that everything it spawns inherits — one group id
+    to signal. Windows: nothing at spawn (there is no ``creationflags`` that a
+    launcher's grandchildren reliably inherit into a *group* we can name); the
+    process is put in a Job Object right after, by :func:`_contain`.
+    """
+    if sys.platform == "win32":
+        return {}
+    else:
+        return {"start_new_session": True}
+
+
+def _contain(pid: int) -> Any:
+    """Windows: put ``pid`` in a Job Object that its children join, and return the
+    job handle to kill it by. ``None`` off Windows, or when containment fails.
+
+    ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` is the same belt-and-suspenders
+    ``office_com.py`` uses: even if the server dies without unwinding, the OS
+    closing the job handle takes the whole gate tree with it rather than leaking a
+    pytest that runs for another half hour. A process created *before* it is
+    assigned keeps its existing children out of the job, but a gate is assigned in
+    the tick after ``create_subprocess_exec`` returns — long before a launcher has
+    finished starting the real tool — so the grandchildren land inside it.
+    """
+    if sys.platform != "win32":
+        return None
+    handle = None
+    try:
+        job = win32job.CreateJobObject(None, "")
+        info = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+        info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, info)
+        handle = win32api.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        win32job.AssignProcessToJobObject(job, handle)
+        return job
+    except Exception as error:
+        # Best-effort and loud: a gate with no job falls back to a single-pid kill,
+        # which is what master did for every gate — worse, but not silently so.
+        log.warning("gates.job_object_failed", pid=pid, detail=str(error))
+        return None
+    finally:
+        # The process handle was only needed to make the assignment; the job holds
+        # its own reference to the members.
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                handle.Close()
+
+
+def _kill_tree(proc: asyncio.subprocess.Process, job: Any) -> None:
+    """End the launcher *and everything it spawned*, synchronously.
+
+    Windows: terminate the Job Object, which fells every process in it at once.
+    POSIX: signal the child's process group — never our own (``getpgid(0)``; a
+    child that shares our group would mean ``setsid`` never happened, and the
+    kill would take uvicorn with it, the guard ``pty_posix.py`` makes explicit).
+    Either way the fallback for "no group/job" is the single-pid kill master had.
+    """
+    if sys.platform == "win32":
+        if job is not None:
+            with contextlib.suppress(Exception):
+                win32job.TerminateJobObject(job, 1)
+        else:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+    else:
+        import signal
+
+        with contextlib.suppress(ProcessLookupError, OSError):
+            group = os.getpgid(proc.pid)
+            if group != os.getpgid(0):
+                os.killpg(group, signal.SIGKILL)
+            else:
+                proc.kill()
+
+
+def _close_job(job: Any) -> None:
+    """Release the job handle. With kill-on-close set this fells any straggler
+    still inside it — a no-op once the gate finished on its own, cleanup when it
+    did not. Safe only after the launcher has exited or been killed."""
+    if job is None:
+        return
+    with contextlib.suppress(Exception):
+        job.Close()
+
+
 # ---- the runners -------------------------------------------------------------
 
 
@@ -307,19 +427,69 @@ class SubprocessGateRunner:
                 # that mattered.
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                # A new session on POSIX so the launcher leads a group its
+                # grandchildren join; the Windows Job Object is assigned just below.
+                **_spawn_kwargs(),
             )
         except OSError as err:
             capture.feed(f"could not start {command.argv[0]!r}: {err}".encode())
             return self._log(command, None, started, capture)
+        # Contain the tree the instant the launcher exists, before it has had time
+        # to start the real tool (see :func:`_contain`). ``_close_job`` in the
+        # ``finally`` is what makes the kill-on-close safety net deterministic
+        # rather than a GC-timed surprise, and it is safe there because every exit
+        # from the block below leaves the launcher either finished or killed first.
+        job = _contain(proc.pid)
         try:
-            await asyncio.wait_for(self._drain(proc, capture), command.timeout_s)
+            try:
+                await asyncio.wait_for(self._drain(proc, capture), command.timeout_s)
+            except TimeoutError:
+                await self._reap(proc, job)
+                capture.feed(f"\n[killed: no exit after {command.timeout_s:.0f}s]".encode())
+                return self._log(command, None, started, capture)
+            except BaseException:
+                # The wait was cut short abnormally — a cancellation unwinding
+                # through here: the connection behind ``POST /api/validation/run``
+                # dropped, the ASGI server disconnect-cancelled the handler, or
+                # lifespan teardown cancelled it (this coroutine can stay open the
+                # whole ``pytest`` ceiling — up to 30 minutes). ``wait_for`` has
+                # already cancelled and awaited the drain, so nothing is left
+                # reading the pipe; what remains is the whole gate *tree*, which is
+                # ours and must not outlive the coroutine that started it. Reap it
+                # — the launcher and every grandchild — then re-raise: a swallowed
+                # ``CancelledError`` would be a worse bug than the orphan it hides,
+                # so ``raise`` is not optional. This is the timeout path's
+                # discipline, extended to the one exit it did not cover.
+                await self._reap(proc, job)
+                raise
+            return self._log(command, proc.returncode, started, capture)
+        finally:
+            _close_job(job)
+
+    @staticmethod
+    async def _reap(proc: asyncio.subprocess.Process, job: Any) -> None:
+        """Kill the gate's whole tree and wait — bounded — for it to go. Both the
+        timeout path and the cancel path mean it is still running and unwanted.
+
+        :func:`_kill_tree` ends the launcher *and every process it spawned*
+        synchronously, before the first ``await`` here, so even a second
+        cancellation arriving mid-reap cannot leave the real tool — the pytest/
+        mypy grandchild a single-pid ``kill`` would never reach — running on.
+
+        The wait is bounded on purpose. The killed launcher's stdout ``PIPE`` is
+        inherited by that grandchild, and asyncio's Windows transport does not
+        resolve ``proc.wait()`` until every duplicate of the write handle closes;
+        killing the tree closes them, but the ceiling guarantees a handle that
+        somehow lingers can never turn this cancellation unwind into a stall up to
+        ``command.timeout_s`` — the "hang inside a ``finally``" this project's
+        ``terminate`` conventions (``pty_posix.py``) exist to avoid. A child that
+        already exited makes the kill a suppressed no-op and the wait return at once.
+        """
+        _kill_tree(proc, job)
+        try:
+            await asyncio.wait_for(proc.wait(), _REAP_WAIT_CEILING_S)
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
-            await proc.wait()
-            capture.feed(f"\n[killed: no exit after {command.timeout_s:.0f}s]".encode())
-            return self._log(command, None, started, capture)
-        return self._log(command, proc.returncode, started, capture)
+            log.warning("gates.reap_wait_timed_out", pid=proc.pid, ceiling_s=_REAP_WAIT_CEILING_S)
 
     @staticmethod
     async def _drain(proc: asyncio.subprocess.Process, capture: _BoundedCapture) -> None:
