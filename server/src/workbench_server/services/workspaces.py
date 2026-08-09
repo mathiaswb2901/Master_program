@@ -7,8 +7,9 @@ environment variable. This service makes the root a thing the app can change.
 **One root, one write.** Everything rooted in the workspace holds that root in
 one of two ways: it keeps the :class:`~workbench_server.services.workspace.Workspace`
 object (the routers, the office services), or it copied the path into a field of
-its own at construction (the watcher, layouts, shortcuts, provenance, sessions,
-the worktree pool). The first kind follows for free — re-pointing one object
+its own at construction (the watcher, layouts, shortcuts, provenance, validation,
+the fleet feed, sessions, the conversation browser, the worktree pool). The first
+kind follows for free — re-pointing one object
 re-roots every caller at once. The second kind each owe a ``set_workspace_root``,
 and :meth:`WorkspaceService.switch` calls **all** of them in one place. That list
 being in one function is the point: a service added later that copies the root

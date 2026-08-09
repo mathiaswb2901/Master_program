@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from workbench_server.models.evidence import EvidencePayload
 from workbench_server.models.gates import GateLog
 from workbench_server.models.reconciliation import ReconciliationReport
+from workbench_server.models.review import ReviewReport
 from workbench_server.models.validation import (
     ApproveRequest,
     EvidenceKind,
@@ -65,6 +66,8 @@ async def payload(request: Request, kind: EvidenceKind, ref: str) -> EvidencePay
         return EvidencePayload(kind=kind, ref=ref, reconciliation=found)
     if isinstance(found, GateLog):
         return EvidencePayload(kind=kind, ref=ref, gate_log=found)
+    if isinstance(found, ReviewReport):
+        return EvidencePayload(kind=kind, ref=ref, review=found)
     # A payload shape this build has no field for. Refused rather than returned
     # as an envelope with every field null, which a client can only read as
     # either "empty" or "broken" — the emptiness AXI shape 2 exists to forbid.
