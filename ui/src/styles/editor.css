@@ -241,3 +241,73 @@
   font-size: var(--type-md-size);
   color: var(--text-tertiary);
 }
+
+/* ---- MONACO, WEARING THE APP'S CHROME (DESIGN.md §2.8, §4, §5.6) ----------
+   The editor's *colour* lives in `ui/src/editorTheme.ts`: every slot Monaco
+   paints is resolved from a token in `design/tokens.css` at the moment the theme
+   is built, in both themes, and rebuilt on a live toggle. What is left over is the
+   part `defineTheme` has no slot for — geometry and elevation — and it is what
+   makes the difference between a themed editor and one that merely has the
+   right background.
+
+   Monaco's overlays are square boxes carrying a vendor drop shadow. §4 gives
+   anything that floats a radius and one of three shadow levels, and pairs every
+   shadow with a 1px border (a dark-mode shadow alone does not separate two
+   surfaces). The theme suppresses `widget.shadow` for exactly this reason, so
+   these rules are the whole elevation rather than a second one on top.
+
+   Selectors are class-based and therefore per-instance: two editor panes are
+   two `.monaco-editor` roots, and each dresses its own widgets. Nothing here
+   assumes there is one editor in the window. */
+
+.monaco-editor .find-widget,
+.monaco-editor .suggest-widget,
+.monaco-editor .suggest-details,
+.monaco-editor .monaco-hover,
+.monaco-editor .parameter-hints-widget,
+.monaco-editor .quick-input-widget,
+.monaco-menu-container {
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+
+/* The find widget hangs from the top edge of the buffer and slides down out of
+   it, so only its lower corners are ever off the edge — rounding all four makes
+   it look detached from the frame it is docked to. */
+.monaco-editor .find-widget {
+  border-top: none;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+/* Chrome inside the buffer is chrome: it reads in the UI face, not in the
+   editor's mono. Family only — Monaco lays these widgets out against fixed
+   pixel heights, and a size change here moves rows it has already measured. */
+.monaco-editor .find-widget,
+.monaco-editor .quick-input-widget,
+.monaco-menu-container {
+  font-family: var(--font-ui);
+}
+
+/* Inputs and their toggles take the app's control radius (§4). Monaco paints
+   them from `input.*` / `inputOption.*`, which the theme has already pointed at
+   `--surface-elevated` and the amber. */
+.monaco-editor .find-widget .monaco-inputbox,
+.monaco-editor .find-widget .monaco-findInput,
+.monaco-editor .quick-input-widget .monaco-inputbox {
+  border-radius: var(--radius-sm);
+}
+
+.monaco-editor .find-widget .monaco-custom-toggle {
+  border-radius: var(--radius-xs);
+}
+
+/* Reduced motion zeroes travel and keeps tint (§5.6). Monaco ships this same
+   override behind a `.monaco-workbench.reduce-motion` class the standalone
+   editor never wears, so the widget's 200 ms slide survives the setting unless
+   we say otherwise — and a panel sliding across the screen is exactly the
+   movement the preference is about. */
+@media (prefers-reduced-motion: reduce) {
+  .monaco-editor .find-widget {
+    transition-duration: 0s;
+  }
+}

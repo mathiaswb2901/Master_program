@@ -20,11 +20,16 @@
  * * **Loading is idempotent and shared.** `loadMonaco` memoizes its promise, so
  *   the idle-time prefetch and a user clicking a file in the same moment
  *   produce one download, not two.
+ * * **The palette is not here.** The ANVIL theme is ~14 kB of colour tables that
+ *   only an editor can use, so it lives in `./editorTheme` and is reached the
+ *   same way Monaco is — through the bundle. This module keeps the *decision*
+ *   (when to define, and under which name) and takes the builder off the chunk
+ *   as it lands.
  */
 
 import type * as Monaco from "monaco-editor";
 
-import { cssVar, documentTheme, hexVar, toHex, type Theme } from "./theme";
+import { documentTheme, type Theme } from "./theme";
 
 export const MONO_FONT =
   "'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace";
@@ -33,6 +38,17 @@ export const MONO_FONT =
 let api: typeof Monaco | null = null;
 /** In-flight (or settled) load, so concurrent callers share one import. */
 let loading: Promise<typeof Monaco> | null = null;
+/**
+ * The theme builder, taken off the bundle when the chunk lands.
+ *
+ * A captured reference rather than an import, so the ~7 kB of colour tables in
+ * `./editorTheme` ride the editor's chunk instead of the entry one — this module
+ * *is* on the launch path (`store.ts` imports it for `setModelContent`), so an
+ * import here would be an import from `main.tsx` by one more hop
+ * (`ui/e2e/perf/bundle.spec.ts`). The type is `typeof import(…)`, which the
+ * compiler erases; nothing in this file names the module at runtime.
+ */
+let buildTheme: typeof import("./editorTheme").workbenchThemeData | null = null;
 
 /**
  * Load Monaco, configure it, and define the theme. Safe to call from anywhere,
@@ -57,6 +73,7 @@ let loading: Promise<typeof Monaco> | null = null;
 export async function loadMonaco(): Promise<typeof Monaco> {
   loading ??= import("./monacoBundle").then((bundle) => {
     api = bundle.configureBundle();
+    buildTheme = bundle.workbenchThemeData;
     defineWorkbenchTheme(documentTheme());
     return api;
   });
@@ -91,62 +108,22 @@ export function monacoThemeName(theme: Theme): string {
 
 /**
  * (Re)build the Monaco theme from the CURRENT computed tokens. Call after the
- * data-theme attribute changes so both themes are defined from live values.
- * Chrome colors per DESIGN.md §2.8; syntax colors from the ANSI palette.
+ * `data-theme` attribute changes so both themes are defined from live values —
+ * `store.setTheme` does, in that order.
+ *
+ * Monaco re-applies a theme that is redefined under the name it is already
+ * showing, and `<Editor theme=…>` asks for the other name on the render that
+ * follows, so **every** editor in the window turns over on one toggle: the theme
+ * lives on Monaco's global theme service, not on an instance. Two panes on two
+ * files repaint together, and neither has to know the other exists.
  *
  * A no-op before the editor is loaded, and safely so: `loadMonaco` defines
  * whatever theme is current at the moment it finishes, so a toggle that landed
  * inside the load window is picked up there rather than lost here.
  */
 export function defineWorkbenchTheme(theme: Theme): void {
-  if (api === null) return;
-  const rule = (token: string, varName: string): Monaco.editor.ITokenThemeRule => ({
-    token,
-    foreground: hexVar(varName).slice(1),
-  });
-  api.editor.defineTheme(monacoThemeName(theme), {
-    base: theme === "dark" ? "vs-dark" : "vs",
-    inherit: true,
-    rules: [
-      rule("comment", "--ansi-bright-black"),
-      rule("string", "--ansi-green"),
-      rule("string.escape", "--ansi-bright-green"),
-      rule("number", "--ansi-yellow"),
-      rule("keyword", "--ansi-magenta"),
-      rule("operator", "--ansi-cyan"),
-      rule("type", "--ansi-cyan"),
-      rule("type.identifier", "--ansi-cyan"),
-      rule("namespace", "--ansi-cyan"),
-      rule("function", "--ansi-blue"),
-      rule("regexp", "--ansi-cyan"),
-      rule("tag", "--ansi-red"),
-      rule("attribute.name", "--ansi-blue"),
-      rule("attribute.value", "--ansi-green"),
-    ],
-    colors: {
-      // The buffer is a content well, not panel chrome: `--surface-code` is one
-      // full step below `--surface-panel` on ANVIL's ramp (DESIGN.md §2.1), so
-      // the code sits *in* the panel instead of level with the tree beside it.
-      "editor.background": toHex(cssVar("--surface-code")),
-      "editor.foreground": toHex(cssVar("--text-primary")),
-      "editor.lineHighlightBackground": toHex(cssVar("--surface-hover")),
-      "editor.selectionBackground": toHex(cssVar("--surface-selected")),
-      "editor.inactiveSelectionBackground": toHex(cssVar("--surface-hover")),
-      "editorLineNumber.foreground": toHex(cssVar("--text-tertiary")),
-      "editorLineNumber.activeForeground": toHex(cssVar("--text-secondary")),
-      "editorCursor.foreground": toHex(cssVar("--accent")),
-      "editorGutter.background": toHex(cssVar("--surface-code")),
-      "editorWidget.background": toHex(cssVar("--surface-overlay")),
-      "editorWidget.border": toHex(cssVar("--border-default")),
-      "editorSuggestWidget.selectedBackground": toHex(cssVar("--surface-selected")),
-      "editorIndentGuide.background1": toHex(cssVar("--border-subtle")),
-      "scrollbarSlider.background": hexVar("--border-strong") + "88",
-      "scrollbarSlider.hoverBackground": hexVar("--border-strong") + "BB",
-      "scrollbarSlider.activeBackground": hexVar("--border-strong"),
-      "editorOverviewRuler.border": toHex(cssVar("--surface-code")),
-      focusBorder: toHex(cssVar("--focus-ring")),
-    },
-  });
+  if (api === null || buildTheme === null) return;
+  api.editor.defineTheme(monacoThemeName(theme), buildTheme(theme));
 }
 
 // ---- model helpers ----------------------------------------------------------
