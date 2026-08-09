@@ -1131,6 +1131,18 @@ class TestTheArgvIsFixedAndServerOwned:
 LOCAL_ARGV = (sys.executable, "-m", "workbench_server.spec_entry")
 
 
+def _alive(proc: asyncio.subprocess.Process) -> bool:
+    """Is this child still running?
+
+    A function rather than an inline ``proc.returncode is None`` because the
+    inline form is the *same expression* before and after the kill, and narrowing
+    it once pins it: ``assert ... is None`` teaches mypy the attribute is ``None``
+    and nothing in between un-teaches it, so the later "it died" assertion reads
+    as unreachable. Asking through a call keeps each answer its own.
+    """
+    return proc.returncode is None
+
+
 class TestTheRealSubprocess:
     """What a fake cannot prove: that a hung process is killed, that a callable's
     ``print`` lands on the right pipe, and that ``sys.modules`` really answers."""
@@ -1354,13 +1366,13 @@ callable = "slow:value"
                 if spawned:
                     break
             assert spawned, "the watcher never spawned a run to interrupt"
-            assert spawned[0].returncode is None, "the child finished before it could be killed"
+            assert _alive(spawned[0]), "the child finished before it could be killed"
 
             await service.stop()
 
             # Dead and reaped. Before the fix this assertion failed with the
             # child still sleeping out its two minutes in the user's folder.
-            assert spawned[0].returncode is not None
+            assert not _alive(spawned[0])
             assert service._running == set()
 
         asyncio.run(scenario())
