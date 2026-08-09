@@ -14,8 +14,9 @@ made somewhere else in the repo:
 """
 
 import json
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+import threading
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from workbench_server.models.settings import (
     MAX_FILE_BYTES,
     SETTINGS_VERSION,
     SettingsFile,
+    ThemeChoice,
     WorkbenchSettings,
 )
 from workbench_server.services.office_host import OfficeHostService
@@ -353,6 +355,162 @@ async def test_off_configured_without_the_variable_names_no_variable(
         caps = (await client.get("/api/office/capabilities")).json()
     assert "WORKBENCH_OFFICE_NATIVE" not in caps["detail"]
     assert "outside the app" in caps["detail"]
+
+
+# ---- one read per answer: a state() can never be half of two documents ------
+#
+# `state()` used to read `settings.json` twice — once for `stored`, and again
+# through `effective()` -> `stored()` -> `load()`. A PUT landing between the two
+# reads produced a `SettingsState` whose `stored` came from one version of the
+# document and whose `effective` came from the next: a torn answer the panel
+# renders as "the value is A, and A is not what is in force", which is exactly
+# the sentence reserved for a real override. Nothing about it is recoverable
+# from the client side, so it is fixed where the read happens.
+
+
+def _reads(service: SettingsService, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Count `load()` calls, returning a *different* document each time.
+
+    The concurrency, made deterministic: every read sees a newer file than the
+    last, which is what a PUT landing mid-answer looks like from in here. A
+    method that reads once cannot notice; one that reads twice tears.
+    """
+    seen: list[str] = []
+    themes: tuple[ThemeChoice, ...] = ("light", "dark", "system")
+
+    def changing(_self: SettingsService) -> tuple[WorkbenchSettings, str | None]:
+        theme = themes[min(len(seen), len(themes) - 1)]
+        seen.append(theme)
+        return WorkbenchSettings(theme=theme), None
+
+    # Patched *after* construction: `__init__` captures the launch values, and
+    # that read is not the one under test.
+    monkeypatch.setattr(SettingsService, "load", changing)
+    assert service is not None
+    return seen
+
+
+def test_state_reads_the_document_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path)
+    seen = _reads(service, monkeypatch)
+    service.state()
+    assert seen == ["light"], "one answer, one read of the file"
+
+
+def test_state_is_never_torn_between_two_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    _reads(service, monkeypatch)
+    state = service.state()
+    # Nothing is configured from outside, so "in force" *is* "stored". Any
+    # difference here is two documents wearing one answer.
+    assert state.stored == state.effective
+    assert state.overrides == []
+
+
+def test_a_torn_read_cannot_hide_behind_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With a real override in play, `effective` legitimately differs — but only
+    # in the overridden key. Every other field must still come from the same
+    # read as `stored`.
+    service = _service(tmp_path, config=ProcessConfig(office_native="off"))
+    _reads(service, monkeypatch)
+    state = service.state()
+    assert state.effective.office_native == "off"
+    assert state.effective.theme == state.stored.theme
+    assert state.effective.voice_input == state.stored.voice_input
+
+
+def test_save_reads_the_document_once_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PUT answers with `state()`, so it inherited the same shape. One read after
+    # the write, not two.
+    service = _service(tmp_path)
+    seen = _reads(service, monkeypatch)
+    saved = service.save(WorkbenchSettings(theme="dark"))
+    assert seen == ["light"]
+    assert saved.stored == saved.effective
+
+
+@contextmanager
+def _a_thread_writing(service: SettingsService) -> Iterator[None]:
+    """A background thread saving alternating documents for the duration.
+
+    The interleaving the two tests below need — a PUT landing while a read is
+    being assembled — with no monkeypatching: real threads, a real file, a real
+    ``os.replace``. A transient Windows lock the *writer* cannot get past is not
+    what either test is about, so it is suppressed here rather than in each.
+    """
+    stop = threading.Event()
+
+    def writer() -> None:
+        flip = (WorkbenchSettings(theme="light"), WorkbenchSettings(theme="dark"))
+        turn = 0
+        while not stop.is_set():
+            with suppress(OSError):
+                service.save(flip[turn % 2])
+            turn += 1
+
+    hand = threading.Thread(target=writer, daemon=True)
+    hand.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        hand.join(timeout=10)
+
+
+def test_a_read_is_consistent_while_another_thread_writes(tmp_path: Path) -> None:
+    # The unpatched reproduction. Slower and less surgical than the tests above,
+    # and kept because it is the only one that exercises the real interleaving
+    # rather than a model of it.
+    service = _service(tmp_path)
+    service.save(WorkbenchSettings(theme="light"))
+    failures: list[str] = []
+    with _a_thread_writing(service):
+        for _ in range(300):
+            state = service.state()
+            if state.stored != state.effective:
+                failures.append(f"stored={state.stored.theme} effective={state.effective.theme}")
+    assert failures == [], f"{len(failures)} torn reads"
+
+
+def test_a_read_during_a_write_does_not_call_the_document_unreadable(tmp_path: Path) -> None:
+    """Found by the test above, and worse than what it was looking for.
+
+    On Windows a read landing inside another thread's ``os.replace`` fails with
+    a sharing violation, which `load` used to report as
+    ``settings.json: unreadable: Permission denied`` — defaults in force, every
+    control snapped back, and a sentence telling the user their settings file is
+    broken. It is not: it is being replaced, and it is readable microseconds
+    later. Two quick clicks in the panel is all it takes.
+    """
+    service = _service(tmp_path)
+    service.save(WorkbenchSettings(theme="light"))
+    problems: list[str] = []
+    with _a_thread_writing(service):
+        for _ in range(300):
+            problem = service.state().problem
+            if problem is not None:
+                problems.append(problem)
+    assert problems == [], f"{len(problems)} spurious complaints, e.g. {problems[:1]}"
+
+
+def test_a_genuinely_unreadable_document_is_still_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The retry must not swallow a real one. A lock that never clears is still
+    # the defaults plus a sentence — it just costs a few milliseconds first.
+    _write(tmp_path, SettingsFile().model_dump_json())
+
+    def denied(*_args: object, **_kwargs: object) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    state = _service(tmp_path).state()
+    assert state.stored == WorkbenchSettings()
+    assert state.problem is not None and "unreadable" in state.problem
 
 
 def test_the_source_of_a_setting_is_only_ever_stored_when_nothing_configured(
