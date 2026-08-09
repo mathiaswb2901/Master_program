@@ -640,6 +640,10 @@ describe("the registered tools", () => {
       "Alt+K": "keys.open",
       // The universal find-in-files chord (`panels/Search.tsx`).
       "Ctrl+Shift+F": "search.open",
+      // The universal settings chord (`settings.ts`). Not an `Alt` chord, so
+      // unlike the ones above it takes nothing out of a user's `shortcuts.md`,
+      // which may bind `Alt` and nothing else.
+      "Ctrl+,": "settings.open",
       "Ctrl+1": "panel.files",
       "Ctrl+2": "panel.editors",
       "Ctrl+3": "panel.agent",
@@ -670,6 +674,7 @@ describe("the registered tools", () => {
       "objective",
       "visual",
       "setup",
+      "settings",
       "keys",
     ]);
   });
