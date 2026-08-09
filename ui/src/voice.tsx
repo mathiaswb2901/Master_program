@@ -169,14 +169,17 @@ interface Gesture {
   base: string;
   /** The exact string this gesture last set into the composer. The witness that
    * lets {@link healBase} tell "the human typed" (`draft !== written`) from "the
-   * draft is still ours to overwrite". */
+   * draft is still ours to overwrite", and the base {@link recoverBase} diffs the
+   * live draft against to locate the edit structurally. */
   written: string;
   capture: VoiceCapture | null;
   voiceId: string | null;
   sequence: number;
   /** The transcript so far, as the last chunk response reported it — also the
-   * exact interim suffix this gesture contributed to {@link written}, which
-   * {@link healBase} strips when recovering the human's text. */
+   * exact interim suffix this gesture contributed to {@link written}. Its
+   * *length* is the boundary {@link recoverBase} uses to keep the human's base
+   * apart from this gesture's own words; it is never matched as a trailing
+   * substring, so a hand-typed word equal to it is not mistaken for it. */
   interim: string;
   /** A release that beat the server's answer, remembered until it can be acted on. */
   pendingRelease: "stop" | "cancel" | null;
@@ -195,16 +198,61 @@ export function joinDraft(base: string, spoken: string): string {
   return `${base.replace(/\s+$/, "")} ${spoken}`;
 }
 
-/** Recover the human's text from a draft this gesture last wrote as
- * `joinDraft(base, interim)`. The interim is the suffix {@link joinDraft}
- * appended, so removing a trailing occurrence of it (and the single space that
- * joined it) leaves the base the human is really editing. If the interim is no
- * longer a clean suffix — the human typed *into* the spoken tail — nothing is
- * stripped and the whole live draft becomes the base: at worst a spoken word is
- * duplicated for the human to trim, never their own text discarded. */
-export function stripInterim(live: string, interim: string): string {
-  if (interim === "" || !live.endsWith(interim)) return live;
-  return live.slice(0, live.length - interim.length).replace(/\s+$/, "");
+/**
+ * Recover the human's text from a draft this gesture last wrote as `written`,
+ * whose final `interim.length` characters were this gesture's own spoken interim.
+ *
+ * **Loss-free by construction — a character the human typed is never discarded**;
+ * at worst a spoken word is duplicated for them to trim. That is the promise, and
+ * it is why this is a structural diff against `written` (common prefix and
+ * suffix) rather than a `live.endsWith(interim)` match: a hand-typed word that
+ * merely *equals* the interim (they type "hello" the moment the ASR also guesses
+ * "hello") must not be read as the interim and stripped out from under them.
+ *
+ * The boundary between the human's base and this gesture's interim is
+ * `boundary = written.length - interim.length`. There are exactly three cases,
+ * and the interim is removed only in the two where doing so is *provably* safe:
+ *
+ *  1. **The base region is untouched** (`prefix >= boundary`): the first
+ *     `boundary` characters of `live` and `written` are identical, so the human
+ *     edited only the spoken tail — which the next interim rewrites regardless.
+ *     Keep the base exactly.
+ *  2. **A pure insertion into the base** (`prefix + suffix === written.length`,
+ *     so nothing of `written` was deleted): all of `written` survives in `live`,
+ *     which means the interim is still intact at `live`'s tail. Strip exactly it.
+ *  3. **Anything else** — the human deleted or replaced part of what this gesture
+ *     wrote, so the surviving tail *could* be their own coincidental text rather
+ *     than the interim. Keep the whole draft: duplication, never loss. The
+ *     no-base case (`boundary <= 0`, the interim is the whole of what was
+ *     written) falls here too — there is nothing to anchor a strip to.
+ */
+export function recoverBase(live: string, written: string, interim: string): string {
+  const boundary = written.length - interim.length;
+
+  let prefix = 0;
+  const maxPrefix = Math.min(written.length, live.length);
+  while (prefix < maxPrefix && written[prefix] === live[prefix]) prefix += 1;
+  if (boundary > 0 && prefix >= boundary) {
+    // Case 1: base region byte-identical; drop the (soon-rewritten) spoken tail.
+    return written.slice(0, boundary).replace(/\s+$/, "");
+  }
+
+  let suffix = 0;
+  const maxSuffix = Math.min(written.length - prefix, live.length - prefix);
+  while (
+    suffix < maxSuffix &&
+    written[written.length - 1 - suffix] === live[live.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  if (boundary > 0 && prefix + suffix === written.length) {
+    // Case 2: nothing of `written` was removed, so its interim suffix is still at
+    // `live`'s tail. The insertion sits in the base region (prefix < boundary).
+    return live.slice(0, live.length - interim.length).replace(/\s+$/, "");
+  }
+
+  // Case 3: cannot prove the tail is ours — keep every character the human has.
+  return live;
 }
 
 function handleFor(target: string): ComposerHandle | null {
@@ -224,7 +272,7 @@ function handleFor(target: string): ComposerHandle | null {
 function healBase(mine: Gesture): void {
   const live = handleFor(mine.target)?.draft;
   if (live !== undefined && live !== mine.written) {
-    mine.base = stripInterim(live, mine.interim);
+    mine.base = recoverBase(live, mine.written, mine.interim);
   }
 }
 

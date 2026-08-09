@@ -540,6 +540,20 @@ class VoiceService:
             # As in `feed`: the utterance settles and the caller gets a 502.
             await self._fail(voice_id)
             raise VoiceBackendError(str(exc) or type(exc).__name__) from exc
+        except BaseException:
+            # Cancelled from outside — the ASGI layer drops the request task when
+            # the client disconnects mid-`/stop` (a closed laptop, a dropped
+            # connection, a pane forced shut while the release is in flight).
+            # `CancelledError` is a `BaseException`, so neither handler above runs;
+            # without this the session would sit `transcribing` forever, leaking
+            # one of MAX_ACTIVE_SESSIONS with no code path left to free it. Free
+            # the slot synchronously (awaiting the backend's discard here would
+            # just re-raise the cancellation) and re-raise — a cancellation is not
+            # ours to swallow. The backend's own buffer is bounded by its ceiling,
+            # and `_reap`'s transcribing cutoff is the backstop if even this is
+            # skipped.
+            self._sessions.pop(voice_id, None)
+            raise
         # Terminal: the utterance is done and its slot is freed. The transcript
         # is the answer to this call and is held nowhere — what the user said is
         # theirs, and it lives in their composer, not in a server-side history.
@@ -631,20 +645,34 @@ class VoiceService:
         backend's own buffer for a dead id is bounded by the same ceiling and is
         dropped when it next sees the id, or when the process ends.
 
-        **Only a still-recording utterance can be abandoned.** A held key nobody
-        released stays ``recording`` and is exactly what this reaps. One that is
-        already ``transcribing`` has been released and the backend is finishing
-        it, bounded by :data:`STOP_TIMEOUT_S` — reaping *that* would delete a live
-        utterance out from under :meth:`stop`, which is the real failure a long
-        dictation hits: released near :data:`MAX_UTTERANCE_S`, its ``started_at``
-        is already past this cutoff while the model is still running, so a second
-        client's start would reap it, defeat the cap the long utterance is meant
-        to enjoy, and 404 an honest retry. The transcribing slot is freed the
-        moment ``stop`` returns or its ceiling fires, so sparing it here leaks
-        nothing.
+        **A still-recording utterance is abandoned past a short grace.** A held
+        key nobody released stays ``recording`` and is exactly what this reaps.
+
+        **A transcribing utterance is spared far longer, but not forever.** One
+        that is ``transcribing`` has been released and the backend is finishing
+        it, normally bounded by :data:`STOP_TIMEOUT_S`; reaping it on the
+        *recording* cutoff would delete a live utterance out from under
+        :meth:`stop`, the real failure a long dictation hits — released near
+        :data:`MAX_UTTERANCE_S`, its ``started_at`` is already past that cutoff
+        while the model still runs, so a second client's start would reap it,
+        defeat the cap it is meant to enjoy, and 404 an honest retry. But
+        ``transcribing`` is not exempt without bound: if the task running
+        :meth:`stop` is torn down without freeing the slot — the ASGI layer
+        cancelling the request on a client disconnect, an event loop killed
+        mid-await — nothing else would ever release it, and one leaked slot per
+        dropped connection eventually 429-locks the one microphone. So it too is
+        reaped, on its own generous cutoff: a full-length utterance
+        (:data:`MAX_UTTERANCE_S`) plus the whole stop ceiling
+        (:data:`STOP_TIMEOUT_S`) plus the grace. An honest ``stop`` always
+        finishes inside that window; only a leak outlives it.
         """
-        cutoff = time.time() - (MAX_UTTERANCE_S + ABANDON_GRACE_S)
+        now = time.time()
+        recording_cutoff = now - (MAX_UTTERANCE_S + ABANDON_GRACE_S)
+        transcribing_cutoff = now - (MAX_UTTERANCE_S + STOP_TIMEOUT_S + ABANDON_GRACE_S)
         for voice_id, session in list(self._sessions.items()):
-            if session.state == "recording" and session.started_at < cutoff:
+            if session.state == "recording" and session.started_at < recording_cutoff:
                 log.warning("voice.abandoned", voice_id=voice_id)
+                del self._sessions[voice_id]
+            elif session.state == "transcribing" and session.started_at < transcribing_cutoff:
+                log.warning("voice.abandoned_transcribing", voice_id=voice_id)
                 del self._sessions[voice_id]
