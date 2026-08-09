@@ -19,10 +19,11 @@ import errno
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import FrameType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -34,18 +35,29 @@ from workbench_server.services.pty_posix import PosixPty, PosixSyscalls, _Stdlib
 class FakePosix:
     """A `PosixSyscalls` over an in-memory script — no fork, no fd, no OS."""
 
+    #: What `getpgid(0)` answers: the server's own group, which nothing here may
+    #: ever signal. Deliberately unlike any pid a test uses.
+    OUR_GROUP = 111
+
     def __init__(self, reads: list[bytes | OSError] | None = None, pid: int = 4242) -> None:
         self._reads = list(reads or [])
         self.pid = pid
         self.written: list[bytes] = []
         self.sizes: list[tuple[int, int]] = []
         self.signals: list[bool] = []
+        self.groups: list[tuple[int, bool]] = []
         self.closed = 0
         self.reaps = 0
         self.slept: list[float] = []
         self.exit_status: int | None = None
         self.write_limit: int | None = None
         self.forked: tuple[list[str], Path, dict[str, str]] | None = None
+        #: The child's own group. `pty.fork()` calls setsid(), so a healthy child
+        #: is its own session and group leader — hence pgid == pid.
+        self.child_group: int | None = pid
+        #: What the tty says is in the foreground. `None` is a kernel that
+        #: refuses the ioctl; the default is "the shell itself", i.e. no job.
+        self.foreground: int | None = pid
 
     # -- the protocol ---------------------------------------------------------
     def fork_pty(self, argv: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, int]:
@@ -74,6 +86,23 @@ class FakePosix:
     def kill(self, pid: int, *, force: bool) -> None:
         self.signals.append(force)
         self.exit_status = 9 if force else None
+
+    def killpg(self, pgid: int, *, force: bool) -> None:
+        self.groups.append((pgid, force))
+        # Same effect on the child as the pid path: it is inside the group.
+        self.exit_status = 9 if force else None
+
+    def getpgid(self, pid: int) -> int:
+        if pid == 0:
+            return self.OUR_GROUP
+        if self.child_group is None:
+            raise ProcessLookupError(errno.ESRCH, "No such process")
+        return self.child_group
+
+    def foreground_pgid(self, fd: int) -> int:
+        if self.foreground is None:
+            raise OSError(errno.ENOTTY, "Inappropriate ioctl for device")
+        return self.foreground
 
     def reap(self, pid: int) -> int | None:
         self.reaps += 1
@@ -144,7 +173,7 @@ class TestTheSeam:
         assert manager._sessions == {session.session_id: session}
         manager.shutdown()
         assert manager._sessions == {}
-        assert fake.signals == [True]  # force-killed, as on Windows
+        assert fake.groups == [(fake.pid, True)]  # force-killed, as on Windows
 
 
 class TestPosixSpawn:
@@ -216,6 +245,20 @@ class RealFdSyscalls(_StdlibSyscalls):
 
     def kill(self, pid: int, *, force: bool) -> None: ...
 
+    def killpg(self, pgid: int, *, force: bool) -> None: ...
+
+    def getpgid(self, pid: int) -> int:
+        """A group that is emphatically not the test runner's.
+
+        These tests pass `os.getpid()` as the child, so the real `getpgid` would
+        answer with *our* group — which `terminate` refuses to signal, sending
+        every one of them down the fallback path instead of the one under test.
+        """
+        return 4242 if pid else 111
+
+    def foreground_pgid(self, fd: int) -> int:
+        raise OSError(errno.ENOTTY, "a pipe has no foreground process group")
+
     def reap(self, pid: int) -> int | None:
         return None
 
@@ -280,7 +323,8 @@ class TestPosixLifecycle:
         fake = FakePosix()
         proc = posix_pty(fake)
         assert proc.terminate(force=True)
-        assert fake.signals == [True]
+        assert fake.groups == [(fake.pid, True)]  # the group, not the bare pid
+        assert fake.signals == []
         assert fake.slept == []  # a dead child is reapable on the first poll
         assert fake.closed == 1
         assert proc.exit_status == 9
@@ -289,7 +333,7 @@ class TestPosixLifecycle:
         fake = FakePosix()
         proc = posix_pty(fake)
         proc.terminate()
-        assert fake.signals == [False]
+        assert fake.groups == [(fake.pid, False)]
         assert fake.slept == []  # SIGHUP can be ignored — never wait on it
 
     def test_terminating_an_exited_child_signals_nothing(self) -> None:
@@ -298,6 +342,7 @@ class TestPosixLifecycle:
         proc = posix_pty(fake)
         assert proc.terminate(force=True)
         assert fake.signals == []
+        assert fake.groups == []
         assert fake.closed == 1
 
     def test_a_terminate_race_still_reaps_the_child(self) -> None:
@@ -305,19 +350,164 @@ class TestPosixLifecycle:
 
         Nothing will ever signal it again and the manager has already dropped
         the session, so if `terminate` skips the reap here the child stays a
-        zombie for the life of the server.
+        zombie for the life of the server. Both signalling paths have to fail
+        for that to be the diagnosis: a group that is gone is exactly the case
+        that falls back to the pid, and it is the pid's `ESRCH` that means
+        "already exited" rather than "wrong target".
         """
 
         class Racing(FakePosix):
+            def killpg(self, pgid: int, *, force: bool) -> None:
+                raise ProcessLookupError(errno.ESRCH, "No such process")
+
             def kill(self, pid: int, *, force: bool) -> None:
                 self.exit_status = 0  # it is gone; that is why the signal failed
-                raise ProcessLookupError(3, "No such process")
+                raise ProcessLookupError(errno.ESRCH, "No such process")
 
         fake = Racing()
         proc = posix_pty(fake)
         assert proc.terminate(force=True)
         assert fake.reaps >= 2  # the isalive() probe, then the one that waits on it
         assert proc.exit_status == 0
+        assert fake.closed == 1
+
+
+class TestTerminateSignalsTheGroupNotThePid:
+    """Who gets the signal — the half a fake can prove on any OS.
+
+    `TestAJobDoesNotOutliveItsTerminal` (bottom of this file) proves the kernel
+    end of it on the POSIX legs. These pin the decisions: which groups are
+    chosen, which are refused, and what happens when the kernel says no.
+    """
+
+    def test_the_running_jobs_group_is_signalled_as_well_as_the_shells(self) -> None:
+        """Job control puts the command in a group of its own.
+
+        An interactive shell starts every job in a new process group, so the
+        shell's own group holds nothing but the shell: kill it and the build the
+        user was running is untouched. The group the *terminal* is pointed at is
+        the one that has it.
+        """
+        fake = FakePosix()
+        fake.foreground = 5555  # `make` and its children, in a group of their own
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        # The job first: the shell's death would otherwise be free to release
+        # that pgid before we reach it.
+        assert fake.groups == [(5555, True), (fake.pid, True)]
+        assert fake.signals == []
+
+    def test_one_group_is_signalled_once_when_the_shell_is_the_foreground(self) -> None:
+        """At a prompt — or with job control off — both names are one group."""
+        fake = FakePosix()
+        fake.foreground = fake.pid
+        proc = posix_pty(fake)
+        proc.terminate(force=True)
+        assert fake.groups == [(fake.pid, True)]
+
+    def test_a_kernel_that_will_not_name_the_foreground_group_still_kills_the_shell(
+        self,
+    ) -> None:
+        fake = FakePosix()
+        fake.foreground = None  # the ioctl raised; nothing to fall back *to*
+        proc = posix_pty(fake)
+        proc.terminate(force=True)
+        assert fake.groups == [(fake.pid, True)]
+
+    def test_our_own_process_group_is_never_signalled(self) -> None:
+        """The one mistake that would kill the server instead of the terminal.
+
+        A child sharing our group means `pty.fork()` did not `setsid()` — the
+        group SIGKILL would land on uvicorn, this process and every other
+        terminal. Refuse the group, signal the pid, and say so in the log.
+        """
+        fake = FakePosix()
+        fake.child_group = FakePosix.OUR_GROUP
+        fake.foreground = FakePosix.OUR_GROUP
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert fake.groups == []
+        assert fake.signals == [True]  # the pid path, which can only hit the child
+
+    def test_a_group_that_cannot_be_looked_up_falls_back_to_the_pid(self) -> None:
+        fake = FakePosix()
+        fake.child_group = None  # getpgid raised ESRCH
+        fake.foreground = None
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert fake.groups == []
+        assert fake.signals == [True]
+
+    @pytest.mark.parametrize("refusal", [errno.ESRCH, errno.EPERM])
+    def test_a_refused_group_signal_falls_back_to_the_pid_and_never_raises(
+        self, refusal: int
+    ) -> None:
+        """ESRCH: the group is already gone. EPERM: it is not ours to signal.
+
+        Either way the child itself may still be alive, and `terminate` owes the
+        caller a dead child — so the pid path runs. Neither error escapes:
+        `routers/terminal.py` calls this from a `finally:`.
+        """
+
+        class Refusing(FakePosix):
+            def killpg(self, pgid: int, *, force: bool) -> None:
+                self.groups.append((pgid, force))
+                raise OSError(refusal, os.strerror(refusal))
+
+        fake = Refusing()
+        fake.foreground = 5555
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert fake.groups == [(5555, True), (fake.pid, True)]  # both were tried
+        assert fake.signals == [True]  # and the child was still signalled
+        assert fake.closed == 1
+
+    def test_a_refused_job_group_does_not_cost_the_shell_its_group_kill(self) -> None:
+        """Only the job's group is gone (it finished); the shell's is intact."""
+
+        class JobGone(FakePosix):
+            def killpg(self, pgid: int, *, force: bool) -> None:
+                if pgid != self.pid:
+                    raise ProcessLookupError(errno.ESRCH, "No such process")
+                super().killpg(pgid, force=force)
+
+        fake = JobGone()
+        fake.foreground = 5555
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert fake.groups == [(fake.pid, True)]  # the shell's, delivered
+        assert fake.signals == []  # so no pid fallback was needed
+
+    def test_the_foreground_group_is_not_read_from_a_released_fd(self) -> None:
+        """The ioctl needs the master, and the master has one owner (#110).
+
+        A terminate that arrives after the reader hit EOF has no fd to ask, and
+        asking anyway would put a `TIOCGPGRP` on whatever the number has since
+        become. The shell's own group does not depend on the fd, so that half
+        still runs.
+        """
+        fake = FakePosix([b""])
+        fake.foreground = 5555
+        proc = posix_pty(fake)
+        assert proc.read(4096) == ""  # EOF: the reader closed the master
+        assert fake.closed == 1
+        proc.terminate(force=True)
+        assert fake.groups == [(fake.pid, True)]
+
+    def test_the_reap_ladder_is_unchanged_by_the_group_signal(self) -> None:
+        """A group SIGKILL is still bounded, and still never blocks the loop."""
+
+        class Wedged(FakePosix):
+            def reap(self, pid: int) -> int | None:
+                self.reaps += 1
+                return None
+
+        fake = Wedged()
+        fake.foreground = 5555
+        proc = posix_pty(fake)
+        assert proc.terminate(force=True)
+        assert sum(fake.slept) <= pty_posix.REAP_TIMEOUT_S + pty_posix.REAP_POLL_MAX_S
+        assert [(fake.pid, fake)] == pty_posix._UNREAPED
         assert fake.closed == 1
 
 
@@ -703,3 +893,205 @@ class TestAWedgedChildCannotFreezeTheServer:
         monkeypatch.setenv("SHELL", "/bin/sh")
         pty_posix.spawn(Path.cwd(), syscalls=FakePosix())
         assert pty_posix._UNREAPED == []
+
+
+# --- the real fork, on the legs that have one ---------------------------------
+#
+# Everything above drives `PosixSyscalls` through a fake, which proves what
+# `terminate` *decides* and nothing about what the kernel does with it. Process
+# groups are exactly where those two part company: whether the command the user
+# was running is inside the group we signal is a question about `setsid`, job
+# control and the controlling tty, and a fake has none of those. So these fork a
+# real shell on a real pty and kill it for real. Windows has no `pty` and
+# `emscripten`/`wasi` have no `fork`, so the guard is the same "a POSIX backend
+# exists" shape `test_terminal.py` uses.
+posix_only = pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="pty.fork/killpg/tcgetpgrp are POSIX; a Windows terminal is pywinpty",
+)
+
+#: What the user leaves running when they close the pane. Three real processes
+#: deep — the shell we forked, the command it runs, and *that* command's own
+#: child — and the innermost one ignores SIGHUP.
+#:
+#: The ignore is the whole point, not a trick to make the test red. When a
+#: session leader dies the kernel's only cleanup is a SIGHUP to the terminal's
+#: foreground group, so SIGHUP is the one signal a long-running job is likely to
+#: have opted out of: anything under `nohup`, anything with its own handler, any
+#: script that traps it to keep working over a dropped connection. `trap "" HUP`
+#: survives the `exec` because POSIX inherits an *ignored* disposition across
+#: `execve` — which is precisely how `nohup` itself works — so the `sleep`
+#: holding the pid at the end is HUP-proof the way a real one is.
+JOB_SCRIPT = """\
+#!/bin/sh
+# $1: the file the innermost process announces its pid in, written atomically so
+# the test never reads half a number.
+sh -c 'trap "" HUP; echo $$ > "$1.tmp"; mv "$1.tmp" "$1"; exec sleep 30' sh "$1"
+"""
+
+
+def _pgid(pid: int) -> int:
+    """`os.getpgid` behind the `sys.platform` guard mypy needs on Windows.
+
+    Same `if/else` shape as `_StdlibSyscalls`: the branch is what lets a strict
+    check run on both platforms, since these names do not exist on win32.
+    """
+    if sys.platform == "win32":  # pragma: no cover - every caller is posix_only
+        raise NotImplementedError
+    else:
+        return os.getpgid(pid)
+
+
+def _sid(pid: int) -> int:
+    """`os.getsid`, same guard."""
+    if sys.platform == "win32":  # pragma: no cover - every caller is posix_only
+        raise NotImplementedError
+    else:
+        return os.getsid(pid)
+
+
+def _alive(pid: int) -> bool:
+    """Does this pid still name a process? Signal 0 is the probe that asks."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - it exists; we just may not signal it
+        return True
+    return True
+
+
+def _gone_within(pid: int, timeout: float = 15.0) -> bool:
+    """Bounded wait for a pid to disappear. Not our child, so there is no wait()."""
+    deadline = time.monotonic() + timeout
+    while _alive(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _announced_pid(path: Path, timeout: float = 30.0) -> int | None:
+    """The pid the job wrote, once it has written one."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            text = path.read_text(encoding="utf-8").strip()
+            if text.isdigit():
+                return int(text)
+        time.sleep(0.02)
+    return None
+
+
+@posix_only
+@pytest.mark.timeout(120)
+class TestAJobDoesNotOutliveItsTerminal:
+    """A closed pane must take the command that was running in it.
+
+    These run on the ubuntu and macos legs of the 3-OS matrix (M7 §C2) and skip
+    on Windows, where the backend is pywinpty and ConPTY owns the lifetime.
+    """
+
+    def test_the_forked_shell_is_a_session_and_group_leader(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`pty.fork()` calls `setsid()` — which is what makes a group kill safe.
+
+        Signalling a process *group* is only ever correct because the child has
+        one of its own. If the fork path ever stopped calling `setsid` the child
+        would share **our** group, and a group SIGKILL would take the whole
+        server down with one terminal. `terminate` guards against that at
+        runtime; this is the proof that the guard is the backstop rather than
+        the thing the normal case rests on.
+        """
+        monkeypatch.setenv("SHELL", "/bin/sh")
+        proc = pty_posix.spawn(tmp_path)
+        try:
+            assert _sid(proc.pid) == proc.pid  # a session of its own
+            assert _pgid(proc.pid) == proc.pid  # and a group of its own
+            assert _pgid(proc.pid) != _pgid(0)  # which is never ours
+        finally:
+            proc.terminate(force=True)
+
+    def test_the_master_side_can_read_the_terminals_foreground_group(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The ioctl the job kill leans on, asked of the master fd directly.
+
+        `TIOCGPGRP` on the *master* is what names the group the terminal is
+        currently giving the keyboard to — the running job's own group, once an
+        interactive shell has done job control. Linux answers it for a master
+        even though the pty is not this process's controlling terminal. If a
+        kernel refuses, `terminate` degrades to the child's own group rather
+        than failing, so this test says so out loud (CI runs `pytest -rs`, which
+        prints the reason) instead of narrowing an assertion until it passes.
+        """
+        monkeypatch.setenv("SHELL", "/bin/sh")
+        proc = pty_posix.spawn(tmp_path)
+        calls = _StdlibSyscalls()
+        try:
+            pgid = 0
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    pgid = calls.foreground_pgid(proc._fd)
+                except OSError as exc:
+                    pytest.skip(f"this kernel will not read TIOCGPGRP from a master: {exc}")
+                if pgid > 0:  # 0 until the child has finished claiming the tty
+                    break
+                time.sleep(0.01)
+            assert pgid == proc.pid  # nothing running yet, so: the shell itself
+        finally:
+            proc.terminate(force=True)
+
+    def test_a_running_job_does_not_outlive_the_terminal_that_started_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The bug, assembled the way a user assembles it.
+
+        A shell, a command running under it, that command's own child — then the
+        pane closes. Signalling only the shell's pid kills the shell; the kernel
+        sends SIGHUP to the terminal's foreground group on the way out, and the
+        one process that ignores SIGHUP is left running with no terminal and no
+        parent. An orphaned build, `ssh` or dev server, for the life of the box.
+
+        The teardown is the real one: `PtyManager.release`, which is what
+        `routers/terminal.py` calls from its `finally:` when the WebSocket goes.
+        """
+        monkeypatch.setenv("SHELL", "/bin/sh")
+        script = tmp_path / "job.sh"
+        script.write_text(JOB_SCRIPT, encoding="utf-8")
+        pid_file = tmp_path / "grandchild.pid"
+
+        manager = PtyManager()
+        session = manager.spawn(tmp_path)
+        shell = cast(PosixPty, session._proc)
+        grandchild = 0
+        try:
+            session.write(f"sh '{script}' '{pid_file}'\r")
+            found = _announced_pid(pid_file)
+            assert found is not None, "the job never started under the shell"
+            grandchild = found
+
+            # The tree really is the one the bug is about: a live process in the
+            # shell's session that is not the shell.
+            assert grandchild != shell.pid
+            assert _sid(grandchild) == shell.pid
+            job_group, shell_group = _pgid(grandchild), _pgid(shell.pid)
+
+            manager.release(session)
+
+            assert _gone_within(grandchild), (
+                f"pid {grandchild} outlived its terminal: job group {job_group}, "
+                f"shell group {shell_group} — "
+                + (
+                    "job control put the job in a group of its own"
+                    if job_group != shell_group
+                    else "the job shared the shell's group"
+                )
+            )
+        finally:
+            manager.shutdown()
+            if grandchild:
+                with contextlib.suppress(OSError):
+                    os.kill(grandchild, 9)  # SIGKILL, spelled without the posix-only name
