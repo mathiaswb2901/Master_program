@@ -140,8 +140,13 @@ impl GuestProcess {
         self.reap_within(REAP_TIMEOUT);
     }
 
-    /// [`Self::reap`] with the bound named, so a test can measure that the wait
-    /// is real without spending the production timeout to do it.
+    /// [`Self::reap`] with the bound named by the caller.
+    ///
+    /// Two callers name their own. A test measures that the wait is real
+    /// without spending the production timeout to do it; and [`super::reaper`]'s
+    /// fallback — the path taken when no reaper thread could be started — waits
+    /// on the *caller's* thread and so answers to a much shorter number than
+    /// [`REAP_TIMEOUT`], which is sized for a thread that owns nothing.
     pub(super) fn reap_within(&mut self, timeout: Duration) {
         self.kill();
         let deadline = Instant::now() + timeout;

@@ -15,7 +15,8 @@
 //! desktop: two of them fighting over focus at the same time would measure each
 //! other.
 
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
@@ -1138,6 +1139,93 @@ fn closing_a_panel_still_ends_the_instance_it_launched() {
             .unwrap_or_else(|err| err.into_inner())
             .is_empty(),
         "the registry still holds the panel that was closed"
+    );
+}
+
+/// **A reaper thread that never starts must not take the keyboard with it.**
+///
+/// `reap` moves the wait off the main thread, and the step that depends on the
+/// wait — handing the keyboard back to the webview — goes with it. Thread and
+/// handle exhaustion is real pressure for a shell juggling several hosted Office
+/// instances, and `thread::Builder::spawn` drops the closure it could not run:
+/// the shape this guards against is a failed spawn quietly swallowing the
+/// continuation, leaving a user with a closed panel and a keyboard that never
+/// came back, and nothing but a log line to say so.
+///
+/// The refusal is injected rather than provoked — starving the test runner of
+/// threads to observe this would be a worse test than naming the case.
+#[test]
+fn a_reaper_thread_that_never_starts_still_hands_the_keyboard_back() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    let guest_window = fixture.guest_window;
+    let process = fixture.take_process();
+
+    let reclaimed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&reclaimed);
+    reaper::reap_with(
+        process,
+        Box::new(move || flag.store(true, Ordering::SeqCst)),
+        |_body| Err(io::Error::other("no thread for you")),
+    );
+
+    assert!(
+        reclaimed.load(Ordering::SeqCst),
+        "the continuation was dropped with the thread that could not start — for `host_close` \
+         that is the keyboard reclaim, so the caret would be stranded with no way back"
+    );
+    // And the instance still ends: the kill never depended on the thread.
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the guest outlived a close whose reaper thread failed to start"
+    );
+}
+
+/// The other half of that fallback: **it is bounded, and it is short.**
+///
+/// The inline wait runs on the caller, which for `host_close` is the main
+/// thread — the thread this whole module exists to keep out of a two-second
+/// poll. So the fallback answers to its own much shorter number. Made
+/// deterministic the same way the timing test above is: a guest with its job
+/// object taken away cannot be killed, so the wait runs to the full bound
+/// instead of ending the moment the instance does.
+#[test]
+fn the_fallback_wait_is_bounded_far_below_the_reapers_own() {
+    let mut fixture = Fixture::new((640, 480), 0);
+    let guest_window = fixture.guest_window;
+    let job = fixture.process().detach_job_for_test();
+    let process = fixture.take_process();
+
+    let reclaimed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&reclaimed);
+    let started = Instant::now();
+    reaper::reap_with(
+        process,
+        Box::new(move || flag.store(true, Ordering::SeqCst)),
+        |_body| Err(io::Error::other("no thread for you")),
+    );
+    let elapsed = started.elapsed();
+    println!("reaper: the inline fallback held its caller for {elapsed:?}");
+
+    assert!(
+        reclaimed.load(Ordering::SeqCst),
+        "the continuation did not run after the fallback gave up on the instance"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "the fallback returned in {elapsed:?} without waiting for an instance that cannot die, \
+         so it would hand the keyboard back while the window is still on the desktop"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the fallback held its caller for {elapsed:?} — that is the reaper's own two-second \
+         bound leaking back onto the main thread, which is the freeze this module removed"
+    );
+
+    // Nothing leaked: the instance is still ours to end, and ending it works.
+    drop(job);
+    assert!(
+        wait_until(|| !exists(guest_window)),
+        "the slow-dying guest outlived the test"
     );
 }
 
