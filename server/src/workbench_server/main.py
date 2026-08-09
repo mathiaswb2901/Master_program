@@ -119,11 +119,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # bus for a reconnecting client — the usage/activity precedent. Ships the
     # frame only; the reconciliation gate that plugs into it is a later PR.
     validation_service = ValidationService(workspace.root, event_bus)
-    # M6 PR2: the first *domain* check. It reads the addressed .xlsx cells directly
-    # with openpyxl (deterministic, no Office), comparing code-computed numbers
-    # against the workbook unit- and DST-aware. Additive registration — the frame
-    # dispatches to it when a spec names its id ("reconciliation").
-    validation_service.register(ReconciliationCheck())
+    # The reconciliation gate is registered further down, once the Office host
+    # exists: it needs that host as its live-workbook seam, so it can refuse to
+    # reconcile a docked workbook's stale file instead of quietly passing it.
     # Workspace-wide content search (M7 V7b). Holds the live `Workspace`, so a
     # switch re-roots it with everything else and it owes no `set_workspace_root`.
     # Reuses the file tree's ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so search
@@ -226,6 +224,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fake=settings.office_fake,
         channel=host_channel,
     )
+    # M6 PR2: the first *domain* check, and the wedge — do the numbers the agent
+    # computed agree with the numbers the workbook actually contains? Registered
+    # *here* rather than beside the service it plugs into, because it takes the
+    # Office host as its live-workbook seam (narrowed to `LiveWorkbookHost` in
+    # the check). That is what makes the front gate possible: a workbook this
+    # process is holding open with unsaved edits is one whose `.xlsx` on disk is
+    # a different workbook, and reconciling the file there would report **pass**
+    # about numbers nobody read. Handed `None` — a server with no host at all —
+    # the check reads disk exactly as it did before.
+    validation_service.register(ReconciliationCheck(office_host_service))
     # Mission Control's second half. Built before the session manager because
     # the client factory needs it (an orchestrator session's toolset is created
     # with the client), and handed the manager through `bind` a few lines below.
