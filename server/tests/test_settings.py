@@ -240,7 +240,14 @@ async def test_get_settings_answers_the_defaults(client: AsyncClient) -> None:
     response = await client.get("/api/settings")
     assert response.status_code == 200
     body = response.json()
-    assert body["stored"] == {"theme": "system", "office_native": "auto", "voice_input": False}
+    assert body["stored"] == {
+        "theme": "system",
+        "office_native": "auto",
+        "voice_input": False,
+        # One defaulted field is all a new knob costs a stored document — no
+        # SETTINGS_VERSION bump, so nobody's theme is discarded to add one.
+        "validation_retention_days": 90,
+    }
     assert body["effective"] == body["stored"]
     assert body["overrides"] == []
     assert body["telemetry"]["enabled"] is False
@@ -260,6 +267,10 @@ async def test_put_settings_persists_and_answers_the_new_state(client: AsyncClie
         "theme": "light",
         "office_native": "on",
         "voice_input": True,
+        # Untouched by a PUT that did not name it: the client sends the whole
+        # document, and a field it omits arrives at its default rather than
+        # failing to parse (models/settings.py).
+        "validation_retention_days": 90,
     }
     # Launch-only: the running server is still on what it started with, and says so.
     assert again.json()["pending_restart"] == ["office_native"]

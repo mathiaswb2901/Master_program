@@ -33,6 +33,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 import {
   E2E_APP_DATA,
+  E2E_AUTH_TOKEN,
   E2E_WORKSPACE,
   projectsDirFor,
   WORKSPACE_ENV,
@@ -101,7 +102,9 @@ const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 // token to a known value lets the harness attach it as a default header
 // (`extraHTTPHeaders` below) so those calls authenticate, while the app still
 // exercises the real bootstrap + WS-subprotocol paths on its own traffic.
-const AUTH_TOKEN = "e2e-fixed-auth-token-do-not-ship";
+// Declared in `e2e/workspace.ts` so `evidence-persist.spec.ts` — which starts a
+// second backend the browser context also talks to — pins the same one.
+const AUTH_TOKEN = E2E_AUTH_TOKEN;
 
 export default defineConfig({
   testDir: "./e2e",

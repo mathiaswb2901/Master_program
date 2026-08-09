@@ -23,6 +23,11 @@ import type { CheckOutcome, EvidenceItem, RiskLevel, ValidationResult } from "..
 // the command's `run` is never fired here.
 vi.mock("./Panes", () => ({ revealPane: vi.fn() }));
 vi.mock("../dock", () => ({ openPanel: vi.fn() }));
+// The app store, for its one seam this module uses: the toast a command reports
+// through. Mocked rather than imported because `store.ts` reaches the editor and
+// the shell at import, neither of which exists in a node-only render.
+const toastMock = vi.fn();
+vi.mock("../store", () => ({ useStore: { getState: () => ({ pushToast: toastMock }) } }));
 
 // The store, mocked to read a mutable state object — the `AgentPanel.test.tsx`
 // pattern. This is what lets a *mounted* `ReviewPanel` resolve its pane id
@@ -36,10 +41,16 @@ let vstate: { results: Record<string, ValidationResult>; hydrated: boolean } = {
 };
 const approveMock = vi.fn();
 const initMock = vi.fn();
+const exportMock = vi.fn();
 
 vi.mock("../validation", async (importActual) => {
   const actual = await importActual<typeof import("../validation")>();
-  const snapshot = (): Record<string, unknown> => ({ ...vstate, approve: approveMock, init: initMock });
+  const snapshot = (): Record<string, unknown> => ({
+    ...vstate,
+    approve: approveMock,
+    init: initMock,
+    exportResult: exportMock,
+  });
   const useValidationStore = Object.assign((select: (s: Record<string, unknown>) => unknown) => select(snapshot()), {
     getState: snapshot,
     setState: (patch: Partial<typeof vstate>) => {
@@ -61,6 +72,8 @@ const {
   ApprovalGate,
   EvidenceGallery,
   EvidencePayloadView,
+  ExportAction,
+  exportNewest,
   OutcomePill,
   ReviewPanel,
   ReviewView,
@@ -121,8 +134,10 @@ const view = (result: ValidationResult, stale: string | null = null): string =>
       note=""
       pending={false}
       stale={stale}
+      exportState={{ phase: "idle" }}
       onNote={noop}
       onApprove={noop}
+      onExport={noop}
     />,
   );
 
@@ -523,6 +538,79 @@ describe("a restored pane bound to an absent id", () => {
   });
 });
 
+describe("the export action", () => {
+  const noReport = { phase: "idle" } as const;
+
+  it("offers the action and shows nothing else until it has run", () => {
+    const markup = html(<ExportAction state={noReport} onExport={noop} />);
+    expect(markup).toContain("Export evidence…");
+    expect(markup).not.toContain("wb-review-export-path");
+  });
+
+  it("names the path it wrote and carries the report itself", () => {
+    const markup = html(
+      <ExportAction
+        state={{
+          phase: "written",
+          report: {
+            validation_id: "val_1",
+            path: ".workbench/validation/exports/val_1.md",
+            filename: "val_1.md",
+            markdown: "# Validation evidence — SE3\n\n**Approval** you",
+            bytes: 46,
+            generated_at: "2026-08-09T14:06:00Z",
+          },
+        }}
+        onExport={noop}
+      />,
+    );
+    // The *path*, because what this produces is a file in the user's own
+    // workspace — not a download the browser named somewhere they must go and
+    // find. The document rides along so reading it costs no second call.
+    expect(markup).toContain(".workbench/validation/exports/val_1.md");
+    expect(markup).toContain("Validation evidence");
+    expect(markup).toContain("**Approval** you");
+  });
+
+  it("says a failure out loud rather than looking like it wrote something", () => {
+    const markup = html(
+      <ExportAction state={{ phase: "error", detail: "Could not write the report." }} onExport={noop} />,
+    );
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Could not write the report.");
+    expect(markup).not.toContain("wb-review-export-path");
+  });
+});
+
+describe("the validation.export command", () => {
+  it("says so when there is nothing to export, rather than doing nothing", async () => {
+    useValidationStore.setState({ results: {}, hydrated: true });
+    await exportNewest();
+    expect(exportMock).not.toHaveBeenCalled();
+    expect(toastMock).toHaveBeenCalledWith("info", expect.stringContaining("Nothing to export"));
+  });
+
+  it("exports the newest result — the one you just ran", async () => {
+    exportMock.mockResolvedValue({
+      validation_id: "v2",
+      path: ".workbench/validation/exports/v2.md",
+      filename: "v2.md",
+      markdown: "#",
+      bytes: 1,
+      generated_at: "2026-08-09T14:06:00Z",
+    });
+    seed([
+      result("v1", { created_at: "2026-08-08T10:00:00Z" }),
+      result("v2", { created_at: "2026-08-08T12:00:00Z" }),
+    ]);
+
+    await exportNewest();
+
+    expect(exportMock).toHaveBeenCalledWith("v2");
+    expect(toastMock).toHaveBeenCalledWith("success", expect.stringContaining("v2.md"));
+  });
+});
+
 describe("reviewTool registration", () => {
   const instances = reviewTool.panel?.instances;
 
@@ -534,6 +622,18 @@ describe("reviewTool registration", () => {
     expect(reviewTool.commands?.[0]?.id).toBe("review.open");
     // No default chord — bindable from shortcuts.md the day it registers.
     expect(reviewTool.shortcuts).toBeUndefined();
+  });
+
+  it("registers validation.export, and it is safe from a file and from the CLI", () => {
+    const command = reviewTool.commands?.find((entry) => entry.id === "validation.export");
+    expect(command).toBeDefined();
+    // It names no path — the server picks the filename from a server-minted id
+    // and writes under the workspace's own `.workbench/` — so it is bindable and
+    // the command relay will publish it. That is the whole reach of PR-C's CLI
+    // surface, and it is deliberate rather than incidental.
+    expect(command?.unsafeFromFile).toBeUndefined();
+    useValidationStore.setState({ results: {}, hydrated: true });
+    expect(command?.detail?.()).toContain("nothing validated yet");
   });
 
   it("options() lists a row per held result, each keyed by its validation_id", () => {

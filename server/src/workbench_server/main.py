@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
 from workbench_server.models.orchestrator import OrchestratorBudget
+from workbench_server.models.validation_store import RetentionPolicy
 from workbench_server.routers import (
     activity,
     agents,
@@ -112,18 +113,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
     # Correlates agent tool calls with the watcher's file events; in-memory only.
     provenance_service = ProvenanceService(workspace.root, event_bus)
-    # The next question after provenance's "who wrote this file": "and is it
-    # correct". A registry of checks that assembles a ValidationResult and
-    # derives its risk from the evidence. In-memory and bounded (LRU keyed by
-    # validation_id, like provenance), and it publishes each result on the shared
-    # bus for a reconnecting client — the usage/activity precedent. Ships the
-    # frame only; the reconciliation gate that plugs into it is a later PR.
-    validation_service = ValidationService(workspace.root, event_bus)
-    # M6 PR2: the first *domain* check. It reads the addressed .xlsx cells directly
-    # with openpyxl (deterministic, no Office), comparing code-computed numbers
-    # against the workbook unit- and DST-aware. Additive registration — the frame
-    # dispatches to it when a spec names its id ("reconciliation").
-    validation_service.register(ReconciliationCheck())
     # Workspace-wide content search (M7 V7b). Holds the live `Workspace`, so a
     # switch re-roots it with everything else and it owes no `set_workspace_root`.
     # Reuses the file tree's ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so search
@@ -195,6 +184,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # sentence (`office_host/service.py::_OFF_DETAIL`); nothing about which knob
     # is user-facing copy belongs here.
     office_native_source = settings_service.source_of("office_native")
+    # The next question after provenance's "who wrote this file": "and is it
+    # correct". A registry of checks that assembles a ValidationResult and
+    # derives its risk from the evidence, publishing each one on the shared bus
+    # for a reconnecting client — the usage/activity precedent.
+    #
+    # Results, their evidence payloads and their approvals are written to
+    # `<workspace>/.workbench/validation/` and replayed from there on start, so a
+    # restart no longer forgets what was proven or who signed it off. Built here,
+    # after the settings document, because how long that record is kept is a
+    # *machine* preference read from it — asked for per sweep rather than
+    # captured, so changing it does not need a restart to mean something.
+    validation_service = ValidationService(
+        workspace.root,
+        event_bus,
+        retention=lambda: RetentionPolicy(
+            days=settings_service.effective().validation_retention_days
+        ),
+    )
+    # M6 PR2: the first *domain* check. It reads the addressed .xlsx cells directly
+    # with openpyxl (deterministic, no Office), comparing code-computed numbers
+    # against the workbook unit- and DST-aware. Additive registration — the frame
+    # dispatches to it when a spec names its id ("reconciliation").
+    validation_service.register(ReconciliationCheck())
     # Native Office hosting, constructed before the session manager because a
     # session reads the live docked document through it (narrowed to
     # OfficeDocumentReader in the SDK factory). The backend is None on any
@@ -451,6 +463,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         watcher.start()
         shortcuts_service.start()
         provenance_service.start()
+        # Sweeps what is past the retention window, then fills the result and
+        # payload maps from `.workbench/validation/` — so the first
+        # `GET /api/validation` after a restart answers with what was proven
+        # rather than with an empty list. Never raises (services/validation.py).
+        validation_service.start()
         # Binds to this loop, which is what lets it coalesce a burst of tool
         # calls into one frame instead of one frame per call.
         activity_service.start()

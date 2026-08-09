@@ -17,6 +17,7 @@ import type {
   CreateSessionRequest,
   DirListing,
   DocEditorConfig,
+  EvidenceExport,
   EvidenceKind,
   EvidencePayload,
   FileContent,
@@ -184,6 +185,12 @@ export const approveValidation = (
   body: ApproveRequest,
 ): Promise<ValidationResult> =>
   request(`/api/validation/${encodeURIComponent(validationId)}/approve`, jsonInit("POST", body));
+
+/** Render one result as a one-page Markdown report **and write it** into the
+ * workspace. A POST because it leaves a file behind, which is the point: proof
+ * you can hand to someone is a file. 404 for an id the server no longer holds. */
+export const exportValidation = (validationId: string): Promise<EvidenceExport> =>
+  request(`/api/validation/${encodeURIComponent(validationId)}/export`, { method: "POST" });
 
 /** Redeem an `EvidenceItem.payload_ref` — the bounded detail behind one evidence
  * line (a captured gate log, a reconciliation table). **404 once the per-kind LRU

@@ -34,6 +34,7 @@ import { paneInstance } from "../panes";
 import type { WorkbenchTool } from "../registry";
 import type {
   CheckOutcome,
+  EvidenceExport,
   EvidenceItem,
   EvidencePayload,
   ReviewSeverity,
@@ -42,6 +43,7 @@ import type {
 } from "../types";
 import {
   awaitingApproval,
+  newestResult,
   orderResults,
   outcomeVisual,
   reviewCount,
@@ -408,24 +410,90 @@ export function ApprovalGate({
   );
 }
 
+// ---- the export --------------------------------------------------------------
+
+/** What the Export action is doing right now. `written` is the settled state and
+ * it carries the whole report, so the panel can show the path *and* the document
+ * without a second round trip. */
+export type ExportState =
+  | { phase: "idle" }
+  | { phase: "running" }
+  | { phase: "written"; report: EvidenceExport }
+  | { phase: "error"; detail: string };
+
+/**
+ * Turn this result into something you can hand to somebody who was not there.
+ *
+ * The server renders **and writes** the report, so what this surfaces is a path
+ * in the user's own workspace rather than a download the browser names. The
+ * document itself is behind an expander: a one-page report is worth reading
+ * before you send it, and it is not worth pushing the approval gate off screen.
+ *
+ * Pure over its props, so every state renders under a static markup test. Built
+ * from classes `review.css` already defines — this PR adds no stylesheet, which
+ * is why the report reuses the captured-log box the gate expander uses.
+ */
+export function ExportAction({
+  state,
+  onExport,
+}: {
+  state: ExportState;
+  onExport: () => void;
+}) {
+  return (
+    <div className="wb-review-approval wb-review-export">
+      <button
+        type="button"
+        className="wb-btn wb-btn-outline wb-btn-sm wb-review-export-run"
+        disabled={state.phase === "running"}
+        onClick={onExport}
+      >
+        {state.phase === "running" ? "Exporting…" : "Export evidence…"}
+      </button>
+      {state.phase === "written" && (
+        <>
+          <p className="wb-evidence-detail u-tabular wb-review-export-path">
+            Written to <code>{state.report.path}</code> ({state.report.bytes.toLocaleString()}{" "}
+            bytes)
+          </p>
+          <details className="wb-evidence-expand">
+            <summary>The report</summary>
+            <pre className="wb-evidence-log">{state.report.markdown}</pre>
+          </details>
+        </>
+      )}
+      {state.phase === "error" && (
+        <p className="wb-review-stale" role="alert">
+          {state.detail}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ---- the whole review of one result -----------------------------------------
 
-/** The badge, the subject, the summary, the gallery and the approval gate —
- * everything one result says. Pure over props; the panel wires the store. */
+/** The badge, the subject, the summary, the gallery, the approval gate and the
+ * export — everything one result says, and the one thing you can do with it
+ * afterwards. Pure over props; the panel wires the store. */
 export function ReviewView({
   result,
   note,
   pending,
   stale,
+  exportState,
   onNote,
   onApprove,
+  onExport,
 }: {
   result: ValidationResult;
   note: string;
   pending: boolean;
   stale: string | null;
+  exportState: ExportState;
   onNote: (value: string) => void;
   onApprove: () => void;
+  onExport: () => void;
 }) {
   return (
     <section className="wb-review-body" data-risk={result.risk} data-validation={result.validation_id}>
@@ -445,6 +513,7 @@ export function ReviewView({
         onNote={onNote}
         onApprove={onApprove}
       />
+      <ExportAction state={exportState} onExport={onExport} />
     </section>
   );
 }
@@ -511,6 +580,9 @@ function ReviewInstance({ validationId }: { validationId: string }) {
   const [note, setNote] = useState("");
   const [pending, setPending] = useState(false);
   const [stale, setStale] = useState<string | null>(null);
+  // Per pane, not per tool: two Review panes export two different results, and a
+  // shared "last export" would show one pane the other pane's report.
+  const [exportState, setExportState] = useState<ExportState>({ phase: "idle" });
 
   if (result === undefined) {
     // The store answered but has no such id — a restored pane whose result is
@@ -533,14 +605,33 @@ function ReviewInstance({ validationId }: { validationId: string }) {
       .finally(() => setPending(false));
   };
 
+  const onExport = (): void => {
+    setExportState({ phase: "running" });
+    void useValidationStore
+      .getState()
+      .exportResult(validationId)
+      .then((report) => setExportState({ phase: "written", report }))
+      .catch((err: unknown) => {
+        setExportState({
+          phase: "error",
+          detail:
+            err instanceof ApiError && err.status === 404
+              ? "This result is no longer current — it was superseded or evicted. Re-run the validation."
+              : "Could not write the report. Check that the workspace folder is writable.",
+        });
+      });
+  };
+
   return (
     <ReviewView
       result={result}
       note={note}
       pending={pending}
       stale={stale}
+      exportState={exportState}
       onNote={setNote}
       onApprove={onApprove}
+      onExport={onExport}
     />
   );
 }
@@ -639,6 +730,45 @@ function orderBySeverity(results: readonly ValidationResult[]): ValidationResult
 
 // ---- registration ------------------------------------------------------------
 
+/**
+ * `validation.export`, the command half of the export — reachable from the
+ * QuickBar, from `shortcuts.md`, and from `workbench-cmd invoke`.
+ *
+ * It exports the **newest** result, because a parameterless command has to pick
+ * one and the thing you just ran is overwhelmingly the thing you meant. Naming a
+ * particular id is a *parameterised* invocation (`validation.export{validation_id}`),
+ * which is a mechanism this repo does not have yet — so this is the first real
+ * customer waiting for it rather than a second, private way of saying it.
+ *
+ * Both ends report through a toast: a command run from a CLI or a chord has no
+ * pane to draw in, and a command that silently did or did not write a file is
+ * the one thing a proof surface may not be. "Nothing validated yet" is said out
+ * loud (AXI shape 2) rather than being a no-op that looks like a broken key.
+ *
+ * The app store is reached through a **dynamic** `import()`, the `commandRelay.ts`
+ * trick: a panel module has no business holding a load-time edge into `store.ts`
+ * (which reaches the editor and the shell at import), and a command runs long
+ * after the module graph has settled. It costs nothing — `store.ts` is already
+ * in the entry chunk — and it is what keeps this module renderable in a
+ * node-only test.
+ */
+export async function exportNewest(): Promise<void> {
+  const store = useValidationStore.getState();
+  const newest = newestResult(Object.values(store.results));
+  const { useStore } = await import("../store");
+  const toast = useStore.getState().pushToast;
+  if (newest === null) {
+    toast("info", "Nothing to export yet — no validation has been run in this workspace.");
+    return;
+  }
+  try {
+    const report = await store.exportResult(newest.validation_id);
+    toast("success", `Evidence exported to ${report.path}`);
+  } catch {
+    toast("error", "Could not export the evidence report.");
+  }
+}
+
 function ReviewIcon() {
   return (
     <svg
@@ -694,6 +824,21 @@ export const reviewTool: WorkbenchTool = {
       title: "Review validation…",
       detail: () => "the evidence, the risk badge, and the approval gate",
       run: () => openPanel(TOOL_ID),
+    },
+    {
+      id: "validation.export",
+      title: "Export validation evidence",
+      detail: () => {
+        const newest = newestResult(Object.values(useValidationStore.getState().results));
+        return newest === null ? "nothing validated yet" : `the newest: ${newest.subject.label}`;
+      },
+      // Safe from an untrusted `shortcuts.md` and from the CLI: it names no
+      // path. The server picks the file name from the server-minted
+      // `validation_id` and writes it under the workspace's own `.workbench/`,
+      // so there is no input here through which a caller could reach a path.
+      run: () => {
+        void exportNewest();
+      },
     },
   ],
   // No Alt chord by default (the Scratchpad/Workspaces precedent): a registered

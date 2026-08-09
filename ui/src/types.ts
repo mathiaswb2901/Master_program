@@ -1634,6 +1634,27 @@ export interface ValidationEvent {
   result: ValidationResult;
 }
 
+// ---- validation_store.py ----------------------------------------------------
+
+/**
+ * POST /api/validation/{id}/export — the proof, as a document.
+ *
+ * A `ValidationResult` is a wire type; this is the thing you hand to somebody
+ * who was not there. The server renders **and writes** it (into the workspace's
+ * own `.workbench/validation/exports/`), so an export run from the CLI leaves a
+ * file behind rather than a string in a terminal that scrolled away — and the
+ * markdown rides the response so the panel can show it without reading it back.
+ */
+export interface EvidenceExport {
+  validation_id: string;
+  /** Workspace-relative, forward-slashed. */
+  path: string;
+  filename: string;
+  markdown: string;
+  bytes: number;
+  generated_at: string;
+}
+
 // ---- gates.py / evidence.py -------------------------------------------------
 // M6 staged review PR1: the toolchain gate, and the payload route the #82 frame
 // left open. Only the two shapes the *UI* reads are mirrored here — `GateCommand`,
@@ -1985,6 +2006,14 @@ export interface WorkbenchSettings {
   /** Push-to-talk voice input. Remembered even on a machine where the local
    * transcriber is not installed yet (M7 §3). */
   voice_input: boolean;
+  /**
+   * Days of written validation evidence to keep; `0` keeps everything.
+   *
+   * A machine-level preference about *workspace* data, and the panel says so:
+   * this document is app-data scoped (how much disk this machine spends), while
+   * the files it governs live in each project's `.workbench/validation/`.
+   */
+  validation_retention_days: number;
 }
 
 /** A setting this process was configured with from outside the app — an

@@ -22,8 +22,14 @@ Two bounded stores, both mirroring provenance's 500-path posture:
 Every result is published as a :class:`ValidationEvent` on the shared bus, the
 usage/activity precedent, so a window that never issued the run still tracks it.
 
-In memory only — a restart forgets every result, and re-rooting the workspace
-clears them (they reference paths under the root the user just left).
+**Both stores are backed by a disk source** (``services/validation_store.py``).
+The bounded maps above are still what serves a request — nothing downstream of
+this module changed — but they are now *filled* from
+``<workspace>/.workbench/validation/`` on :meth:`ValidationService.start`, and
+re-filled from the new root on a workspace switch. That is the whole shape of
+this feature: a third source in the #82 event-and-replay pattern, so the endpoint
+a client already calls on reconnect stops being empty after a restart. A write
+that fails costs the record and never the run.
 """
 
 import uuid
@@ -50,7 +56,10 @@ from workbench_server.models.validation import (
     ValidationSpec,
     ValidationSubject,
 )
+from workbench_server.models.validation_store import EvidenceExport, RetentionPolicy
 from workbench_server.services.event_bus import EventBus
+from workbench_server.services.evidence_export import render_evidence
+from workbench_server.services.validation_store import ValidationStore
 
 log = structlog.get_logger()
 
@@ -127,13 +136,23 @@ class PayloadStore:
         self._by_kind: dict[EvidenceKind, OrderedDict[str, BaseModel]] = {}
 
     def put(self, kind: EvidenceKind, payload: BaseModel) -> str:
-        store = self._by_kind.setdefault(kind, OrderedDict())
         ref = f"{kind}_{uuid.uuid4().hex[:16]}"
+        self.put_ref(kind, ref, payload)
+        return ref
+
+    def put_ref(self, kind: EvidenceKind, ref: str, payload: BaseModel) -> None:
+        """Put a payload back behind a ref that already exists.
+
+        The replay half of :meth:`put`: a payload read off disk is already named
+        by the ``payload_ref`` on a stored result's evidence, so minting a fresh
+        id for it would leave that reference pointing at nothing — the dead
+        handle the payload route was added to close.
+        """
+        store = self._by_kind.setdefault(kind, OrderedDict())
         store[ref] = payload
         store.move_to_end(ref)
         while len(store) > self._cap:
             store.popitem(last=False)
-        return ref
 
     def get(self, kind: EvidenceKind, ref: str) -> BaseModel | None:
         """The payload behind a ref, or None once the LRU has dropped it."""
@@ -187,6 +206,7 @@ class ValidationService:
         clock: Callable[[], datetime] = _now_utc,
         id_factory: Callable[[], str] | None = None,
         max_results: int = MAX_RESULTS,
+        retention: Callable[[], RetentionPolicy] | None = None,
     ) -> None:
         self._root = root.resolve()
         self._bus = bus
@@ -196,20 +216,67 @@ class ValidationService:
         self._checks: dict[str, ValidationCheck] = {}
         self._results: OrderedDict[str, ValidationResult] = OrderedDict()
         self._payloads = PayloadStore()
+        # How long the record is kept, asked for rather than captured: it lives
+        # in the *machine's* settings document, which a workspace switch does not
+        # touch and a user may change while the server runs.
+        self._retention = retention or (lambda: RetentionPolicy())
+        self._disk = ValidationStore(self._root)
+
+    def start(self) -> None:
+        """Sweep what is past the window, then fill the maps from disk.
+
+        Called once from the lifespan, before anything can ask. Prune first so a
+        replay never rehydrates results it is about to delete, and never raises:
+        a workspace whose ``.workbench/`` cannot be read starts empty, which is
+        the same answer a fresh one gives and is exactly as true.
+        """
+        self._replay()
 
     def set_workspace_root(self, root: Path) -> None:
-        """Re-root, and **forget every result**.
+        """Re-root, and **re-read the new project's evidence**.
 
-        A result for ``subject.kind == "file"`` names a workspace-relative path;
-        carrying it across a switch would attach a verdict about a file in the
-        project the user left to a same-named file in the one they opened. The
-        payload store goes with it for the same reason. Nothing is published —
-        the client re-reads ``GET /api/validation`` as part of adopting the new
-        workspace, and an empty list is the correct answer.
+        A result for ``subject.kind == "file"`` names a workspace-relative path,
+        so carrying one across a switch would attach a verdict about a file in
+        the project the user left to a same-named file in the one they opened —
+        which is why this used to clear both maps and stop. Clearing was standing
+        in for the right behaviour: the record lives *in* the workspace, so the
+        honest answer after a switch is the other project's own evidence, not
+        emptiness. Nothing is published — the client re-reads
+        ``GET /api/validation`` as part of adopting the new workspace.
         """
         self._root = root.resolve()
         self._results.clear()
         self._payloads = PayloadStore()
+        self._disk = ValidationStore(self._root)
+        self._replay()
+
+    def _replay(self) -> None:
+        """Prune, then rehydrate the bounded maps from the disk source."""
+        policy = self._policy()
+        try:
+            self._disk.prune(policy, now=self._clock())
+            found = self._disk.load(self._max_results, payload_cap=MAX_PAYLOADS_PER_KIND)
+        except Exception:  # a replay may never be the reason a server will not start
+            log.exception("validation.replay_failed", root=str(self._root))
+            return
+        for result in found.results:
+            self._results[result.validation_id] = result
+        for (kind, ref), payload in found.payloads.items():
+            self._payloads.put_ref(kind, ref, payload)
+        log.info(
+            "validation.replayed",
+            results=len(found.results),
+            payloads=len(found.payloads),
+            skipped=found.skipped,
+            retention=policy.detail(),
+        )
+
+    def _policy(self) -> RetentionPolicy:
+        try:
+            return self._retention()
+        except Exception:
+            log.exception("validation.retention_unreadable")
+            return RetentionPolicy()
 
     def register(self, check: ValidationCheck) -> None:
         """Add a check to the registry. Last registration for an id wins."""
@@ -282,6 +349,7 @@ class ValidationService:
             truncated=truncated,
         )
         self._store(result)
+        self._write(result)
         self._bus.publish(ValidationEvent(result=result))
         log.info(
             "validation.completed",
@@ -311,8 +379,54 @@ class ValidationService:
         updated = result.model_copy(update={"approval": approval})
         self._results[validation_id] = updated
         self._results.move_to_end(validation_id)
+        # Its own append-only line, never an edit to the result's — which is what
+        # lets the results log stay append-only at all (services/validation_store.py).
+        self._disk.append_approval(validation_id, approval, now=self._clock())
         self._bus.publish(ValidationEvent(result=updated))
         return updated
+
+    def export(self, validation_id: str) -> EvidenceExport | None:
+        """Render one result as a one-page report and write it into the workspace.
+
+        ``None`` means the id is unknown — the same answer :meth:`approve` gives
+        an evicted handle, and the router turns it into a 404 rather than an
+        empty document a reader could mistake for a result with nothing in it.
+        Raises ``OSError`` if the file cannot be written: an export is something
+        a person is waiting on, so a failure is a message and not a silence.
+        """
+        result = self._results.get(validation_id)
+        if result is None:
+            return None
+        generated_at = self._clock()
+        markdown = render_evidence(
+            result,
+            payloads=self._payloads,
+            workspace_root=self._root,
+            generated_at=generated_at,
+        )
+        filename = f"{validation_id}.md"
+        written = self._disk.write_export(filename, markdown)
+        relative = written.relative_to(self._root).as_posix()
+        log.info("validation.exported", validation_id=validation_id, path=relative)
+        return EvidenceExport(
+            validation_id=validation_id,
+            path=relative,
+            filename=filename,
+            markdown=markdown,
+            bytes=len(markdown.encode("utf-8")),
+            generated_at=generated_at,
+        )
+
+    def _write(self, result: ValidationResult) -> None:
+        """Append the result and the detail payloads its evidence names."""
+        payloads: list[tuple[EvidenceKind, str, BaseModel]] = []
+        for item in result.evidence:
+            if item.payload_ref is None:
+                continue
+            payload = self._payloads.get(item.kind, item.payload_ref)
+            if payload is not None:
+                payloads.append((item.kind, item.payload_ref, payload))
+        self._disk.append_result(result, payloads, now=self._clock())
 
     def get(self, validation_id: str) -> ValidationResult | None:
         return self._results.get(validation_id)

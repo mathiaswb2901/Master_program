@@ -4,9 +4,6 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request
 
 from workbench_server.models.evidence import EvidencePayload
-from workbench_server.models.gates import GateLog
-from workbench_server.models.reconciliation import ReconciliationReport
-from workbench_server.models.review import ReviewReport
 from workbench_server.models.validation import (
     ApproveRequest,
     EvidenceKind,
@@ -14,7 +11,9 @@ from workbench_server.models.validation import (
     ValidationResults,
     ValidationSpec,
 )
+from workbench_server.models.validation_store import EvidenceExport
 from workbench_server.services.validation import ValidationService
+from workbench_server.services.validation_store import payload_envelope
 
 log = structlog.get_logger()
 
@@ -62,17 +61,19 @@ async def payload(request: Request, kind: EvidenceKind, ref: str) -> EvidencePay
     found = _service(request).payload(kind, ref)
     if found is None:
         raise HTTPException(status_code=404, detail="unknown or evicted payload")
-    if isinstance(found, ReconciliationReport):
-        return EvidencePayload(kind=kind, ref=ref, reconciliation=found)
-    if isinstance(found, GateLog):
-        return EvidencePayload(kind=kind, ref=ref, gate_log=found)
-    if isinstance(found, ReviewReport):
-        return EvidencePayload(kind=kind, ref=ref, review=found)
-    # A payload shape this build has no field for. Refused rather than returned
-    # as an envelope with every field null, which a client can only read as
-    # either "empty" or "broken" — the emptiness AXI shape 2 exists to forbid.
-    log.warning("validation.payload_unrenderable", kind=kind, ref=ref, shape=type(found).__name__)
-    raise HTTPException(status_code=404, detail="no payload shape this server can render")
+    # One narrowing, shared with the disk source that has to write the same
+    # envelope (`services/validation_store.py`) — two copies of it would drift
+    # the day a fourth payload kind lands and only one of them is visited.
+    envelope = payload_envelope(kind, ref, found)
+    if envelope is None:
+        # A payload shape this build has no field for. Refused rather than
+        # returned as an envelope with every field null, which a client can only
+        # read as either "empty" or "broken" — the emptiness AXI shape 2 forbids.
+        log.warning(
+            "validation.payload_unrenderable", kind=kind, ref=ref, shape=type(found).__name__
+        )
+        raise HTTPException(status_code=404, detail="no payload shape this server can render")
+    return envelope
 
 
 @router.get("/{validation_id}")
@@ -83,6 +84,29 @@ async def result(request: Request, validation_id: str) -> ValidationResult:
     if found is None:
         raise HTTPException(status_code=404, detail="unknown validation")
     return found
+
+
+@router.post("/{validation_id}/export")
+async def export(request: Request, validation_id: str) -> EvidenceExport:
+    """Render this result as a one-page Markdown report and write it into the
+    workspace (``.workbench/validation/exports/<id>.md``).
+
+    A POST because it leaves a file behind — which is the point: a proof you can
+    hand to someone is a file, not a string in a terminal that scrolled away. The
+    rendered document rides the response too, so the panel that asked for it can
+    show it without reading the file back. **404** for an id the server no longer
+    holds, exactly as ``approve`` answers one.
+    """
+    try:
+        written = _service(request).export(validation_id)
+    except OSError as err:
+        log.warning("validation.export_failed", validation_id=validation_id, error=str(err))
+        raise HTTPException(
+            status_code=500, detail=f"could not write the report: {err.strerror or err}"
+        ) from err
+    if written is None:
+        raise HTTPException(status_code=404, detail="unknown or superseded validation")
+    return written
 
 
 @router.post("/{validation_id}/approve")
