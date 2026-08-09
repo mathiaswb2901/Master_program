@@ -59,15 +59,41 @@ const METAFILE = path.join(DIST, "bundle-metafile.json");
  * 195.4 KiB gzipped, still 0 Monaco modules**, which is the number the ceiling
  * below has to live with.
  *
- * What is left is dockview-core (423 KiB attributed), xterm (285 KiB), our own
- * `src` (199 KiB) and react-dom (132 KiB) — the next things anyone shrinking
- * this number has to argue with.
+ * What is left is dockview-core, xterm (285 KiB), our own `src` and react-dom
+ * (132 KiB) — the next things anyone shrinking this number has to argue with.
  *
- * The ceiling is ~1.33x the measured number: enough headroom for a panel or two
- * without a ratchet fight, tight enough that another editor-sized dependency
- * cannot arrive unnoticed. Lower it when a PR earns it.
+ * ## Raised for dockview 7, 2026-08-09
+ *
+ * | | entry chunk | gzipped | dockview packages attributed |
+ * |---|---|---|---|
+ * | dockview 4.13.1 | 879.8 KiB | 236.5 KiB | 451 KiB over 80 modules |
+ * | dockview 7.0.4  | 1032.2 KiB | 271.9 KiB | 666 KiB over 4 modules |
+ *
+ * That last column sums all three packages — `dockview` + `dockview-core` +
+ * `dockview-react`. ROADMAP.md quotes `dockview-core` **alone** for the same two
+ * builds (423 KiB → 597 KiB): a different scope over the same measurement, not a
+ * second measurement that disagrees. On 7.0.4 the split is dockview-core 597 +
+ * dockview 36 + dockview-react 33, and on 4.13.1 the 66 shakeable modules below
+ * are dockview-core's share of that row's 80.
+ *
+ * **+35.4 KiB gzipped, +15.0%**, and it is packaging rather than features. v4
+ * resolved to per-module ESM, so rollup could see 66 dockview-core modules and
+ * shake the ones we never reach; 7 publishes a pre-bundled `main.esm.mjs` and
+ * its `exports` map offers no other entry, so the whole library arrives as one
+ * opaque module. The `dockview` package additionally calls `registerModules()`
+ * at import — accessibility, advanced drag-and-drop, tab groups, context menus
+ * — so even reaching past the export map would not shake much. Measured, not
+ * assumed: aliasing back to `dist/esm` was tried and abandoned (it fights the
+ * package's own export map for a gain the eager `registerModules` call cancels).
+ *
+ * The dock is the app shell — nothing paints without it — so this cannot move
+ * behind a dynamic import the way Monaco did. The ceiling therefore goes to 285
+ * KiB: 13 KiB (4.8%) of headroom, deliberately tighter than the 1.33x this
+ * number started at, because the thing that grew is not going to grow again on
+ * its own and the next PR to touch it should have to argue. Lower it when a PR
+ * earns it.
  */
-const ENTRY_GZIP_CEILING_KB = 260;
+const ENTRY_GZIP_CEILING_KB = 285;
 
 /** Rollup's per-chunk module attribution, aggregated by package. */
 interface Metafile {

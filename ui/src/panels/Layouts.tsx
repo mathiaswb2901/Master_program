@@ -102,11 +102,76 @@ const useLayoutUi = create<LayoutUiState>()(() => ({
 }));
 
 /** Armed only once a restore has settled: a read that failed, or has not
- * happened yet, must never let the default arrangement overwrite the file. */
+ * happened yet, must never let the default arrangement overwrite the file.
+ *
+ * Note what this is *not*: it is not the "don't write back what we just read"
+ * guard. That one is `replacingArrangement` below, and the two are separate
+ * because they answer different questions — this one is about the file (do we
+ * know what is in it?), that one about the window (is this change the user's,
+ * or ours?). */
 let persistenceArmed = false;
 let saveTimer: number | undefined;
 let saveFailureReported = false;
 let dockListeners: DockviewIDisposable[] = [];
+
+/**
+ * Depth of a dockview transaction in which the app is *replacing* the whole
+ * arrangement rather than the user changing it.
+ *
+ * dockview 7 brackets every structural change with `onWillMutateLayout` /
+ * `onDidMutateLayout`, tagged with a `kind` and an origin — `'user'` for a drag
+ * or a tab click, `'api'` for something this application called. Two of those
+ * kinds mean "the arrangement is being swapped out from underneath": `load`
+ * (`fromJSON`) and `clear`. Both are only ever this file's doing, and this file
+ * always follows them with a deliberate `persist()` carrying the arrangement as
+ * it finally is.
+ *
+ * The burst of `onDidLayoutChange`s such a transaction fires is therefore an
+ * *echo* — the app hearing its own voice — and answering it re-armed the
+ * debounce and wrote the same arrangement a second time half a second later.
+ * Suppressing saves for the length of the transaction is what the origin tag
+ * bought: a layout switch now writes `layouts.json` once instead of twice, and
+ * the guard is a fact reported by dockview rather than a flag this file sets
+ * around its own calls and hopes it never forgets to clear.
+ *
+ * Deliberately *not* every `api`-origin transaction: `addPanel` is api-origin
+ * too, and a new pane placed by the pane capability (`Panes.tsx`) has no
+ * explicit `persist()` behind it — the debounced autosave is what persists it,
+ * and must go on doing so.
+ */
+let replacingDepth = 0;
+/** Transactions that have closed but whose layout-change echo is still in the
+ * microtask queue — see `leaveReplacing`. */
+let replacingSettling = 0;
+const REPLACING_KINDS: ReadonlySet<string> = new Set(["load", "clear"]);
+const replacingArrangement = (): boolean => replacingDepth > 0 || replacingSettling > 0;
+
+const enterReplacing = (): void => {
+  replacingDepth++;
+};
+
+/**
+ * Close a replacing transaction — but hold the guard one microtask longer.
+ *
+ * `onDidLayoutChange` is dockview's `AsapEvent`: the first change inside a
+ * transaction queues a microtask and every later one coalesces into it, so the
+ * whole burst is delivered *after* the transaction has synchronously closed. A
+ * guard released here would therefore already be down by the time the echo
+ * arrives, and this would suppress nothing at all.
+ *
+ * The queue is FIFO and dockview's microtask was queued during the transaction,
+ * so one queued here is behind it: the echo is heard with the guard still up,
+ * and the guard is down before anything a user could do next. Degrades to
+ * nothing when no echo was queued.
+ */
+const leaveReplacing = (): void => {
+  replacingDepth = Math.max(0, replacingDepth - 1);
+  if (replacingDepth > 0) return;
+  replacingSettling++;
+  queueMicrotask(() => {
+    replacingSettling = Math.max(0, replacingSettling - 1);
+  });
+};
 
 const toast = (kind: "error" | "warn" | "info" | "success", message: string): void =>
   useStore.getState().pushToast(kind, message);
@@ -179,7 +244,7 @@ function persist(): Promise<void> {
 }
 
 function scheduleSave(): void {
-  if (!persistenceArmed) return;
+  if (!persistenceArmed || replacingArrangement()) return;
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => void persist(), SAVE_DEBOUNCE_MS);
 }
@@ -443,9 +508,19 @@ function onDockReady(dock: DockviewApi | null): void {
   window.clearTimeout(saveTimer);
   persistenceArmed = false;
   saveFailureReported = false;
+  replacingDepth = 0;
+  replacingSettling = 0;
   useLayoutUi.setState({ maximized: false, menu: "closed", current: null });
   if (dock === null) return;
   dockListeners = [
+    // Registered before the save listener, so a transaction is already open by
+    // the time the layout changes it causes are heard (see `replacingDepth`).
+    dock.onWillMutateLayout((event) => {
+      if (event.origin === "api" && REPLACING_KINDS.has(event.kind)) enterReplacing();
+    }),
+    dock.onDidMutateLayout((event) => {
+      if (event.origin === "api" && REPLACING_KINDS.has(event.kind)) leaveReplacing();
+    }),
     dock.onDidLayoutChange(() => scheduleSave()),
     dock.onDidMaximizedGroupChange(() => {
       useLayoutUi.setState({ maximized: dock.hasMaximizedGroup() });

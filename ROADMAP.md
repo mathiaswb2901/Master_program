@@ -318,7 +318,11 @@ left is the **exit criterion below, not yet met**: the last cold-launch figure t
 document records is **903 ms** to the first tree rows against an 800 ms ceiling, and no
 `@wallclock` ceiling has been ratcheted from its starting ~2.5x. The one named layout-shift
 violation — the file tree's centred "Loading workspace…" swapping for a toolbar 322 px
-higher — is also still open (see the picker paragraph above).
+higher — is also still open (see the picker paragraph above). One new weight to note: the
+dockview 7 upgrade makes dockview-core alone **597 kB** attributed in the entry chunk — 7
+publishes one pre-bundled ESM module where 4 published 66 shakeable ones, and
+`ui/e2e/perf/bundle.spec.ts` quotes 666 kB for the same build because it sums all three
+dockview packages.
 
 **The picker that moved the pane** (landed): the launch layout-shift budget existed to
 catch a webfont swap and caught something better. Measured 2026-08-06 on the pinned
