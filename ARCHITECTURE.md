@@ -400,6 +400,7 @@ in-process calls where the model and the user dominate.
 | `services/pty_manager.py` | PTY sessions: the `PtyLike` seam, the per-platform factory, ConPTY (Windows) |
 | `services/pty_posix.py` | the POSIX PTY backend — stdlib `pty.fork`, behind an injectable syscall surface |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
+| `services/ws_lifecycle.py` | the teardown rules both live sockets share: a pump that never raises, a drain that can never skip the release |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
 | `services/conversations.py` | the whole store, browsable: enumerate + mtime-cached reads, lossy-key resolution, the workspace jail |

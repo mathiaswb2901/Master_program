@@ -1,7 +1,7 @@
 """Agent session REST + WebSocket endpoints."""
 
 import asyncio
-import contextlib
+from collections.abc import AsyncIterator
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -28,6 +28,7 @@ from workbench_server.services.local_auth import ws_subprotocol_to_echo
 from workbench_server.services.sdk_factory import UiStateStore
 from workbench_server.services.session_index import SessionIndex
 from workbench_server.services.workspace import PathOutsideWorkspaceError, Workspace
+from workbench_server.services.ws_lifecycle import drain_pump, send_frames
 
 log = structlog.get_logger()
 
@@ -186,13 +187,12 @@ async def agent_ws(ws: WebSocket, local_id: str) -> None:
     for pending in session.pending_attention():
         queue.put_nowait(pending)
 
-    async def pump() -> None:
-        with contextlib.suppress(RuntimeError):
-            while True:
-                event = await queue.get()
-                await ws.send_text(event.model_dump_json())
+    async def frames() -> AsyncIterator[str]:
+        while True:
+            event = await queue.get()
+            yield event.model_dump_json()
 
-    pump_task = asyncio.create_task(pump())
+    pump_task = asyncio.create_task(send_frames(ws, frames(), stream="agent", session=local_id))
     try:
         while True:
             raw = await ws.receive_text()
@@ -212,7 +212,13 @@ async def agent_ws(ws: WebSocket, local_id: str) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        pump_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pump_task
-        session.unsubscribe(queue)
+        # `unsubscribe` gets a `finally:` of its own rather than a line after an
+        # `await` that can still raise: a pump that died of an abrupt disconnect
+        # stored that exception, and re-raising it here used to leave this
+        # client's queue in the session's listener set forever — a fan-out to a
+        # socket nobody is reading, filling until it hit its cap.
+        # `services/ws_lifecycle` has the whole chain.
+        try:
+            await drain_pump(pump_task, stream="agent", session=local_id)
+        finally:
+            session.unsubscribe(queue)

@@ -15,6 +15,7 @@ other's platform. Nothing above this line knows which one it got.
 import asyncio
 import itertools
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Protocol
 
@@ -24,6 +25,19 @@ log = structlog.get_logger()
 
 _READ_CHUNK = 4096
 _WINDOWS_SHELL = "powershell.exe -NoLogo"
+#: Threads reserved for teardown, and why teardown gets its own pool at all.
+#:
+#: `release` blocks: force-terminating a child that is wedged in uninterruptible
+#: kernel I/O (an `ssh` to a dead peer, a hung network mount) polls for up to
+#: `pty_posix.REAP_TIMEOUT_S`, and `winpty.PtyProcess.terminate` sleeps too. That
+#: may not happen on the event-loop thread — uvicorn serves every other socket
+#: and request from it — and it may not happen on the loop's *default* executor
+#: either: that is where every live terminal parks a thread inside
+#: `PtySession.read`, so a release scheduled there would queue behind the very
+#: sessions it is closing (a box with 8 cores gives that pool 12 workers).
+#: Hence a private pool, wide enough that a windowful of wedged terminals costs
+#: one `REAP_TIMEOUT_S` in total rather than one apiece.
+_TEARDOWN_THREADS = 32
 
 
 class PtyLike(Protocol):
@@ -83,6 +97,12 @@ class PtyManager:
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self._sessions: dict[int, PtySession] = {}
+        # Threads are created on demand, so a manager nobody releases through
+        # costs nothing. Deliberately never shut down: a WebSocket handler's
+        # own `finally:` can still run after the lifespan's, and a closed pool
+        # would turn that release into a RuntimeError and orphan the child.
+        # The workers are idle and are joined at interpreter exit.
+        self._teardown = ThreadPoolExecutor(_TEARDOWN_THREADS, thread_name_prefix="pty-teardown")
 
     def spawn(self, cwd: Path, rows: int = 24, cols: int = 80) -> PtySession:
         session = PtySession(next(self._ids), _spawn_backend(cwd, rows, cols))
@@ -91,10 +111,26 @@ class PtyManager:
         return session
 
     def release(self, session: PtySession) -> None:
+        """Terminate the child and forget the session. **Blocks** — see
+        `_TEARDOWN_THREADS`; callers on the event loop want `release_async`."""
         session.terminate()
         self._sessions.pop(session.session_id, None)
         log.info("pty.released", session_id=session.session_id)
 
-    def shutdown(self) -> None:
-        for session in list(self._sessions.values()):
-            self.release(session)
+    async def release_async(self, session: PtySession) -> None:
+        """`release`, off the event-loop thread."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._teardown, self.release, session)
+
+    async def shutdown(self) -> None:
+        """Release every live session — off the loop thread, and all at once.
+
+        Concurrently rather than in a loop: serially, N wedged children cost N x
+        `REAP_TIMEOUT_S` of dead server before the process can exit, and a user
+        who left four terminals open on hung SSH sessions would feel every one
+        of them. Gathered, the whole shutdown is bounded by the slowest child.
+        """
+        sessions = list(self._sessions.values())
+        if not sessions:
+            return
+        await asyncio.gather(*(self.release_async(session) for session in sessions))

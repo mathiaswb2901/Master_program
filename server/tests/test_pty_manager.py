@@ -15,6 +15,7 @@ is what the ubuntu leg of the 3-OS matrix (M7 §C2) is for, where these same
 
 import os
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ from typing import Any
 import pytest
 
 from workbench_server.services import pty_posix
-from workbench_server.services.pty_manager import PtyLike, PtyManager, _spawn_backend
+from workbench_server.services.pty_manager import PtyLike, PtyManager, PtySession, _spawn_backend
 from workbench_server.services.pty_posix import PosixPty, PosixSyscalls, _StdlibSyscalls
 
 
@@ -39,6 +40,9 @@ class FakePosix:
         self.closed = 0
         self.reaps = 0
         self.slept: list[float] = []
+        #: Which thread each reap-poll sleep ran on. A blocking wait belongs on
+        #: a worker; on the event-loop thread it is the whole server stalling.
+        self.slept_on: list[int] = []
         self.exit_status: int | None = None
         self.write_limit: int | None = None
         self.forked: tuple[list[str], Path, dict[str, str]] | None = None
@@ -77,6 +81,42 @@ class FakePosix:
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
+        self.slept_on.append(threading.get_ident())
+
+
+class WedgedChild(FakePosix):
+    """SIGKILLed but stuck in uninterruptible I/O — never becomes reapable.
+
+    The one case `REAP_TIMEOUT_S` exists for, and the only one in which a
+    release blocks long enough for *where* it blocks to matter.
+    """
+
+    def reap(self, pid: int) -> int | None:
+        self.reaps += 1
+        return None
+
+
+class InLockstep(WedgedChild):
+    """A wedged child whose first reap-poll waits for its siblings' at a barrier.
+
+    `met_the_others` is False when it was the only one there — which is exactly
+    what a serial shutdown looks like from inside one child's reap.
+    """
+
+    def __init__(self, barrier: threading.Barrier, pid: int) -> None:
+        super().__init__(pid=pid)
+        self._barrier = barrier
+        self.met_the_others: bool | None = None
+
+    def sleep(self, seconds: float) -> None:
+        super().sleep(seconds)
+        if self.met_the_others is None:
+            try:
+                self._barrier.wait(timeout=5)
+            except threading.BrokenBarrierError:
+                self.met_the_others = False
+            else:
+                self.met_the_others = True
 
 
 def posix_pty(fake: FakePosix) -> PosixPty:
@@ -126,7 +166,7 @@ class TestTheSeam:
         backend = _spawn_backend(Path.cwd(), 24, 80)
         assert isinstance(backend, PosixPty)
 
-    def test_the_manager_tracks_and_releases_whatever_the_factory_returned(
+    async def test_the_manager_tracks_and_releases_whatever_the_factory_returned(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The manager is platform-blind — the seam's whole point."""
@@ -138,7 +178,7 @@ class TestTheSeam:
         manager = PtyManager()
         session = manager.spawn(Path.cwd())
         assert manager._sessions == {session.session_id: session}
-        manager.shutdown()
+        await manager.shutdown()
         assert manager._sessions == {}
         assert fake.signals == [True]  # force-killed, as on Windows
 
@@ -356,6 +396,48 @@ class TestAWedgedChildCannotFreezeTheServer:
         assert max(fake.slept) <= pty_posix.REAP_POLL_MAX_S  # no single long stall
         assert fake.closed == 1  # the fd is released even though the child is not
         assert proc.exit_status is None
+
+    async def test_a_wedged_child_reaps_on_a_worker_thread_not_the_caller_s(self) -> None:
+        """`release_async` is the only release an event loop may call.
+
+        The assertion is which thread the poll sleeps on: `release` blocks for
+        `REAP_TIMEOUT_S`, and uvicorn serves every other socket from the thread
+        that would otherwise be doing the waiting.
+        """
+        fake = WedgedChild()
+        manager = PtyManager()
+        session = PtySession(1, posix_pty(fake))
+        manager._sessions[session.session_id] = session
+
+        await manager.release_async(session)
+
+        assert fake.slept_on, "the wedged child never reached the polling reap"
+        assert threading.get_ident() not in fake.slept_on
+        assert manager._sessions == {}
+
+    async def test_shutdown_reaps_every_wedged_terminal_at_once_not_one_by_one(self) -> None:
+        """N wedged children must cost one `REAP_TIMEOUT_S`, not N of them.
+
+        The barrier *is* the assertion, and it is what makes this deterministic
+        rather than a wall-clock guess: three reaps can only get through a
+        3-party barrier if all three are in flight at the same moment. A
+        shutdown that releases sessions in a `for` loop leaves the first one
+        waiting there alone until the barrier times out and breaks.
+        """
+        parties = 3
+        barrier = threading.Barrier(parties)
+        fakes = [InLockstep(barrier, pid=100 + i) for i in range(parties)]
+        manager = PtyManager()
+        for fake in fakes:
+            session = PtySession(fake.pid, posix_pty(fake))
+            manager._sessions[session.session_id] = session
+
+        await manager.shutdown()
+
+        assert all(f.met_the_others for f in fakes), "the reaps ran one after another"
+        assert all(f.signals == [True] for f in fakes)  # every child was force-killed
+        assert threading.get_ident() not in [t for f in fakes for t in f.slept_on]
+        assert manager._sessions == {}
 
     def test_a_child_that_dies_late_is_reaped_by_the_next_spawn(
         self, monkeypatch: pytest.MonkeyPatch
