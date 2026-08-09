@@ -1,12 +1,20 @@
-"""PTY sessions on Windows via pywinpty (ConPTY).
+"""PTY sessions, one backend per platform behind one protocol.
 
-``winpty.PtyProcess`` does blocking reads, so reads are pushed onto worker
+A PTY does blocking reads whatever the OS, so reads are pushed onto worker
 threads with ``asyncio.to_thread``. The manager tracks live sessions so the
 app can terminate them all on shutdown.
+
+`PtyLike` is the seam (ARCHITECTURE.md, "platform code is quarantined"): the
+shape of `winpty.PtyProcess`, which is what the rest of the server was already
+written against. `_spawn_backend` picks the implementation by `sys.platform` —
+pywinpty/ConPTY on Windows, `pty_posix.PosixPty` (stdlib `pty`) elsewhere — and
+both imports are function-local, because neither module can be imported on the
+other's platform. Nothing above this line knows which one it got.
 """
 
 import asyncio
 import itertools
+import sys
 from pathlib import Path
 from typing import Protocol
 
@@ -15,7 +23,7 @@ import structlog
 log = structlog.get_logger()
 
 _READ_CHUNK = 4096
-_SHELL = "powershell.exe -NoLogo"
+_WINDOWS_SHELL = "powershell.exe -NoLogo"
 
 
 class PtyLike(Protocol):
@@ -26,6 +34,19 @@ class PtyLike(Protocol):
     def setwinsize(self, rows: int, cols: int) -> None: ...
     def isalive(self) -> bool: ...
     def terminate(self, force: bool = ...) -> bool: ...
+
+
+def _spawn_backend(cwd: Path, rows: int, cols: int) -> PtyLike:
+    """The platform's PTY, started on the user's shell in `cwd`."""
+    if sys.platform == "win32":
+        from winpty import PtyProcess  # Windows-only import, deferred
+
+        spawned: PtyLike = PtyProcess.spawn(_WINDOWS_SHELL, cwd=str(cwd), dimensions=(rows, cols))
+        return spawned
+    else:
+        from workbench_server.services import pty_posix  # POSIX-only stdlib imports
+
+        return pty_posix.spawn(cwd, rows, cols)
 
 
 class PtySession:
@@ -64,10 +85,7 @@ class PtyManager:
         self._sessions: dict[int, PtySession] = {}
 
     def spawn(self, cwd: Path, rows: int = 24, cols: int = 80) -> PtySession:
-        from winpty import PtyProcess  # Windows-only import, deferred
-
-        proc: PtyProcess = PtyProcess.spawn(_SHELL, cwd=str(cwd), dimensions=(rows, cols))
-        session = PtySession(next(self._ids), proc)
+        session = PtySession(next(self._ids), _spawn_backend(cwd, rows, cols))
         self._sessions[session.session_id] = session
         log.info("pty.spawned", session_id=session.session_id, cwd=str(cwd))
         return session

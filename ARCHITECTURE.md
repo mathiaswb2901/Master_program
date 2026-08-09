@@ -33,9 +33,11 @@ One Python process, one webview window, one optional local Office engine.
    discriminated unions on `type`. The UI mirrors these in `ui/src/types.ts`.
 3. **Routers thin, services own logic.** A router validates, delegates, maps domain
    errors to HTTP codes. Everything interesting is testable without HTTP.
-4. **Platform code is quarantined.** Windows-only bits live in
-   `services/pty_manager.py` behind a `Protocol`; a POSIX implementation slots in
-   without touching the router.
+4. **Platform code is quarantined.** The PTY sits behind the `PtyLike` `Protocol` in
+   `services/pty_manager.py`, whose `_spawn_backend` picks by `sys.platform`: pywinpty
+   (ConPTY) on Windows, `services/pty_posix.py` (stdlib `pty`) elsewhere. Neither
+   backend's imports run on the other's platform, and the router never learns which
+   one it got.
 5. **The Agent SDK is injected.** `services/agent_sessions.py` takes a client factory;
    the real one (`services/sdk_factory.py`) is the only module importing
    `claude_agent_sdk`. Tests script a fake client through the same seam.
@@ -395,7 +397,8 @@ in-process calls where the model and the user dominate.
 | `services/watcher.py` | watchfiles -> bus |
 | `services/ignore.py` | what the tree and watcher skip: noise names, plus `CACHEDIR.TAG` build caches |
 | `services/event_bus.py` | in-process pub/sub |
-| `services/pty_manager.py` | ConPTY sessions (Windows) |
+| `services/pty_manager.py` | PTY sessions: the `PtyLike` seam, the per-platform factory, ConPTY (Windows) |
+| `services/pty_posix.py` | the POSIX PTY backend — stdlib `pty.fork`, behind an injectable syscall surface |
 | `services/terminal_stream.py` | batching PTY reads into WebSocket frames (below) |
 | `services/agent_sessions.py` | session state machines, streaming, permissions, plan artifacts |
 | `services/session_index.py` | per-folder history from Claude Code's storage; the one transcript line parser |
@@ -545,8 +548,28 @@ Each live session wraps one `ClaudeSDKClient` with `cwd` bound to a workspace fo
 Streaming uses `include_partial_messages`; the session translates SDK messages into
 typed events (text deltas, tool-use notes, status, turn-done) consumed by any number
 of WebSocket listeners. Permissions: file tools inside the folder are auto-allowed;
-everything else (Bash, web) raises a `PermissionRequest` event and blocks on an
-asyncio future until the UI answers (10-minute timeout -> deny). The context-bridge
+everything else (shell, web) raises a `PermissionRequest` event and blocks on an
+asyncio future until the UI answers (10-minute timeout -> deny).
+
+That promise is kept by **two** mechanisms, because one was not enough.
+`can_use_tool` is only reached for calls the CLI resolves to *ask* — anything
+already resolved to *allow*, whether by `allowed_tools`, by `permission_mode` or
+by a `permissions.allow` rule in a workspace settings file, never reaches the
+callback. The server used to run with `permission_mode="acceptEdits"`, and that
+mode allows a `Bash` call outright when its base command is one of
+`mkdir touch rm rmdir mv cp sed`: measured against the bundled CLI, `mkdir` in
+the workspace executed with no card, no provenance claim and no activity row.
+The mode is now `default`, and the shell launchers (`Bash`, and `PowerShell`,
+which the CLI substitutes on Windows) are additionally brokered by a `PreToolUse`
+hook — `services/permission_broker.py`. A hook is dispatched for every tool call
+and its deny binds even in permissive modes, so a mode a subagent inherited or an
+allow rule in a folder the user did not write cannot walk around it. The hook
+resolves the *same* `ask_permission` future the chat card and the board answer,
+and its explicit allow suppresses the callback, so a brokered request still costs
+exactly one prompt — both directions are driven through the real bundled CLI by
+`TestTheEndToEndRepro` in `server/tests/test_permission_broker.py`
+(`WORKBENCH_PERMISSION_REPRO=1`), which counts the answers a single shell call
+costs. The context-bridge
 MCP tool `get_workspace_state` lets agents see the active/open/dirty files so they
 avoid editing buffers with unsaved user changes.
 
@@ -1240,10 +1263,15 @@ names a test after each):
 
 1. **Never auto-allow shell.** There is no code path in the service that
    resolves a permission — asserted by absence, because that absence is the
-   whole threat model. `Bash` is not in any session kind's `allowed_tools`, so a
-   worker's shell request blocks on the same future a chat session's does and is
-   answered by a human on the board. An orchestrator that could approve its own
-   workers' shell access is a different product.
+   whole threat model. No shell launcher is in any session kind's
+   `allowed_tools`, so a worker's shell request blocks on the same future a chat
+   session's does and is answered by a human on the board. An orchestrator that
+   could approve its own workers' shell access is a different product.
+   Absence from the allow-list is necessary but was never sufficient: a
+   permission mode auto-approves without consulting the callback, and a subagent
+   inherits its parent's mode with no way to override it per-worker. The
+   `PreToolUse` broker above is what makes the guarantee hold for a worker
+   rather than only for the config we happened to ship.
 2. **A budget that binds, checked before spawning.** Per-worker and per-fleet
    ceilings on turns and dollars (`WORKBENCH_ORCHESTRATOR_*`), read from the
    usage service. Every refusal is a `SpawnRefusal` carrying the limit, the

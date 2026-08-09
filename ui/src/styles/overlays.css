@@ -116,7 +116,24 @@
   color: var(--error);
 }
 
-/* ---- Toasts --------------------------------------------------------------- */
+/* ---- Toasts ---------------------------------------------------------------
+   ANVIL V4 (DESIGN.md §2.1, §5.4, §6.4, §7). A toast is the app's ambient
+   voice: the one surface that speaks without being asked, so it arrives with
+   intent, says one thing, and leaves. Three decisions carry it.
+
+     * **It floats, so it is `--surface-overlay`** — the same surface as the
+       QuickBar and every menu, at elevation 2 with the 1px border §4 requires
+       beside a dark-mode shadow. There is no second floating palette.
+     * **A kind is a glyph, a name and an edge — never a colour alone** (§7).
+       The 2px left rule is the tint; the 14px mark is the shape; the
+       screen-reader name is in `Toasts.tsx`.
+     * **It hugs its own text.** The column is anchored to the right edge and
+       each toast sizes to its message up to 360px, so a four-word message is
+       four words wide. A fixed 360px slab for "Saved" is a notification
+       competing with the work.
+
+   Colour here is spent only on the 2px edge and the mark, both semantic, both
+   for as long as the toast lives — which is seconds. Nothing standing. */
 
 .wb-toasts {
   position: fixed;
@@ -124,9 +141,14 @@
   bottom: var(--space-6);
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: var(--space-4);
   width: 360px;
   max-width: calc(100vw - 32px);
+  /* The column is taller than its toasts by its gaps, and a transparent gap
+     that swallows a click on the panel underneath is a bug nobody reports
+     twice. Only the toasts themselves take the pointer. */
+  pointer-events: none;
   z-index: 180;
 }
 
@@ -134,6 +156,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-4);
+  max-width: 100%;
   padding: var(--space-4) var(--space-5);
   background: var(--surface-overlay);
   border: 1px solid var(--border-default);
@@ -142,40 +165,67 @@
   box-shadow: var(--shadow-2);
   font-size: var(--type-md-size);
   color: var(--text-primary);
+  pointer-events: auto;
   /* A toast is the one thing on screen the user did not ask for, so it is the
      one thing allowed to move to be noticed: it rises into the stack. */
   animation: wb-rise-in var(--motion-enter);
 }
 
-/* Success is the only celebratory state this app has, and `--motion-celebrate`
-   is the only spring that overshoots (DESIGN.md §5). Spent here and nowhere
-   else — an error that bounced would be flippant. */
-.wb-toast.is-success {
-  animation: wb-rise-in var(--motion-celebrate);
+/* The kind's shape. 14px, aligned to the first line of the message rather than
+   to the box, so a three-line toast does not leave the mark floating. */
+.wb-toast-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: calc((var(--type-md-line) - 14px) / 2);
 }
 
-/* Leaving: out to the right and gone, faster than it arrived and with no
-   spring — a dismissal that springs is a dismissal arguing with you.
-   `src/motion.ts` keeps the element mounted for exactly `--motion-exit-ms`. */
-.wb-toast.is-leaving {
-  animation: wb-slide-out var(--motion-exit);
-  pointer-events: none;
-}
-
+/* One semantic per kind, on both the edge and the mark — the tint and the
+   shape saying the same thing, which is what §7 asks for. One rule per kind,
+   so "what does an error look like" has exactly one answer to read. */
 .wb-toast.is-error {
   border-left-color: var(--error);
+}
+
+.wb-toast.is-error .wb-toast-mark {
+  color: var(--error);
 }
 
 .wb-toast.is-warn {
   border-left-color: var(--warn);
 }
 
+.wb-toast.is-warn .wb-toast-mark {
+  color: var(--warn);
+}
+
 .wb-toast.is-info {
   border-left-color: var(--info);
 }
 
+.wb-toast.is-info .wb-toast-mark {
+  color: var(--info);
+}
+
+/* Success is also the only celebratory state this app has, and
+   `--motion-celebrate` is the only spring that overshoots (DESIGN.md §5). Spent
+   here and nowhere else — an error that bounced would be flippant. */
 .wb-toast.is-success {
   border-left-color: var(--success);
+  animation: wb-rise-in var(--motion-celebrate);
+}
+
+.wb-toast.is-success .wb-toast-mark {
+  color: var(--success);
+}
+
+/* Leaving: out to the right and gone, faster than it arrived and with no
+   spring — a dismissal that springs is a dismissal arguing with you.
+   `src/motion.ts` keeps the element mounted for exactly `--motion-exit-ms`.
+   Last, so it beats the success entrance above at equal specificity. */
+.wb-toast.is-leaving {
+  animation: wb-slide-out var(--motion-exit);
+  pointer-events: none;
 }
 
 .wb-toast-msg {
@@ -184,10 +234,12 @@
   overflow-wrap: anywhere;
 }
 
+/* 24px, not the 20px this was: WCAG 2.2's desktop floor (§7), and the only
+   control a toast has. The glyph stays small — the target is what grows. */
 .wb-toast-close {
   flex: none;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
