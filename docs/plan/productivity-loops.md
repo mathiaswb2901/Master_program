@@ -73,9 +73,13 @@ fetch wastes their afternoon:
   unconditional `_AUTO_ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep"]` (line 60) that
   the section says it will replace. Nowhere in this document does a branch name for it
   appear, and nobody should go looking for one.
-- The ordering constraint PR-D really has is **#122** (`fix/activity-workspace-reroot`),
-  which owns `services/activity.py` — the file PR-D's one server-side edit lands in. PR-D
-  rebases onto #122; the staged-review track is irrelevant to it.
+- The ordering constraint PR-D really had was **#122** (`fix/activity-workspace-reroot`),
+  which owns `services/activity.py` — the file PR-D's one server-side edit lands in. **#122
+  merged on 2026-08-09** (`4a709da`), so that constraint is now discharged: PR-D branches
+  from a master that already has it, and the seam it needs survives the re-rooting work
+  unchanged (`describe`, `_PATH_KEYS` and `_DETAIL_KEYS` are all still there, at
+  `services/activity.py:103–164`). The staged-review track was never relevant to it either
+  way.
 
 **3. dockview v7's origin tags do not control focus, and focus is the actual bug.**
 Verified: `ui/src/registry.ts::openToolPanel` ends with an unconditional
@@ -308,7 +312,8 @@ front gate, both readers and every row of that table are green under
   is a **probe, not a gate**: no CI job runs it, and it is named as such so nobody mistakes
   its absence from the quality gate for an oversight.
 - **Composes with — two hard ordering constraints against open PRs**, of the same kind as
-  PR-D's #122 and stated in the same place for the same reason: PR-A's owned-file list above
+  PR-D's #122 (which has since merged) and stated in the same place for the same reason:
+  PR-A's owned-file list above
   *is* the intersection, so a lane that starts without reading this writes its tests against
   a version of `services/reconciliation.py` that will not exist when it merges.
   - **#114** (`m6/gate-closure-check`) rewrites `services/reconciliation.py` by +120/−38.
@@ -655,8 +660,8 @@ unchanged — still the jailed path the UI may open, never the locus — because
 *opening* are separate answers and `describe`'s docstring already says so. The paragraph
 index is rendered 1-based, because ¶0 is not a thing a person has ever counted.
 
-This is the only server-side edit in PR-D. It lands in the file **#122** owns, hence the
-rebase.
+This is the only server-side edit in PR-D. It lands in the file **#122** owned — which
+merged on 2026-08-09, so what was a rebase is now just "start from master".
 
 ### (b) The tree pulses where an agent is editing
 
@@ -699,7 +704,7 @@ not merit writing `layouts.json`.
 
 ### PR-D — owned files, models, tests
 
-- **Owns (edits):** `services/activity.py` (`describe` only — after #122),
+- **Owns (edits):** `services/activity.py` (`describe` only — on top of #122, now merged),
   `ui/src/registry.ts` (`openToolPanel`'s option), `ui/src/dock.ts` (`openPanel` passthrough),
   `ui/src/panels/FileTree.tsx` + its stylesheet, `ui/src/mission.ts` +
   `ui/src/panels/MissionControl.tsx`, `ui/src/activity.ts`, `DESIGN.md` §5.4 (one row).
@@ -715,7 +720,8 @@ not merit writing `layouts.json`.
   running rows and nothing else through a save/restore round trip with two FileTree panes
   (the plural test); and the perf lane asserts the tint adds no measurable per-row cost on
   the 5,005-file fixture.
-- **Composes with:** #122 (**must rebase** — it owns `services/activity.py`); **#119**
+- **Composes with:** #122 (**merged 2026-08-09** — it owned `services/activity.py`, and
+  PR-D now simply starts from a master that has it); **#119**
   (**must rebase** — despite its "store permission flags" title it edits `ui/src/mission.ts`
   by +40/−11 inside `useMissionStore.answer`, plus `ui/src/mission.test.ts`; PR-D adds the
   current-target line to the same file, so this is the same different-functions-one-file
@@ -857,14 +863,14 @@ parallel lanes**; B is the only one with a hard prerequisite *inside this plan* 
 reader seam and the `ReadSource` it stamps on every result B produces).
 
 Disjoint from each other is not the same claim as disjoint from everything in flight. Two of
-the four — A and D — carry two ordering constraints each against PRs that are open right
-now, and those are drawn into the diagram rather than left to the prose, because a lane that
+the four — A and D — carry ordering constraints against PRs that are open as of 2026-08-09,
+and those are drawn into the diagram rather than left to the prose, because a lane that
 discovers its rebase at merge time has already written its tests against the wrong file:
 
 ```
         A   (rebase onto #114, and onto #107 if open) ──► B
         C
-        D   (rebase onto #122, then #119)
+        D   (rebase onto #119; #122 has merged)
         E   (rebase onto D if both in flight)
 ```
 
@@ -900,7 +906,7 @@ whole document bridge, and "store permission flags" edits `ui/src/mission.ts`.
 |---|---|---|
 | **#114** gate-closure check | **PR-A** — both own `services/reconciliation.py` (#114: +120/−38) | **PR-A rebases onto it.** See PR-A's composition bullet: #114 renames `_Unit`/`_UNIT_TO_BASE`/`_is_ambiguous` public and leaves `OpenpyxlReader` alone, so PR-A's rename merges *cleanly and wrongly* if it goes first |
 | **#107** PowerPoint hosting | **PR-A** — `document_bridge.py`, `real_`/`fake_document_bridge.py`, `office_com.py` (+305), `service.py` (+172) | **PR-A rebases onto it if it is still open.** Additive on both sides, conflicting in the same Protocol body every time |
-| **#122** activity workspace re-root | **PR-D** — owns `services/activity.py` | **PR-D rebases onto it.** PR-D's one server-side edit lands in that file |
+| **#122** activity workspace re-root | **PR-D** — owns `services/activity.py` | **Merged 2026-08-09** (`4a709da`), constraint discharged. PR-D branches off a master that has it; `describe` and its key tuples survive unchanged |
 | **#119** store permission flags | **PR-D** — both edit `ui/src/mission.ts` (#119: +40/−11, inside `useMissionStore.answer`) | **PR-D rebases onto it.** Different functions in one file, exactly like the D/E overlap on `registry.ts` above — and it also touches `ui/src/mission.test.ts`, which PR-D extends |
 | **#118** dockview v7 | **PR-D**, softly | Wanted, not required: without it, one spurious layout save per agent-driven open (stated under PR-D rather than hidden) |
 | **#113** voice seam | none | Disjoint, and a natural later customer for PR-E: a voice command resolving to `layout.switch{name}` is a parameterised invocation, which is why PR-E's validation lives in the relay rather than in the CLI |
