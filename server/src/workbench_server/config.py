@@ -168,6 +168,28 @@ class Settings(BaseSettings):
     # it is what lets CI prove the whole flow with no real toolchain run.
     gate_fake: bool = False
 
+    # Spec-from-code (productivity loops, PR-B): ambient CI for workbooks. A
+    # checked-in `.workbench/reconcile/<name>.toml` maps workbook cells to
+    # callables in the *workspace's own* code, and a save of the workbook re-runs
+    # the reconciliation gate.
+    #
+    # There is no setting here through which a callable, an argv or a cwd is
+    # configured: the argv is fixed and server-owned
+    # (services/reconcile_spec.py::SPEC_ENTRY_ARGV) and the spec travels on
+    # stdin. What *does* widen the posture — this runs in the live workspace
+    # root, which the toolchain gate refuses — is paid for by the one-time
+    # content-hash approval, which covers the spec **and the code it names** and
+    # is re-verified before every run. `.workbench/gates.json` stays refused.
+    reconcile_timeout_s: float = Field(default=60.0, gt=0.0)
+    # Debounce on a workbook save, on top of watchfiles' own 200 ms. Long enough
+    # that Excel's write-temp-then-rename dance is one run rather than three.
+    reconcile_debounce_s: float = Field(default=0.5, ge=0.0)
+    # Replace the spec runner with the scripted stand-in in
+    # services/reconcile_spec.py: name-driven values, no process and no user code
+    # anywhere. The WORKBENCH_OFFICE_FAKE posture — off by default, loudly logged
+    # when on — and it is what lets CI prove the whole watcher→gate→chip loop.
+    reconcile_fake: bool = False
+
     # Staged review (M6, PR2): the adversarial review. A fresh-context reviewer
     # session over the subject session's diff, refute-first, read-only.
     #
