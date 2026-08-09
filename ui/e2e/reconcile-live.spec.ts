@@ -221,6 +221,24 @@ async function reconcile(page: Page, workbook: string, expected: number): Promis
   );
 }
 
+/**
+ * Settle a result, so this file leaves the shared server as it found it.
+ *
+ * Not housekeeping — a correctness requirement of the suite. One backend serves
+ * every spec file, and `review.spec.ts` opens by asserting the status bar is
+ * *quiet* (DESIGN §6.7: nothing needs you). A `high` or `blocked` result is
+ * medium-or-worse and therefore awaiting a human, so leaving two of them behind
+ * turns that file red for a reason that has nothing to do with it — which is
+ * exactly the cross-file failure the layout reset at the bottom of `review.spec`
+ * exists to prevent, arriving from the other direction.
+ */
+async function approve(page: Page, validationId: string): Promise<void> {
+  const response = await page.request.post(`/api/validation/${validationId}/approve`, {
+    data: { approver: "e2e", note: "reconcile-live journey" },
+  });
+  expect(response.ok(), `approving ${validationId} failed`).toBe(true);
+}
+
 /** The Review panel, reached the way a user reaches a tool that is not on
  * screen: the QuickBar, through the registry. */
 async function openReviewPanel(page: Page): Promise<void> {
@@ -240,7 +258,28 @@ test.afterEach(async ({ page }) => {
   await page.request.put("/api/layouts", {
     data: { current: null, current_name: null, saved: [] },
   });
+  await undock(page);
 });
+
+/**
+ * Close every host this file opened.
+ *
+ * A docked host is server-side state on a backend every spec file shares, and it
+ * is not inert: a workspace switch refuses while a document is hosted, and the
+ * host map is bounded. Leaving two workbooks docked for the rest of the run is
+ * the same class of cross-file failure as leaving two panes open — a red test in
+ * a file that never mentions Office, pointing at neither cause.
+ */
+async function undock(page: Page): Promise<void> {
+  const hosts = (await (await page.request.get("/api/office/hosts")).json()) as {
+    hosts: { host_id: string; path: string; state: string }[];
+  };
+  for (const host of hosts.hosts) {
+    if (host.path !== DIRTY && host.path !== DIRTY_NO_LIVE) continue;
+    if (host.state === "closed" || host.state === "failed") continue;
+    await page.request.post(`/api/office/host/${host.host_id}/close`);
+  }
+}
 
 test("a docked workbook with unsaved edits is judged live, never against the file", async ({
   page,
@@ -260,6 +299,8 @@ test("a docked workbook with unsaved edits is judged live, never against the fil
   const [line] = run.evidence;
   expect(line.detail).toContain("Read live from the docked workbook");
   expect(line.detail).toContain("workbook unsaved");
+
+  await approve(page, run.validation_id);
 });
 
 test("dirty and unreadable is BLOCKED, and the panel names the way out", async ({ page }) => {
@@ -288,5 +329,16 @@ test("dirty and unreadable is BLOCKED, and the panel names the way out", async (
     await expect(body.locator(".wb-evidence .wb-pill").first()).toContainText("Blocked");
     // …and the remedy, on screen, where the person who has to act can read it.
     await expect(body).toContainText("Save the workbook");
+  });
+
+  await test.step("a blocked result awaits a human, and Approve settles it", async () => {
+    // `blocked` is medium-or-worse, so the one mandatory decision applies to it
+    // exactly as it does to a `high` — a refusal nobody has to acknowledge would
+    // be a refusal that quietly ages out of the bar.
+    const body = page.locator(`.wb-review-body[data-validation="${run.validation_id}"]`);
+    await expect(body.locator(".wb-review-awaiting")).toContainText("Awaiting approval");
+    await body.locator(".wb-review-note").fill("acknowledged: will save and re-run");
+    await body.locator(".wb-review-approve").click();
+    await expect(body.locator(".wb-review-approved")).toContainText("Approved by you");
   });
 });
