@@ -314,12 +314,38 @@ class SubprocessGateRunner:
         try:
             await asyncio.wait_for(self._drain(proc, capture), command.timeout_s)
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
-            await proc.wait()
+            await self._reap(proc)
             capture.feed(f"\n[killed: no exit after {command.timeout_s:.0f}s]".encode())
             return self._log(command, None, started, capture)
+        except BaseException:
+            # The wait was cut short abnormally — a cancellation unwinding through
+            # here: the connection behind ``POST /api/validation/run`` dropped, the
+            # ASGI server disconnect-cancelled the handler, or lifespan teardown
+            # cancelled it (this coroutine can stay open the whole ``pytest``
+            # ceiling — up to 30 minutes). ``wait_for`` has already cancelled and
+            # awaited the drain, so nothing is left reading the pipe; what remains
+            # is the child, which is ours and must not outlive the coroutine that
+            # started it. Reap it, then re-raise — a swallowed ``CancelledError``
+            # would be a worse bug than the orphan it hides, so ``raise`` is not
+            # optional. This is the timeout path's discipline, extended to the one
+            # exit it did not cover.
+            await self._reap(proc)
+            raise
         return self._log(command, proc.returncode, started, capture)
+
+    @staticmethod
+    async def _reap(proc: asyncio.subprocess.Process) -> None:
+        """Kill the child and wait for it: both the timeout path and the cancel
+        path mean it is still running and no longer wanted.
+
+        ``kill`` is suppressed because the process may have exited on its own in
+        the gap before this call (``ProcessLookupError``); ``wait`` then reaps it
+        so the transport does not leave a handle open. A child that already exited
+        makes both a no-op — its ``returncode`` is set and ``wait`` returns at once.
+        """
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        await proc.wait()
 
     @staticmethod
     async def _drain(proc: asyncio.subprocess.Process, capture: _BoundedCapture) -> None:

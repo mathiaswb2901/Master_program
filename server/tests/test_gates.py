@@ -25,13 +25,15 @@ what is on the disk.
 """
 
 import ast
+import asyncio
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -270,6 +272,30 @@ def python_gate(code: str, *, timeout_s: float = 30.0, gate_id: str = "probe") -
         label=f"python -c ({gate_id})",
         timeout_s=timeout_s,
     )
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether an OS process with ``pid`` is currently running.
+
+    Platform-split (``os.name``, not ``sys.platform`` — the latter would make the
+    POSIX branch statically unreachable under this project's win32 type-check and
+    trip ``warn_unreachable``). A real-subprocess test uses it to prove a cancelled
+    gate's child is actually *gone*, not merely that the runner stopped waiting on
+    it.
+    """
+    if os.name == "nt":
+        listed = subprocess.run(  # noqa: S603 - the arguments are this file's own literals
+            ["tasklist", "/fi", f"PID eq {pid}", "/nh"],  # noqa: S607 - a system utility on PATH
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return str(pid) in listed.stdout
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- judgement
@@ -638,6 +664,62 @@ class TestRealSubprocess:
         log = await SubprocessGateRunner().run(command, tmp_path, MAX_GATE_LOG_BYTES)
         assert log.exit_code is None
         assert "could not start" in log.text
+
+    async def test_a_cancelled_run_kills_and_reaps_the_child_it_started(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bug this branch exists for. A gate runs *inside* the coroutine
+        behind ``POST /api/validation/run``, which can stay open the whole
+        ``pytest`` ceiling — up to 30 minutes. If that coroutine is cancelled — a
+        dropped connection, an ASGI disconnect-cancellation, lifespan teardown —
+        the only handler on ``master`` is ``except TimeoutError``, so the
+        ``CancelledError`` propagates untouched and the child is **orphaned**, still
+        running long after the request that started it is gone.
+
+        Driven the way a user hits it, not by reasoning about it: a real child (a
+        30 s sleeper), the awaiting task cancelled while it runs, and the assertion
+        is on the operating system — the pid is gone and the runner reaped it — plus
+        that the cancellation was honoured rather than swallowed.
+        """
+        started: list[asyncio.subprocess.Process] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def record(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            proc: asyncio.subprocess.Process = await real_exec(*args, **kwargs)
+            started.append(proc)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", record)
+
+        command = python_gate("import time; time.sleep(30)", timeout_s=30.0, gate_id="pytest")
+        task = asyncio.create_task(
+            SubprocessGateRunner().run(command, tmp_path, MAX_GATE_LOG_BYTES)
+        )
+        try:
+            for _ in range(500):  # ~5 s ceiling; the child starts in a tick or two
+                if started:
+                    break
+                await asyncio.sleep(0.01)
+            assert started, "the gate never started its child"
+            proc = started[0]
+            assert pid_alive(proc.pid)  # sanity: it really is running mid-gate
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            # The cancellation was honoured (it re-raised, not swallowed) *and* the
+            # child is gone: the runner killed and reaped it. On ``master`` neither
+            # holds — the CancelledError propagates before any kill, so the runner
+            # never waited (returncode stays ``None``) and the sleeper runs on.
+            assert proc.returncode is not None
+            assert not pid_alive(proc.pid)
+        finally:
+            for leftover in started:  # never leak the sleeper, even on a red run
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    leftover.kill()
+                with contextlib.suppress(Exception):
+                    await leftover.wait()
 
 
 # --------------------------------------------------------------------------- the catalog
