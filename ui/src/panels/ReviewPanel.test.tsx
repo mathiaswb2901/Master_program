@@ -16,6 +16,7 @@ import type { IDockviewPanelProps } from "dockview";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { Command } from "../commands";
 import type { CheckOutcome, EvidenceItem, RiskLevel, ValidationResult } from "../types";
 
 // `./Panes` pulls in dockview's runtime; `../dock` the whole registry. Neither
@@ -66,7 +67,16 @@ vi.mock("../validation", async (importActual) => {
   };
 });
 
+// The relay's executor, imported for the one thing only it can answer: what an
+// external caller is told about a command this module registers. `./api` and
+// `./ws` are stubbed so importing it opens no socket and touches no network —
+// `executeCommandById` takes its command list as an argument, so nothing else of
+// the relay's plumbing is reached.
+vi.mock("../api", () => ({ publishCommandManifest: vi.fn(), reportCommandResult: vi.fn() }));
+vi.mock("../ws", () => ({ ReconnectingSocket: class {} }));
+
 const { resetValidationStoreForTests, useValidationStore } = await import("../validation");
+const { executeCommandById } = await import("../commandRelay");
 
 const {
   ApprovalGate,
@@ -590,6 +600,16 @@ describe("the validation.export command", () => {
     expect(toastMock).toHaveBeenCalledWith("info", expect.stringContaining("Nothing to export"));
   });
 
+  it("says a failed write out loud too, and reports it as a failure", async () => {
+    exportMock.mockRejectedValue(new Error("404"));
+    seed([result("v1")]);
+
+    const outcome = await exportNewest();
+
+    expect(outcome.ok).toBe(false);
+    expect(toastMock).toHaveBeenCalledWith("error", expect.stringContaining("Could not export"));
+  });
+
   it("exports the newest result — the one you just ran", async () => {
     exportMock.mockResolvedValue({
       validation_id: "v2",
@@ -608,6 +628,47 @@ describe("the validation.export command", () => {
 
     expect(exportMock).toHaveBeenCalledWith("v2");
     expect(toastMock).toHaveBeenCalledWith("success", expect.stringContaining("v2.md"));
+  });
+});
+
+/**
+ * The seam an external caller actually gets: `POST /api/commands/invoke` answers
+ * `ok` = "whether that window then ran the command" (`models/commands.py`), and
+ * the window's verdict is whatever `executeCommandById` returns. Driven through
+ * the *real* relay function rather than a re-implementation of its rules —
+ * `run()` is fired here, so `./Panes`/`../dock` being stubbed is doing real work.
+ */
+describe("validation.export over the command relay", () => {
+  const command = (): Command[] => (reviewTool.commands ?? []).filter((c) => c.id === "validation.export");
+
+  it("tells a caller it did not export when there is nothing to export", () => {
+    useValidationStore.setState({ results: {}, hydrated: true });
+
+    const outcome = executeCommandById("validation.export", command());
+
+    // The regression: `run()` returns the instant it has kicked off an export
+    // that its own guard then declines to start, so a relay that only asked
+    // "did `run()` throw" answered `ok: true` and a script believed a file had
+    // been written. Nothing was.
+    expect(outcome.ok).toBe(false);
+    expect(exportMock).not.toHaveBeenCalled();
+  });
+
+  it("runs it when there is a result, and says which one", () => {
+    exportMock.mockResolvedValue({
+      validation_id: "v9",
+      path: ".workbench/validation/exports/v9.md",
+      filename: "v9.md",
+      markdown: "#",
+      bytes: 1,
+      generated_at: "2026-08-09T14:06:00Z",
+    });
+    seed([result("v9")]);
+
+    const outcome = executeCommandById("validation.export", command());
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.detail).toContain("Export validation evidence");
   });
 });
 

@@ -731,6 +731,16 @@ function orderBySeverity(results: readonly ValidationResult[]): ValidationResult
 // ---- registration ------------------------------------------------------------
 
 /**
+ * What one `validation.export` run actually did, in the shape the command relay
+ * reports (`CommandOutcome`). Structural on purpose rather than imported: this
+ * module owes the relay an answer, not a dependency on it.
+ */
+export interface ExportOutcome {
+  ok: boolean;
+  detail: string;
+}
+
+/**
  * `validation.export`, the command half of the export — reachable from the
  * QuickBar, from `shortcuts.md`, and from `workbench-cmd invoke`.
  *
@@ -745,6 +755,12 @@ function orderBySeverity(results: readonly ValidationResult[]): ValidationResult
  * the one thing a proof surface may not be. "Nothing validated yet" is said out
  * loud (AXI shape 2) rather than being a no-op that looks like a broken key.
  *
+ * It **also returns that verdict**, and the two are not the same audience: the
+ * toast is for whoever is looking at the window, the return value is for whoever
+ * invoked it from outside one. `Command.run` is typed `() => void` today, so the
+ * relay discards this — see the command's own note for what stands in until it
+ * does not.
+ *
  * The app store is reached through a **dynamic** `import()`, the `commandRelay.ts`
  * trick: a panel module has no business holding a load-time edge into `store.ts`
  * (which reaches the editor and the shell at import), and a command runs long
@@ -752,21 +768,31 @@ function orderBySeverity(results: readonly ValidationResult[]): ValidationResult
  * in the entry chunk — and it is what keeps this module renderable in a
  * node-only test.
  */
-export async function exportNewest(): Promise<void> {
+export async function exportNewest(): Promise<ExportOutcome> {
   const store = useValidationStore.getState();
   const newest = newestResult(Object.values(store.results));
   const { useStore } = await import("../store");
   const toast = useStore.getState().pushToast;
   if (newest === null) {
-    toast("info", "Nothing to export yet — no validation has been run in this workspace.");
-    return;
+    const detail = "Nothing to export yet — no validation has been run in this workspace.";
+    toast("info", detail);
+    return { ok: false, detail };
   }
   try {
     const report = await store.exportResult(newest.validation_id);
-    toast("success", `Evidence exported to ${report.path}`);
+    const detail = `Evidence exported to ${report.path}`;
+    toast("success", detail);
+    return { ok: true, detail };
   } catch {
-    toast("error", "Could not export the evidence report.");
+    const detail = "Could not export the evidence report.";
+    toast("error", detail);
+    return { ok: false, detail };
   }
+}
+
+/** Is there anything for `validation.export` to export right now? */
+function hasExportableResult(): boolean {
+  return newestResult(Object.values(useValidationStore.getState().results)) !== null;
 }
 
 function ReviewIcon() {
@@ -836,9 +862,29 @@ export const reviewTool: WorkbenchTool = {
       // path. The server picks the file name from the server-minted
       // `validation_id` and writes it under the workspace's own `.workbench/`,
       // so there is no input here through which a caller could reach a path.
-      run: () => {
-        void exportNewest();
-      },
+      //
+      // `when()` is what keeps the *external* answer honest, and it is here for
+      // that rather than for the palette. `POST /api/commands/invoke` answers
+      // `ok` = "whether that window then ran the command"
+      // (`models/commands.py`), and `executeCommandById` can only get that from a
+      // synchronous `run()` — so with nothing validated yet the caller used to be
+      // told `ok: true` for a command whose whole body was a toast saying it had
+      // done nothing. `when()` is the one channel the relay reads *before* it
+      // runs (`commandRelay.ts`), and it turns that into an explicit refusal with
+      // a reason, which is also what a `shortcuts.md` binding gets
+      // (`commands.ts`) and what the QuickBar honours by not offering a command
+      // that provably cannot act. The published manifest is unfiltered, so the
+      // CLI still discovers the command and is told why, rather than never
+      // hearing of it.
+      when: hasExportableResult,
+      // Returned, not `void`ed. `Command.run` is `() => void` today and the relay
+      // discards it, so the *other* dishonest case — an export that starts and
+      // then fails, which only ever reaches a toast — is still invisible to an
+      // external caller. Fixing that means the relay awaiting a `run()` that can
+      // answer, which is `ui/src/registry.ts` + `ui/src/commandRelay.ts`: PR-E's
+      // files, and PR-E is retyping exactly that signature. Handing back the real
+      // outcome here means that lands as an await and no change to this command.
+      run: () => exportNewest(),
     },
   ],
   // No Alt chord by default (the Scratchpad/Workspaces precedent): a registered

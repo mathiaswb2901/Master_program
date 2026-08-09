@@ -208,6 +208,58 @@ const SUBJECT: ValidationSubject = {
   label: "SE3 dispatch reconciliation",
 };
 
+/**
+ * The negative path, and it runs **first** on purpose: this is the only moment
+ * the journey's workspace has nothing in it, and "nothing" is the case an export
+ * command is most likely to lie about.
+ *
+ * `POST /api/commands/invoke` answers `ok` = "whether that window then ran the
+ * command" (`models/commands.py`), and the caller is a script that will go on to
+ * read the file it believes was written. A window that dispatches an export it
+ * declines to start, and reports `ok: true` because `run()` returned, is telling
+ * that script a file exists. The command's `when()` is what makes the refusal
+ * real — and the manifest stays unfiltered, so the CLI still *discovers* the
+ * command and is told why rather than never hearing of it (AXI shape 2, aimed at
+ * whoever is holding the terminal).
+ */
+test("with nothing validated, an external caller is told so — not told it worked", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/`);
+  await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();
+
+  // The window has to have published its manifest before an invoke means
+  // anything; polled rather than slept on, so a relay that never connects fails
+  // here instead of turning the assertion below into a false pass.
+  await expect
+    .poll(
+      async () => {
+        const listed = (await (await page.request.get(`${BASE}/api/commands`)).json()) as {
+          commands: { id: string }[];
+        };
+        return listed.commands.map((entry) => entry.id);
+      },
+      { timeout: 15_000 },
+    )
+    .toContain("validation.export");
+
+  const outcome = (await (
+    await page.request.post(`${BASE}/api/commands/invoke`, {
+      data: { command_id: "validation.export", params: {} },
+    })
+  ).json()) as { dispatched: boolean; ok: boolean; detail: string };
+
+  // It reached the window — this is not the "no window connected" refusal.
+  expect(outcome.dispatched).toBe(true);
+  // …and the window's own verdict is that it did not run it.
+  expect(outcome.ok, `the window claimed success: ${outcome.detail}`).toBe(false);
+  expect(outcome.detail).not.toBe("");
+
+  // The claim the caller would have acted on: there is no report anywhere.
+  const exports = path.join(WORKSPACE, ".workbench", "validation", "exports");
+  expect(fs.existsSync(exports) ? fs.readdirSync(exports) : []).toEqual([]);
+});
+
 test("a result, its evidence and its approval survive a server restart", async ({ page }) => {
   await page.goto(`${BASE}/`);
   await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();

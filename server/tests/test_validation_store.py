@@ -18,6 +18,7 @@ was true is "nobody looked".
 """
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from workbench_server.models.validation_store import (
     RetentionPolicy,
     StoredValidation,
 )
+from workbench_server.services import validation_store
 from workbench_server.services.event_bus import EventBus
 from workbench_server.services.validation import (
     MAX_PAYLOADS_PER_KIND,
@@ -305,6 +307,90 @@ def test_the_payload_cap_keeps_the_newest_results_detail(tmp_path: Path) -> None
     assert set(found.payloads) == {("numeric", "numeric_3"), ("numeric", "numeric_2")}
 
 
+# ---- the write discipline ----------------------------------------------------
+#
+# `os.replace` onto a path another process has transiently open raises
+# PermissionError on Windows instead of waiting, and this repo already knows that
+# is common rather than theoretical (`services/layouts.py`, measured at ~50% for
+# two writes to one path ~20 ms apart). Both writers here can repeat a target that
+# fast — `exports/<validation_id>.md` is one fixed path per id — so the retry is
+# what stands between a double-click and either a 500 or a silently dropped
+# payload. These three pin it: transient loses, exhausted still raises, and the
+# payload half survives a lock that the export half would report.
+
+
+#: Captured before any test patches `os.replace`, so a flake that finally lets the
+#: write through calls the real one rather than itself.
+_REAL_REPLACE = os.replace
+
+
+class _FlakyReplace:
+    """``os.replace`` that refuses the first ``fails`` calls, as Windows does."""
+
+    def __init__(self, fails: int) -> None:
+        self.fails = fails
+        self.calls = 0
+
+    def __call__(self, src: object, dst: object) -> None:
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise PermissionError(13, "Access is denied")
+        _REAL_REPLACE(str(src), str(dst))
+
+
+def test_an_export_survives_a_transient_lock_on_its_own_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-exporting the same id twice in quick succession is the collision here.
+
+    Without the retry this is the 500 a user gets for double-clicking "Export
+    evidence…" — `write_export` is the one method in the store allowed to raise.
+    """
+    store = _store(tmp_path)
+    flaky = _FlakyReplace(fails=3)
+    monkeypatch.setattr(os, "replace", flaky)
+
+    written = store.write_export("val_0001.md", "# proof\n")
+
+    assert flaky.calls == 4  # three refusals absorbed, the fourth landed
+    assert written.read_text(encoding="utf-8") == "# proof\n"
+
+
+def test_a_lock_that_outlasts_the_budget_still_reaches_the_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry is a budget, not a hang: a real lock (open in an editor, a
+    read-only directory) still raises, and the export path is the one that
+    reports it to the user waiting on it."""
+    store = _store(tmp_path)
+    flaky = _FlakyReplace(fails=validation_store.REPLACE_ATTEMPTS)
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(validation_store, "REPLACE_BACKOFF_S", 0.0)
+
+    with pytest.raises(PermissionError):
+        store.write_export("val_0001.md", "# proof\n")
+
+    assert flaky.calls == validation_store.REPLACE_ATTEMPTS
+    # …and the temp file it was writing through does not survive the failure.
+    assert list((tmp_path / VALIDATION_DIR / "exports").glob("*.tmp")) == []
+
+
+def test_a_payload_is_not_silently_dropped_by_a_transient_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_write_payload` swallows its failures — so without the retry the same
+    self-resolving contention loses the detail payload for good, and the result
+    replays pointing at nothing."""
+    store = _store(tmp_path)
+    monkeypatch.setattr(os, "replace", _FlakyReplace(fails=2))
+
+    store.append_result(_result(), [("numeric", "numeric_a", _big_report(1))], now=NOW)
+
+    found = store.load(10, payload_cap=MAX_PAYLOADS_PER_KIND)
+    assert [r.validation_id for r in found.results] == ["val_0001"]
+    assert ("numeric", "numeric_a") in found.payloads
+
+
 # ---- retention ---------------------------------------------------------------
 
 
@@ -349,6 +435,48 @@ def test_a_swept_month_takes_its_payload_files_with_it(tmp_path: Path) -> None:
     store.prune(RetentionPolicy(days=90), now=NOW)
 
     assert not payload.exists()
+
+
+def test_a_month_whose_results_file_will_not_delete_keeps_its_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-failed sweep leaves the month whole, never proof without its proof.
+
+    The reproduction is the transient Windows lock this module already retries
+    ``os.replace`` past — here on the ``unlink`` of a month's ``results-*.jsonl``,
+    which is caught and logged rather than raised. Deleting the payload files
+    first would leave that month's results on disk with their evidence gone, so
+    the next boot replays them with ``payload_ref``\\ s that 404 — indistinguishable
+    from ordinary LRU eviction, with nothing anywhere saying retention took them.
+    """
+    store = _store(tmp_path)
+    old = NOW - timedelta(days=400)
+    store.append_result(
+        _result("val_old", created_at=old), [("numeric", "numeric_old", _big_report(1))], now=old
+    )
+    payload = tmp_path / VALIDATION_DIR / "payloads" / "numeric" / "numeric_old.json"
+    results = _results_file(tmp_path, old)
+    assert payload.exists() and results.exists()
+
+    real_unlink = Path.unlink
+
+    def refuse_the_results_file(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == results.name:
+            raise PermissionError(13, "Access is denied")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", refuse_the_results_file)
+
+    assert store.prune(RetentionPolicy(days=90), now=NOW) == 0
+
+    monkeypatch.undo()
+    # Both halves are still there, so the result still resolves to its evidence
+    # and the next sweep can finish the job.
+    assert results.exists()
+    assert payload.exists()
+    found = store.load(500, payload_cap=MAX_PAYLOADS_PER_KIND)
+    assert [r.validation_id for r in found.results] == ["val_old"]
+    assert ("numeric", "numeric_old") in found.payloads
 
 
 def test_a_month_is_only_swept_once_every_line_in_it_is_past_the_window(

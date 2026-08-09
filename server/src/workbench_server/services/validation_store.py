@@ -42,6 +42,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -89,6 +90,23 @@ APPROVALS_FILE = "approvals.jsonl"
 #: prunable at all: whole files age out, and nothing is ever rewritten.
 _RESULTS_GLOB = "results-*.jsonl"
 _RESULTS_MONTH = re.compile(r"^results-(\d{4})-(\d{2})\.jsonl$")
+
+# Windows: `os.replace` onto a path some other process has open fails outright
+# with PermissionError instead of waiting. The holder is transient and unrelated
+# to us — the workspace watcher reacting to the previous write, Defender, the
+# search indexer — and lets go in a few milliseconds, so a short bounded retry
+# turns a *lost* write into a marginally slower one. `services/layouts.py` carries
+# the same two constants and the measurement behind them: two writes to one path
+# ~20 ms apart, observed failing ~50% of the time.
+#
+# Both writers here can repeat a target that fast. `write_export` has one fixed
+# path per validation id, so a double-click of "Export evidence…" is exactly that
+# collision — and it is the one method here allowed to raise, so without the retry
+# a self-resolving lock is a 500 the user sees. `_write_payload` swallows its
+# failures, so the same lock silently drops the detail payload this module exists
+# to keep. Neither is a good way to lose proof.
+REPLACE_ATTEMPTS = 10
+REPLACE_BACKOFF_S = 0.02
 
 #: A ``payload_ref`` is server-minted (``kind_<hex>``), but it reaches this
 #: module from a file on disk as well as from memory — so it is checked before it
@@ -475,6 +493,18 @@ class ValidationStore:
         longer. That asymmetry is deliberate — an append-only file cannot lose a
         row from its middle, and the direction that errs is the one that keeps
         proof around too long rather than throwing it away too early.
+
+        **The results file goes first, its payloads only once it is gone**, and
+        that order is the same safety direction applied to a half-failed sweep.
+        The unlink can fail — the transient Windows lock :func:`_replace_with_retry`
+        exists for, or a file genuinely open elsewhere — and it is caught rather
+        than raised. Deleting the payloads first would then leave a month of
+        results on disk whose evidence is already gone, so the next boot replays
+        every one of them with ``payload_ref``\\ s that 404: proof that reads to a
+        user exactly like ordinary LRU eviction, with nothing anywhere saying a
+        retention sweep took it. This way a failed sweep leaves the month **whole**
+        and tries again; the cost of the other half failing is payload files
+        nothing points at any more, which waste bytes and never an answer.
         """
         cutoff = policy.cutoff(now)
         if cutoff is None:
@@ -484,20 +514,24 @@ class ValidationStore:
             end = _month_end(path.name)
             if end is None or end >= cutoff:
                 continue
+            # Read the refs while the file that names them still exists.
+            refs: list[tuple[EvidenceKind, str]] = []
             for line in self._lines(path):
                 parsed = _parse(line, StoredValidation)
                 if parsed is None:
                     continue
-                for stored in parsed.payloads:
-                    if _SAFE_REF.match(stored.ref):
-                        (self._dir / PAYLOAD_DIR / stored.kind / f"{stored.ref}.json").unlink(
-                            missing_ok=True
-                        )
+                refs.extend(
+                    (stored.kind, stored.ref)
+                    for stored in parsed.payloads
+                    if _SAFE_REF.match(stored.ref)
+                )
             try:
                 path.unlink()
             except OSError as err:
                 log.warning("validation_store.prune_failed", path=str(path), error=str(err))
                 continue
+            for kind, ref in refs:
+                (self._dir / PAYLOAD_DIR / kind / f"{ref}.json").unlink(missing_ok=True)
             removed += 1
             log.info("validation_store.pruned", path=str(path), policy=policy.detail())
         return removed
@@ -518,16 +552,36 @@ class ValidationStore:
 
 
 def _write_atomic(target: Path, data: bytes) -> None:
-    """tmp + ``os.replace``, the discipline every other document write here uses."""
+    """tmp + retried ``os.replace``, the discipline every other document write here
+    uses — *including* the retry half of it (see the constants)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     handle, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
         with os.fdopen(handle, "wb") as tmp:
             tmp.write(data)
-        os.replace(tmp_name, target)
+        _replace_with_retry(tmp_name, target)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+def _replace_with_retry(tmp_name: str, target: Path) -> None:
+    """``os.replace``, retried past a transient Windows lock.
+
+    A lock that outlasts the budget is a real one — the file is open in an editor,
+    or the directory is read-only — so the last attempt raises and the caller's own
+    posture decides what that costs: ``write_export`` turns it into the error the
+    user is waiting on, ``_write_payload`` into a warning and a skipped payload.
+    """
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp_name, target)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            log.debug("validation_store.replace_retry", path=str(target), attempt=attempt + 1)
+            time.sleep(REPLACE_BACKOFF_S)
 
 
 _Line = TypeVar("_Line", bound=BaseModel)
