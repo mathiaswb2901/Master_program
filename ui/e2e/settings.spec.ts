@@ -30,6 +30,7 @@ interface StoredSettings {
   theme: string;
   office_native: string;
   voice_input: boolean;
+  validation_retention_days: number;
 }
 
 const panel = (page: Page) => page.getByRole("region", { name: "Settings" });
@@ -69,6 +70,7 @@ test("settings: a choice sticks on the server, survives a relaunch, and telemetr
       await expect(group(page, "Theme")).toBeVisible();
       await expect(group(page, "Open documents in Word and Excel")).toBeVisible();
       await expect(group(page, "Voice input")).toBeVisible();
+      await expect(group(page, "Keep validation evidence")).toBeVisible();
     });
 
     await test.step("asking again focuses the pane that exists — it is singular", async () => {
@@ -80,8 +82,13 @@ test("settings: a choice sticks on the server, survives a relaunch, and telemetr
       const privacy = page.getByRole("region", { name: "Privacy" });
       await expect(privacy).toContainText("Telemetry");
       await expect(privacy.locator(".wb-settings-stance")).toHaveText("Off");
-      // The assertion that matters: no fourth control appeared for it.
-      await expect(page.getByRole("radiogroup")).toHaveCount(3);
+      // The assertion that matters: no control appeared for it. Named rather
+      // than counted — the count was 3 when there were three settings and is 4
+      // now that evidence retention is one, and a census that has to be edited
+      // every time a real setting lands stops being about telemetry at all.
+      await expect(page.getByRole("radiogroup", { name: /telemetry/i })).toHaveCount(0);
+      await expect(privacy.getByRole("radiogroup")).toHaveCount(0);
+      await expect(privacy.getByRole("button")).toHaveCount(0);
     });
 
     await test.step("choosing a theme repaints the window and is stored server-side", async () => {
@@ -126,6 +133,19 @@ test("settings: a choice sticks on the server, survives a relaunch, and telemetr
         })
         .toBe("dark");
     });
+    await test.step("how long evidence is kept is a choice this machine remembers", async () => {
+      // Machine-level, and the panel says so — the files it governs live in each
+      // project's own `.workbench/validation/`, which is the one thing about
+      // this knob a user would otherwise guess wrong.
+      await expect(panel(page)).toContainText("A choice about this machine's disk");
+      await group(page, "Keep validation evidence").getByRole("radio", { name: "1 year" }).click();
+      await expect
+        .poll(async () => (await storedSettings(page)).validation_retention_days, {
+          message: "the retention choice reached the server document",
+        })
+        .toBe(365);
+    });
+
     await test.step("closing its tab is the way out, and it leaves no trace", async () => {
       // Settings docks in the centre, beside the editor — so a pane left open
       // here is a pane the *saved arrangement* carries into the next launch,

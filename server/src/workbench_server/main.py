@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from workbench_server.config import Settings, load_settings
 from workbench_server.logging import configure_logging
 from workbench_server.models.orchestrator import OrchestratorBudget
+from workbench_server.models.validation_store import RetentionPolicy
 from workbench_server.routers import (
     activity,
     agents,
@@ -118,37 +119,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     shortcuts_service = ShortcutsService(workspace.root, event_bus)
     # Correlates agent tool calls with the watcher's file events; in-memory only.
     provenance_service = ProvenanceService(workspace.root, event_bus)
-    # The next question after provenance's "who wrote this file": "and is it
-    # correct". A registry of checks that assembles a ValidationResult and
-    # derives its risk from the evidence. In-memory and bounded (LRU keyed by
-    # validation_id, like provenance), and it publishes each result on the shared
-    # bus for a reconnecting client — the usage/activity precedent. Ships the
-    # frame only; the reconciliation gate that plugs into it is a later PR.
-    validation_service = ValidationService(workspace.root, event_bus)
-    # The reconciliation gate is registered further down, once the Office host
-    # exists: it needs that host as its live-workbook seam, so it can refuse to
-    # reconcile a docked workbook's stale file instead of quietly passing it.
-
-    # Productivity loops PR-B: **ambient CI for workbooks**. A checked-in
-    # `.workbench/reconcile/<name>.toml` names the analyst's own callables; a
-    # save of the workbook re-runs the gate above with the values they produce.
-    # It reuses #115's *mechanism* (bounded capture, fake-first runner, fixed
-    # argv, timeout discipline) and not its catalog: the argv is server-owned and
-    # the spec travels on stdin. The posture it widens — running in the live
-    # workspace root, which the toolchain gate refuses — is paid for by a
-    # one-time content-hash approval that covers the spec **and the code it
-    # names**, stored under the machine's app-data dir and never in `.workbench/`
-    # (a trust record inside the folder it authorises is one an attacker can
-    # write). `.workbench/gates.json` stays refused.
-    reconcile_spec_service = ReconcileSpecService(
-        workspace.root,
-        event_bus,
-        build_spec_runner(settings.reconcile_fake),
-        validation_service,
-        SpecApprovalStore(settings.app_data_root),
-        timeout_s=settings.reconcile_timeout_s,
-        debounce_s=settings.reconcile_debounce_s,
-    )
     # Workspace-wide content search (M7 V7b). Holds the live `Workspace`, so a
     # switch re-roots it with everything else and it owes no `set_workspace_root`.
     # Reuses the file tree's ignore rules (IGNORED_DIRS + CACHEDIR.TAG), so search
@@ -220,6 +190,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # sentence (`office_host/service.py::_OFF_DETAIL`); nothing about which knob
     # is user-facing copy belongs here.
     office_native_source = settings_service.source_of("office_native")
+    # The next question after provenance's "who wrote this file": "and is it
+    # correct". A registry of checks that assembles a ValidationResult and
+    # derives its risk from the evidence, publishing each one on the shared bus
+    # for a reconnecting client — the usage/activity precedent.
+    #
+    # Results, their evidence payloads and their approvals are written to
+    # `<workspace>/.workbench/validation/` and replayed from there on start, so a
+    # restart no longer forgets what was proven or who signed it off. Built here,
+    # after the settings document, because how long that record is kept is a
+    # *machine* preference read from it — asked for per sweep rather than
+    # captured, so changing it does not need a restart to mean something.
+    #
+    # The reconciliation gate is registered further down, once the Office host
+    # exists: it needs that host as its live-workbook seam, so it can refuse to
+    # reconcile a docked workbook's stale file instead of quietly passing it.
+    validation_service = ValidationService(
+        workspace.root,
+        event_bus,
+        retention=lambda: RetentionPolicy(
+            days=settings_service.effective().validation_retention_days
+        ),
+    )
+    # Productivity loops PR-B: **ambient CI for workbooks**. A checked-in
+    # `.workbench/reconcile/<name>.toml` names the analyst's own callables; a
+    # save of the workbook re-runs the reconciliation gate with the values they
+    # produce. It reuses #115's *mechanism* (bounded capture, fake-first runner,
+    # fixed argv, timeout discipline) and not its catalog: the argv is
+    # server-owned and the spec travels on stdin. The posture it widens — running
+    # in the live workspace root, which the toolchain gate refuses — is paid for
+    # by a one-time content-hash approval that covers the spec **and the code it
+    # names**, stored under the machine's app-data dir and never in `.workbench/`
+    # (a trust record inside the folder it authorises is one an attacker can
+    # write). `.workbench/gates.json` stays refused.
+    #
+    # Built here rather than beside provenance because it takes the validation
+    # service, which PR-C moved down to after the settings document (retention is
+    # a machine preference read from it).
+    reconcile_spec_service = ReconcileSpecService(
+        workspace.root,
+        event_bus,
+        build_spec_runner(settings.reconcile_fake),
+        validation_service,
+        SpecApprovalStore(settings.app_data_root),
+        timeout_s=settings.reconcile_timeout_s,
+        debounce_s=settings.reconcile_debounce_s,
+    )
     # Native Office hosting, constructed before the session manager because a
     # session reads the live docked document through it (narrowed to
     # OfficeDocumentReader in the SDK factory). The backend is None on any
@@ -492,6 +508,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         watcher.start()
         shortcuts_service.start()
         provenance_service.start()
+        # Sweeps what is past the retention window, then fills the result and
+        # payload maps from `.workbench/validation/` — so the first
+        # `GET /api/validation` after a restart answers with what was proven
+        # rather than with an empty list. Never raises (services/validation.py).
+        validation_service.start()
         # Binds to this loop, which is what lets it coalesce a burst of tool
         # calls into one frame instead of one frame per call.
         activity_service.start()

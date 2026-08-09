@@ -22,10 +22,15 @@ vi.mock("../settings", () => ({
   useSettings: () => null,
 }));
 
-import { noteFor, SettingsBody } from "./Settings";
+import { noteFor, retentionChoice, SettingsBody } from "./Settings";
 
 function state(over: Partial<SettingsState> = {}): SettingsState {
-  const stored = { theme: "system" as const, office_native: "auto" as const, voice_input: false };
+  const stored = {
+    theme: "system" as const,
+    office_native: "auto" as const,
+    voice_input: false,
+    validation_retention_days: 90,
+  };
   return {
     stored,
     effective: stored,
@@ -54,7 +59,12 @@ describe("the Settings body", () => {
 
   it("marks the stored value as the checked segment", () => {
     const html = render({
-      stored: { theme: "light", office_native: "off", voice_input: true },
+      stored: {
+        theme: "light",
+        office_native: "off",
+        voice_input: true,
+        validation_retention_days: 90,
+      },
     });
     // The selected segment is neutral-marked (`is-selected`) and checked; colour
     // is never the only signal, and it is never the amber (DESIGN.md §2.4).
@@ -70,7 +80,7 @@ describe("the Settings body", () => {
     // The one assertion this file exists for: the stance is not a control. If a
     // fourth radio group ever appears here, it is the telemetry switch that must
     // not exist.
-    expect(html.match(/role="radiogroup"/g)).toHaveLength(3);
+    expect(html.match(/role="radiogroup"/g)).toHaveLength(4);
   });
 
   it("disables an overridden control and prints the reason", () => {
@@ -82,7 +92,12 @@ describe("the Settings body", () => {
           detail: "Set by WORKBENCH_OFFICE_NATIVE for this launch.",
         },
       ],
-      effective: { theme: "system", office_native: "off", voice_input: false },
+      effective: {
+        theme: "system",
+        office_native: "off",
+        voice_input: false,
+        validation_retention_days: 90,
+      },
     });
     expect(html).toContain("Set by WORKBENCH_OFFICE_NATIVE for this launch.");
     expect(html).toContain("In force: off.");
@@ -120,6 +135,41 @@ describe("the Settings body", () => {
     expect(render({ problem: "settings.json: not valid JSON" })).toContain(
       "the defaults are in force",
     );
+  });
+});
+
+describe("the evidence retention row", () => {
+  it("offers windows a person can mean, and marks the stored one", () => {
+    const html = render({
+      stored: {
+        theme: "system",
+        office_native: "auto",
+        voice_input: false,
+        validation_retention_days: 365,
+      },
+    });
+    expect(html).toContain('aria-label="Keep validation evidence"');
+    expect(html).toContain('aria-checked="true" class="wb-settings-segment is-selected">1 year');
+    // `0` is the server's own encoding of "keep everything", offered as a word.
+    expect(html).toContain("Forever");
+  });
+
+  it("states the split the setting really has, rather than implying one file", () => {
+    // Machine-local document, per-project files — said in the panel because it
+    // is the one thing about this knob a user would otherwise guess wrong.
+    const html = render();
+    expect(html).toContain("A choice about this machine&#x27;s disk");
+    expect(html).toContain(".workbench/validation/");
+  });
+
+  it("snaps an unoffered stored value to the nearest window it can show", () => {
+    // A hand-edited document (or one from a build with more choices) still
+    // lights a segment: none lit reads as "no value" for a setting that has one.
+    expect(retentionChoice(90)).toBe("90");
+    expect(retentionChoice(0)).toBe("0");
+    expect(retentionChoice(45)).toBe("30");
+    expect(retentionChoice(300)).toBe("365");
+    expect(retentionChoice(-5)).toBe("0");
   });
 });
 

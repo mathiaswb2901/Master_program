@@ -58,6 +58,35 @@ const VOICE_CHOICES: readonly Choice<"off" | "on">[] = [
 ];
 
 /**
+ * Retention is a number of days on the wire and a **choice** here, on purpose:
+ * a free number field invites 1 (which throws away this morning's proof) and
+ * 100000 (which is "forever" spelled unclearly), and neither is an answer anyone
+ * arrived at. Four windows a person can mean — a month, a quarter, a year,
+ * forever — expressed in the same segmented vocabulary as every other row, so
+ * this PR adds a setting and not a control type. `0` is forever, which is the
+ * server's own encoding rather than a second one invented for the UI.
+ */
+const RETENTION_CHOICES: readonly Choice<string>[] = [
+  { value: "30", label: "30 days" },
+  { value: "90", label: "90 days" },
+  { value: "365", label: "1 year" },
+  { value: "0", label: "Forever" },
+];
+
+/** The nearest offered window to whatever is stored — a document written by
+ * hand (or by a later version with more choices) still lights a segment rather
+ * than lighting none, which would read as "no value" for a setting that has one. */
+export function retentionChoice(days: number): string {
+  const offered = RETENTION_CHOICES.map((choice) => Number(choice.value));
+  if (days <= 0 || offered.includes(days)) return String(Math.max(days, 0));
+  const finite = offered.filter((value) => value > 0);
+  const nearest = finite.reduce((best, value) =>
+    Math.abs(value - days) < Math.abs(best - days) ? value : best,
+  );
+  return String(nearest);
+}
+
+/**
  * A segmented choice — a radio group wearing tabs' clothes.
  *
  * The selected segment is **neutral**, not amber: what it marks is a standing
@@ -222,6 +251,27 @@ export function SettingsBody({
                 disabled={state.overrides.some((entry) => entry.key === "voice_input")}
                 onChange={(choice) => {
                   onChange({ voice_input: choice === "on" });
+                }}
+              />
+            </Row>
+
+            <Row
+              title="Keep validation evidence"
+              detail="Results, their evidence and their approvals are written into each project's own .workbench/validation/ folder, so a restart does not forget what was proven."
+              // The honest half, said in the panel rather than left to be
+              // discovered: this document is machine-local and the files it
+              // governs are not, so one answer covers every project you open.
+              // Not a `noteFor` lookup — there is no environment variable behind
+              // this knob, so there is nothing an override could say about it.
+              note="A choice about this machine's disk; the evidence itself stays in each project. A month is swept only once every result in it is past the window."
+            >
+              <Segmented
+                label="Keep validation evidence"
+                choices={RETENTION_CHOICES}
+                value={retentionChoice(state.stored.validation_retention_days)}
+                disabled={false}
+                onChange={(days) => {
+                  onChange({ validation_retention_days: Number(days) });
                 }}
               />
             </Row>
