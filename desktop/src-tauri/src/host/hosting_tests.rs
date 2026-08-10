@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DispatchMessageW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect,
     IsHungAppWindow, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SendMessageTimeoutW,
     SetWindowLongPtrW, TranslateMessage, GWLP_WNDPROC, GWL_STYLE, MSG, PM_REMOVE, SMTO_ABORTIFHUNG,
-    WM_APP, WM_CLOSE, WM_HOTKEY, WM_NULL, WM_PAINT, WM_PARENTNOTIFY, WS_CAPTION, WS_CHILD, WS_POPUP,
-    WS_THICKFRAME,
+    WM_APP, WM_CLOSE, WM_HOTKEY, WM_NULL, WM_PAINT, WM_PARENTNOTIFY, WS_CAPTION, WS_CHILD,
+    WS_POPUP, WS_THICKFRAME,
 };
 
 use super::class::{self, PanelState};
