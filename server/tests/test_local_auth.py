@@ -334,6 +334,26 @@ async def test_enforced_app_lets_options_preflight_through(settings: Settings) -
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
 
 
+async def test_cors_allows_the_desktop_shell_origin(settings: Settings) -> None:
+    # The Tauri shell serves the UI from ``tauri.localhost`` and calls this
+    # backend cross-origin; without the shell origin in the CORS allow-list every
+    # request the packaged window makes is blocked, and the window loads but can
+    # never reach its own backend. A browser tab is same-origin and never
+    # exercised this, so the gap only bit the desktop shell. Regression: the
+    # preflight from the shell origin must be echoed a matching allow-origin.
+    settings = settings.model_copy(update={"enforce_auth": True, "auth_token": TOKEN})
+    async with await _app_client(settings) as client:
+        resp = await client.options(
+            "/api/layouts",
+            headers={
+                "origin": "https://tauri.localhost",
+                "access-control-request-method": "GET",
+            },
+        )
+    assert resp.status_code < 400
+    assert resp.headers.get("access-control-allow-origin") == "https://tauri.localhost"
+
+
 async def test_enforced_app_serves_token_handout_without_a_token(settings: Settings) -> None:
     # The bootstrap endpoint stays reachable with no token (chicken-and-egg): it
     # is how a fresh client obtains one. Guarded on local Origin/Host instead.

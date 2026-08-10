@@ -99,6 +99,15 @@ log = structlog.get_logger()
 
 # Vite dev server origin; irrelevant once the built UI is served by this process.
 _DEV_ORIGINS = ["http://localhost:5173"]
+# The Tauri desktop shell serves the UI from its own asset protocol
+# (``tauri.localhost``), which is cross-origin with this backend on 127.0.0.1.
+# Without these the packaged window's every request is CORS-blocked — the browser
+# tab is same-origin and never needed them, so this gap only bit the shell.
+_SHELL_ORIGINS = [
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+]
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -600,7 +609,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_DEV_ORIGINS,
+        allow_origins=_DEV_ORIGINS + _SHELL_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
