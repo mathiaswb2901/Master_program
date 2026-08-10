@@ -25,9 +25,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DispatchMessageW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect,
-    IsHungAppWindow, IsWindow, PeekMessageW, PostMessageW, SendMessageTimeoutW, SetWindowLongPtrW,
-    TranslateMessage, GWLP_WNDPROC, GWL_STYLE, MSG, PM_REMOVE, SMTO_ABORTIFHUNG, WM_APP, WM_CLOSE,
-    WM_HOTKEY, WM_NULL, WM_PAINT, WM_PARENTNOTIFY, WS_CAPTION, WS_CHILD, WS_POPUP, WS_THICKFRAME,
+    IsHungAppWindow, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SendMessageTimeoutW,
+    SetWindowLongPtrW, TranslateMessage, GWLP_WNDPROC, GWL_STYLE, MSG, PM_REMOVE, SMTO_ABORTIFHUNG,
+    WM_APP, WM_CLOSE, WM_HOTKEY, WM_NULL, WM_PAINT, WM_PARENTNOTIFY, WS_CAPTION, WS_CHILD,
+    WS_POPUP, WS_THICKFRAME,
 };
 
 use super::class::{self, PanelState};
@@ -35,7 +36,7 @@ use super::embed::{self, EmbeddedGuest};
 use super::geometry::{host_layout, CssRect, HostLayout, PhysicalRect};
 use super::guest::{self, GuestProcess};
 use super::layout::{self, Coalescer};
-use super::{commands, escape, focus, main_thread, reaper};
+use super::{commands, escape, focus, main_thread, reaper, zorder};
 use super::{HostError, HostErrorCode, HostRegistry, Panel, WindowId};
 
 /// One desktop, one window test at a time.
@@ -288,6 +289,11 @@ fn parent_of(window: HWND) -> Option<HWND> {
 fn exists(window: WindowId) -> bool {
     // SAFETY: `IsWindow` validates the handle itself.
     unsafe { IsWindow(Some(window.hwnd())).as_bool() }
+}
+
+fn is_visible(window: HWND) -> bool {
+    // SAFETY: `IsWindowVisible` validates the handle itself.
+    unsafe { IsWindowVisible(window).as_bool() }
 }
 
 // ---- the tests ---------------------------------------------------------------
@@ -888,6 +894,368 @@ fn a_real_click_into_a_hosted_guest() {
         "WM_PARENTNOTIFY now arrives for clicks into a reparented guest - a \
          `focused` event could be built on it after all"
     );
+}
+
+// ---- z-order: who is on top of a docked panel ---------------------------------
+
+/// **The Win32 fact the whole z-order fix exists for, measured rather than
+/// recited**: a child window is created at the *bottom* of its siblings' Z
+/// order, not the top.
+///
+/// The folklore — and `CreateWindowEx`'s own documentation, which says a new
+/// window is "added to the top of the Z order" without distinguishing children
+/// from top-level windows — says the opposite, and believing it is how a docked
+/// panel ended up underneath the webview: the panel is created long after
+/// `WRY_WEBVIEW`, so *later* had to mean *above* for hosting to work, and it
+/// does not.
+///
+/// Deliberately raw `CreateWindowExW` on the stock `STATIC` class rather than
+/// our own [`class::create_panel`]: this is a claim about Windows, and running it
+/// through the code that now compensates for it would test the compensation
+/// instead. Plain children of a window of ours, so nothing else on the desktop
+/// is involved.
+#[test]
+fn a_new_child_window_is_created_below_its_siblings() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_CHILD, WS_VISIBLE,
+    };
+
+    let _serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
+    let root = class::create_panel(
+        None,
+        PhysicalRect {
+            x: 60,
+            y: 60,
+            width: 400,
+            height: 300,
+        },
+        PanelState::new("zorder-root".to_string()),
+    )
+    .expect("root window");
+    // SAFETY: two stock `STATIC` children of a window this thread owns, both
+    // destroyed below.
+    let child = |name: windows::core::PCWSTR| unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            windows::core::w!("STATIC"),
+            name,
+            WS_CHILD | WS_VISIBLE,
+            0,
+            0,
+            200,
+            120,
+            Some(root),
+            None,
+            None,
+            None,
+        )
+        .expect("a STATIC child")
+    };
+    let first = child(windows::core::w!("first"));
+    let second = child(windows::core::w!("second"));
+
+    let chain = zorder::children_top_first(root);
+    assert_eq!(chain.len(), 2, "expected exactly the two children");
+    assert_eq!(
+        chain[0].window,
+        WindowId::from_hwnd(first),
+        "a child created *later* came out on top — Windows has changed its mind \
+         about where CreateWindowEx puts a child, and `class::create_panel` no \
+         longer needs to raise the panel it creates"
+    );
+    assert_eq!(zorder::depth_in_z_order(first), Some((0, 2)));
+    assert_eq!(zorder::depth_in_z_order(second), Some((1, 2)));
+
+    // SAFETY: our own windows, destroyed once.
+    unsafe {
+        let _ = DestroyWindow(second);
+        let _ = DestroyWindow(first);
+    }
+    class::destroy(WindowId::from_hwnd(root));
+}
+
+/// **The bug, reproduced without a webview.**
+///
+/// The shell's arrangement is a top-level window whose entire client area is
+/// already covered by somebody else's child — `WRY_WEBVIEW`, created when the
+/// window was — and a panel docked into it long afterwards. Two things then go
+/// wrong at once, and the test insists on both, because fixing only the first
+/// makes a docked document *worse*: reachable by the mouse and still invisible.
+///
+/// * Given the fact above, the panel lands **underneath** that sibling, so a
+///   click at its own centre never reaches it.
+/// * `WRY_WEBVIEW` carries **no `WS_CLIPSIBLINGS`**, so even from in front the
+///   panel is painted over. The stand-in has the bit stripped for exactly that
+///   reason — with it left on, this test passes with half the fix in place.
+///
+/// Measured in the running shell first (`WORKBENCH_HOST_DEMO=word:…`, a real
+/// Word docked, the demo's z-order report), then reproduced here so it stays
+/// fixed. The stand-in for the webview is one of our own windows because what
+/// matters is that it is a full-size sibling that already exists and does not
+/// clip, not what it draws.
+///
+/// **`ChildWindowFromPointEx`, not `WindowFromPoint`** — see
+/// [`super::zorder::child_hit`]: this test's windows are not the foreground, so
+/// the desktop-wide probe would answer with whatever the machine happens to have
+/// in front and the test would fail for reasons that are not this bug.
+#[test]
+fn a_panel_docked_into_a_window_that_already_has_a_webview_is_the_one_a_click_reaches() {
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, WS_CLIPSIBLINGS};
+
+    let _serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
+    let root = class::create_panel(
+        None,
+        PhysicalRect {
+            x: 80,
+            y: 80,
+            width: 800,
+            height: 600,
+        },
+        PanelState::new("zorder-shell".to_string()),
+    )
+    .expect("the stand-in shell window");
+    let (root_width, root_height) = client_size(root);
+    // The webview: created with the window, covering all of it.
+    let webview = class::create_panel(
+        Some(root),
+        PhysicalRect {
+            x: 0,
+            y: 0,
+            width: root_width,
+            height: root_height,
+        },
+        PanelState::new("webview stand-in".to_string()),
+    )
+    .expect("the stand-in webview");
+    // ...and, like the real one, not clipping the siblings in front of it.
+    // SAFETY: a plain style write on a window this thread created.
+    unsafe {
+        SetWindowLongPtrW(
+            webview,
+            GWL_STYLE,
+            (style_of(webview) & !WS_CLIPSIBLINGS.0) as isize,
+        );
+    }
+    assert_eq!(
+        style_of(webview) & WS_CLIPSIBLINGS.0,
+        0,
+        "the stand-in still clips its siblings, so it does not stand in for WRY_WEBVIEW"
+    );
+
+    // The panel: created afterwards, over part of it — a docked document.
+    let panel = class::create_panel(
+        Some(root),
+        PhysicalRect {
+            x: 120,
+            y: 90,
+            width: 400,
+            height: 300,
+        },
+        PanelState::new("panel".to_string()),
+    )
+    .expect("the panel window");
+    let clip = class::create_clip(
+        panel,
+        PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 300,
+        },
+    )
+    .expect("the clip child");
+    settle();
+
+    let rect = zorder::screen_rect_of(panel);
+    let point = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+    let hit = zorder::child_hit(root, point);
+    let reached = hit.is_some_and(|window| {
+        window == WindowId::from_hwnd(panel) || window == WindowId::from_hwnd(clip)
+    });
+    assert!(
+        reached,
+        "a click in the middle of the docked panel landed on {:?}, not on the \
+         panel ({:?}) or its clip child ({:?}) — the panel is underneath the \
+         webview, so the document in it is neither visible nor clickable",
+        hit.map(|window| zorder::describe(window.hwnd())),
+        WindowId::from_hwnd(panel),
+        WindowId::from_hwnd(clip),
+    );
+    assert_eq!(
+        zorder::depth_in_z_order(panel),
+        Some((0, 2)),
+        "the panel is not the topmost child of the window it was docked into"
+    );
+    assert_eq!(
+        zorder::depth_in_z_order(webview),
+        Some((1, 2)),
+        "the webview stand-in was expected to end up below the panel"
+    );
+    assert_ne!(
+        style_of(webview) & WS_CLIPSIBLINGS.0,
+        0,
+        "the sibling still paints across whatever is in front of it, so the panel is \
+         clickable and invisible — worse than being behind it"
+    );
+
+    class::destroy(WindowId::from_hwnd(clip));
+    class::destroy(WindowId::from_hwnd(panel));
+    class::destroy(WindowId::from_hwnd(webview));
+    class::destroy(WindowId::from_hwnd(root));
+}
+
+/// **The paint control's `ShowWindow` calls run where the windows live.**
+///
+/// The one diagnostic in [`super::zorder`] that writes rather than reads, called
+/// from the one place that is not the main thread: the demo's z-order probe runs
+/// on a thread of its own. `ShowWindow` on a window owned by another thread is
+/// not the free asynchronous post it is often taken for — `ShowWindowAsync` is
+/// the call that exists for that — so it waits on the owner's message queue and
+/// can park the caller behind whatever the owner is already doing, which is
+/// exactly the main-thread stall #121 removed from the close path.
+///
+/// The shape of the proof is
+/// [`a_teardown_asked_for_off_thread_runs_its_win32_where_the_windows_live`]'s:
+/// this thread owns the windows, a spawned thread stands in for the demo, and
+/// the seam routes the work back here. The assertions are that both hops ran
+/// *here* and not on the caller, and — so this cannot pass as a routed no-op —
+/// that the sibling was genuinely hidden on the first hop and genuinely back on
+/// the second.
+#[test]
+fn the_paint_control_hides_siblings_on_the_thread_that_owns_them() {
+    let _serial = SERIAL.lock().unwrap_or_else(|err| err.into_inner());
+    let owner = thread::current().id();
+    let root = class::create_panel(
+        None,
+        PhysicalRect {
+            x: 90,
+            y: 90,
+            width: 700,
+            height: 500,
+        },
+        PanelState::new("paint-control-shell".to_string()),
+    )
+    .expect("the stand-in shell window");
+    let (root_width, root_height) = client_size(root);
+    // The sibling the control has to hide and put back — the webview's role.
+    let webview = class::create_panel(
+        Some(root),
+        PhysicalRect {
+            x: 0,
+            y: 0,
+            width: root_width,
+            height: root_height,
+        },
+        PanelState::new("webview stand-in".to_string()),
+    )
+    .expect("the stand-in webview");
+    let panel = class::create_panel(
+        Some(root),
+        PhysicalRect {
+            x: 100,
+            y: 80,
+            width: 360,
+            height: 260,
+        },
+        PanelState::new("panel".to_string()),
+    )
+    .expect("the panel window");
+    settle();
+    assert!(
+        is_visible(webview),
+        "the sibling starts hidden, so hiding it would prove nothing"
+    );
+
+    let ran_on: Arc<Mutex<Vec<ThreadId>>> = Arc::new(Mutex::new(Vec::new()));
+    let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send + 'static>>();
+    let point = {
+        let rect = zorder::screen_rect_of(panel);
+        (rect.x + rect.width / 2, rect.y + rect.height / 2)
+    };
+    let probe = {
+        let ran_on = Arc::clone(&ran_on);
+        let root = WindowId::from_hwnd(root);
+        let panel = WindowId::from_hwnd(panel);
+        thread::spawn(move || {
+            let asked_from = thread::current().id();
+            // The seam the demo gives `paint_control`, with this test's thread
+            // in the main thread's place. `Fn`, not `FnOnce`: the control uses
+            // it twice, once to hide and once to restore.
+            let on_owning_thread =
+                |work: Box<dyn FnOnce() -> Result<(), HostError> + Send + 'static>| {
+                    let tx = tx.clone();
+                    let ran_on = Arc::clone(&ran_on);
+                    main_thread::dispatch_within(
+                        move |posted| {
+                            tx.send(posted).map_err(|_| {
+                                HostError::new(
+                                    HostErrorCode::MainThread,
+                                    "nobody is draining the queue",
+                                )
+                            })
+                        },
+                        SETTLE_TIMEOUT * 3,
+                        move || {
+                            ran_on
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner())
+                                .push(thread::current().id());
+                            work()
+                        },
+                    )
+                };
+            zorder::paint_control(&on_owning_thread, "test", root.hwnd(), panel.hwnd(), point);
+            asked_from
+        })
+    };
+
+    // This thread owns the windows, so this thread runs the work — which is
+    // what a message loop servicing `run_on_main_thread` amounts to. The
+    // control sleeps between the two hops, so the wait spans both.
+    let deadline = Instant::now() + SETTLE_TIMEOUT * 3;
+    let mut visibility_after: Vec<bool> = Vec::new();
+    while visibility_after.len() < 2 && Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(work) => {
+                work();
+                visibility_after.push(is_visible(webview));
+            }
+            Err(_) => {
+                pump_once();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+    let asked_from = probe.join().expect("the probe thread finished");
+
+    assert_ne!(
+        asked_from, owner,
+        "the stand-in probe ran on the owning thread, so this proves nothing"
+    );
+    let ran_on = ran_on.lock().unwrap_or_else(|err| err.into_inner()).clone();
+    assert_eq!(
+        ran_on.len(),
+        2,
+        "the paint control made {} hop(s) to the owning thread, not the hide and \
+         the restore — a `ShowWindow` that skipped the seam is one that ran on \
+         {asked_from:?} instead",
+        ran_on.len()
+    );
+    assert!(
+        ran_on.iter().all(|id| *id == owner),
+        "the paint control's Win32 calls ran on {ran_on:?}, not on {owner:?}, which owns \
+         the windows"
+    );
+    assert_eq!(
+        visibility_after,
+        vec![false, true],
+        "the hide/restore pair was routed but did nothing: the sibling's visibility \
+         after each hop should have gone false then true"
+    );
+
+    class::destroy(WindowId::from_hwnd(panel));
+    class::destroy(WindowId::from_hwnd(webview));
+    class::destroy(WindowId::from_hwnd(root));
 }
 
 // ---- counting WM_PARENTNOTIFY ------------------------------------------------

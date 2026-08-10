@@ -98,6 +98,7 @@ mod main_thread;
 pub mod mover;
 mod reaper;
 mod watchdog;
+mod zorder;
 
 use std::collections::HashMap;
 use std::fmt;

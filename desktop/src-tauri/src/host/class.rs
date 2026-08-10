@@ -24,6 +24,42 @@
 //!   never learns that a native child took the focus, which is a job for a
 //!   focus hook and is deferred with the panel that would consume it.
 //!
+//! **A panel has to be put in front of the webview, twice, and neither half is
+//! optional.** A panel window is created as a child of the Tauri window, which
+//! already contains `WRY_WEBVIEW` — wry's host for WebView2 — covering the whole
+//! client area. Two separate Win32 facts conspire to bury a docked document
+//! under it, and fixing one without the other makes things worse rather than
+//! better. Both are measured in [`super::hosting_tests`] and both were seen in
+//! the running shell with a real Word docked ([`super::demo`]'s z-order report).
+//!
+//! 1. **A child window is created at the *bottom* of its siblings' Z order.**
+//!    `CreateWindowEx`'s documentation says a new window goes "to the top of the
+//!    Z order" without distinguishing children, and the folklore repeats it; for
+//!    a `WS_CHILD` it is the other way round
+//!    (`a_new_child_window_is_created_below_its_siblings`). So a panel created
+//!    long after the webview lands underneath it, and `WindowFromPoint` over a
+//!    docked document answers `Chrome_RenderWidgetHostHWND` — which is exactly
+//!    what #127's in-shell verification saw. [`super::zorder::raise_to_top`] is
+//!    the answer, and [`create_panel`] calls it for every panel that has a
+//!    parent.
+//!
+//! 2. **`WRY_WEBVIEW` is created without `WS_CLIPSIBLINGS`**, so it paints
+//!    across whatever is in front of it. Raising the panel alone therefore fixed
+//!    hit-testing and *not* pixels: the document was reachable by the mouse and
+//!    still invisible, which is the worst of the three states, because it leaves
+//!    a window the user cannot see under their cursor.
+//!    [`super::zorder::ensure_siblings_clip`] adds the bit, and with both halves
+//!    a real Word is visible and clickable in the panel.
+//!
+//! **The probe matters as much as the fix.** `WindowFromPoint` is the honest
+//! answer for *input* — it is the walk the mouse takes — but it says nothing
+//! about what is painted, and it walks the whole desktop, so in a test it
+//! answers with whatever application happens to be in front. Ask both questions:
+//! [`super::zorder::child_hit`] for "who would a click in *this window* reach",
+//! and [`super::zorder::pixel_at`] with [`super::zorder::paint_control`] for
+//! "whose pixels are actually on the screen". A single `WindowFromPoint` call
+//! with nothing beside it is how half of this bug stayed hidden.
+//!
 //! What is left here is real and needed. `WM_SETFOCUS` forwards focus to the
 //! guest, so a panel focused programmatically — a `Ctrl+N` chord, a command, a
 //! restored layout — puts the keyboard where the user expects it rather than on
@@ -163,7 +199,42 @@ pub(super) fn create_panel(
         )
     };
     match created {
-        Ok(hwnd) if !hwnd.0.is_null() => Ok(hwnd),
+        Ok(hwnd) if !hwnd.0.is_null() => {
+            // **A child window is created at the *bottom* of its siblings' Z
+            // order**, not the top — measured in
+            // `hosting_tests::a_new_child_window_is_created_below_its_siblings`
+            // against the stock `STATIC` class, so it is Windows' behaviour and
+            // not ours. The Tauri window already contains `WRY_WEBVIEW`, so a
+            // panel created later lands *underneath* the whole webview: nothing
+            // of the document paints, and every click at the panel's own
+            // rectangle is delivered to `Chrome_RenderWidgetHostHWND`.
+            //
+            // A top-level panel — the one the hosting tests build — has no
+            // siblings worth the call, and asking would be a `SetWindowPos` on
+            // the desktop's Z order for no reason.
+            if let Some(parent) = parent {
+                // **Raising is only half of it.** `WRY_WEBVIEW` is created
+                // without `WS_CLIPSIBLINGS`, so it paints across whatever is in
+                // front of it — a panel raised above it was hit-testable and
+                // still invisible, which is worse than being behind, because it
+                // puts a window the user cannot see under their cursor. Both
+                // halves, or neither.
+                let fixed = super::zorder::ensure_siblings_clip(parent);
+                if fixed > 0 {
+                    crate::backend::log(&format!(
+                        "office host: {fixed} sibling window(s) of the shell were painting \
+                         over their neighbours; given WS_CLIPSIBLINGS"
+                    ));
+                }
+                if let Err(err) = super::zorder::raise_to_top(hwnd) {
+                    crate::backend::log(&format!(
+                        "office host: the panel window could not be raised above its \
+                         siblings ({err}); a docked document will be behind the webview"
+                    ));
+                }
+            }
+            Ok(hwnd)
+        }
         Ok(_) => {
             // SAFETY: the window was never created, so nothing took ownership.
             drop(unsafe { Box::from_raw(state) });

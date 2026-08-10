@@ -1257,7 +1257,7 @@ rectangle. Mind the unit boundary at the seam: these Rust commands take **CSS**
 pixels, while the Python `PanelRect` is documented in **physical** pixels. A
 bridge between the two must convert, or the rectangle is scaled twice.
 
-**Four things were measured that the documentation does not tell you**, each one
+**Six things were measured that the documentation does not tell you**, each one
 now a test in `host/hosting_tests.rs`:
 
 | Claim | What actually happens |
@@ -1266,6 +1266,29 @@ now a test in `host/hosting_tests.rs`:
 | Click-to-focus needs the host to route the click | It does not. The guest's own window procedure focuses itself, and the keyboard follows. What is lost is only the *notification* to the webview |
 | `SetFocus` across processes needs `AttachThreadInput` | It does not, for a parent/child pair: that relationship already attaches the input queues. No `AttachThreadInput` call exists in this crate |
 | `SWP_ASYNCWINDOWPOS` keeps a hung guest from stalling the host | **It does not**, for the same reason: the flag only posts when the two threads are on *different* input queues, and being our child put them on the same one. `DeferWindowPos` also rejects the flag outright (`ERROR_INVALID_PARAMETER`), so our own two windows are batched and the guest is moved separately |
+| `CreateWindowEx` adds a new window "to the top of the Z order" | **Not for a child.** A `WS_CHILD` is created at the *bottom* of its siblings, so a panel created long after `WRY_WEBVIEW` lands underneath the whole webview — `WindowFromPoint` over a docked document answers `Chrome_RenderWidgetHostHWND`. `host/zorder.rs` raises every panel that has a parent |
+| Being in front is what decides whose pixels the user sees | Only with `WS_CLIPSIBLINGS`, and **`WRY_WEBVIEW` is created without it** — it paints across whatever is in front. Raising alone left a docked Word *clickable and invisible*, which is worse than being behind; both halves ship together |
+
+**The docked window has to be put in front of the webview, and "in front" is two
+different questions** (`host/zorder.rs`). Hit-testing is Z order, painting is Z
+order *plus* `WS_CLIPSIBLINGS`, and the two failed independently here — so the
+module answers both and a diagnosis quotes both: `WindowFromPoint` for "where
+would a real click go" (desktop-wide, and therefore the wrong probe in a test —
+`ChildWindowFromPointEx` is scoped to one window's tree), a screen-pixel read for
+"what is actually there", and a control that hides the sibling to tell "the panel
+is not painting" apart from "the panel is painting and losing". Every probe there
+is a *read* except that control, which hides a window and puts it back — so it
+takes the thread seam and the rest do not. `ShowWindow` gets no exemption for
+being "asynchronous", because it is not: `ShowWindowAsync` exists precisely
+because the plain call on another thread's window waits on that thread's message
+queue, which is the same stall the close paths below were fixed to avoid. The
+demo probe runs on its own thread and hands those two calls to
+`main_thread::on_main` like every other window write in the shell. Verified in the
+shell against a real Word (`WORKBENCH_HOST_DEMO=word:<path>` docks one through
+the same launch/find/embed the Python service drives): before, the panel was
+`#2 of 2` children, the hit test answered `Chrome_RenderWidgetHostHWND` and the
+document was invisible; after, the hit test walks `_WwG < _WwB < _WwF < OpusApp <
+…` into Word and the pixel at the panel's centre is the page.
 
 **A docked window is also a keyboard trap, and that needed an escape of its own**
 (`host/escape.rs`). The click-to-focus row above cuts both ways: the guest focuses
