@@ -29,6 +29,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::class::{self, PanelState};
+use super::escape;
 use super::geometry::CssRect;
 use super::guest::{self, GuestProcess};
 use super::layout::{self, Coalescer};
@@ -209,6 +210,10 @@ pub fn host_detach(app: AppHandle, host_id: String) -> Result<(), HostError> {
             ours
         };
         reclaim_focus(&handle, &dead_ends);
+        // That window is on the desktop now, where Alt+Tab is the way out of it
+        // — the escape is for a window the user cannot leave, and this is no
+        // longer one. It stays armed if another document is still docked.
+        release_escape_if_idle(&handle.state::<HostRegistry>());
         Ok(())
     })
 }
@@ -274,7 +279,10 @@ pub(super) fn close_panel(
     let dead_ends = [panel.window, panel.clip];
     release_panel(&mut panel);
     // Outside the registry lock, as it always was: nothing another panel's
-    // command needs is held while an instance is being seen off.
+    // command needs is held while an instance is being seen off. The escape goes
+    // with the last docked document — it is here rather than in `host_close` so
+    // that every caller of this body, tests included, releases the chord.
+    release_escape_if_idle(registry);
     finish(panel.process.take(), dead_ends);
     Ok(())
 }
@@ -307,6 +315,43 @@ pub fn host_focus(app: AppHandle, host_id: String) -> Result<(), HostError> {
             .ok_or_else(|| HostError::unknown_host(&host_id))?;
         super::focus::focus(panel.window)
     })
+}
+
+/// What the panel is allowed to *promise* about the way out of a docked
+/// document.
+///
+/// The chord [`super::escape`] registers is taken from the **whole machine**, so
+/// `RegisterHotKey` can be refused: another application already owns it, which
+/// inside an RDP session `mstsc` really does (it binds `Ctrl+Alt+Home` to the
+/// connection bar). [`arm_escape`] treats that as a degrade rather than a failed
+/// embed — the document still opens and the *Return to Workbench* button still
+/// works — but the panel used to print "`Ctrl+Alt+Home` brings it back" either
+/// way, and the only trace of the refusal was a backend log line the user has no
+/// way to read. This is that answer, in the shape the panel asks for it.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct EscapeState {
+    /// Is the chord ours right now? `false` means the hint must not name it —
+    /// there is no hotkey registered, and the button is the only way back.
+    pub armed: bool,
+    /// The chord as a person reads it, quoted from the registration rather than
+    /// spelled a second time: [`super::escape::CHORD`] is where it is written.
+    pub chord: &'static str,
+}
+
+/// Is there a keyboard way out of a docked document *right now*?
+///
+/// A read of one atomic, so unlike its neighbours it needs neither the registry
+/// nor a hop to the main thread: the question is about a machine-wide
+/// registration, not about a panel. The UI asks it whenever a document docks or
+/// undocks, and that re-ask matters — arming is idempotent and retried by every
+/// embed, so a chord that was taken when the first document docked can become
+/// ours by the time the second one does.
+#[tauri::command]
+pub fn host_escape_state() -> EscapeState {
+    EscapeState {
+        armed: escape::is_armed(),
+        chord: escape::CHORD,
+    }
 }
 
 /// Every panel this window owns. A leak is visible here and nowhere else.
@@ -528,6 +573,11 @@ fn embed_into_panel(
     panel.guest = Some(embedded);
     panel.caption_inset_css = inset_css;
     panel.coalescer = coalescer;
+    // From this instant the panel contains a window that takes every keystroke
+    // aimed at it and hands the webview none of them, so this is the instant the
+    // keyboard escape has to exist. Both callers reach it here rather than
+    // separately, and a re-embed after a detach re-arms.
+    arm_escape(app);
 
     Ok(HostGeometry {
         host_id,
@@ -564,6 +614,55 @@ pub(super) fn reclaim_focus(app: &AppHandle, dead_ends: &[WindowId]) {
         crate::backend::log(
             "office host: a hosted window left with the keyboard; handed it back to the webview",
         );
+    }
+}
+
+/// Arm the keyboard escape, because a window that swallows keystrokes has just
+/// gone into a panel.
+///
+/// Called from [`embed_into_panel`] with the registry lock held, which is safe
+/// precisely because [`super::escape`] owns no registry: the answer to "is
+/// something docked" is not in question here — one just was.
+///
+/// A refusal is a log line and not a failed embed. The chord being unavailable
+/// (another application already registered it) makes the keyboard escape worse,
+/// not the document unopenable, and the visible affordance under the panel is
+/// still there. What a refusal must *not* do is stay invisible: the panel reads
+/// [`host_escape_state`] on every dock and stops naming a chord that is not
+/// ours, so the hint degrades to the button instead of promising a keystroke
+/// nothing would answer.
+fn arm_escape(app: &AppHandle) {
+    let Some(fallback) = app_window(app) else {
+        // No main window is a build or a moment with nowhere to hand the
+        // keyboard back to — the same reason `reclaim_focus` leaves it alone.
+        return;
+    };
+    if let Err(err) = escape::arm(fallback) {
+        crate::backend::log(&format!(
+            "office host: a document is docked without a keyboard escape: {err}"
+        ));
+    }
+}
+
+/// Give the chord back once nothing is docked any more.
+///
+/// The chord [`super::escape`] registers is taken from the **whole machine**
+/// while it is armed, so it is armed exactly while a window that can swallow the
+/// keyboard is inside a panel. Every path that *removes* a guest — detach, close,
+/// a guest that went away by itself — ends here, and the last one out releases
+/// it.
+///
+/// **Main thread only, and never with the registry lock held** — it takes the
+/// lock itself to answer the one question it has.
+pub(super) fn release_escape_if_idle(registry: &HostRegistry) {
+    let docked = match lock(registry) {
+        Ok(panels) => panels.values().any(|panel| panel.guest.is_some()),
+        // A poisoned registry means a window operation panicked. Leaving the
+        // chord exactly as it is beats guessing in either direction.
+        Err(_) => return,
+    };
+    if !docked {
+        escape::disarm();
     }
 }
 
@@ -677,6 +776,9 @@ pub(super) fn on_guest_gone(app: &AppHandle, host_id: String) {
     let handle = app.clone();
     if let Err(err) = on_main(app, move || {
         reclaim_focus(&handle, &dead_ends);
+        // One fewer document that can swallow the keyboard — and if it was the
+        // last, the chord goes back to the machine.
+        release_escape_if_idle(&handle.state::<HostRegistry>());
         Ok(())
     }) {
         crate::backend::log(&format!(
@@ -754,6 +856,12 @@ pub fn shutdown(app: &AppHandle) -> bool {
 /// The teardown itself. **Main thread only** — see [`shutdown`], which is how
 /// every caller reaches it.
 pub(super) fn tear_down_all(registry: &HostRegistry) {
+    // Unconditionally, and before the drain: this is every path that ends the
+    // window, so whatever it leaves behind, it does not leave a machine-wide
+    // chord registered to a window that is about to stop existing. Called
+    // directly rather than through `release_escape_if_idle`, which wants the
+    // lock the line below takes.
+    escape::disarm();
     let Ok(mut panels) = lock(registry) else {
         return;
     };

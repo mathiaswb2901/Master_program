@@ -331,6 +331,7 @@ pub fn run() {
         host::commands::host_close,
         host::commands::host_poll,
         host::commands::host_focus,
+        host::commands::host_escape_state,
         host::commands::host_list,
         host::commands::host_open_guest,
         host::commands::host_hang_guest
@@ -354,6 +355,7 @@ pub fn run() {
         host::commands::host_close,
         host::commands::host_poll,
         host::commands::host_focus,
+        host::commands::host_escape_state,
         host::commands::host_list
     ]);
     #[cfg(not(windows))]
