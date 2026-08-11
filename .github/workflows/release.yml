@@ -84,7 +84,7 @@ jobs:
       # and let the action create it — this is the "prove the pipeline" path and
       # is still marked pre-release.
       - name: Publish GitHub Release with the installer
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dispatch-{0}', github.run_number) }}
           prerelease: true
