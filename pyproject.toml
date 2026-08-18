@@ -7,9 +7,9 @@ license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.141.1",
-    "uvicorn[standard]>=0.52.0",
+    "uvicorn[standard]>=0.52.3",
     "pydantic>=2.13.4",
-    "pydantic-settings>=2.14.2",
+    "pydantic-settings>=2.15.0",
     "structlog>=26.1.0",
     "watchfiles>=1.2.0",
     "pywinpty>=3.0.5; sys_platform == 'win32'",
@@ -18,10 +18,10 @@ dependencies = [
     # shell reparents, and holds the job object that guarantees the process is
     # reaped. Named as the COM route in ARCHITECTURE.md since the M4 direction
     # was set; ctypes would be the same calls with the bindings hand-written.
-    "pywin32>=311; sys_platform == 'win32'",
+    "pywin32>=312; sys_platform == 'win32'",
     "pyjwt>=2.13.0",
     "httpx>=0.28.1",
-    "claude-agent-sdk>=0.2.128",
+    "claude-agent-sdk>=0.2.139",
     "tzdata>=2026.3",
     # The M6 reconciliation gate reads .xlsx cell values deterministically with no
     # Office installed — the whole reason the gate is CI-verifiable. openpyxl is the
@@ -38,16 +38,16 @@ dependencies = [
     # call for the happy path and a hand-written version-migration + schema for
     # everything else. Read-only; no kernel, no execution (nbclient/jupyter-client
     # are not pulled in).
-    "nbformat>=5.10.4",
+    "nbformat>=5.11.0",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.16.1",
-    "mypy>=2.3.0",
+    "ruff>=0.16.3",
+    "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "pre-commit>=4.6.1",
+    "pre-commit>=4.6.2",
     "pytest-timeout>=2.4.0",
 ]
 # Release-only: freezes the backend into the standalone exe the desktop app
@@ -55,7 +55,7 @@ dev = [
 # test gate, and `uv sync --dev` never installs it. Pull it in for a build with
 # `uv sync --group packaging` (or `uv run --group packaging pyinstaller …`).
 packaging = [
-    "pyinstaller>=6.11.0",
+    "pyinstaller>=6.22.0",
 ]
 
 [project.scripts]
