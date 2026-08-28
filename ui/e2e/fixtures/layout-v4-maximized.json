@@ -1,0 +1,137 @@
+{
+  "grid": {
+    "root": {
+      "type": "branch",
+      "data": [
+        {
+          "type": "leaf",
+          "data": {
+            "views": [
+              "files"
+            ],
+            "activeView": "files",
+            "id": "6"
+          },
+          "size": 240
+        },
+        {
+          "type": "branch",
+          "data": [
+            {
+              "type": "leaf",
+              "data": {
+                "views": [
+                  "editors"
+                ],
+                "activeView": "editors",
+                "id": "5"
+              },
+              "size": 232
+            },
+            {
+              "type": "branch",
+              "data": [
+                {
+                  "type": "leaf",
+                  "data": {
+                    "views": [
+                      "terminal#2"
+                    ],
+                    "activeView": "terminal#2",
+                    "id": "9"
+                  },
+                  "size": 330
+                },
+                {
+                  "type": "leaf",
+                  "data": {
+                    "views": [
+                      "scratchpad"
+                    ],
+                    "activeView": "scratchpad",
+                    "id": "10"
+                  },
+                  "size": 330
+                }
+              ],
+              "size": 232
+            },
+            {
+              "type": "leaf",
+              "data": {
+                "views": [
+                  "terminal"
+                ],
+                "activeView": "terminal",
+                "id": "8"
+              },
+              "size": 232
+            }
+          ],
+          "size": 660
+        },
+        {
+          "type": "leaf",
+          "data": {
+            "views": [
+              "agent"
+            ],
+            "activeView": "agent",
+            "id": "7"
+          },
+          "size": 380
+        }
+      ],
+      "size": 696
+    },
+    "width": 1280,
+    "height": 696,
+    "orientation": "HORIZONTAL",
+    "maximizedNode": {
+      "location": [
+        1,
+        1,
+        1
+      ]
+    }
+  },
+  "panels": {
+    "editors": {
+      "id": "editors",
+      "contentComponent": "editors",
+      "tabComponent": "props.defaultTabComponent",
+      "title": "Editor"
+    },
+    "files": {
+      "id": "files",
+      "contentComponent": "files",
+      "tabComponent": "props.defaultTabComponent",
+      "title": "Files"
+    },
+    "agent": {
+      "id": "agent",
+      "contentComponent": "agent",
+      "tabComponent": "props.defaultTabComponent",
+      "title": "Agent"
+    },
+    "terminal": {
+      "id": "terminal",
+      "contentComponent": "terminal",
+      "tabComponent": "props.defaultTabComponent",
+      "title": "Terminal"
+    },
+    "terminal#2": {
+      "id": "terminal#2",
+      "contentComponent": "terminal",
+      "tabComponent": "props.defaultTabComponent",
+      "title": "Terminal 2"
+    },
+    "scratchpad": {
+      "id": "scratchpad",
+      "contentComponent": "scratchpad",
+      "tabComponent": "props.defaultTabComponent",
+      "title": "Scratchpad"
+    }
+  },
+  "activeGroup": "10"
+}

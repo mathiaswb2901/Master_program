@@ -440,3 +440,80 @@ test("two layout switches in a row cannot land on disk out of order", async ({ p
   await runCommand(page, "Switch to the Default layout");
   await persisted(page, null);
 });
+
+/**
+ * The app hearing its own voice — and no longer answering it.
+ *
+ * Restoring an arrangement is `dock.fromJSON`, and dockview reports every
+ * change that causes through `onDidLayoutChange` exactly as if a user had made
+ * it. The layout system answered that echo by re-arming its debounce, so a
+ * switch wrote `layouts.json` twice: once immediately and deliberately, and
+ * once half a second later carrying the identical arrangement. Merely *opening*
+ * the app rewrote the file for the same reason.
+ *
+ * dockview 7 brackets a structural change with `onWillMutateLayout` /
+ * `onDidMutateLayout` and tags it `'user'` or `'api'`, so "this change is our
+ * own `fromJSON`" is now a fact the library states rather than a flag this app
+ * sets around its own calls. The redundant write is gone, and the deliberate
+ * one is untouched — which is what this asserts, because a guard that also
+ * swallowed the real write would be a far worse bug than the one it fixed.
+ */
+test("restoring an arrangement does not write it straight back", async ({ page }) => {
+  const writes: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "PUT" && request.url().includes("/api/layouts")) {
+      writes.push(request.postData() ?? "");
+    }
+  });
+
+  await openApp(page);
+  await runCommand(page, "Switch to the Review layout");
+  await persisted(page, "Review");
+  await page.locator(".wb-layout-chip").click();
+  const menu = page.getByRole("dialog", { name: "Layouts" });
+  await menu.getByRole("textbox", { name: "Name for this arrangement" }).fill(SAVED_LAYOUT);
+  await menu.getByRole("button", { name: "Save", exact: true }).click();
+  await persisted(page, SAVED_LAYOUT);
+
+  await test.step("a cold load of a saved arrangement writes nothing at all", async () => {
+    await page.reload();
+    await workspaceReady(page);
+    expect(await panels(page)).toEqual(REVIEW_PANELS);
+    writes.length = 0;
+    // Comfortably past `SAVE_DEBOUNCE_MS`, so a debounced echo would have
+    // landed. Nothing changed, so nothing is owed to disk.
+    await page.waitForTimeout(1_500);
+    expect(writes, "a restore is not a change").toEqual([]);
+  });
+
+  await test.step("switching to a saved layout writes once, not twice", async () => {
+    await runCommand(page, "Switch to the Default layout");
+    await persisted(page, null);
+    writes.length = 0;
+    await runCommand(page, `Switch to the ${SAVED_LAYOUT} layout`);
+    expect(await panels(page)).toEqual(REVIEW_PANELS);
+    await page.waitForTimeout(1_500);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain(`"current_name":"${SAVED_LAYOUT}"`);
+  });
+
+  await test.step("but a change the user makes is still written", async () => {
+    writes.length = 0;
+    // Focus mode is a real arrangement change, made by a keystroke, outside any
+    // `load` transaction — the case the guard must not touch.
+    await treeItem(page, "src").click();
+    await page.keyboard.press("Alt+M");
+    await expect(page.locator(".wb-layout-chip")).toHaveText("Focused");
+    await expect.poll(() => writes.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    await page.keyboard.press("Alt+M");
+  });
+
+  await runCommand(page, "Switch to the Default layout");
+  await persisted(page, null);
+  await runCommand(page, `Delete the ${SAVED_LAYOUT} layout`);
+  // Not "empty": the test above this one leaves its own broken layout saved,
+  // and `afterAll` is what clears the file. This one takes back what it added.
+  await expect
+    .poll(async () => (await layouts(page)).state.saved.map((layout) => layout.name))
+    .not.toContain(SAVED_LAYOUT);
+});
