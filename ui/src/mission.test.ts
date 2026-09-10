@@ -153,6 +153,15 @@ describe("building a card", () => {
     expect(card?.kind).toBe("orchestrator");
   });
 
+  it("reads a reviewer's kind from the activity feed", () => {
+    // A reviewer is spawned by the review check (server-side `kind="reviewer"`)
+    // and carries that kind onto the wire like any other session. Before the TS
+    // mirror learned the kind, this string flowed through untyped and the badge
+    // mislabelled it — so pin that the join surfaces it verbatim.
+    const [card] = cards({ sessions: [activity("rev", { kind: "reviewer" })] });
+    expect(card?.kind).toBe("reviewer");
+  });
+
   it("keeps a stopped worker's card while its orchestrator still lists it", () => {
     // "That one failed and cost $1.20" is the fact the next spawn decision is
     // made on. Dropping the row when the process ends takes it away exactly

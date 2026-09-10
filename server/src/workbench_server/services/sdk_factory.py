@@ -137,6 +137,11 @@ def is_unattended(kind: SessionKind) -> bool:
 # prevent. These are narrow ``Skill(name)`` specifiers, never a bare ``Skill``:
 # only a whole-tool entry shadows can_use_tool, so every other skill — the user's
 # own included, and our own workbench-dev — still reaches the UI prompt.
+#
+# Auto-allowed only for the **attended** kinds: an unattended reviewer answers its
+# own permissions with a denial and never prompts, so pre-approving these here
+# would silently walk around that isolation (see the ``is_unattended`` gate at the
+# ``allowed_tools`` assembly in ``build_agent_options``).
 _AUTO_ALLOWED_SKILLS = [f"Skill({PLUGIN_NAME}:plan-visual)", f"Skill({PLUGIN_NAME}:remember)"]
 
 
@@ -328,7 +333,9 @@ def build_agent_options(
     context filter that hides the user's own project skills. The plugin is
     passed on its own instead, so bundled skills are simply *available* under
     the ``workbench:`` prefix; only the two named in ``_AUTO_ALLOWED_SKILLS``
-    carry a narrow allow rule, and every other invocation still reaches the UI's
+    carry a narrow allow rule — and only for an **attended** kind, since an
+    unattended reviewer denies its own permissions and must not be handed a
+    pre-approved skill — and every other invocation still reaches the UI's
     permission prompt like any other non-file tool.
     """
     from claude_agent_sdk import (
@@ -396,7 +403,19 @@ def build_agent_options(
             # is the direction this list had never gone before M6 PR 2: see
             # ``auto_allowed_for``.
             *auto_allowed_for(kind),
-            *(_AUTO_ALLOWED_SKILLS if plugins else []),
+            # Kind-gated like every sibling on this list — the one line the M6
+            # PR 2 rewrite left ungated. A whole-tool ``Skill(...)`` entry here is
+            # pre-approved *ahead of* ``can_use_tool`` (same shadowing the file's
+            # top comment describes), so an unattended reviewer would carry these
+            # two skills pre-approved despite ``disallowed_tools`` and its own
+            # "nothing you ask permission for will be answered" prompt. ``remember``
+            # is the sharp edge: its trigger ("at the start of work in an
+            # unfamiliar workspace") fits every reviewer, so it auto-invokes into
+            # an Edit-based workflow the reviewer's stripped context cannot finish,
+            # burning turns from the review's tight ceiling. ``not
+            # is_unattended(kind)`` keeps the auto-allow for the attended kinds the
+            # guidance was written for and withholds it from the reviewer.
+            *(_AUTO_ALLOWED_SKILLS if plugins and not is_unattended(kind) else []),
             *allowed_tool_names(kind),
         ],
         # The other half of the reviewer's isolation, and empty for every other
