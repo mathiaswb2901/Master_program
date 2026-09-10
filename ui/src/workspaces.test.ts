@@ -26,15 +26,36 @@ vi.mock("./shell", () => ({
 vi.mock("./store", () => ({
   useStore: Object.assign(
     () => undefined,
-    { getState: () => ({ pushToast: () => undefined, openFiles: [], openQuickPick: () => undefined }) },
+    {
+      getState: () => ({
+        pushToast: () => undefined,
+        openFiles: [],
+        openQuickPick: () => undefined,
+        adoptWorkspace: () => Promise.resolve(),
+      }),
+    },
   ),
 }));
 
 vi.mock("./tools", () => ({ TOOLS: [] }));
 
-const { looksLikeAbsolutePath, switchWarning, workspaceRows } = await import(
-  "./panels/Workspaces"
-);
+// The recent-list check is the one decision in this module that is not pure —
+// it reads the workspace state the tool fetched — so the api is stubbed rather
+// than the state reached into. `openWorkspacePicker` is the exported door to
+// that fetch (it refreshes as it opens), which is how the test seeds a list
+// without a socket.
+const apiMocks = vi.hoisted(() => ({
+  getWorkspace: vi.fn(),
+  switchWorkspace: vi.fn(),
+  ApiError: class ApiError extends Error {
+    detail = "";
+  },
+}));
+
+vi.mock("./api", () => apiMocks);
+
+const { looksLikeAbsolutePath, openRecentWorkspace, openWorkspacePicker, switchWarning, workspaceRows } =
+  await import("./panels/Workspaces");
 
 function state(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -53,7 +74,23 @@ function state(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
 
 beforeEach(() => {
   canPick.mockReturnValue(true);
+  apiMocks.getWorkspace.mockReset();
+  apiMocks.switchWorkspace.mockReset();
 });
+
+/** Seed the tool's workspace state through its own refresh, the way the app
+ * does. Returns once the fetch it kicked off has landed. */
+async function seedWorkspace(overrides: Partial<WorkspaceState> = {}): Promise<void> {
+  const seeded = state(overrides);
+  apiMocks.getWorkspace.mockResolvedValue(seeded);
+  apiMocks.switchWorkspace.mockResolvedValue(seeded);
+  openWorkspacePicker();
+  await vi.waitFor(() => {
+    expect(apiMocks.getWorkspace).toHaveBeenCalled();
+  });
+  // …and let the `.then` that stores the result run.
+  await Promise.resolve();
+}
 
 describe("looksLikeAbsolutePath", () => {
   it.each([
@@ -117,6 +154,57 @@ describe("workspaceRows", () => {
 
   it("renders nothing but the openers before the first read lands", () => {
     expect(workspaceRows(null, "").map((row) => row.key)).toEqual(["browse"]);
+  });
+});
+
+/**
+ * `workspace.open{path}` — the CLI/agent door, and the only one that compares a
+ * caller's string against the recent list.
+ *
+ * The list is written server-side by `str(Path(...))`, so on Windows it is
+ * always backslashes. The caller's string is written by a human in a JSON file,
+ * where a backslash has to be doubled and so almost nobody writes one. Those two
+ * facts meeting is the bug this pins.
+ */
+describe("openRecentWorkspace", () => {
+  it("accepts a recent written with forward slashes", async () => {
+    await seedWorkspace();
+    // `C:\work\beta` on the list; `C:/work/beta` in the routine. Same folder.
+    expect(() => {
+      openRecentWorkspace("C:/work/beta");
+    }).not.toThrow();
+    // Switched to the list's own canonical string, not to the caller's spelling:
+    // the server is told the path it recorded.
+    await vi.waitFor(() => {
+      expect(apiMocks.switchWorkspace).toHaveBeenCalledWith({ path: "C:\\work\\beta" });
+    });
+  });
+
+  it("still refuses a folder that is not on the list, whatever the slashes", async () => {
+    await seedWorkspace();
+    expect(() => {
+      openRecentWorkspace("C:/work/delta");
+    }).toThrow(/not on the recent workspaces list/);
+    expect(apiMocks.switchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("refuses a recent whose folder has gone missing", async () => {
+    await seedWorkspace();
+    expect(() => {
+      openRecentWorkspace("D:/archive/gamma");
+    }).toThrow(/the folder is not there/);
+    expect(apiMocks.switchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("treats the workspace it is already in as a no-op, not a refusal", async () => {
+    await seedWorkspace();
+    // The headline routine's first op: re-open the workspace this window is in,
+    // written with forward slashes. Nothing to switch, and nothing to complain
+    // about — a throw here is what stopped the script at op 1.
+    expect(() => {
+      openRecentWorkspace("c:/WORK/alpha");
+    }).not.toThrow();
+    expect(apiMocks.switchWorkspace).not.toHaveBeenCalled();
   });
 });
 

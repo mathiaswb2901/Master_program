@@ -331,6 +331,46 @@ function switchWithin(dock: DockviewApi, name: string): void {
   void persist();
 }
 
+/**
+ * Every arrangement this window can be switched to, by name — the closed set
+ * `layout.switch{name}` is validated against.
+ *
+ * Derived, never a constant: the presets come from the registry and the saved
+ * ones from this workspace's `layouts.json`, so a workspace switch changes the
+ * answer and the CLI's vocabulary changes with it.
+ */
+export function layoutNames(): string[] {
+  return [
+    DEFAULT_LAYOUT_NAME,
+    ...LAYOUT_PRESETS.map((preset) => preset.name),
+    ...useLayoutUi.getState().saved.map((layout) => layout.name),
+  ];
+}
+
+/**
+ * `layout.switch{name}` — switch by name, from the CLI, an agent or a voice
+ * command, and **refuse a name this window does not have**.
+ *
+ * `switchToLayout` toasts and carries on for an unknown name, which is right for
+ * a `shortcuts.md` entry (the file is whatever it happens to say, and a bad line
+ * must not break the window) and wrong for a caller waiting on an answer: a
+ * routine whose second step silently did nothing is a routine that reports
+ * success about a window it never arranged. So this throws, `executeCommandById`
+ * turns that into the invocation's `detail`, and the CLI stops the script there.
+ *
+ * The names are listed in the refusal, capped, because the whole point of a
+ * closed argument space is that the caller can be told what it is.
+ */
+export function switchToNamedLayout(name: string): void {
+  const known = layoutNames();
+  if (!known.some((candidate) => matches(candidate, name))) {
+    const listed = known.slice(0, 12).join(", ");
+    const rest = known.length > 12 ? `, and ${String(known.length - 12)} more` : "";
+    throw new Error(`no layout named "${name}" — this window has: ${listed}${rest}`);
+  }
+  switchToLayout(name);
+}
+
 export function saveCurrentLayout(rawName: string): void {
   const dock = dockApiHandle();
   const name = rawName.trim().slice(0, MAX_LAYOUT_NAME_CHARS);
@@ -676,6 +716,30 @@ export const layoutsTool: WorkbenchTool = {
       title: "Save this arrangement as a layout…",
       category: LAYOUTS_CATEGORY,
       run: () => useLayoutUi.setState({ menu: "save" }),
+    },
+    {
+      // The parameterised half of the layout system (PR-E). One id whose
+      // argument is a name, rather than one command per layout: the dynamic
+      // `layout.apply.*` family is how the *QuickBar* offers them (a row you can
+      // see and filter), and this is how a script names one — a routine that had
+      // to spell `layout.apply.saved.Morning` would be coupled to how the picker
+      // builds its ids rather than to what the user called the arrangement.
+      //
+      // Bindable from a workspace file, unlike the other two parameterised
+      // commands, and that is deliberate: `shortcuts.md` may already carry out a
+      // `layout` entry (`shortcutActions` below), because moving panels into an
+      // arrangement the user saved is all it can do.
+      id: "layout.switch",
+      title: "Switch to a named layout",
+      detail: () => layoutNames().slice(0, 6).join(", "),
+      category: LAYOUTS_CATEGORY,
+      params: { fields: [{ name: "name", detail: "a layout this window has" }] },
+      // No name means a person: the picker is the answer to "which one", and
+      // asking the QuickBar row to guess would be worse than showing the list.
+      run: (params) => {
+        if (params === undefined) useLayoutUi.setState({ menu: "list" });
+        else switchToNamedLayout(params.name);
+      },
     },
   ],
   // `Alt+M` is the one chord this tool takes, and it earns it: working full

@@ -276,6 +276,28 @@ export function isBindableFromFile(command: Command): boolean {
 }
 
 /**
+ * Whether the **relay** — a CLI or an agent, from outside the window — may
+ * invoke this command (`commandRelay.ts`).
+ *
+ * The base bar is `isBindableFromFile`'s: an external caller is untrusted input,
+ * exactly like a workspace file, so a command that reaches a filesystem path or
+ * re-points the path jail is refused. One addition, and it narrows rather than
+ * widens: a command that declares `params.relayRequiresParams` is invocable
+ * **only in its parameterised form**, which `executeCommandById` enforces by
+ * refusing an argument-less invoke of one. `workspace.open` is the case — the
+ * bare gesture opens a folder dialog onto the whole filesystem, while
+ * `workspace.open{path}` is refused unless the path is on the recent list the
+ * user built by opening those folders themselves.
+ *
+ * A chord is not a caller: `shortcuts.md` binds a keystroke, which carries no
+ * arguments, so `isBindableFromFile` is untouched and still refuses these.
+ */
+export function isRelayInvocable(command: Command): boolean {
+  if (isBindableFromFile(command)) return true;
+  return command.params?.relayRequiresParams === true;
+}
+
+/**
  * Commands that come and go while the app runs — one per saved layout today,
  * one per recent workspace tomorrow. Kept separate from `commands` because the
  * static list is built once (it is read on every keystroke) and because a chord

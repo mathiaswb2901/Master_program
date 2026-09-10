@@ -15,7 +15,7 @@ import pytest
 from workbench_server.cli import commands_cli
 from workbench_server.cli.commands_cli import _HEADER
 from workbench_server.config import Settings
-from workbench_server.main import runtime_token_path
+from workbench_server.runtime import runtime_token_path
 
 
 def _mock_client(handler: object) -> httpx.Client:

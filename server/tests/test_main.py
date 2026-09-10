@@ -13,7 +13,8 @@ import pytest
 
 from workbench_server import main
 from workbench_server.config import Settings
-from workbench_server.main import run, runtime_token_path
+from workbench_server.main import run
+from workbench_server.runtime import runtime_token_path
 
 
 @pytest.fixture

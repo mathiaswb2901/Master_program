@@ -33,6 +33,7 @@
  *    and is intercepted even inside a terminal or editor.
  */
 
+import type { CommandParams, CommandParamValues } from "./commandParams";
 import { focusPanel } from "./dock";
 import { chordId, parseChord, resolveCommand, surfaceOf } from "./keys";
 import {
@@ -71,7 +72,21 @@ export interface Command {
    * commands whose tool module this layer does not own.
    */
   unsafeFromFile?: boolean;
-  run: () => void;
+  /**
+   * Arguments this command takes, if it takes any (`ui/src/commandParams.ts`).
+   *
+   * Declared by the command, next to its own `run` — the type lives in its own
+   * module so that this file, which names no capability, keeps naming none. A
+   * command that declares nothing here keeps its zero-argument call: `run` is
+   * widened, not changed, so no existing command has to be visited.
+   */
+  params?: CommandParams;
+  /**
+   * `params` is present only for an invocation that declared them and passed
+   * validation — the QuickBar, a chord and a `shortcuts.md` binding all call
+   * this with nothing, because a gesture carries no arguments.
+   */
+  run: (params?: CommandParamValues) => void;
 }
 
 /**
