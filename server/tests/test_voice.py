@@ -36,6 +36,7 @@ from workbench_server.services.voice import (
     FAKE_FINAL_TEXT,
     FAKE_SCRIPT,
     MAX_ACTIVE_SESSIONS,
+    STOP_TIMEOUT_S,
     BackendReport,
     FakeVoiceBackend,
     VoiceBackend,
@@ -280,6 +281,121 @@ async def test_shutdown_cancels_a_microphone_still_open() -> None:
     await service.shutdown()
     with pytest.raises(VoiceNotFoundError):
         await service.stop(session.voice_id)
+
+
+class _SlowStop:
+    """Blocks in ``stop`` until released, so a test can hold a session in the
+    ``transcribing`` state while something else runs the reaper."""
+
+    def __init__(self) -> None:
+        #: Set once `stop` is entered — by then the service has flipped the
+        #: session to `transcribing`, so a waiter knows the state is in place.
+        self.entered = asyncio.Event()
+        #: Held until the test lets `stop` finish.
+        self.release = asyncio.Event()
+
+    def ready(self) -> bool:
+        return True
+
+    def report(self) -> BackendReport:
+        return BackendReport(kind="local_whisper", model_present=True, detail="a slow finisher")
+
+    async def start(self, session: VoiceSession) -> None:
+        return None
+
+    async def feed(self, voice_id: str, sequence: int, audio: bytes) -> str:
+        return "heard"
+
+    async def stop(self, voice_id: str) -> VoiceTranscript:
+        self.entered.set()
+        await self.release.wait()
+        return VoiceTranscript(text="the whole long utterance", confidence=0.7, duration_s=118.0)
+
+    async def cancel(self, voice_id: str) -> None:
+        return None
+
+
+async def test_reap_spares_an_utterance_that_is_still_transcribing() -> None:
+    """A long dictation released near the ceiling is `transcribing`, not
+    abandoned. By the time the model finishes, its `started_at` is already past
+    the reap cutoff — so a second client's start must not reap it out from under
+    `stop`, defeating the cap the long utterance is meant to enjoy and 404-ing an
+    honest retry. Only a still-`recording` utterance is abandoned."""
+    backend = _SlowStop()
+    service = VoiceService(backend)
+    session = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    # Age it exactly as a near-two-minute dictation is by the time it is released
+    # and the model is still running: past MAX_UTTERANCE_S + the grace.
+    service._sessions[session.voice_id] = service._sessions[session.voice_id].model_copy(
+        update={"started_at": session.started_at - (MAX_UTTERANCE_S + ABANDON_GRACE_S + 1)}
+    )
+    # Release it: `stop` flips it to `transcribing` and then blocks in the backend.
+    stopping = asyncio.ensure_future(service.stop(session.voice_id))
+    await backend.entered.wait()  # `stop` reached the backend; state is transcribing
+    assert service._sessions[session.voice_id].state == "transcribing"
+    try:
+        # Someone else starts an utterance — this runs `_reap` under the lock.
+        other = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+        # The transcribing utterance is spared: not reaped, still finishing.
+        assert session.voice_id in service._sessions
+        assert service._sessions[session.voice_id].state == "transcribing"
+        await service.cancel(other.voice_id)
+    finally:
+        backend.release.set()
+        # And `stop` still returns its transcript rather than 404-ing.
+        transcript = await stopping
+        assert transcript.text == "the whole long utterance"
+    # Terminal after it finishes: the slot the transcribing session held is freed.
+    assert session.voice_id not in service._sessions
+
+
+async def test_stop_cancelled_from_outside_frees_the_slot() -> None:
+    """The ASGI layer cancels the request task when the client disconnects
+    mid-`/stop` — a closed laptop, a dropped connection, a pane forced shut while
+    the release is in flight. `CancelledError` is a `BaseException`, so `stop`'s
+    `except Exception` never runs; without a `BaseException` path the session
+    would sit `transcribing` forever, leaking one of MAX_ACTIVE_SESSIONS until the
+    server restarts."""
+    backend = _SlowStop()
+    service = VoiceService(backend)
+    session = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    stopping = asyncio.ensure_future(service.stop(session.voice_id))
+    await backend.entered.wait()  # `stop` reached the backend; state is transcribing
+    assert service._sessions[session.voice_id].state == "transcribing"
+
+    # The request task is cancelled out from under `stop`.
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    # The slot is freed rather than pinned in `transcribing` with nothing left to
+    # release it — a fresh start finds the microphone available, not 429-locked.
+    assert session.voice_id not in service._sessions
+    fresh = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    assert fresh.state == "recording"
+
+
+async def test_reap_bounds_a_transcribing_session_that_never_completed() -> None:
+    """`transcribing` is spared by the reaper, but not without bound. If a `stop`
+    coroutine is torn down without freeing the slot (a cancellation that escaped
+    even the `BaseException` path, an event loop killed mid-await), the session
+    must not sit `transcribing` forever. Past MAX_UTTERANCE_S + STOP_TIMEOUT_S +
+    the grace — longer than any honest `stop` can take — it is reaped like any
+    other abandoned utterance."""
+    service = fake_service()
+    session = await service.start(DEFAULT_SAMPLE_RATE_HZ)
+    # A leaked `transcribing` slot, aged past even the generous transcribing
+    # cutoff (a full-length utterance plus the whole stop ceiling plus grace).
+    service._sessions[session.voice_id] = service._sessions[session.voice_id].model_copy(
+        update={
+            "state": "transcribing",
+            "started_at": session.started_at
+            - (MAX_UTTERANCE_S + STOP_TIMEOUT_S + ABANDON_GRACE_S + 1),
+        }
+    )
+    fresh = await service.start(DEFAULT_SAMPLE_RATE_HZ)  # runs `_reap` under the lock
+    assert fresh.state == "recording"
+    assert session.voice_id not in service._sessions
 
 
 # ---- a backend that misbehaves ------------------------------------------------
