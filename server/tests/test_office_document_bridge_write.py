@@ -143,10 +143,302 @@ class TestWord:
         assert "paragraph" in text.lower()
 
 
+# ---- Word: the insert ------------------------------------------------------
+#
+# The write that changes the document's *shape*, and the one that makes
+# "Workbench writes my report" a true sentence rather than "Workbench rewords
+# it". Every assertion here is a round trip: write, re-read, and check that the
+# paragraphs nobody addressed are byte-for-byte where they were.
+
+
+async def _paragraphs(service: OfficeHostService, name: str) -> list[str]:
+    """The whole live body, read back the way the agent reads it."""
+    word = await service.read_document(name, max_chars=6_000, max_cells=600)
+    return word.text.split("\n\n")  # type: ignore[union-attr]
+
+
+class TestWordInsert:
+    async def test_insert_lands_where_addressed_and_moves_nothing_else(
+        self, tmp_path: Path
+    ) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        before = await _paragraphs(service, name)
+        edit = await service.write_document(
+            name, content="Drafted body.", op="insert", after_paragraph=1
+        )
+        assert isinstance(edit, WordEdit)
+        assert (edit.op, edit.paragraph, edit.written_chars) == ("insert", 2, 13)
+        # The shape changed, and the result says so: five paragraphs became six.
+        assert edit.total_paragraphs == len(before) + 1 == 6
+        after = await _paragraphs(service, name)
+        assert after[2] == "Drafted body."
+        # Everything above the insert is untouched, everything below is the same
+        # text one index further down. Nothing was rewritten, merged or lost.
+        assert after[:2] == before[:2]
+        assert after[3:] == before[2:]
+
+    async def test_appending_with_no_anchor(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        before = await _paragraphs(service, name)
+        edit = await service.write_document(name, content="Closing remark.", op="insert")
+        assert isinstance(edit, WordEdit)
+        assert edit.paragraph == len(before)  # one past the old last
+        after = await _paragraphs(service, name)
+        assert after[:-1] == before
+        assert after[-1] == "Closing remark."
+        # An append moved nothing, and the confirmation must not claim a shift
+        # over paragraphs that do not exist below it.
+        text = _text(
+            await handle_office_write(
+                service, {"path": name, "op": "insert", "content": "One more."}
+            )
+        )
+        assert "nothing else moved" in text
+        assert "shifted" not in text
+
+    async def test_inserting_before_the_first_paragraph(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        before = await _paragraphs(service, name)
+        edit = await service.write_document(
+            name, content="Front matter.", op="insert", after_paragraph=-1
+        )
+        assert isinstance(edit, WordEdit)
+        assert edit.paragraph == 0
+        after = await _paragraphs(service, name)
+        assert after[0] == "Front matter."
+        assert after[1:] == before
+        # It split the title, so it *is* the title's style — Word's own answer.
+        assert edit.style == "Heading 1"
+
+    async def test_inserting_into_a_document_with_nothing_in_it(self, tmp_path: Path) -> None:
+        # Where drafting actually starts. A replace refuses here (there is no
+        # paragraph to replace); an insert must not.
+        service, name = await _docked(tmp_path, "empty-notes.docx")
+        edit = await service.write_document(name, content="The first sentence.", op="insert")
+        assert isinstance(edit, WordEdit)
+        assert (edit.paragraph, edit.total_paragraphs) == (0, 1)
+        assert await _paragraphs(service, name) == ["The first sentence."]
+
+    async def test_a_heading_intent_becomes_a_heading_style(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        edit = await service.write_document(
+            name, content="3.1 Method", op="insert", after_paragraph=1, style="heading2"
+        )
+        assert isinstance(edit, WordEdit)
+        assert edit.style == "Heading 2"
+
+    async def test_no_style_after_a_heading_gives_body_not_a_second_heading(
+        self, tmp_path: Path
+    ) -> None:
+        # The fidelity trap: an insert inherits the anchor's formatting, so
+        # without this the paragraph after a title would itself be a title.
+        service, name = await _docked(tmp_path, "report.docx")
+        edit = await service.write_document(
+            name, content="Drafted body.", op="insert", after_paragraph=0
+        )
+        assert isinstance(edit, WordEdit)
+        assert edit.style == "Normal"
+
+    async def test_an_end_of_cell_anchor_is_refused_and_the_table_is_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        service, name = await _docked(tmp_path, "chapter-with-table.docx")
+        before = await _paragraphs(service, name)
+        with pytest.raises(RangeInvalidError, match="table cell"):
+            # Paragraph 6 is the last paragraph of a cell: its range ends with
+            # the end-of-cell marker, and inserting across it moves the boundary.
+            await service.write_document(name, content="x", op="insert", after_paragraph=6)
+        assert await _paragraphs(service, name) == before
+        text = _text(
+            await handle_office_write(
+                service, {"path": name, "op": "insert", "after_paragraph": 6, "content": "x"}
+            )
+        )
+        assert "table" in text.lower()
+
+    async def test_a_mid_cell_anchor_is_allowed(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "chapter-with-table.docx")
+        edit = await service.write_document(name, content="09:00", op="insert", after_paragraph=5)
+        assert isinstance(edit, WordEdit)
+        assert edit.paragraph == 6
+        assert (await _paragraphs(service, name))[6] == "09:00"
+
+    async def test_content_with_a_line_break_is_refused(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        before = await _paragraphs(service, name)
+        with pytest.raises(RangeInvalidError, match="one paragraph"):
+            await service.write_document(
+                name, content="First line.\nSecond line.", op="insert", after_paragraph=1
+            )
+        assert await _paragraphs(service, name) == before
+
+    async def test_an_anchor_past_the_end_is_refused(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        with pytest.raises(RangeInvalidError, match="past the last paragraph"):
+            await service.write_document(name, content="x", op="insert", after_paragraph=99)
+
+    async def test_two_inserts_in_a_row_address_from_the_answer(self, tmp_path: Path) -> None:
+        """The whole point of the returned index: an agent drafting a section
+        keeps going without re-reading. Each call anchors on what the last one
+        said, and the section comes out in order."""
+        service, name = await _docked(tmp_path, "report.docx")
+        first = await service.write_document(
+            name, content="3.1 Method", op="insert", after_paragraph=1, style="heading2"
+        )
+        assert isinstance(first, WordEdit)
+        second = await service.write_document(
+            name, content="We fit the model on...", op="insert", after_paragraph=first.paragraph
+        )
+        assert isinstance(second, WordEdit)
+        third = await service.write_document(
+            name, content="Then we validate it on...", op="insert", after_paragraph=second.paragraph
+        )
+        assert isinstance(third, WordEdit)
+        assert (await _paragraphs(service, name))[2:5] == [
+            "3.1 Method",
+            "We fit the model on...",
+            "Then we validate it on...",
+        ]
+
+    async def test_the_tool_reports_the_index_the_total_and_the_shift(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        text = _text(
+            await handle_office_write(
+                service,
+                {
+                    "path": name,
+                    "op": "insert",
+                    "after_paragraph": 1,
+                    "content": "Drafted body.",
+                    "style": "heading3",
+                },
+            )
+        )
+        assert "index 2" in text
+        assert "now has 6 paragraphs" in text
+        assert "every index from 2 on has shifted by 1" in text  # the stale addresses
+        assert "Heading 3" in text
+        assert "start_paragraph=2" in text  # how to confirm it
+        assert "after_paragraph=2" in text  # how to continue the section
+
+    async def test_a_zero_length_insert_is_said_out_loud(self, tmp_path: Path) -> None:
+        # NB: keep "empty"/"blank" out of the *test name* — the fake mints its
+        # content from the launched path and pytest's tmp_path carries the
+        # function name, so the word here would flip report.docx into the
+        # empty-document branch (the sibling replace tests say the same).
+        service, name = await _docked(tmp_path, "report.docx")
+        text = _text(
+            await handle_office_write(
+                service, {"path": name, "op": "insert", "after_paragraph": 1, "content": ""}
+            )
+        )
+        assert "empty paragraph" in text.lower()
+
+
+class TestWriteCompatibility:
+    """The replace path is a shipped contract. The insert arriving beside it must
+    not have moved a byte of it — same fields, same defaults, same sentence."""
+
+    async def test_a_replace_still_reports_op_replace_and_no_style(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        edit = await service.write_document(name, content="Rewritten body.", paragraph=2)
+        assert isinstance(edit, WordEdit)
+        assert edit.op == "replace"
+        assert edit.style is None
+        assert edit.total_paragraphs == 5  # a replace never changes the shape
+
+    async def test_the_replace_confirmation_is_word_for_word_what_it_was(
+        self, tmp_path: Path
+    ) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        text = _text(
+            await handle_office_write(service, {"path": name, "paragraph": 1, "content": "New."})
+        )
+        assert text == (
+            f'wrote 4 chars to paragraph 2 of {name}: "New.". The document still has '
+            "5 paragraphs; read it back with office_read (start_paragraph=1) to confirm."
+        )
+
+
+class TestInsertArguments:
+    """Every one of these names a position in the user's document. A lenient
+    parse does not produce an error message — it produces text somewhere nobody
+    asked for, reported as success."""
+
+    async def test_an_unknown_op_is_refused_rather_than_defaulted_to_replace(
+        self, tmp_path: Path
+    ) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        before = await _paragraphs(service, name)
+        result = await handle_office_write(
+            service, {"path": name, "op": "append", "paragraph": 0, "content": "x"}
+        )
+        assert result["is_error"] is True
+        assert "'replace' or 'insert'" in _text(result)
+        # And nothing was written: defaulting to replace would have destroyed a
+        # paragraph the model meant to add to.
+        assert await _paragraphs(service, name) == before
+
+    async def test_insert_with_paragraph_instead_of_after_paragraph_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        result = await handle_office_write(
+            service, {"path": name, "op": "insert", "paragraph": 2, "content": "x"}
+        )
+        assert result["is_error"] is True
+        assert "after_paragraph" in _text(result)
+
+    async def test_a_nonsense_anchor_is_refused_not_rounded_to_the_end(
+        self, tmp_path: Path
+    ) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        for anchor in (-5, "two", 1.5):
+            result = await handle_office_write(
+                service, {"path": name, "op": "insert", "after_paragraph": anchor, "content": "x"}
+            )
+            assert result["is_error"] is True, anchor
+            assert "after_paragraph" in _text(result)
+
+    async def test_an_unknown_style_names_the_ones_that_exist(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        result = await handle_office_write(
+            service, {"path": name, "op": "insert", "content": "x", "style": "Overskrift 1"}
+        )
+        assert result["is_error"] is True
+        assert "heading1" in _text(result)
+
+    async def test_an_anchor_without_the_insert_op_names_the_op(self, tmp_path: Path) -> None:
+        # The likely slip: it addressed a position and forgot op=insert. The
+        # service's own "name a paragraph" would read as a contradiction.
+        service, name = await _docked(tmp_path, "report.docx")
+        result = await handle_office_write(
+            service, {"path": name, "after_paragraph": 1, "content": "x"}
+        )
+        assert result["is_error"] is True
+        assert "op='insert'" in _text(result)
+
+    async def test_a_style_on_a_replace_is_refused(self, tmp_path: Path) -> None:
+        service, name = await _docked(tmp_path, "report.docx")
+        result = await handle_office_write(
+            service, {"path": name, "paragraph": 1, "content": "x", "style": "heading1"}
+        )
+        assert result["is_error"] is True
+        assert "insert" in _text(result)
+
+
 # ---- Excel ------------------------------------------------------------------
 
 
 class TestExcel:
+    async def test_insert_is_refused_and_names_what_excel_does_take(self, tmp_path: Path) -> None:
+        # Inserting a *row* is a different operation with different hazards
+        # (formulas and named ranges that reference what moved). Quietly setting
+        # a cell instead would be an edit nobody asked for.
+        service, name = await _docked(tmp_path, "book.xlsx")
+        with pytest.raises(RangeInvalidError, match="Word-only"):
+            await service.write_document(name, content="x", op="insert", sheet="Budget")
+
     async def test_set_a_cell_and_read_it_back(self, tmp_path: Path) -> None:
         service, name = await _docked(tmp_path, "book.xlsx")
         edit = await service.write_document(name, content="9999", sheet="Budget", cell="B2")

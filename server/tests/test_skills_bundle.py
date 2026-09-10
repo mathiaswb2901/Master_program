@@ -24,7 +24,9 @@ from workbench_server.models.office_bridge import (
     DocStructure,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
+    WordWriteOp,
 )
 from workbench_server.models.plans import PlanArtifact, PlanResponse
 from workbench_server.services import skills_bundle
@@ -84,7 +86,10 @@ class StubReader:
         path: str,
         *,
         content: str,
+        op: WordWriteOp = "replace",
         paragraph: int | None = None,
+        after_paragraph: int | None = None,
+        style: WordParagraphStyle | None = None,
         sheet: str | None = None,
         cell: str | None = None,
     ) -> WordEdit | CellEdit:

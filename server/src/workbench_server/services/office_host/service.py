@@ -68,7 +68,9 @@ from workbench_server.models.office_bridge import (
     LiveWorkbookStatus,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
+    WordWriteOp,
 )
 from workbench_server.models.office_host import (
     HOSTABLE_KINDS,
@@ -934,7 +936,10 @@ class OfficeHostService:
         path: str,
         *,
         content: str,
+        op: WordWriteOp = "replace",
         paragraph: int | None = None,
+        after_paragraph: int | None = None,
+        style: WordParagraphStyle | None = None,
         sheet: str | None = None,
         cell: str | None = None,
     ) -> WordEdit | CellEdit:
@@ -949,6 +954,13 @@ class OfficeHostService:
         guessed. Raises the same
         :class:`~...document_bridge.DocumentBridgeError` refusals the read seam
         reports (not docked, still opening, foreign window, gone, unavailable).
+
+        ``op="insert"`` is the Word-only second shape: ``content`` becomes a
+        **new** paragraph after ``after_paragraph`` (omitted = the end of the
+        document, ``-1`` = before the first paragraph), carrying ``style`` as its
+        intent. It is the one write that moves the addresses of the paragraphs
+        below it, which is why the :class:`~....models.office_bridge.WordEdit` it
+        returns names both the new index and the new total.
         """
         host, bridge, handle = self._live_document(path, "writing")
         if host.lifecycle.kind == "powerpoint":
@@ -962,9 +974,22 @@ class OfficeHostService:
                 "target to address. Read it with office_read, and edit it in the panel."
             )
         if host.lifecycle.kind == "word":
+            if op == "insert":
+                return await self._guarded_op(
+                    bridge.insert_word(handle, after_paragraph, content, style)
+                )
             if paragraph is None:
                 raise RangeInvalidError("name a paragraph to write in a Word document")
             return await self._guarded_op(bridge.write_word(handle, paragraph, content))
+        if op == "insert":
+            # Named rather than silently treated as a set: inserting a *row* is a
+            # different operation with different hazards (formulas and named
+            # ranges that reference what moved), and quietly writing a cell
+            # instead would be an edit the agent did not ask for.
+            raise RangeInvalidError(
+                "insert is Word-only: an Excel write sets one addressed cell. "
+                "Pass sheet and cell to set a value."
+            )
         if sheet is None or cell is None:
             raise RangeInvalidError("name a sheet and a cell to write in an Excel document")
         return await self._guarded_op(bridge.write_excel(handle, sheet, cell, content))

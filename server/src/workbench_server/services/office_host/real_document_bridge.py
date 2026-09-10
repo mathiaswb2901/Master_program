@@ -22,10 +22,12 @@ the fake and the service already raise, never a hang and never an unhandled COM
 exception out of the tool.
 
 **Fidelity.** A Word paragraph write replaces only that paragraph's range and
-keeps its paragraph mark; an Excel cell write sets only that cell. Neither
-rewrites the file — the live instance changes and the user can undo it (the
-CLAUDE.md rule). The windowing that shapes a read is the *same* code the fake
-runs (``document_window.py``), so the two produce the identical shape.
+keeps its paragraph mark; a Word insert adds exactly one paragraph and refuses an
+anchor whose mark is a table cell's structure; an Excel cell write sets only that
+cell. None rewrites the file — the live instance changes and the user can undo it
+(the CLAUDE.md rule). The windowing that shapes a read, the addressing that
+resolves an insert and the refusals both raise are the *same* code the fake runs
+(``document_window.py``), so the two produce the identical shape.
 """
 
 from collections.abc import Callable, Sequence
@@ -41,6 +43,7 @@ from workbench_server.models.office_bridge import (
     SheetDim,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
 )
 from workbench_server.models.office_host import HostAppKind
@@ -53,9 +56,11 @@ from workbench_server.services.office_host.document_bridge import (
     DocumentBridgeError,
 )
 from workbench_server.services.office_host.document_window import (
+    check_insert_text,
     check_paragraph,
     no_sheet_error,
     parse_write_cell,
+    resolve_insert_index,
     slide_dims,
     used_dims,
     window_cells,
@@ -140,6 +145,32 @@ class ShellDocumentBridge:
             # Scoped to the one paragraph; a replace never changes the count.
             office_com.set_word_paragraph_text(instance, paragraph, text)
             return WordEdit(paragraph=paragraph, written_chars=len(text), total_paragraphs=total)
+
+        return await self._com(handle, work)
+
+    async def insert_word(
+        self,
+        handle: HostHandle,
+        after_paragraph: int | None,
+        text: str,
+        style: WordParagraphStyle | None,
+    ) -> WordEdit:
+        def work(instance: OfficeInstance) -> WordEdit:
+            total = office_com.word_paragraph_count(instance)
+            index = resolve_insert_index(after_paragraph, total)
+            check_insert_text(text)
+            applied = office_com.insert_word_paragraph(instance, index, text, style)
+            # The count is *re-read*, never computed as ``total + 1``. Word is the
+            # authority on what the document now contains, and a number this seam
+            # invented is exactly the kind that stays plausible while being wrong
+            # — which the caller would then address from.
+            return WordEdit(
+                paragraph=index,
+                written_chars=len(text),
+                total_paragraphs=office_com.word_paragraph_count(instance),
+                op="insert",
+                style=applied,
+            )
 
         return await self._com(handle, work)
 

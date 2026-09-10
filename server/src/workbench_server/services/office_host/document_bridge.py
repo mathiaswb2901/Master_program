@@ -10,13 +10,20 @@ implementation that reaches into the same Word/Excel instance
 ``shell_backend.py`` launched, off the single COM apartment thread that backend
 already owns.
 
-**The read half (PR 1) came before the write half (PR 2).** The two writes below
-— :meth:`DocumentBridge.write_word` and :meth:`DocumentBridge.write_excel` — are
-the mirror of the reads: each is a *targeted* edit of one addressed paragraph or
-one cell that leaves the rest of the document untouched, applied to the live
-in-memory instance (the user can undo it) rather than rewriting the file. They
-are still bounded by the seam the same way — inventing anything the native side
-cannot satisfy is the mistake ``backend.py`` exists to prevent.
+**The read half (PR 1) came before the write half (PR 2).** The writes below —
+:meth:`DocumentBridge.write_word`, :meth:`DocumentBridge.insert_word` and
+:meth:`DocumentBridge.write_excel` — are the mirror of the reads: each is a
+*targeted* edit of one addressed paragraph or one cell that leaves the rest of
+the document untouched, applied to the live in-memory instance (the user can undo
+it) rather than rewriting the file. They are still bounded by the seam the same
+way — inventing anything the native side cannot satisfy is the mistake
+``backend.py`` exists to prevent.
+
+:meth:`DocumentBridge.insert_word` (PR 3) is the only one that changes the
+document's *shape*, and it is a separate method for exactly that reason: the two
+above promise the caller's addresses still mean what they meant, and this one
+promises the opposite. Excel has no sibling — inserting a row is a different
+problem, not a missing symmetry.
 
 **Every method is bounded by the caller above it.** Like a
 :class:`~workbench_server.services.office_host.backend.HostBackend`, an
@@ -40,6 +47,7 @@ from workbench_server.models.office_bridge import (
     LiveWorkbookStatus,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
 )
 from workbench_server.models.office_host import HostAppKind
@@ -164,6 +172,34 @@ class DocumentBridge(Protocol):
         :class:`RangeInvalidError` when ``paragraph`` is out of range (including
         an empty document, which has no paragraph to replace), and
         :class:`DocGoneError` if the instance has closed.
+        """
+        ...
+
+    async def insert_word(
+        self,
+        handle: HostHandle,
+        after_paragraph: int | None,
+        text: str,
+        style: WordParagraphStyle | None,
+    ) -> WordEdit:
+        """Insert **one** new paragraph into the live Word document.
+
+        ``after_paragraph`` is the zero-based paragraph to insert after; ``None``
+        appends at the end of the document and ``-1`` inserts before the first
+        paragraph (``document_window.resolve_insert_index`` is the one place that
+        rule lives). ``style`` is the *intent* — body or a heading level — with
+        ``None`` meaning "whatever Word's own Enter key would give you there".
+
+        This is the write that changes the document's **shape**, which is the
+        whole reason it is a separate method rather than a flag on
+        :meth:`write_word`: every paragraph from the new one down shifts by one,
+        so the returned :class:`WordEdit` carries the new index *and* the new
+        total and the caller re-addresses from those.
+
+        Raises :class:`RangeInvalidError` when the anchor is past the end, or is
+        the last paragraph of a table cell — inserting across an end-of-cell
+        marker would rewrite the table's structure, so it is refused rather than
+        attempted — and :class:`DocGoneError` if the instance has closed.
         """
         ...
 

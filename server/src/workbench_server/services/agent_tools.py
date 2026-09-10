@@ -33,7 +33,7 @@ before a design one.
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast, get_args
 
 from pydantic import BaseModel, ValidationError
 
@@ -52,7 +52,9 @@ from workbench_server.models.office_bridge import (
     DocStructure,
     SlideText,
     WordEdit,
+    WordParagraphStyle,
     WordText,
+    WordWriteOp,
 )
 from workbench_server.models.orchestrator import (
     MAX_TASK_CHARS,
@@ -479,7 +481,10 @@ class OfficeDocumentWriter(Protocol):
         path: str,
         *,
         content: str,
+        op: WordWriteOp = "replace",
         paragraph: int | None = None,
+        after_paragraph: int | None = None,
+        style: WordParagraphStyle | None = None,
         sheet: str | None = None,
         cell: str | None = None,
     ) -> WordEdit | CellEdit: ...
@@ -491,31 +496,46 @@ class OfficeDocumentAccess(OfficeDocumentReader, OfficeDocumentWriter, Protocol)
     ``office_write`` share the service without this module importing it."""
 
 
+#: The style intents an insert may ask for, taken straight from the model's own
+#: Literal so the schema the agent reads, the validation this module does and the
+#: type the bridge applies cannot drift into three different lists.
+WORD_STYLE_INTENTS: tuple[str, ...] = get_args(WordParagraphStyle)
+
+
 OFFICE_WRITE = AgentToolSpec(
     name="office_write",
     description=(
         "Edit the LIVE Office document Workbench has docked in a panel — one "
-        "targeted, undoable edit that leaves the rest of the document untouched, "
-        "only in documents Workbench opened, named by workspace-relative path. "
-        "Word: pass paragraph (zero-based) and content to replace that "
-        "paragraph's whole text. Excel: pass sheet, cell (e.g. B2) and content to "
-        "set one cell; empty content clears it. PowerPoint decks are read-only. "
-        "The edit applies to what is on "
-        "screen, including unsaved changes, so the user can undo it. Returns the "
-        "address written and the character count; an empty or out-of-range target "
-        "says so, and if the document is not docked it says so and how to open it. "
-        "Read the target back with office_read to confirm."
+        "targeted, undoable edit, only in documents Workbench opened, named by "
+        "workspace-relative path. Word: paragraph (zero-based) and content "
+        "replace that paragraph whole; op=insert adds a NEW paragraph after "
+        "after_paragraph (omit = end, -1 = top), one per call, optional "
+        "style=body|heading1|heading2|heading3. An insert shifts every later "
+        "paragraph by one — re-address from the index and total it returns. "
+        "Excel: sheet, cell (e.g. B2) and content set one cell; empty content "
+        "clears it. PowerPoint is read-only. Edits apply to what is on screen, "
+        "including unsaved changes, so the user can undo them. A bad target, an "
+        "undocked document or a table-cell anchor is refused with the reason. "
+        "Read it back with office_read."
     ),
     output_format="text",
     # The result is one confirmation sentence: an address, a char count, a short
     # echo of what was written and the read-back hint. 512 covers a long path and
     # an 80-char echo with margin; the content the model *sent* is its own cost,
     # never echoed in full here — which is why this is nowhere near office_read's.
+    # An insert's confirmation is the longest (it also names the new total, the
+    # shift and the anchor for the next one) and measured 232 bytes on a short
+    # path, so the ceiling is unchanged.
     max_result_bytes=512,
-    # Five small properties, two required. Measured 490 bytes; 800 leaves room
-    # to reword a description-in-schema without letting a sixth argument in
-    # unmeasured — the schema is paid on every request whether the tool runs.
-    max_schema_bytes=800,
+    # Eight small properties, two required. Measured 490 bytes at five (the
+    # replace/set surface); the three the insert adds — op, after_paragraph,
+    # style — measure 902 in total. 1100 leaves the same kind of headroom the
+    # 800 did: room to reword a description-in-schema, not room for a ninth
+    # argument to arrive unmeasured. The schema is paid on every request whether
+    # the tool runs, so this is the number that had to be justified rather than
+    # raised quietly: the enum on `style` is the price of an agent that can say
+    # "heading" without knowing the document's locale.
+    max_schema_bytes=1_100,
     input_schema={
         "type": "object",
         "properties": {
@@ -527,10 +547,25 @@ OFFICE_WRITE = AgentToolSpec(
                 "type": "string",
                 "description": "The new text for the target paragraph or cell.",
             },
+            "op": {
+                "type": "string",
+                "enum": ["replace", "insert"],
+                "description": "Word: replace the target (default) or insert a new paragraph.",
+            },
             "paragraph": {
                 "type": "integer",
                 "minimum": 0,
                 "description": "Word only: zero-based paragraph to replace.",
+            },
+            "after_paragraph": {
+                "type": "integer",
+                "minimum": -1,
+                "description": "Word insert: insert after this paragraph; omit for the end.",
+            },
+            "style": {
+                "type": "string",
+                "enum": list(WORD_STYLE_INTENTS),
+                "description": "Word insert: the new paragraph's style. Omit to follow the anchor.",
             },
             "sheet": {
                 "type": "string",
@@ -818,6 +853,8 @@ def _echo(content: str) -> str:
 
 def _format_word_edit(edit: WordEdit, path: str, content: str) -> str:
     """Confirm a Word paragraph write and name the read-back (AXI shapes 2 & 3)."""
+    if edit.op == "insert":
+        return _format_word_insert(edit, path, content)
     where = f"paragraph {edit.paragraph + 1} of {path}"
     confirm = (
         f"emptied {where}"
@@ -827,6 +864,40 @@ def _format_word_edit(edit: WordEdit, path: str, content: str) -> str:
     return (
         f"{confirm}. The document still has {edit.total_paragraphs} paragraphs; "
         f"read it back with office_read (start_paragraph={edit.paragraph}) to confirm."
+    )
+
+
+def _format_word_insert(edit: WordEdit, path: str, content: str) -> str:
+    """Confirm an inserted paragraph — and say what it did to every address after it.
+
+    The addressing clause is the point (AXI shape 3, and the reason ``op`` exists
+    on :class:`WordEdit`). An insert invalidates the paragraph numbers the model
+    is holding from its last read, so the confirmation states the new index, the
+    new total, the shift, and the exact argument for the *next* paragraph of the
+    same section — the alternative is a re-read before every second sentence.
+    Indices here are zero-based throughout, matching the arguments they are
+    handed straight back to.
+    """
+    styled = f" ({edit.style})" if edit.style else ""
+    what = (
+        "inserted an empty paragraph"
+        if edit.written_chars == 0
+        else f"inserted {edit.written_chars} chars as a new paragraph"
+    )
+    echo = "" if edit.written_chars == 0 else f": {_echo(content)}"
+    # An append has nothing below it, so saying "everything after has shifted"
+    # would be a claim about paragraphs that do not exist — true but useless, and
+    # the kind of boilerplate a model learns to stop reading.
+    shift = (
+        "nothing else moved"
+        if edit.paragraph >= edit.total_paragraphs - 1
+        else f"every index from {edit.paragraph} on has shifted by 1"
+    )
+    return (
+        f"{what} at index {edit.paragraph}{styled} of {path}{echo}. The document now has "
+        f"{edit.total_paragraphs} paragraphs and {shift}; office_read "
+        f"(start_paragraph={edit.paragraph}) confirms it, and after_paragraph={edit.paragraph} "
+        f"continues the section."
     )
 
 
@@ -844,6 +915,29 @@ def _format_cell_edit(edit: CellEdit, path: str, content: str) -> str:
     )
 
 
+def _write_op(args: dict[str, Any]) -> WordWriteOp | str:
+    """The requested operation, or the raw value when it is not one we have.
+
+    An unrecognised ``op`` is **never** quietly treated as the default: the
+    default rewrites an existing paragraph, so a model that meant "add" and
+    mistyped it would destroy the user's text and be told it succeeded.
+    """
+    raw = args.get("op", "replace")
+    return "insert" if raw == "insert" else ("replace" if raw == "replace" else str(raw))
+
+
+def _anchor(args: dict[str, Any]) -> int | str | None:
+    """The insert anchor: an int, ``None`` for "append at the end", or the raw
+    value when it is neither — refused above rather than rounded into a position
+    the caller did not ask for."""
+    raw = args.get("after_paragraph")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < -1:
+        return str(raw)
+    return raw
+
+
 async def handle_office_write(writer: OfficeDocumentWriter, args: dict[str, Any]) -> dict[str, Any]:
     """The office_write tool body, free of SDK imports so it is directly testable.
 
@@ -852,6 +946,11 @@ async def handle_office_write(writer: OfficeDocumentWriter, args: dict[str, Any]
     guessing — the tool only marshals the arguments and renders the confirmation.
     A refusal comes back as a tool error the agent reads and fixes, never an
     exception, and it names the empty/invalid target or how to dock the document.
+
+    The insert arguments are validated *here*, before the service sees them, for
+    one reason: every one of them names a position in the user's document, and
+    the failure mode of a lenient parse is not an error message — it is text
+    landing somewhere nobody asked for.
     """
     path = args.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -859,6 +958,9 @@ async def handle_office_write(writer: OfficeDocumentWriter, args: dict[str, Any]
     content = args.get("content")
     if not isinstance(content, str):
         return error_result("office_write needs 'content' — the new text for the target.")
+    op = _write_op(args)
+    if op not in ("replace", "insert"):
+        return error_result(f"office_write op must be 'replace' or 'insert', not {op!r}.")
     raw_paragraph = args.get("paragraph")
     paragraph = (
         raw_paragraph
@@ -867,11 +969,51 @@ async def handle_office_write(writer: OfficeDocumentWriter, args: dict[str, Any]
         and raw_paragraph >= 0
         else None
     )
+    after_paragraph = _anchor(args)
+    style = args.get("style")
+    if op == "insert":
+        if paragraph is not None:
+            return error_result(
+                "office_write insert addresses with 'after_paragraph', not 'paragraph' "
+                f"(you passed paragraph={paragraph}). Omit after_paragraph to append at the end."
+            )
+        if isinstance(after_paragraph, str):
+            return error_result(
+                f"office_write after_paragraph must be a paragraph index or -1, not "
+                f"{after_paragraph!r}. Omit it to append at the end of the document."
+            )
+        if style is not None and style not in WORD_STYLE_INTENTS:
+            return error_result(
+                f"office_write style must be one of {', '.join(WORD_STYLE_INTENTS)}, "
+                f"not {style!r}. Omit it to follow the paragraph you are inserting after."
+            )
+    elif style is not None:
+        # A replace changes text, never formatting. Saying so beats letting the
+        # model believe it restyled a paragraph it did not.
+        return error_result(
+            "office_write style applies to op=insert only; a replace changes the "
+            "paragraph's text and leaves its style alone."
+        )
+    elif after_paragraph is not None and paragraph is None:
+        # It named a position and forgot the op. Answering "name a paragraph"
+        # here — which is what the service would say — reads as a contradiction
+        # to a model that just named one.
+        return error_result(
+            "office_write got after_paragraph without op='insert'. Pass op='insert' to add a "
+            "new paragraph there, or paragraph=<index> to replace an existing one."
+        )
     sheet = args.get("sheet") if isinstance(args.get("sheet"), str) else None
     cell = args.get("cell") if isinstance(args.get("cell"), str) else None
     try:
         edit = await writer.write_document(
-            path, content=content, paragraph=paragraph, sheet=sheet, cell=cell
+            path,
+            content=content,
+            op=cast(WordWriteOp, op),
+            paragraph=paragraph,
+            after_paragraph=after_paragraph if isinstance(after_paragraph, int) else None,
+            style=cast(WordParagraphStyle, style) if isinstance(style, str) else None,
+            sheet=sheet,
+            cell=cell,
         )
     except DocumentBridgeError as error:
         return error_result(_office_write_refusal(error, path))

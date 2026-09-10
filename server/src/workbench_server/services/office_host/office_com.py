@@ -119,9 +119,13 @@ from typing import Any
 
 import structlog
 
-from workbench_server.models.office_bridge import CalculationState
+from workbench_server.models.office_bridge import CalculationState, WordParagraphStyle
 from workbench_server.models.office_host import SINGLE_INSTANCE_KINDS, HostAppKind
-from workbench_server.services.office_host.document_window import SlideContent
+from workbench_server.services.office_host.document_window import (
+    PARAGRAPH_MARK,
+    SlideContent,
+    cell_anchor_error,
+)
 
 log = structlog.get_logger()
 
@@ -1104,6 +1108,32 @@ def word_paragraph_texts(instance: OfficeInstance) -> list[str]:
     return texts
 
 
+#: ``WdBuiltinStyle`` ids for the styles an insert can ask for. **Ids, never
+#: names**: ``Range.Style = "Heading 1"`` raises on a Norwegian Word, where the
+#: same style is "Overskrift 1" — and this machine's Office is exactly that case.
+#: The enum is locale-free and is what the built-in style *is*.
+WORD_BUILTIN_STYLES: dict[WordParagraphStyle, int] = {
+    "body": -1,  # wdStyleNormal
+    "heading1": -2,  # wdStyleHeading1
+    "heading2": -3,  # wdStyleHeading2
+    "heading3": -4,  # wdStyleHeading3
+}
+
+#: ``WdInformation.wdWithInTable`` — asked of a range, answers whether it sits
+#: inside a table. The guard on the one insert position that has no paragraph
+#: mark to inspect (the top of the document, which inserts *before* its anchor).
+_WD_WITH_IN_TABLE = 12
+
+
+def _terminal_mark(range_text: str) -> str:
+    """The trailing marker Word put on a paragraph's ``Range.Text``, or ``""``.
+
+    ``\\r`` for an ordinary paragraph; ``\\x07`` for the last paragraph in a table
+    cell, which is a structural marker and not a paragraph mark at all.
+    """
+    return range_text[-1] if range_text and range_text[-1] in _PARAGRAPH_MARKS else ""
+
+
 def set_word_paragraph_text(instance: OfficeInstance, paragraph: int, text: str) -> None:
     """Replace the text of one paragraph (zero-based), and nothing else.
 
@@ -1124,8 +1154,128 @@ def set_word_paragraph_text(instance: OfficeInstance, paragraph: int, text: str)
     document = instance.document
     target = _com_call(document.Paragraphs.Item, paragraph + 1)
     current = str(_com_call(getattr, target.Range, "Text"))
-    mark = current[-1] if current and current[-1] in _PARAGRAPH_MARKS else "\r"
+    mark = _terminal_mark(current) or PARAGRAPH_MARK
     _com_call(setattr, target.Range, "Text", text + mark)
+
+
+def word_paragraph_style(instance: OfficeInstance, paragraph: int) -> str | None:
+    """One paragraph's style as the document names it (``Style.NameLocal``).
+
+    ``None`` when the style cannot be read — a document protected in a way that
+    refuses the property, or an Office that answers something unexpected. A
+    write's confirmation is worth less without it, but never worth failing over:
+    the paragraph was still written.
+    """
+    try:
+        target = _com_call(instance.document.Paragraphs.Item, paragraph + 1)
+        style = _com_call(getattr, target.Range, "Style")
+        return str(_com_call(getattr, style, "NameLocal"))
+    except Exception as error:  # pragma: no cover - needs a real Word to reach
+        log.debug("office_host.style_unreadable", paragraph=paragraph, detail=str(error))
+        return None
+
+
+def insert_word_paragraph(
+    instance: OfficeInstance,
+    index: int,
+    text: str,
+    style: WordParagraphStyle | None,
+) -> str | None:
+    """Insert **one** new paragraph at zero-based ``index``, and nothing else.
+
+    The mirror of :func:`set_word_paragraph_text` for the write that *adds*
+    rather than rewrites. ``index`` is the position the new paragraph will
+    occupy — ``0`` puts it before the first paragraph, ``Paragraphs.Count``
+    appends at the end — and it is resolved above by
+    ``document_window.resolve_insert_index``, so this function is handed a
+    destination rather than an addressing scheme. Returns the style the new
+    paragraph ended up with, as the document names it.
+
+    **The table boundary, which is where this write can do real damage.** #92
+    found it in the replace path: ``Document.Paragraphs`` includes the paragraphs
+    inside table cells, and the last paragraph of a cell ends not with ``\\r`` but
+    with the end-of-cell marker ``\\x07``. That marker is the cell, not a
+    paragraph mark — inserting a paragraph across it moves the boundary, which
+    merges cells or strands a row, and a table corrupted that way is not
+    something the user recovers from by reading a cheerful confirmation. So the
+    anchor's own terminal mark is *read back and checked*: an insert that would
+    land on a structural marker is refused by name
+    (``document_window.cell_anchor_error``) rather than attempted. The one
+    position with no mark to inspect — the top of the document, which inserts
+    *before* its anchor — is guarded by asking Word directly whether that
+    paragraph is inside a table.
+
+    **Style is applied, never inherited by accident.** ``Range.InsertParagraph*``
+    copies the anchor's formatting, so a paragraph inserted after a *Heading 1*
+    is itself a Heading 1 — which is not what pressing Enter there would give
+    you, and not what an agent drafting a body paragraph after a heading meant.
+    A named ``style`` is applied by built-in id; with none named, the style is
+    the anchor's ``NextParagraphStyle`` (Word's own answer to "what does Enter
+    give me here"), and only if *that* cannot be read is the inherited formatting
+    left alone. The top-of-document insert is the exception and keeps what it
+    inherited: it splits the first paragraph rather than following one.
+
+    Raises :class:`~...document_bridge.RangeInvalidError` (through
+    ``document_window``) for a table-cell anchor.
+    """
+    document = instance.document
+    count = int(_com_call(getattr, document.Paragraphs, "Count"))
+    anchor_style: Any = None
+    if count == 0:
+        # No paragraph to anchor to at all. A real Word does not produce this
+        # (even a blank document has one empty paragraph), but the seam allows it
+        # and a silent IndexError would be the worst possible answer.
+        _com_call(document.Content.InsertAfter, text)
+    elif index == 0:
+        first = _com_call(document.Paragraphs.Item, 1)
+        if bool(_com_call(first.Range.Information, _WD_WITH_IN_TABLE)):
+            raise cell_anchor_error(0)
+        # No ``anchor_style``, deliberately: ``InsertParagraphBefore`` splits the
+        # first paragraph, so the new one already carries that paragraph's style
+        # — which is what typing at the very start of a document and pressing
+        # Enter gives you. ``NextParagraphStyle`` is the answer for the paragraph
+        # *after* one, and would be wrong here.
+        _com_call(first.Range.InsertParagraphBefore)
+        set_word_paragraph_text(instance, 0, text)
+    else:
+        anchor = _com_call(document.Paragraphs.Item, index)  # 1-based: the one above
+        if _terminal_mark(str(_com_call(getattr, anchor.Range, "Text"))) != PARAGRAPH_MARK:
+            raise cell_anchor_error(index - 1)
+        anchor_style = _com_call(getattr, anchor.Range, "Style")
+        _com_call(anchor.Range.InsertParagraphAfter)
+        set_word_paragraph_text(instance, index, text)
+    _style_paragraph(instance, index, style, anchor_style)
+    return word_paragraph_style(instance, index)
+
+
+def _style_paragraph(
+    instance: OfficeInstance,
+    index: int,
+    style: WordParagraphStyle | None,
+    anchor_style: Any,
+) -> None:
+    """Give the freshly inserted paragraph the style it was asked for.
+
+    A failure here is logged, never raised: the paragraph is in the document and
+    reporting the style it actually has (which :func:`word_paragraph_style` reads
+    back) is more honest than failing a write that already landed.
+    """
+    target = _com_call(instance.document.Paragraphs.Item, index + 1)
+    if style is not None:
+        try:
+            _com_call(setattr, target.Range, "Style", WORD_BUILTIN_STYLES[style])
+        except Exception as error:  # pragma: no cover - needs a real Word to reach
+            log.warning("office_host.style_not_applied", style=style, detail=str(error))
+        return
+    if anchor_style is None:
+        return
+    try:
+        following = _com_call(getattr, anchor_style, "NextParagraphStyle")
+        _com_call(setattr, target.Range, "Style", following)
+    except Exception as error:  # pragma: no cover - needs a real Word to reach
+        # The inherited formatting stays. That is Word's own copy of the anchor,
+        # so it is a defensible answer — just not the one Enter would have given.
+        log.debug("office_host.next_style_unreadable", detail=str(error))
 
 
 def excel_sheet_names(instance: OfficeInstance) -> list[str]:
