@@ -21,6 +21,7 @@ import pytest
 
 from workbench_server.models.office_bridge import CellEdit, CellWindow, DocStructure, WordEdit
 from workbench_server.services.office_host import office_com
+from workbench_server.services.office_host.a1 import column_letter, parse_range
 from workbench_server.services.office_host.backend import HostHandle
 from workbench_server.services.office_host.document_bridge import (
     DocGoneError,
@@ -104,22 +105,68 @@ class FakeCells:
         return FakeCell(self._sheet, row, col)
 
 
-class FakeUsedRange:
-    def __init__(self, row: int, col: int, value: Any) -> None:
-        self.Row = row
-        self.Column = col
-        self.Value = value
+class FakeCellRange:
+    """A COM ``Range`` reduced to the one member a read touches: ``Value``.
+
+    Lazy on purpose — the sheet is only asked for the rectangle when the value is
+    actually pulled, which is what makes ``cells_marshalled`` a count of the work
+    a read really did rather than of the objects it made.
+    """
+
+    def __init__(self, sheet: "FakeWorksheet", box: tuple[int, int, int, int]) -> None:
+        self._sheet = sheet
+        self._box = box
+
+    @property
+    def Value(self) -> Any:
+        return self._sheet.rectangle(*self._box)
+
+
+class FakeUsedRange(FakeCellRange):
+    """``UsedRange``: a rectangle that also knows where it starts.
+
+    ``Address`` is spelled the way Excel spells it — ``$A$1:$C$3``, absolute and
+    collapsed to a single cell when it is one — because that string is what the
+    dimension read parses instead of paying six round trips for the corners.
+    """
+
+    def __init__(self, sheet: "FakeWorksheet", box: tuple[int, int, int, int]) -> None:
+        super().__init__(sheet, box)
+        row1, col1, row2, col2 = box
+        self.Row = row1 + 1
+        self.Column = col1 + 1
+        start = f"${column_letter(col1)}${row1 + 1}"
+        end = f"${column_letter(col2)}${row2 + 1}"
+        self.Address = start if start == end else f"{start}:{end}"
 
 
 class FakeWorksheet:
     """A worksheet backed by a zero-based ``(row, col) -> value`` map, with a
     ``UsedRange`` anchored at the first used cell — so the bridge's A1-offset
-    arithmetic is exercised, not bypassed."""
+    arithmetic is exercised, not bypassed.
 
-    def __init__(self, name: str, grid: dict[tuple[int, int], Any]) -> None:
+    ``claims`` is Excel's least convenient habit, made reproducible: a real
+    ``UsedRange`` extends to any cell that was ever *formatted* or written and
+    cleared, so it routinely reports rows and columns that hold nothing. It is
+    the reason the dimension read cannot simply trust the used range's corners.
+
+    ``cells_marshalled`` counts every cell handed across the boundary. It is the
+    budget the perf test asserts, and it cannot flake: a whole-sheet read is
+    rows x cols on any machine, and two edge strips are rows + cols on any
+    machine.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        grid: dict[tuple[int, int], Any],
+        claims: tuple[int, int] | None = None,
+    ) -> None:
         self.Name = name
         self._grid = dict(grid)
+        self._claims = claims
         self.Cells = FakeCells(self)
+        self.cells_marshalled = 0
 
     def raw(self, row1: int, col1: int) -> Any:
         return self._grid.get((row1 - 1, col1 - 1))
@@ -134,19 +181,30 @@ class FakeWorksheet:
     def cell(self, row0: int, col0: int) -> Any:
         return self._grid.get((row0, col0))
 
+    def rectangle(self, row1: int, col1: int, row2: int, col2: int) -> Any:
+        self.cells_marshalled += (row2 - row1 + 1) * (col2 - col1 + 1)
+        if row1 == row2 and col1 == col2:
+            return self._grid.get((row1, col1))  # Excel hands back a scalar for one cell
+        return tuple(
+            tuple(self._grid.get((row, col)) for col in range(col1, col2 + 1))
+            for row in range(row1, row2 + 1)
+        )
+
+    def Range(self, a1: str) -> FakeCellRange:
+        row1, col1, row2, col2 = parse_range(a1)
+        return FakeCellRange(self, (row1, col1, row2 or row1, col2 or col1))
+
     @property
     def UsedRange(self) -> FakeUsedRange:
         if not self._grid:
-            return FakeUsedRange(1, 1, None)
-        min_row = min(row for row, _ in self._grid)
-        min_col = min(col for _, col in self._grid)
-        max_row = max(row for row, _ in self._grid)
-        max_col = max(col for _, col in self._grid)
-        value = tuple(
-            tuple(self._grid.get((row, col)) for col in range(min_col, max_col + 1))
-            for row in range(min_row, max_row + 1)
-        )
-        return FakeUsedRange(min_row + 1, min_col + 1, value)
+            box = (0, 0, 0, 0)  # a blank sheet's used range is A1, holding nothing
+        else:
+            rows = [row for row, _ in self._grid]
+            cols = [col for _, col in self._grid]
+            box = (min(rows), min(cols), max(rows), max(cols))
+        if self._claims is not None:
+            box = (box[0], box[1], max(box[2], self._claims[0]), max(box[3], self._claims[1]))
+        return FakeUsedRange(self, box)
 
 
 class FakeWorksheets:
@@ -331,6 +389,114 @@ class TestExcel:
         bridge = com("excel", FakeWorkbook([_budget()]))
         with pytest.raises(RangeInvalidError):
             await bridge.write_excel(HANDLE, "Budget", "not-a-cell", "x")
+
+
+# ---- asking for the shape must not pull the sheet ---------------------------
+#
+# `office_read` asks for the structure and *then* reads a sheet. The structure
+# used to be `used_dims(excel_grid(worksheet))` for every sheet in the book — a
+# whole-sheet pull over COM, and a text map built from all of it, to arrive at
+# two integers. So a sheet-scoped read pulled the sheet the caller wanted twice
+# and every other sheet once. Measured against a real Excel (Office 16.0, 3
+# sheets of 5,000x20): 0.497 s for the structure alone, 0.024 s per sheet after.
+#
+# The budget below is the *work* — cells handed across the boundary — because it
+# is the thing that cannot flake, and because it is the thing that was wrong.
+
+
+class TestSheetDimensions:
+    """`excel_used_dims` has to be exactly what the grid would have said.
+
+    Every case here is a sheet shape that breaks one of the cheap answers. They
+    were each checked against a real Excel as well (`ALL MATCH`, PR body); these
+    pin the same shapes where CI can run them.
+    """
+
+    async def test_a_used_range_that_over_reports_still_gives_the_tight_dims(
+        self, com: Any
+    ) -> None:
+        """Formatting a far cell extends Excel's used range but not the data.
+
+        This is why the corners of `UsedRange` cannot simply be believed: against
+        a real Excel, data in A1:B2 with a fill on J20 reports a used range of
+        20x10 and a grid of 2x2.
+        """
+        sheet = FakeWorksheet("Padded", {(0, 0): 1, (1, 1): 2}, claims=(19, 9))
+        bridge = com("excel", FakeWorkbook([sheet]))
+        structure = await bridge.structure(HANDLE, "excel")
+        assert structure.sheets is not None
+        assert (structure.sheets[0].rows, structure.sheets[0].cols) == (2, 2)
+
+    async def test_a_blank_sheet_is_none_not_one_by_one(self, com: Any) -> None:
+        """A blank sheet's used range is A1 — one cell, holding nothing. Reported
+        as ``0, 0``, which is what lets a reader say "none" instead of streaming
+        an empty cell."""
+        bridge = com("excel", FakeWorkbook([FakeWorksheet("Blank", {})]))
+        structure = await bridge.structure(HANDLE, "excel")
+        assert structure.sheets is not None
+        assert (structure.sheets[0].rows, structure.sheets[0].cols) == (0, 0)
+
+    async def test_a_last_row_of_zeroes_is_not_trimmed(self, com: Any) -> None:
+        """`0`, `0.0` and `False` are values, not blanks — a load profile ends in
+        a row of them, and a dimension read that treated falsy as empty would cut
+        the last hour off every one."""
+        grid = {(0, 0): 1.0, (0, 1): "x", (1, 0): 0.0, (1, 1): False}
+        bridge = com("excel", FakeWorkbook([FakeWorksheet("Zeroes", grid)]))
+        structure = await bridge.structure(HANDLE, "excel")
+        assert structure.sheets is not None
+        assert (structure.sheets[0].rows, structure.sheets[0].cols) == (2, 2)
+
+    async def test_a_formula_that_returns_empty_string_is_blank(self, com: Any) -> None:
+        """An `=IF(...,"","x")` whose result is `""` renders as an empty cell, so
+        it does not extend the dimensions — the grid drops it, and this must too.
+        (It is also the case that defeats `Range.Find`, which matches it.)"""
+        grid: dict[tuple[int, int], Any] = {(0, 0): 1, (4, 1): ""}
+        bridge = com("excel", FakeWorkbook([FakeWorksheet("EmptyStr", grid)]))
+        structure = await bridge.structure(HANDLE, "excel")
+        assert structure.sheets is not None
+        assert (structure.sheets[0].rows, structure.sheets[0].cols) == (1, 1)
+
+    async def test_the_shape_of_a_book_is_read_without_pulling_its_sheets(self, com: Any) -> None:
+        """The budget: asking for the structure costs the *edges* of each sheet,
+        not its contents.
+
+        Three 200x8 sheets are 4,800 cells. The old structure call marshalled
+        every one of them; the two edge strips of a sheet are 200 + 8, and the
+        fast path needs nothing else.
+        """
+        sheets = [
+            FakeWorksheet(
+                f"S{n}",
+                {(row, col): float(row + col) for row in range(200) for col in range(8)},
+            )
+            for n in range(3)
+        ]
+        bridge = com("excel", FakeWorkbook(sheets))
+        structure = await bridge.structure(HANDLE, "excel")
+        assert structure.sheets is not None
+        assert [(s.rows, s.cols) for s in structure.sheets] == [(200, 8)] * 3
+        marshalled = sum(sheet.cells_marshalled for sheet in sheets)
+        assert marshalled <= 3 * (200 + 8), (
+            f"the structure read pulled {marshalled} cells; the whole book is "
+            f"{3 * 200 * 8} and its edges are {3 * (200 + 8)}"
+        )
+
+    async def test_a_sheet_scoped_read_pulls_that_sheet_once(self, com: Any) -> None:
+        """The double read, from where `office_read` performs it: structure first
+        (so an Excel request with no sheet can answer with the sheet list), then
+        the sheet. Only the second of those may pull cells."""
+        target = FakeWorksheet(
+            "Prices", {(row, col): float(row) for row in range(200) for col in range(8)}
+        )
+        other = FakeWorksheet("Notes", {(0, 0): "hello"})
+        bridge = com("excel", FakeWorkbook([target, other]))
+        await bridge.structure(HANDLE, "excel")
+        await bridge.read_excel(HANDLE, "Prices", None, 600, 6_000)
+        # One whole-sheet pull for the window, plus the edge strips of both
+        # sheets for the structure — never two whole-sheet pulls.
+        whole = 200 * 8
+        assert target.cells_marshalled < 2 * whole
+        assert target.cells_marshalled <= whole + 200 + 8
 
 
 # ---- degrading honestly -----------------------------------------------------

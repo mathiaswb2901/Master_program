@@ -60,12 +60,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from typing import NamedTuple, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import openpyxl
 import structlog
+from openpyxl.utils import column_index_from_string
 from pydantic import ValidationError
 
 from workbench_server.models.office_bridge import LiveWorkbookStatus
@@ -110,12 +112,19 @@ MAX_DUPLICATE_LINES = 20
 #: cell content is the workbook's, so it is bounded before it reaches the evidence.
 _OFFSET_SAMPLE_CLIP = 40
 
-#: Hard ceiling on the rows one live column read pulls over COM. A year of
-#: quarter-hours is 35,040 rows, so this clears the realistic worst case with
+#: Hard ceiling on the rows **one column read pulls**, live or from disk. A year
+#: of quarter-hours is 35,040 rows, so this clears the realistic worst case with
 #: room; a taller column is cut there. Truncation can only ever *lose* a row,
 #: which surfaces as an unmatched expectation ("alignment gap") — it can never
 #: manufacture agreement, which is the property that makes the cap safe.
-MAX_LIVE_ROWS = 50_000
+#:
+#: It bounds *both* readers, and that is the point rather than tidiness. It was
+#: the live read's cap alone (``MAX_LIVE_ROWS``) while the disk read had none, so
+#: a 60,000-row column reconciled 50,000 rows docked and 60,000 undocked — the
+#: same defect :func:`column_data_rows` exists to prevent, one level up. A cap
+#: that bounds the *read* is also the only kind that helps: slicing the report
+#: afterwards costs the same read.
+MAX_COLUMN_ROWS = 50_000
 
 #: Least-to-most severe, for rolling per-cell outcomes up into one grouped
 #: verdict. ``blocked`` sorts above ``fail`` for the same reason the risk ramp
@@ -259,7 +268,7 @@ def column_data_rows(rows: Iterable[tuple[object, object]]) -> list[tuple[object
     The rule kept is the disk reader's, unchanged, and the choice is not
     arbitrary. Cutting at the gap can only ever *lose* rows, and a lost row
     surfaces as an unmatched expectation ("alignment gap") — the same property
-    that makes :data:`MAX_LIVE_ROWS` safe. It can never manufacture agreement,
+    that makes :data:`MAX_COLUMN_ROWS` safe. It can never manufacture agreement,
     which is the one thing a validation gate must not do.
     """
     out: list[tuple[object, object]] = []
@@ -311,7 +320,10 @@ class DiskWorkbookReader:
 
     ``data_only=True`` reads the values Excel last cached — the correct source for
     reconciling *numbers* rather than formula strings. ``read_only=True`` keeps a large
-    workbook cheap. A workbook that was never opened in Excel has no cached values; the
+    workbook cheap **as long as it is read the way a read-only sheet wants to be read**:
+    streamed, forwards, once (:meth:`column_pairs`). It has no random access, so the
+    convenient-looking ``ws["A7"]`` is the expensive call, not the cheap one.
+    A workbook that was never opened in Excel has no cached values; the
     check turns the resulting all-``None`` into a **fail that names the fix** rather
     than a silent green, and :attr:`ReadSource.cached_values` records it so the
     evidence can tell "a workbook of zeros" from "a workbook nobody has opened".
@@ -358,23 +370,50 @@ class DiskWorkbookReader:
     def column_pairs(
         self, sheet: str | None, ts_column: str, value_column: str, start_row: int
     ) -> list[tuple[object, object]]:
+        """The two columns from ``start_row`` down, in **one streamed forward pass**.
+
+        This is the only way to read a read-only worksheet that is not quadratic,
+        and the reason is worth writing down because the shape that replaced it
+        looks so innocent. ``ReadOnlyWorksheet`` has no random access: every
+        ``ws["A7"]`` re-opens the sheet's zip member and re-runs the SAX parse
+        **from row 1** to find that one cell. The previous loop asked for two
+        addresses per data row, so a column of N rows cost 2N parses of an
+        O(N)-row document — measured in this repo's venv at 500 rows 4.3 s,
+        1,000 rows 17.5 s, 2,000 rows 55.1 s, four-fold per doubling. An annual
+        hourly series is 8,760 rows (twenty-odd minutes) and a multi-year
+        quarter-hourly one is 35,040 (hours), inside a gate that is supposed to
+        run on save. It also made the class docstring's "``read_only=True`` keeps
+        a large workbook cheap" false. After: 0.15 s at 10,000 rows, 0.48 s at
+        35,040.
+
+        ``iter_rows`` is the documented streamed read: one SAX pass, rows handed
+        out in order, and — measured against a real ``.xlsx`` — missing rows are
+        padded with ``None`` cells, so a gap in the data still arrives as the
+        ``(None, None)`` that :func:`column_data_rows` stops on and a column that
+        starts below ``start_row`` still stops immediately. Same rows in, same
+        rows out; the pass is lazy, so a sheet whose data ends at row 40 is still
+        not scanned to row 1,048,576.
+
+        The band is ``min(ts, value)`` to ``max(ts, value)`` — two columns that
+        are far apart cost the columns between them per row, which is bounded and
+        linear, where a second pass would be another whole parse. The read is
+        bounded by :data:`MAX_COLUMN_ROWS`, the same ceiling the live reader gets,
+        and it bounds the *read* rather than the report.
+        """
         ws = self._sheet(sheet)
+        # A column letter that is not one (``"A1"``, ``""``) raises here, and
+        # `_compare_time_rows` turns that into a named fail per expectation. The
+        # address form it replaced silently read a *different* cell instead.
+        ts_index = column_index_from_string(ts_column)
+        value_index = column_index_from_string(value_column)
+        first, last = min(ts_index, value_index), max(ts_index, value_index)
 
         def rows() -> Iterator[tuple[object, object]]:
-            """Rows from ``start_row`` down, one at a time and for ever.
-
-            Lazy on purpose: :func:`column_data_rows` stops pulling at the first
-            blank row, so this reads exactly the cells the old inline loop read —
-            the shared rule costs nothing, and a sheet whose data ends at row 40
-            is still not scanned to row 1,048,576.
-            """
-            row = start_row
-            while True:
-                yield (
-                    ws[f"{ts_column}{row}"].value,  # type: ignore[index]
-                    ws[f"{value_column}{row}"].value,  # type: ignore[index]
-                )
-                row += 1
+            banded = ws.iter_rows(  # type: ignore[attr-defined]
+                min_row=start_row, min_col=first, max_col=last, values_only=True
+            )
+            for row in islice(banded, MAX_COLUMN_ROWS):
+                yield row[ts_index - first], row[value_index - first]
 
         pairs = column_data_rows(rows())
         if pairs:
@@ -477,7 +516,7 @@ class LiveComWorkbookReader:
                 ti.timestamp_column,
                 ti.value_column,
                 ti.start_row,
-                MAX_LIVE_ROWS,
+                MAX_COLUMN_ROWS,
             )
             # The bridge hands back the window it was asked for, verbatim; where
             # the *data* ends is this seam's decision and the disk reader's rule.
