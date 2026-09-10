@@ -720,6 +720,15 @@
   background: var(--text-disabled);
 }
 
+/* Settled, with this window never told which way — answered in another window,
+   or denied by the server's timeout. Drawn as the *absence* of a decision, the
+   same way the picker draws "on disk" (§6.12): a shape, not a sixth colour, so
+   nothing here claims an approval the agent may never have received. */
+.wb-perm-decision .wb-dot.is-elsewhere {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
 /* ---- Input row ------------------------------------------------------------ */
 
 .wb-chat-input {

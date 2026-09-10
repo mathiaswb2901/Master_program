@@ -26,6 +26,13 @@ vi.mock("./api", async () => {
   return { ...actual, approveValidation, getValidations, runValidation };
 });
 
+// `buildCards` below comes from `mission.ts`, which reaches the app store to
+// settle a prompt answered on the board — and the store reads `document` at
+// import, which the node suite has not got. Nothing here calls it.
+vi.mock("./store", () => ({
+  useStore: { getState: () => ({ settlePermission: () => undefined }) },
+}));
+
 import { ApiError } from "./api";
 import { buildCards } from "./mission";
 import type { RiskLevel, ValidationResult } from "./types";
