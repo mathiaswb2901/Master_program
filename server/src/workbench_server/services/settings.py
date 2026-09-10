@@ -12,7 +12,13 @@ the same reasons:
   Every failure resolves to "defaults, plus a sentence saying why".
 * **Atomic writes, retried past a transient Windows lock** (``tmp`` +
   ``os.replace``): a replace onto a path Defender or the indexer momentarily
-  holds open fails outright on Windows instead of waiting.
+  holds open fails outright on Windows instead of waiting. **Reads wait out the
+  same lock**, because the commonest thing holding the file open is this
+  service's own ``os.replace`` — two quick clicks in the panel.
+* **One read per answer.** :meth:`SettingsService.state` derives *both* views it
+  reports from a single :meth:`SettingsService.load`. Reading twice let a
+  concurrent PUT land in between and produce a state whose halves came from
+  different versions of the document.
 * **utf-8-sig on read**, so a file someone opened in Notepad still parses.
 
 **Where it lives, and where it deliberately does not.** App data, not the
@@ -127,16 +133,44 @@ class SettingsService:
 
     # ---- reading -----------------------------------------------------------
 
+    def _read(self) -> str | None:
+        """The document's text, or ``None`` when it is too big to be one.
+
+        Retries past a transient Windows lock, which is :meth:`_replace`'s wait
+        seen from the other side: a ``PermissionError`` here is almost always a
+        concurrent :meth:`save` mid-``os.replace``, and the file is readable
+        again microseconds later. Reporting *that* as "unreadable" would blank
+        every control in the panel and raise an alarming sentence about the
+        user's settings file, for the length of one atomic swap — which is
+        exactly what two quick clicks used to produce.
+
+        ``FileNotFoundError`` and a read that really failed are raised;
+        :meth:`load` turns them into "the defaults, because…".
+        """
+
+        def once() -> str | None:
+            if self._path.stat().st_size > MAX_FILE_BYTES:
+                return None
+            return self._path.read_text(encoding="utf-8-sig")
+
+        for attempt in range(REPLACE_ATTEMPTS - 1):
+            try:
+                return once()
+            except PermissionError:
+                log.debug("settings.read_retry", path=str(self._path), attempt=attempt + 1)
+                time.sleep(REPLACE_BACKOFF_S)
+        return once()
+
     def load(self) -> tuple[WorkbenchSettings, str | None]:
         """The stored choices, and the reason they are the defaults if they are."""
         try:
-            if self._path.stat().st_size > MAX_FILE_BYTES:
-                return self._defaults(f"larger than {MAX_FILE_BYTES // 1024} KB — ignored")
-            raw = self._path.read_text(encoding="utf-8-sig")
+            raw = self._read()
         except FileNotFoundError:
             return WorkbenchSettings(), None  # nothing chosen yet: the defaults
         except OSError as err:
             return self._defaults(f"unreadable: {err.strerror or err}")
+        if raw is None:
+            return self._defaults(f"larger than {MAX_FILE_BYTES // 1024} KB — ignored")
         try:
             parsed = json.loads(raw)
         except ValueError as err:
@@ -153,17 +187,35 @@ class SettingsService:
         """Just the choices; the reason is for the endpoint, not for callers."""
         return self.load()[0]
 
+    def _in_force(self, stored: WorkbenchSettings) -> WorkbenchSettings:
+        """``stored`` with whatever this process was configured with on top.
+
+        Split out from :meth:`effective` so a caller that has *already read* the
+        document can derive the second view without reading it again — see
+        :meth:`state`.
+        """
+        if self._config.office_native is None:
+            return stored
+        return stored.model_copy(update={"office_native": self._config.office_native})
+
     def effective(self) -> WorkbenchSettings:
         """What is in force: the stored choices, with process config on top."""
-        settings = self.stored()
-        if self._config.office_native is not None:
-            settings = settings.model_copy(update={"office_native": self._config.office_native})
-        return settings
+        return self._in_force(self.stored())
 
     def state(self) -> SettingsState:
-        """The whole picture the Settings panel renders."""
+        """The whole picture the Settings panel renders.
+
+        **One read of the file, and both views derived from it.** This used to
+        read ``settings.json`` twice — once here for ``stored``, and again
+        through ``effective()`` -> ``stored()`` -> ``load()`` — so a PUT landing
+        between the two produced a state whose halves came from different
+        versions of the document. The panel renders that as "the value is A, and
+        A is not what is in force", which is the sentence reserved for a real
+        override; nothing on the client can tell the two apart. `save` answers
+        with this method, so a PUT inherited the same shape.
+        """
         stored, problem = self.load()
-        effective = self.effective()
+        effective = self._in_force(stored)
         return SettingsState(
             stored=stored,
             effective=effective,
