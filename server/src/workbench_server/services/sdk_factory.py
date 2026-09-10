@@ -329,7 +329,10 @@ def build_agent_options(
     passed on its own instead, so bundled skills are simply *available* under
     the ``workbench:`` prefix; only the two named in ``_AUTO_ALLOWED_SKILLS``
     carry a narrow allow rule, and every other invocation still reaches the UI's
-    permission prompt like any other non-file tool.
+    permission prompt like any other non-file tool. An **unattended** kind gets
+    neither auto-allow: with no human to prompt, a silent auto-invoke would only
+    spend a turn on a skill it cannot use, so the allow is gated by
+    :func:`is_unattended` the same way the builtin auto-allows are.
     """
     from claude_agent_sdk import (
         ClaudeAgentOptions,
@@ -396,7 +399,15 @@ def build_agent_options(
             # is the direction this list had never gone before M6 PR 2: see
             # ``auto_allowed_for``.
             *auto_allowed_for(kind),
-            *(_AUTO_ALLOWED_SKILLS if plugins else []),
+            # Gated by ``kind`` for the same reason ``auto_allowed_for`` is: a
+            # whole-tool ``Skill(...)`` entry auto-approves *ahead of*
+            # ``can_use_tool`` exactly like a bare ``Write`` does, so an
+            # unattended reviewer left carrying these would silently auto-invoke
+            # ``workbench:remember`` (its trigger names the start of unfamiliar
+            # work — every fresh reviewer), burn a turn out of its cap, and then
+            # stall because Edit/Write are disallowed. M6 PR 2 tightened the
+            # three siblings above and below and missed this line.
+            *(_AUTO_ALLOWED_SKILLS if plugins and not is_unattended(kind) else []),
             *allowed_tool_names(kind),
         ],
         # The other half of the reviewer's isolation, and empty for every other

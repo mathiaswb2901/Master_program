@@ -28,6 +28,7 @@ from workbench_server.models.notebook import (
     NotebookDocument,
 )
 from workbench_server.services.notebook import (
+    MAX_OUTPUTS_PER_CELL,
     NotANotebookError,
     NotebookTooLargeError,
     NotebookUnreadableError,
@@ -445,6 +446,61 @@ class TestCaps:
         path.write_bytes(b"{" + b" " * MAX_NOTEBOOK_BYTES)
         with pytest.raises(NotebookTooLargeError):
             read_notebook(workspace, "huge.ipynb")
+
+
+class TestOutputCountCap:
+    """The cap on the *number* of outputs, not their size.
+
+    The per-output byte caps make each output small; nothing above bounds how
+    *many* a single cell may carry. A ``display()`` in a tight loop or a progress
+    bar that re-emits each step produces thousands of individually-tiny outputs —
+    every one under every byte cap — that balloon one cell's slice of the
+    response. This cap drops the overflow and states the drop, mirroring the cell
+    cap's shape rather than inventing a new one.
+    """
+
+    def test_a_cell_with_too_many_outputs_is_capped_and_says_how_many(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        extra = 37
+        many = [
+            {"output_type": "stream", "name": "stdout", "text": f"step {i}\n"}
+            for i in range(MAX_OUTPUTS_PER_CELL + extra)
+        ]
+        _write(tmp_path, "nb.ipynb", _notebook([_code("for i in range(9999): show(i)", 1, many)]))
+        cell = read_notebook(workspace, "nb.ipynb").cells[0]
+
+        # The first `MAX_OUTPUTS_PER_CELL` real outputs are kept, in order, plus
+        # exactly one trailing notice — so a reader still sees where the cell began.
+        assert len(cell.outputs) == MAX_OUTPUTS_PER_CELL + 1
+        kept = cell.outputs[:MAX_OUTPUTS_PER_CELL]
+        assert [o.text for o in kept] == [f"step {i}\n" for i in range(MAX_OUTPUTS_PER_CELL)]
+
+        # …and the last output is a stated-truncation notice: how many were
+        # dropped and the true total, so "the cell stopped producing output" and
+        # "the reader was not shown the rest" are never the same blank ending.
+        notice = cell.outputs[-1]
+        assert notice.truncated
+        assert notice.mime == ""
+        assert notice.text is not None
+        assert str(extra) in notice.text  # how many were dropped
+        assert str(MAX_OUTPUTS_PER_CELL + extra) in notice.text  # the true total
+
+    def test_a_cell_at_the_output_cap_keeps_them_all_with_no_notice(
+        self, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        # The boundary in the direction that matters: a cap that quietly ate the
+        # last *allowed* output, or bolted a notice onto a cell that never
+        # overflowed, would be indistinguishable from a bug.
+        many = [
+            {"output_type": "stream", "name": "stdout", "text": f"{i}\n"}
+            for i in range(MAX_OUTPUTS_PER_CELL)
+        ]
+        _write(tmp_path, "nb.ipynb", _notebook([_code("loud()", 1, many)]))
+        cell = read_notebook(workspace, "nb.ipynb").cells[0]
+        assert len(cell.outputs) == MAX_OUTPUTS_PER_CELL
+        assert all(o.output_type == "stream" for o in cell.outputs)
+        assert not any(o.mime == "" for o in cell.outputs)
 
 
 class TestImageCaps:
