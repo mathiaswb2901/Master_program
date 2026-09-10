@@ -16,6 +16,7 @@ import type { IDockviewPanelProps } from "dockview";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { Command } from "../commands";
 import type { CheckOutcome, EvidenceItem, RiskLevel, ValidationResult } from "../types";
 
 // `./Panes` pulls in dockview's runtime; `../dock` the whole registry. Neither
@@ -23,6 +24,11 @@ import type { CheckOutcome, EvidenceItem, RiskLevel, ValidationResult } from "..
 // the command's `run` is never fired here.
 vi.mock("./Panes", () => ({ revealPane: vi.fn() }));
 vi.mock("../dock", () => ({ openPanel: vi.fn() }));
+// The app store, for its one seam this module uses: the toast a command reports
+// through. Mocked rather than imported because `store.ts` reaches the editor and
+// the shell at import, neither of which exists in a node-only render.
+const toastMock = vi.fn();
+vi.mock("../store", () => ({ useStore: { getState: () => ({ pushToast: toastMock }) } }));
 
 // The store, mocked to read a mutable state object — the `AgentPanel.test.tsx`
 // pattern. This is what lets a *mounted* `ReviewPanel` resolve its pane id
@@ -36,10 +42,16 @@ let vstate: { results: Record<string, ValidationResult>; hydrated: boolean } = {
 };
 const approveMock = vi.fn();
 const initMock = vi.fn();
+const exportMock = vi.fn();
 
 vi.mock("../validation", async (importActual) => {
   const actual = await importActual<typeof import("../validation")>();
-  const snapshot = (): Record<string, unknown> => ({ ...vstate, approve: approveMock, init: initMock });
+  const snapshot = (): Record<string, unknown> => ({
+    ...vstate,
+    approve: approveMock,
+    init: initMock,
+    exportResult: exportMock,
+  });
   const useValidationStore = Object.assign((select: (s: Record<string, unknown>) => unknown) => select(snapshot()), {
     getState: snapshot,
     setState: (patch: Partial<typeof vstate>) => {
@@ -55,12 +67,23 @@ vi.mock("../validation", async (importActual) => {
   };
 });
 
+// The relay's executor, imported for the one thing only it can answer: what an
+// external caller is told about a command this module registers. `./api` and
+// `./ws` are stubbed so importing it opens no socket and touches no network —
+// `executeCommandById` takes its command list as an argument, so nothing else of
+// the relay's plumbing is reached.
+vi.mock("../api", () => ({ publishCommandManifest: vi.fn(), reportCommandResult: vi.fn() }));
+vi.mock("../ws", () => ({ ReconnectingSocket: class {} }));
+
 const { resetValidationStoreForTests, useValidationStore } = await import("../validation");
+const { executeCommandById } = await import("../commandRelay");
 
 const {
   ApprovalGate,
   EvidenceGallery,
   EvidencePayloadView,
+  ExportAction,
+  exportNewest,
   OutcomePill,
   ReviewPanel,
   ReviewView,
@@ -121,8 +144,10 @@ const view = (result: ValidationResult, stale: string | null = null): string =>
       note=""
       pending={false}
       stale={stale}
+      exportState={{ phase: "idle" }}
       onNote={noop}
       onApprove={noop}
+      onExport={noop}
     />,
   );
 
@@ -539,6 +564,130 @@ describe("a restored pane bound to an absent id", () => {
   });
 });
 
+describe("the export action", () => {
+  const noReport = { phase: "idle" } as const;
+
+  it("offers the action and shows nothing else until it has run", () => {
+    const markup = html(<ExportAction state={noReport} onExport={noop} />);
+    expect(markup).toContain("Export evidence…");
+    expect(markup).not.toContain("wb-review-export-path");
+  });
+
+  it("names the path it wrote and carries the report itself", () => {
+    const markup = html(
+      <ExportAction
+        state={{
+          phase: "written",
+          report: {
+            validation_id: "val_1",
+            path: ".workbench/validation/exports/val_1.md",
+            filename: "val_1.md",
+            markdown: "# Validation evidence — SE3\n\n**Approval** you",
+            bytes: 46,
+            generated_at: "2026-08-09T14:06:00Z",
+          },
+        }}
+        onExport={noop}
+      />,
+    );
+    // The *path*, because what this produces is a file in the user's own
+    // workspace — not a download the browser named somewhere they must go and
+    // find. The document rides along so reading it costs no second call.
+    expect(markup).toContain(".workbench/validation/exports/val_1.md");
+    expect(markup).toContain("Validation evidence");
+    expect(markup).toContain("**Approval** you");
+  });
+
+  it("says a failure out loud rather than looking like it wrote something", () => {
+    const markup = html(
+      <ExportAction state={{ phase: "error", detail: "Could not write the report." }} onExport={noop} />,
+    );
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Could not write the report.");
+    expect(markup).not.toContain("wb-review-export-path");
+  });
+});
+
+describe("the validation.export command", () => {
+  it("says so when there is nothing to export, rather than doing nothing", async () => {
+    useValidationStore.setState({ results: {}, hydrated: true });
+    await exportNewest();
+    expect(exportMock).not.toHaveBeenCalled();
+    expect(toastMock).toHaveBeenCalledWith("info", expect.stringContaining("Nothing to export"));
+  });
+
+  it("says a failed write out loud too, and reports it as a failure", async () => {
+    exportMock.mockRejectedValue(new Error("404"));
+    seed([result("v1")]);
+
+    const outcome = await exportNewest();
+
+    expect(outcome.ok).toBe(false);
+    expect(toastMock).toHaveBeenCalledWith("error", expect.stringContaining("Could not export"));
+  });
+
+  it("exports the newest result — the one you just ran", async () => {
+    exportMock.mockResolvedValue({
+      validation_id: "v2",
+      path: ".workbench/validation/exports/v2.md",
+      filename: "v2.md",
+      markdown: "#",
+      bytes: 1,
+      generated_at: "2026-08-09T14:06:00Z",
+    });
+    seed([
+      result("v1", { created_at: "2026-08-08T10:00:00Z" }),
+      result("v2", { created_at: "2026-08-08T12:00:00Z" }),
+    ]);
+
+    await exportNewest();
+
+    expect(exportMock).toHaveBeenCalledWith("v2");
+    expect(toastMock).toHaveBeenCalledWith("success", expect.stringContaining("v2.md"));
+  });
+});
+
+/**
+ * The seam an external caller actually gets: `POST /api/commands/invoke` answers
+ * `ok` = "whether that window then ran the command" (`models/commands.py`), and
+ * the window's verdict is whatever `executeCommandById` returns. Driven through
+ * the *real* relay function rather than a re-implementation of its rules —
+ * `run()` is fired here, so `./Panes`/`../dock` being stubbed is doing real work.
+ */
+describe("validation.export over the command relay", () => {
+  const command = (): Command[] => (reviewTool.commands ?? []).filter((c) => c.id === "validation.export");
+
+  it("tells a caller it did not export when there is nothing to export", () => {
+    useValidationStore.setState({ results: {}, hydrated: true });
+
+    const outcome = executeCommandById("validation.export", command());
+
+    // The regression: `run()` returns the instant it has kicked off an export
+    // that its own guard then declines to start, so a relay that only asked
+    // "did `run()` throw" answered `ok: true` and a script believed a file had
+    // been written. Nothing was.
+    expect(outcome.ok).toBe(false);
+    expect(exportMock).not.toHaveBeenCalled();
+  });
+
+  it("runs it when there is a result, and says which one", () => {
+    exportMock.mockResolvedValue({
+      validation_id: "v9",
+      path: ".workbench/validation/exports/v9.md",
+      filename: "v9.md",
+      markdown: "#",
+      bytes: 1,
+      generated_at: "2026-08-09T14:06:00Z",
+    });
+    seed([result("v9")]);
+
+    const outcome = executeCommandById("validation.export", command());
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.detail).toContain("Export validation evidence");
+  });
+});
+
 describe("reviewTool registration", () => {
   const instances = reviewTool.panel?.instances;
 
@@ -550,6 +699,18 @@ describe("reviewTool registration", () => {
     expect(reviewTool.commands?.[0]?.id).toBe("review.open");
     // No default chord — bindable from shortcuts.md the day it registers.
     expect(reviewTool.shortcuts).toBeUndefined();
+  });
+
+  it("registers validation.export, and it is safe from a file and from the CLI", () => {
+    const command = reviewTool.commands?.find((entry) => entry.id === "validation.export");
+    expect(command).toBeDefined();
+    // It names no path — the server picks the filename from a server-minted id
+    // and writes under the workspace's own `.workbench/` — so it is bindable and
+    // the command relay will publish it. That is the whole reach of PR-C's CLI
+    // surface, and it is deliberate rather than incidental.
+    expect(command?.unsafeFromFile).toBeUndefined();
+    useValidationStore.setState({ results: {}, hydrated: true });
+    expect(command?.detail?.()).toContain("nothing validated yet");
   });
 
   it("options() lists a row per held result, each keyed by its validation_id", () => {

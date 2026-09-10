@@ -196,6 +196,7 @@ describe("command registry", () => {
       "mission.open",
       "mission.newOrchestrator",
       "review.open",
+      "validation.export",
       // Objectives after Review, because it consumes the evidence Review approves.
       "objective.open",
       // First run's connect half sits beside the Keyboard tool (its welcome

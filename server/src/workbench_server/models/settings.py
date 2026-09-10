@@ -80,6 +80,21 @@ class WorkbenchSettings(BaseModel):
     #: a separate, consent-gated install (M7 §3) — so this is remembered even on
     #: a machine that cannot yet act on it.
     voice_input: bool = False
+    #: How many days of written validation evidence to keep, per workspace.
+    #: ``0`` keeps everything.
+    #:
+    #: **A machine-level preference about workspace data**, and the split is
+    #: stated rather than papered over: this document is app-data scoped (a
+    #: choice about how much disk *this machine* spends), while the files it
+    #: governs live in each project's own ``.workbench/validation/``. So the
+    #: number is one answer for every project you open, which is the honest shape
+    #: of "how much disk am I willing to give this", and the panel says so.
+    #:
+    #: Adding it does **not** bump :data:`SETTINGS_VERSION`: this model promises
+    #: that every field is a scalar with a default precisely so an older
+    #: document arrives with the new field at its default rather than failing to
+    #: parse. A version bump here would discard everybody's theme to add a knob.
+    validation_retention_days: int = 90
 
 
 class SettingsFile(BaseModel):

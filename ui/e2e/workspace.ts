@@ -39,6 +39,18 @@ import path from "node:path";
 
 /** Public: "seed this run's workspace here". Empty or nonexistent, or nothing. */
 export const WORKSPACE_ENV = "WB_E2E_WORKSPACE";
+
+/**
+ * The per-launch auth token this run pins, so out-of-band `page.request.*` calls
+ * can authenticate (`playwright.config.ts` attaches it as an extra header).
+ *
+ * It lives here rather than in the config because it is no longer only the
+ * config's: `evidence-persist.spec.ts` starts a *second* backend of its own, and
+ * the browser context attaches this header to every request it makes — including
+ * the ones aimed at that second server. Two literals that have to match are one
+ * edit away from a 403 nobody would connect to the change that caused it.
+ */
+export const E2E_AUTH_TOKEN = "e2e-fixed-auth-token-do-not-ship";
 /** Internal: the seeded path, runner -> workers. Set below, never by hand. */
 const ACTIVE_ENV = "WB_E2E_WORKSPACE_ACTIVE";
 

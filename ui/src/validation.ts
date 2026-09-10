@@ -36,10 +36,17 @@
 
 import { create } from "zustand";
 
-import { ApiError, approveValidation, getValidations, runValidation } from "./api";
+import {
+  ApiError,
+  approveValidation,
+  exportValidation,
+  getValidations,
+  runValidation,
+} from "./api";
 import type {
   ApproveRequest,
   CheckOutcome,
+  EvidenceExport,
   RiskLevel,
   ValidationResult,
   ValidationSpec,
@@ -140,6 +147,16 @@ export function orderResults(results: readonly ValidationResult[]): ValidationRe
   );
 }
 
+/** The newest result held, or null. What a parameterless `validation.export`
+ * exports: the thing you just ran is overwhelmingly the thing you meant, and
+ * naming *which* one is PR-E's parameterised-command job, not a second surface
+ * invented here. Null is a real answer — nothing has been validated — and the
+ * command says so rather than doing nothing (AXI shape 2). */
+export function newestResult(results: readonly ValidationResult[]): ValidationResult | null {
+  const ordered = orderResults(results);
+  return ordered[ordered.length - 1] ?? null;
+}
+
 /** The latest result for a session's output, or null — the join Mission Control
  * reads (`mission.ts`, the fifth read). Keyed on `subject.kind === "session_output"`
  * so a file result for the same ref never masquerades as the session's. */
@@ -180,6 +197,15 @@ interface ValidationStore {
    * as an approval that landed, and it drops the dead entry from the map.
    */
   approve: (validationId: string, approver: string, note: string | null) => Promise<ValidationResult>;
+  /**
+   * Render this result as a one-page report and write it into the workspace.
+   *
+   * Resolves with the `EvidenceExport` — which carries both the markdown and the
+   * path it landed at, so the caller can show either without a second call. A
+   * 404 (evicted, superseded) throws the `ApiError`, exactly as `approve` does,
+   * so nothing reads a failure as a report that was written.
+   */
+  exportResult: (validationId: string) => Promise<EvidenceExport>;
 }
 
 let started = false;
@@ -255,4 +281,6 @@ export const useValidationStore = create<ValidationStore>((set, get) => ({
       throw err;
     }
   },
+
+  exportResult: (validationId) => exportValidation(validationId),
 }));
