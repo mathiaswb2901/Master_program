@@ -19,7 +19,7 @@ dependencies = [
     # reaped. Named as the COM route in ARCHITECTURE.md since the M4 direction
     # was set; ctypes would be the same calls with the bindings hand-written.
     "pywin32>=311; sys_platform == 'win32'",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.15.0",
     "httpx>=0.28.1",
     "claude-agent-sdk>=0.2.128",
     "tzdata>=2026.3",
